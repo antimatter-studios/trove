@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Headless daemon for sdpm: holds unlocked vault state and serves clients over IPC"
 
+[lib]
+name = "sdpmd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sdpmd"
 path = "src/main.rs"
@@ -16,3 +20,18 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
+# SSH key parsing (OpenSSH private-key format). The `ed25519` feature pulls in
+# `ed25519-dalek` for in-process signing; we don't enable `encryption` because
+# v0.0.2.0 only handles unencrypted private keys.
+ssh-key = { version = "0.6", default-features = false, features = ["std", "alloc", "ed25519"] }
+# `rand` is only needed in tests (to generate fresh keys via `ssh-key`'s
+# `PrivateKey::random`). Keeping it test-only avoids paying for randomness in
+# the production binary.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+
+[dev-dependencies]
+tempfile = "3"
+sha2 = "0.10"
+base64 = "0.22"
+rand_core = { version = "0.6", features = ["getrandom"] }

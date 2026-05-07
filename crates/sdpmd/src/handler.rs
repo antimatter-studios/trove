@@ -3,15 +3,22 @@
 //! Concurrency: a single shared `Mutex<Option<Vault>>`. v0.0.1 holds at most
 //! one vault. If `Unlock` is called while a vault is already held, the old
 //! vault is dropped and replaced.
+//!
+//! v0.0.2.0: also owns the SSH agent key store. On `unlock`, every entry's
+//! `id` attachment is parsed as an OpenSSH ed25519 private key; successful
+//! parses populate the key store. On `lock` / `shutdown`, the store is
+//! cleared (which zeroizes the in-memory keys via `SigningKey`'s
+//! `ZeroizeOnDrop` impl).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use sdpm_core::Vault;
+use sdpm_core::{EntrySummary, Vault};
 
 use crate::protocol::{EntryDto, Request, Response};
+use crate::ssh_agent::{keys as ssh_keys, KeyStore, LoadedKey};
 
 pub type SharedState = Arc<Mutex<Option<Vault>>>;
 
@@ -21,7 +28,7 @@ pub struct Handled {
     pub shutdown: bool,
 }
 
-pub async fn handle(req: Request, state: &SharedState) -> Handled {
+pub async fn handle(req: Request, state: &SharedState, key_store: &KeyStore) -> Handled {
     match req {
         Request::Ping => Handled {
             response: Response::ok_pong(),
@@ -36,8 +43,20 @@ pub async fn handle(req: Request, state: &SharedState) -> Handled {
                 tokio::task::spawn_blocking(move || Vault::open(&path_buf, &password)).await;
             match result {
                 Ok(Ok(vault)) => {
-                    let mut guard = state.lock().await;
-                    *guard = Some(vault);
+                    // Pull SSH keys out of the vault before stashing it in
+                    // shared state. We do this with the local handle so we
+                    // never hold the state mutex across attachment reads.
+                    let loaded_keys = load_ssh_keys_from_vault(&vault);
+                    {
+                        let mut guard = state.lock().await;
+                        *guard = Some(vault);
+                    }
+                    {
+                        let mut keys = key_store.write().await;
+                        // Replace wholesale so a re-unlock doesn't accumulate
+                        // stale keys from the previous vault.
+                        *keys = loaded_keys;
+                    }
                     Handled {
                         response: Response::ok_empty(),
                         shutdown: false,
@@ -82,8 +101,16 @@ pub async fn handle(req: Request, state: &SharedState) -> Handled {
         }
 
         Request::Lock => {
-            let mut guard = state.lock().await;
-            *guard = None;
+            {
+                let mut guard = state.lock().await;
+                *guard = None;
+            }
+            // Drop SSH keys too. SigningKey's ZeroizeOnDrop wipes the
+            // private bytes when the Vec is cleared.
+            {
+                let mut keys = key_store.write().await;
+                keys.clear();
+            }
             Handled {
                 response: Response::ok_empty(),
                 shutdown: false,
@@ -91,13 +118,68 @@ pub async fn handle(req: Request, state: &SharedState) -> Handled {
         }
 
         Request::Shutdown => {
-            // Drop vault eagerly here too; main loop will also clean up.
-            let mut guard = state.lock().await;
-            *guard = None;
+            // Drop vault and keys eagerly; main loop will also clean up.
+            {
+                let mut guard = state.lock().await;
+                *guard = None;
+            }
+            {
+                let mut keys = key_store.write().await;
+                keys.clear();
+            }
             Handled {
                 response: Response::ok_empty(),
                 shutdown: true,
             }
         }
     }
+}
+
+/// Walk every entry in `vault`, look for an `id` attachment, and try to parse
+/// it as an OpenSSH ed25519 private key. Skips (with a one-line warning)
+/// anything that doesn't parse, isn't ed25519, or is encrypted. Never panics.
+pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
+    const ATTACHMENT_NAME: &str = "id";
+    let mut out = Vec::new();
+    let entries: Vec<EntrySummary> = vault.list_entries();
+    for entry in entries {
+        if !entry.attachment_names.iter().any(|a| a == ATTACHMENT_NAME) {
+            continue;
+        }
+        let bytes = match vault.read_binary(&entry.id, ATTACHMENT_NAME) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!(
+                    "ssh-agent: failed to read 'id' attachment on entry '{}': {}",
+                    entry.title, e
+                );
+                continue;
+            }
+        };
+        match ssh_keys::parse_openssh_ed25519(&bytes, &entry.title) {
+            Ok(loaded) => out.push(loaded),
+            Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
+                eprintln!(
+                    "ssh-agent: skipping entry '{}': unsupported key algorithm {} \
+                     (v0.0.2.0 ed25519-only)",
+                    entry.title, alg
+                );
+            }
+            Err(ssh_keys::ParseError::Encrypted) => {
+                eprintln!(
+                    "ssh-agent: skipping entry '{}': encrypted private keys not supported \
+                     in v0.0.2.0",
+                    entry.title
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "ssh-agent: skipping entry '{}': {}",
+                    entry.title, e
+                );
+            }
+        }
+    }
+    out
 }
