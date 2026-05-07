@@ -6,9 +6,11 @@ license.workspace = true
 description = "kdbx-compatible vault library: I/O, crypto, sidecars"
 
 [dependencies]
-keepass.workspace = true
+keepass = { workspace = true, features = ["save_kdbx4"] }
 zeroize.workspace = true
 thiserror.workspace = true
+base64 = "0.22"
+secstr = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
