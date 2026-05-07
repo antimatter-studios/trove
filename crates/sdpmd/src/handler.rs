@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 
 use sdpm_core::{EntrySummary, Vault};
 
+use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::protocol::{EntryDto, Request, Response};
 use crate::ssh_agent::{keys as ssh_keys, KeyStore, LoadedKey};
 
@@ -28,7 +29,12 @@ pub struct Handled {
     pub shutdown: bool,
 }
 
-pub async fn handle(req: Request, state: &SharedState, key_store: &KeyStore) -> Handled {
+pub async fn handle(
+    req: Request,
+    state: &SharedState,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+) -> Handled {
     match req {
         Request::Ping => Handled {
             response: Response::ok_pong(),
@@ -43,10 +49,11 @@ pub async fn handle(req: Request, state: &SharedState, key_store: &KeyStore) -> 
                 tokio::task::spawn_blocking(move || Vault::open(&path_buf, &password)).await;
             match result {
                 Ok(Ok(vault)) => {
-                    // Pull SSH keys out of the vault before stashing it in
-                    // shared state. We do this with the local handle so we
-                    // never hold the state mutex across attachment reads.
+                    // Pull SSH and GPG keys out of the vault before stashing
+                    // it in shared state. We do this with the local handle so
+                    // we never hold the state mutex across attachment reads.
                     let loaded_keys = load_ssh_keys_from_vault(&vault);
+                    let loaded_gpg = load_gpg_keys_from_vault(&vault);
                     {
                         let mut guard = state.lock().await;
                         *guard = Some(vault);
@@ -56,6 +63,10 @@ pub async fn handle(req: Request, state: &SharedState, key_store: &KeyStore) -> 
                         // Replace wholesale so a re-unlock doesn't accumulate
                         // stale keys from the previous vault.
                         *keys = loaded_keys;
+                    }
+                    {
+                        let mut gkeys = gpg_store.write().await;
+                        *gkeys = loaded_gpg;
                     }
                     Handled {
                         response: Response::ok_empty(),
@@ -105,11 +116,15 @@ pub async fn handle(req: Request, state: &SharedState, key_store: &KeyStore) -> 
                 let mut guard = state.lock().await;
                 *guard = None;
             }
-            // Drop SSH keys too. SigningKey's ZeroizeOnDrop wipes the
+            // Drop SSH and GPG keys too. SigningKey's ZeroizeOnDrop wipes the
             // private bytes when the Vec is cleared.
             {
                 let mut keys = key_store.write().await;
                 keys.clear();
+            }
+            {
+                let mut gkeys = gpg_store.write().await;
+                gkeys.clear();
             }
             Handled {
                 response: Response::ok_empty(),
@@ -127,12 +142,70 @@ pub async fn handle(req: Request, state: &SharedState, key_store: &KeyStore) -> 
                 let mut keys = key_store.write().await;
                 keys.clear();
             }
+            {
+                let mut gkeys = gpg_store.write().await;
+                gkeys.clear();
+            }
             Handled {
                 response: Response::ok_empty(),
                 shutdown: true,
             }
         }
     }
+}
+
+/// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to
+/// parse it as an OpenPGP secret-key export. Returns one `LoadedGpgKey` per
+/// ed25519 secret key found across all entries. Other algorithms and
+/// encrypted exports are skipped with a one-line warning. Never panics.
+pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
+    const ATTACHMENT_NAME: &str = "gpg-priv";
+    let mut out = Vec::new();
+    let entries: Vec<EntrySummary> = vault.list_entries();
+    for entry in entries {
+        if !entry.attachment_names.iter().any(|a| a == ATTACHMENT_NAME) {
+            continue;
+        }
+        let bytes = match vault.read_binary(&entry.id, ATTACHMENT_NAME) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!(
+                    "gpg-agent: failed to read 'gpg-priv' attachment on entry '{}': {}",
+                    entry.title, e
+                );
+                continue;
+            }
+        };
+        match gpg_keys::parse_gpg_export(&bytes, &entry.title) {
+            Ok(loaded) => {
+                for k in loaded {
+                    out.push(k);
+                }
+            }
+            Err(gpg_keys::ParseError::NoEd25519) => {
+                eprintln!(
+                    "gpg-agent: skipping entry '{}': no ed25519 keys in this export \
+                     (v0.0.3.0 ed25519-only)",
+                    entry.title
+                );
+            }
+            Err(gpg_keys::ParseError::Encrypted) => {
+                eprintln!(
+                    "gpg-agent: skipping entry '{}': encrypted secret keys not supported \
+                     in v0.0.3.0",
+                    entry.title
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "gpg-agent: skipping entry '{}': {}",
+                    entry.title, e
+                );
+            }
+        }
+    }
+    out
 }
 
 /// Walk every entry in `vault`, look for an `id` attachment, and try to parse

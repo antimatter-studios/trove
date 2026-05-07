@@ -29,6 +29,12 @@ ssh-key = { version = "0.6", default-features = false, features = ["std", "alloc
 # `PrivateKey::random`). Keeping it test-only avoids paying for randomness in
 # the production binary.
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+# v0.0.3.0: GPG agent. We hand-roll OpenPGP secret-key packet parsing for the
+# narrow ed25519/EdDSA subcase (algo 22 + curve Ed25519) — pulling in rPGP
+# would balloon compile time by hundreds of crates for 30 lines of parsing.
+# `sha1` is required to compute the libgcrypt "keygrip" identifier that
+# gpg-agent uses on the Assuan wire.
+sha1 = { version = "0.10", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
