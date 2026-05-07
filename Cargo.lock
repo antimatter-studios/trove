@@ -777,7 +777,9 @@ dependencies = [
 name = "sdpm-core"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "keepass",
+ "secstr",
  "tempfile",
  "thiserror 1.0.69",
  "zeroize",
