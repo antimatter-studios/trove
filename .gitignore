@@ -1,0 +1,6 @@
+/target
+.history/
+.DS_Store
+*.swp
+*.kdbx
+!tests/fixtures/*.kdbx
