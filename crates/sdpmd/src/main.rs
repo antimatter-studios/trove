@@ -8,19 +8,17 @@
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("sdpmd currently supports macOS and Linux only");
 
-mod handler;
-mod protocol;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, RwLock};
 
-use crate::handler::{handle, SharedState};
-use crate::protocol::{Request, Response};
+use sdpmd::handler::{handle, SharedState};
+use sdpmd::protocol::{Request, Response};
+use sdpmd::ssh_agent::{self, KeyStore};
 
 /// Decide where the socket should live.
 ///
@@ -59,7 +57,12 @@ fn set_socket_perms(path: &std::path::Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, perms)
 }
 
-async fn handle_connection(stream: UnixStream, state: SharedState, shutdown: Arc<Notify>) {
+async fn handle_connection(
+    stream: UnixStream,
+    state: SharedState,
+    key_store: KeyStore,
+    shutdown: Arc<Notify>,
+) {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
 
@@ -75,7 +78,7 @@ async fn handle_connection(stream: UnixStream, state: SharedState, shutdown: Arc
 
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
-                let handled = handle(req, &state).await;
+                let handled = handle(req, &state, &key_store).await;
                 if handled.shutdown {
                     // Best-effort: write the ack, then signal the main loop.
                     let _ = write_response(&mut write_half, &handled.response).await;
@@ -125,7 +128,24 @@ async fn main() -> Result<()> {
     eprintln!("listening on {}", sock_path.display());
 
     let state: SharedState = Arc::new(Mutex::new(None));
+    let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let shutdown = Arc::new(Notify::new());
+
+    // Spawn the SSH agent listener on its own socket. The agent socket is
+    // bound now (before any vault is unlocked) so clients can connect at any
+    // time; until `unlock` populates the key store, list-identities returns
+    // empty and sign-request returns FAILURE — see `ssh_agent::serve_connection`.
+    let ssh_sock_path = ssh_agent::resolve_ssh_socket_path();
+    if let Some(parent) = ssh_sock_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let ssh_store_for_task = key_store.clone();
+    let ssh_sock_for_cleanup = ssh_sock_path.clone();
+    let _ssh_task = tokio::spawn(async move {
+        if let Err(e) = ssh_agent::run(ssh_sock_path, ssh_store_for_task).await {
+            eprintln!("ssh-agent listener exited: {e}");
+        }
+    });
 
     // Signal handlers — SIGINT + SIGTERM both trigger graceful shutdown.
     let shutdown_signal = shutdown.clone();
@@ -151,8 +171,9 @@ async fn main() -> Result<()> {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let state = state.clone();
+                    let key_store = key_store.clone();
                     let shutdown = shutdown.clone();
-                    tokio::spawn(handle_connection(stream, state, shutdown));
+                    tokio::spawn(handle_connection(stream, state, key_store, shutdown));
                 }
                 Err(_) => {
                     // Transient accept errors must not kill the daemon.
@@ -168,12 +189,19 @@ async fn main() -> Result<()> {
         _ = shutdown.notified() => {}
     }
 
-    // Cleanup: drop vault state, remove socket file.
+    // Cleanup: drop vault state, drop SSH keys (zeroized on drop), remove
+    // both socket files. The SSH listener task is aborted by dropping its
+    // JoinHandle going out of scope at process exit.
     {
         let mut guard = state.lock().await;
         *guard = None;
     }
+    {
+        let mut keys = key_store.write().await;
+        keys.clear();
+    }
     let _ = std::fs::remove_file(&sock_path);
+    let _ = std::fs::remove_file(&ssh_sock_for_cleanup);
 
     Ok(())
 }
@@ -204,16 +232,19 @@ mod tests {
             set_socket_perms(&sock_path).unwrap();
 
             let state: SharedState = Arc::new(Mutex::new(None));
+            let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
             let shutdown = Arc::new(Notify::new());
 
             let accept_state = state.clone();
+            let accept_keys = key_store.clone();
             let accept_shutdown = shutdown.clone();
             let accept = async move {
                 loop {
                     if let Ok((stream, _)) = listener.accept().await {
                         let s = accept_state.clone();
+                        let ks = accept_keys.clone();
                         let sh = accept_shutdown.clone();
-                        tokio::spawn(handle_connection(stream, s, sh));
+                        tokio::spawn(handle_connection(stream, s, ks, sh));
                     }
                 }
             };

@@ -63,6 +63,25 @@ enum Command {
         #[command(subcommand)]
         resource: GetResource,
     },
+
+    /// SSH agent helper subcommands.
+    Agent {
+        #[command(subcommand)]
+        op: AgentOp,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentOp {
+    /// Print the path to the sdpmd SSH agent socket.
+    ///
+    /// Resolution order matches `sdpmd`:
+    /// 1. `SDPM_SSH_SOCK` env var (override).
+    /// 2. `$XDG_RUNTIME_DIR/sdpm-ssh.sock`.
+    /// 3. `${TMPDIR:-/tmp}/sdpm-ssh-$UID.sock`.
+    ///
+    /// Typical usage: `export SSH_AUTH_SOCK="$(sdpm agent socket)"`.
+    Socket,
 }
 
 #[derive(Debug, Subcommand)]
@@ -126,7 +145,32 @@ fn run(cli: Cli) -> Result<()> {
         Command::Get {
             resource: GetResource::Ssh { vault, title, out },
         } => cmd_get_ssh(&vault, &title, out.as_deref(), pw_stdin),
+        Command::Agent { op: AgentOp::Socket } => cmd_agent_socket(),
     }
+}
+
+fn cmd_agent_socket() -> Result<()> {
+    // Resolution must mirror `sdpmd::ssh_agent::resolve_ssh_socket_path`.
+    // Kept inline here to avoid pulling sdpmd as a dependency of the CLI.
+    let path = if let Ok(p) = std::env::var("SDPM_SSH_SOCK") {
+        PathBuf::from(p)
+    } else if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
+        if !rt.is_empty() {
+            PathBuf::from(rt).join("sdpm-ssh.sock")
+        } else {
+            ssh_socket_tmp_fallback()
+        }
+    } else {
+        ssh_socket_tmp_fallback()
+    };
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn ssh_socket_tmp_fallback() -> PathBuf {
+    let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    let uid = std::env::var("UID").unwrap_or_else(|_| "0".to_string());
+    PathBuf::from(tmp).join(format!("sdpm-ssh-{uid}.sock"))
 }
 
 fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
