@@ -16,6 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, RwLock};
 
+use sdpmd::gpg_agent::{self, GpgKeyStore};
 use sdpmd::handler::{handle, SharedState};
 use sdpmd::protocol::{Request, Response};
 use sdpmd::ssh_agent::{self, KeyStore};
@@ -61,6 +62,7 @@ async fn handle_connection(
     stream: UnixStream,
     state: SharedState,
     key_store: KeyStore,
+    gpg_store: GpgKeyStore,
     shutdown: Arc<Notify>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
@@ -78,7 +80,7 @@ async fn handle_connection(
 
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
-                let handled = handle(req, &state, &key_store).await;
+                let handled = handle(req, &state, &key_store, &gpg_store).await;
                 if handled.shutdown {
                     // Best-effort: write the ack, then signal the main loop.
                     let _ = write_response(&mut write_half, &handled.response).await;
@@ -129,6 +131,7 @@ async fn main() -> Result<()> {
 
     let state: SharedState = Arc::new(Mutex::new(None));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
+    let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let shutdown = Arc::new(Notify::new());
 
     // Spawn the SSH agent listener on its own socket. The agent socket is
@@ -144,6 +147,20 @@ async fn main() -> Result<()> {
     let _ssh_task = tokio::spawn(async move {
         if let Err(e) = ssh_agent::run(ssh_sock_path, ssh_store_for_task).await {
             eprintln!("ssh-agent listener exited: {e}");
+        }
+    });
+
+    // Mirror the SSH listener for GPG. Same pattern: socket bound up-front,
+    // empty store until unlock; see `gpg_agent::serve_connection`.
+    let gpg_sock_path = gpg_agent::resolve_gpg_socket_path();
+    if let Some(parent) = gpg_sock_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let gpg_store_for_task = gpg_store.clone();
+    let gpg_sock_for_cleanup = gpg_sock_path.clone();
+    let _gpg_task = tokio::spawn(async move {
+        if let Err(e) = gpg_agent::run(gpg_sock_path, gpg_store_for_task).await {
+            eprintln!("gpg-agent listener exited: {e}");
         }
     });
 
@@ -172,8 +189,11 @@ async fn main() -> Result<()> {
                 Ok((stream, _addr)) => {
                     let state = state.clone();
                     let key_store = key_store.clone();
+                    let gpg_store = gpg_store.clone();
                     let shutdown = shutdown.clone();
-                    tokio::spawn(handle_connection(stream, state, key_store, shutdown));
+                    tokio::spawn(handle_connection(
+                        stream, state, key_store, gpg_store, shutdown,
+                    ));
                 }
                 Err(_) => {
                     // Transient accept errors must not kill the daemon.
@@ -189,9 +209,9 @@ async fn main() -> Result<()> {
         _ = shutdown.notified() => {}
     }
 
-    // Cleanup: drop vault state, drop SSH keys (zeroized on drop), remove
-    // both socket files. The SSH listener task is aborted by dropping its
-    // JoinHandle going out of scope at process exit.
+    // Cleanup: drop vault state, drop SSH+GPG keys (zeroized on drop),
+    // remove all socket files. The listener tasks are aborted by dropping
+    // their JoinHandles going out of scope at process exit.
     {
         let mut guard = state.lock().await;
         *guard = None;
@@ -200,8 +220,13 @@ async fn main() -> Result<()> {
         let mut keys = key_store.write().await;
         keys.clear();
     }
+    {
+        let mut gkeys = gpg_store.write().await;
+        gkeys.clear();
+    }
     let _ = std::fs::remove_file(&sock_path);
     let _ = std::fs::remove_file(&ssh_sock_for_cleanup);
+    let _ = std::fs::remove_file(&gpg_sock_for_cleanup);
 
     Ok(())
 }
@@ -233,18 +258,21 @@ mod tests {
 
             let state: SharedState = Arc::new(Mutex::new(None));
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
+            let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
             let shutdown = Arc::new(Notify::new());
 
             let accept_state = state.clone();
             let accept_keys = key_store.clone();
+            let accept_gpg = gpg_store.clone();
             let accept_shutdown = shutdown.clone();
             let accept = async move {
                 loop {
                     if let Ok((stream, _)) = listener.accept().await {
                         let s = accept_state.clone();
                         let ks = accept_keys.clone();
+                        let gks = accept_gpg.clone();
                         let sh = accept_shutdown.clone();
-                        tokio::spawn(handle_connection(stream, s, ks, sh));
+                        tokio::spawn(handle_connection(stream, s, ks, gks, sh));
                     }
                 }
             };

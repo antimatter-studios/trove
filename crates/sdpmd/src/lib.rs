@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod gpg_agent;
 pub mod handler;
 pub mod protocol;
 pub mod ssh_agent;
