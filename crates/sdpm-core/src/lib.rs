@@ -1,4 +1,4 @@
-//! `spm-core` — kdbx I/O and vault primitives.
+//! `sdpm-core` — kdbx I/O and vault primitives.
 //!
 //! Format compatibility with KeePassXC is non-negotiable: this crate must
 //! round-trip any valid `.kdbx` file. v0.0.1 scope is KDBX 4 with a password
@@ -65,18 +65,18 @@ impl Vault {
     /// Errors if the file already exists.
     pub fn create(path: &Path, password: &str) -> Result<Self> {
         let _ = (path, password);
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Open an existing kdbx file with a password.
     pub fn open(path: &Path, password: &str) -> Result<Self> {
         let _ = (path, password);
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Persist in-memory state back to the original path (atomic replace).
     pub fn save(&mut self) -> Result<()> {
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     pub fn path(&self) -> &Path {
@@ -86,56 +86,56 @@ impl Vault {
     /// Add a new entry at the root group with the given title. Returns its stable ID.
     pub fn add_entry(&mut self, title: &str) -> Result<EntryId> {
         let _ = title;
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// List all entries in the vault (recursively across all groups).
     pub fn list_entries(&self) -> Vec<EntrySummary> {
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Look up an entry by ID. Returns `None` if no such entry exists.
     pub fn get_entry(&self, id: &EntryId) -> Option<EntrySummary> {
         let _ = id;
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Find an entry by exact title match. Returns the first match if multiple share a title.
     pub fn find_by_title(&self, title: &str) -> Option<EntryId> {
         let _ = title;
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Set or replace a string field on an entry. Standard fields:
     /// `"Title"`, `"UserName"`, `"Password"`, `"URL"`, `"Notes"`. Custom fields permitted.
     pub fn set_field(&mut self, id: &EntryId, field: &str, value: &str) -> Result<()> {
         let _ = (id, field, value);
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Attach a binary blob (e.g. an SSH private key) to an entry under `name`.
     /// Replaces any existing attachment with the same name.
     pub fn attach_binary(&mut self, id: &EntryId, name: &str, bytes: &[u8]) -> Result<()> {
         let _ = (id, name, bytes);
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Read an attachment's bytes. Returns `Ok(None)` if the entry exists but has no such attachment.
     /// Errors if the entry itself does not exist.
     pub fn read_binary(&self, id: &EntryId, name: &str) -> Result<Option<Vec<u8>>> {
         let _ = (id, name);
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Remove an attachment from an entry. No-op if the attachment is missing.
     pub fn remove_binary(&mut self, id: &EntryId, name: &str) -> Result<()> {
         let _ = (id, name);
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 
     /// Delete an entry by ID.
     pub fn delete_entry(&mut self, id: &EntryId) -> Result<()> {
         let _ = id;
-        unimplemented!("implemented by spm-core impl agent")
+        unimplemented!("implemented by sdpm-core impl agent")
     }
 }

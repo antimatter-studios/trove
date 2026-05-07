@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/spm-core", "crates/spm-cli", "crates/spmd"]
+members = ["crates/sdpm-core", "crates/sdpm-cli", "crates/sdpmd"]
 
 [workspace.package]
 version = "0.0.0"
@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.75"
 
 [workspace.dependencies]
-spm-core = { path = "crates/spm-core" }
+sdpm-core = { path = "crates/sdpm-core" }
 keepass = "0.7"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 thiserror = "1"

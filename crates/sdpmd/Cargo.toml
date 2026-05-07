@@ -1,16 +1,16 @@
 [package]
-name = "spmd"
+name = "sdpmd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Headless daemon for spm: holds unlocked vault state and serves clients over IPC"
+description = "Headless daemon for sdpm: holds unlocked vault state and serves clients over IPC"
 
 [[bin]]
-name = "spmd"
+name = "sdpmd"
 path = "src/main.rs"
 
 [dependencies]
-spm-core.workspace = true
+sdpm-core.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

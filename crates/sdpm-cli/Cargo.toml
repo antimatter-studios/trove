@@ -1,16 +1,16 @@
 [package]
-name = "spm-cli"
+name = "sdpm-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Command-line client for spm"
+description = "Command-line client for sdpm"
 
 [[bin]]
-name = "spm"
+name = "sdpm"
 path = "src/main.rs"
 
 [dependencies]
-spm-core.workspace = true
+sdpm-core.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 rpassword.workspace = true
