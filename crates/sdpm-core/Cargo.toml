@@ -9,14 +9,12 @@ description = "kdbx-compatible vault library: I/O, crypto, sidecars"
 keepass = { workspace = true, features = ["save_kdbx4"] }
 zeroize.workspace = true
 thiserror.workspace = true
-base64 = "0.22"
-secstr = "0.5"
+# Used to expose the inner bytes of `keepass::db::Value::Protected` when reading
+# binary attachments. keepass 0.12 exposes Protected values as
+# `secrecy::SecretBox`; we don't construct them, only read.
+secrecy = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
-# Used by integration tests to synthesise a legacy vault (the v0.0.1
-# `_SDPM_BIN_*` Protected-string layout) by writing kdbx directly.
 keepass = { workspace = true, features = ["save_kdbx4"] }
-secstr = "0.5"
-base64 = "0.22"
 rand = "0.8"

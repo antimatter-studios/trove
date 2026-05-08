@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sdpm-core", "crates/sdpm-cli", "crates/sdpmd", "vendor/keepass"]
+members = ["crates/sdpm-core", "crates/sdpm-cli", "crates/sdpmd"]
 
 [workspace.package]
 version = "0.0.0"
@@ -10,7 +10,7 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 sdpm-core = { path = "crates/sdpm-core" }
-keepass = "0.7"
+keepass = "0.12"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 thiserror = "1"
 anyhow = "1"
@@ -23,12 +23,3 @@ serde_json = "1"
 [profile.release]
 lto = "thin"
 strip = "symbols"
-
-# Vendored fork of the `keepass` crate. The published 0.7.33 parses
-# `<Binary Ref="..."/>` references inside entries but discards them
-# ("TODO reference into a binary field from the Meta") and panics on
-# non-UTF-8 `Value::Bytes` during save. Our fork resolves both so binary
-# attachments round-trip as real KDBX4 inner-header binaries — restoring
-# bit-exact KeePassXC interoperability. See `vendor/keepass/`.
-[patch.crates-io]
-keepass = { path = "vendor/keepass" }
