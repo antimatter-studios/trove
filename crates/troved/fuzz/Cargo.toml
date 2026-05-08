@@ -1,0 +1,75 @@
+# Standalone fuzz crate for troved's hand-rolled parsers.
+#
+# This crate is INTENTIONALLY NOT a workspace member. The parent workspace
+# (`/Cargo.toml`) builds on stable Rust (`rustc 1.94`-class). libfuzzer-sys
+# pulls in nightly-only features and would force a nightly toolchain on the
+# whole workspace if added as a member. Keeping it standalone means
+# `cargo build --workspace` from the project root continues to work on stable;
+# only this subcrate requires `cargo +nightly fuzz build`.
+#
+# Quickstart:
+#   cargo install cargo-fuzz
+#   cd crates/troved/fuzz
+#   cargo +nightly fuzz run ssh_wire_parse
+#
+# See ./README.md for crash triage and fixture layout.
+
+[package]
+name = "troved-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Empty `[workspace]` table makes Cargo treat this directory as the root of a
+# fresh workspace, so it does NOT inherit / extend the parent workspace at
+# `../../../Cargo.toml`. This is the canonical pattern for cargo-fuzz crates.
+[workspace]
+resolver = "2"
+
+# Mirror the parent workspace's vendored keepass fork. The parent's
+# `[patch.crates-io]` entry doesn't apply here (we're a separate workspace
+# root), but `trove-core` — pulled in transitively via `troved` — depends on
+# fork-specific fields like `Entry::binaries`. Pointing at the same vendored
+# tree keeps the dependency graph identical.
+[patch.crates-io]
+keepass = { path = "../../../vendor/keepass" }
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+# Path dependency on the parent crate. We rely on its public API
+# (`ssh_agent::wire::parse_request`, `gpg_agent::assuan::{Line, percent_*}`)
+# which is already `pub` for integration-test purposes.
+troved = { path = ".." }
+
+# Prevent these binaries from being compiled when the fuzz crate is built
+# without cargo-fuzz (e.g. plain `cargo check` from inside this directory),
+# which would fail because libfuzzer-sys's `fuzz_target!` macro only works
+# when a libfuzzer runtime is linked.
+[[bin]]
+name = "ssh_wire_parse"
+path = "fuzz_targets/ssh_wire_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_wire_round_trip"
+path = "fuzz_targets/ssh_wire_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assuan_line_parse"
+path = "fuzz_targets/assuan_line_parse.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

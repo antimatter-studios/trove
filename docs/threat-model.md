@@ -1,6 +1,6 @@
 # Threat model
 
-What sdpm defends against, what it doesn't, and how that compares to the alternatives. Companion to [docs/architecture.md](architecture.md); the README's "Why file materialization is *less* dangerous than the status quo" is the executive summary, expanded here.
+What trove defends against, what it doesn't, and how that compares to the alternatives. Companion to [docs/architecture.md](architecture.md); the README's "Why file materialization is *less* dangerous than the status quo" is the executive summary, expanded here.
 
 ## Adversaries
 
@@ -33,7 +33,7 @@ Where could secrets leak from each delivery surface? One section per surface.
 ### Vault file (kdbx)
 
 - **At rest.** Encrypted with the master key (Argon2-derived). Reading the file off a stolen laptop without the password gets the attacker bytes that take real compute to crack. Status quo is "mostly fine" for this surface.
-- **Sync targets.** kdbx files often live in Dropbox / iCloud / Git. The encryption survives sync; the attack surface is "wherever the cloud copy lives." sdpm doesn't introduce a new surface here — the user's existing sync-folder choice is already in scope. (We are explicit about not building OAuth sync adapters; "drop the file in your sync folder" is the user's call.)
+- **Sync targets.** kdbx files often live in Dropbox / iCloud / Git. The encryption survives sync; the attack surface is "wherever the cloud copy lives." trove doesn't introduce a new surface here — the user's existing sync-folder choice is already in scope. (We are explicit about not building OAuth sync adapters; "drop the file in your sync folder" is the user's call.)
 - **Backups.** Same: encrypted at rest, snapshotted into Time Machine / restic / borg, fine.
 
 ### Daemon process memory
@@ -41,14 +41,14 @@ Where could secrets leak from each delivery surface? One section per surface.
 - **While unlocked.** Decrypted vault, parsed SSH keys, parsed GPG secret-key scalars, materialized-file bookkeeping. Process memory; we use `Zeroize`-on-drop where the underlying crate supports it (`secstr` for strings, `ZeroizeOnDrop` on `ssh_key::SigningKey`). Best-effort, not a guarantee.
 - **Crash dumps.** OS crash reporting could capture secret state. Out-of-process attack surface; we don't disable core dumps (that's a deployment-time choice). On Linux, `prctl(PR_SET_DUMPABLE, 0)` would help; not yet implemented.
 - **Swap.** Linux swap and macOS swap can hit disk. We don't `mlock` decrypted regions today. Real concern; partially mitigated by tmpfs-only materialization defaults on Linux.
-- **Hibernation.** Same family as swap. Disable hibernation on machines that hold long-lived sdpmd unlocks if you care.
+- **Hibernation.** Same family as swap. Disable hibernation on machines that hold long-lived troved unlocks if you care.
 - **Other processes running as the user.** A process running as the same UID can `ptrace` us, read `/proc/self/mem`, or open our `0600` Unix sockets (we own them; same-UID can open them). This is the irreducible "secrets in user space" assumption — every password manager has it.
 
 ### SSH agent socket
 
 - **Path.** `0600`, in `$XDG_RUNTIME_DIR` (a per-user tmpfs on most Linux setups) or `$TMPDIR` fallback. Only same-UID can connect.
 - **Wire format.** Standard OpenSSH agent protocol. We never expose private bytes — only signatures.
-- **Forwarding.** If a user forwards `SDPM_SSH_SOCK` over SSH (`-A`), the remote host can sign-as-them for as long as the connection is live. Same as any SSH agent; the user opts in to that risk.
+- **Forwarding.** If a user forwards `TROVE_SSH_SOCK` over SSH (`-A`), the remote host can sign-as-them for as long as the connection is live. Same as any SSH agent; the user opts in to that risk.
 
 ### GPG agent socket
 
@@ -59,11 +59,11 @@ Where could secrets leak from each delivery surface? One section per surface.
 ### File materialization
 
 - **Path.** User-chosen. Default refusal of non-tmpfs paths on Linux; soft-allowlist on macOS. `0600` mode by default.
-- **Residue on lock.** `wipe_file` does a single-pass random overwrite, fsync, truncate to 0, then unlink. One pass instead of seven because flash storage and APFS copy-on-write make multi-pass overwrites theatre — the FTL almost certainly remaps to a fresh cell and leaves the old one until garbage collection. On TTL expiry, we wipe via the same path. See [crates/sdpmd/src/materialize/wipe.rs](../crates/sdpmd/src/materialize/wipe.rs) for the rationale.
+- **Residue on lock.** `wipe_file` does a single-pass random overwrite, fsync, truncate to 0, then unlink. One pass instead of seven because flash storage and APFS copy-on-write make multi-pass overwrites theatre — the FTL almost certainly remaps to a fresh cell and leaves the old one until garbage collection. On TTL expiry, we wipe via the same path. See [crates/troved/src/materialize/wipe.rs](../crates/troved/src/materialize/wipe.rs) for the rationale.
 - **Other processes reading the materialized file.** Anything running as the user can read a `0600` file. Group-permission tightening would help; not yet exposed.
 - **Backups capturing the materialized file.** A live backup that copies `/tmp/kubeconfig` while it's materialized leaks the kubeconfig. Doc for this: don't materialize into paths your backup tool watches. Default `/tmp` is rarely backed up.
 
-### CLI direct retrieval (`sdpm get …`)
+### CLI direct retrieval (`trove get …`)
 
 - **Bytes go to a path you choose, no daemon involvement.** Same surface as materialization but without TTL or wipe-on-lock. The user is on their own to clean up. Useful for one-shot imports / migrations; less useful as a steady-state credential delivery mechanism.
 
@@ -71,7 +71,7 @@ Where could secrets leak from each delivery surface? One section per surface.
 
 Tabulated form.
 
-| Threat | Mitigation in sdpm | Gap |
+| Threat | Mitigation in trove | Gap |
 | --- | --- | --- |
 | Lost / stolen cold laptop | Encrypted-at-rest kdbx, Argon2 KDF | Same as KeePassXC; depends on master-password strength |
 | Same-UID process reading agent socket | `0600` perms, owned by user | None — same-UID is part of the threat model we accept |
@@ -79,10 +79,10 @@ Tabulated form.
 | `~/.kube/config` lying around for 18 months | TTL + wipe-on-lock + idle-lock | If `AllowDiskBacked=true` and no TTL set, equivalent to status quo |
 | Backup tool capturing materialized path | Default targets in `/tmp` (not backed up); refusal of system dirs | If the user picks `~/Documents/secret`, no protection |
 | Swap / hibernation capture | tmpfs-only defaults on Linux | macOS APFS has no tmpfs — soft-allowlist only |
-| Unattended unlocked laptop | Idle-lock (default 900s, configurable) | Doesn't help if you set the timeout to 0 (`SDPM_IDLE_TIMEOUT=0`) |
+| Unattended unlocked laptop | Idle-lock (default 900s, configurable) | Doesn't help if you set the timeout to 0 (`TROVE_IDLE_TIMEOUT=0`) |
 | Crash-dumped daemon memory | Best-effort `Zeroize` on drop | No `prctl(PR_SET_DUMPABLE, 0)` yet |
 | Kernel-level attacker / cold-boot | None | Out of scope |
-| Forwarded SSH agent abuse | Standard SSH agent protocol — user opts in | Same as any agent; not specific to sdpm |
+| Forwarded SSH agent abuse | Standard SSH agent protocol — user opts in | Same as any agent; not specific to trove |
 | Password manager UI phishing | N/A — no GUI yet | Future GUI must address this |
 
 ## Comparisons
@@ -91,9 +91,9 @@ Tabulated form.
 
 The honest baseline — every developer machine today has plaintext keys and tokens scattered across `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, `~/.kube/`, every project's `.env`. Most of those secrets sit there for months or years. Backups vacuum them up; sync tools vacuum them up; a process running as the user can read all of them anyway, and they survive long after the credential should have been rotated.
 
-Time-bounded materialization is a *strict* reduction. A secret on disk for 2 minutes during a `kubectl apply` then wiped leaks less than the same secret sitting in `~/.kube/config` for 18 months. The threat-model comparison is not "encrypted vault vs. plaintext file." It's "plaintext file forever vs. plaintext file briefly, with a real chance the developer rotates it because rotation is now cheap." sdpm aims for the second.
+Time-bounded materialization is a *strict* reduction. A secret on disk for 2 minutes during a `kubectl apply` then wiped leaks less than the same secret sitting in `~/.kube/config` for 18 months. The threat-model comparison is not "encrypted vault vs. plaintext file." It's "plaintext file forever vs. plaintext file briefly, with a real chance the developer rotates it because rotation is now cheap." trove aims for the second.
 
-The same goes for SSH and GPG. With ssh-agent + sdpmd, the private key bytes never hit disk after the initial vault import. With `~/.ssh/id_ed25519` plain on disk, every backup, every cloud-sync directory, every misconfigured `chmod 644` is a credential leak.
+The same goes for SSH and GPG. With ssh-agent + troved, the private key bytes never hit disk after the initial vault import. With `~/.ssh/id_ed25519` plain on disk, every backup, every cloud-sync directory, every misconfigured `chmod 644` is a credential leak.
 
 ### vs. KeePassXC
 
@@ -113,9 +113,9 @@ Where we agree with upstream:
 
 ### vs. 1Password / Bitwarden / Vaultwarden
 
-Different category. Those are SaaS-shaped tools with team accounts and central servers. sdpm is a local-first single-user tool that can grow team features as opt-in sidecars. Their threat model includes "the server operator is honest"; ours doesn't have a server. Useful comparisons:
+Different category. Those are SaaS-shaped tools with team accounts and central servers. trove is a local-first single-user tool that can grow team features as opt-in sidecars. Their threat model includes "the server operator is honest"; ours doesn't have a server. Useful comparisons:
 
-- **End-to-end-encrypted** servers like Bitwarden / Vaultwarden hold ciphertext; the surface is mostly their auth + transport + key-derivation. sdpm has no server today.
-- **File materialization** isn't a 1Password feature in the same shape; their `op run` injects secrets as env vars / temp files for one process invocation, which is closer to what we'd build as `sdpm exec`. Different point on the same trade-off curve.
+- **End-to-end-encrypted** servers like Bitwarden / Vaultwarden hold ciphertext; the surface is mostly their auth + transport + key-derivation. trove has no server today.
+- **File materialization** isn't a 1Password feature in the same shape; their `op run` injects secrets as env vars / temp files for one process invocation, which is closer to what we'd build as `trove exec`. Different point on the same trade-off curve.
 
-The shortest honest summary: sdpm is for developers who want a kdbx-compatible local-first tool that stops pretending plaintext kubeconfigs aren't the actual problem. It is *not* a corporate password manager and is not trying to be one.
+The shortest honest summary: trove is for developers who want a kdbx-compatible local-first tool that stops pretending plaintext kubeconfigs aren't the actual problem. It is *not* a corporate password manager and is not trying to be one.

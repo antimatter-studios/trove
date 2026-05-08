@@ -1363,59 +1363,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sdpm-cli"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "rpassword",
- "sdpm-core",
- "sdpmd",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "sdpm-core"
-version = "0.0.0"
-dependencies = [
- "keepass",
- "rand 0.8.6",
- "secrecy",
- "tempfile",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "sdpmd"
-version = "0.0.0"
-dependencies = [
- "aes 0.8.4",
- "aes-kw",
- "anyhow",
- "base64",
- "ed25519-dalek",
- "proptest",
- "rand 0.8.6",
- "rand_core 0.6.4",
- "rsa",
- "sdpm-core",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "ssh-key",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "sec1"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,6 +1681,59 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "trove-cli"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rpassword",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "trove-core",
+ "troved",
+]
+
+[[package]]
+name = "trove-core"
+version = "0.0.0"
+dependencies = [
+ "keepass",
+ "rand 0.8.6",
+ "secrecy",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "troved"
+version = "0.0.0"
+dependencies = [
+ "aes 0.8.4",
+ "aes-kw",
+ "anyhow",
+ "base64",
+ "ed25519-dalek",
+ "proptest",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "ssh-key",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "trove-core",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

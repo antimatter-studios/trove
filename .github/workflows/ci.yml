@@ -1,4 +1,4 @@
-# SuperDuperPasswordManager CI
+# trove CI
 #
 # Triggers on push / pull_request against `main` and on manual dispatch.
 # Jobs:

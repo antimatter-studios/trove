@@ -253,7 +253,7 @@ pub fn rich_database(config: DatabaseConfig) -> Database {
     use chrono::NaiveDate;
 
     let mut db = Database::with_config(config);
-    db.meta.generator = Some("sdpm-keepass-tests".to_string());
+    db.meta.generator = Some("trove-keepass-tests".to_string());
     db.meta.database_name = Some("rich-fixture".to_string());
     db.meta.database_description = Some("clean-room generated".to_string());
 

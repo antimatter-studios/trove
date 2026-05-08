@@ -39,7 +39,7 @@ A writer bug = users lose every secret. A reader bug that accepts malformed inpu
 
 #### Our vendored fork (`vendor/keepass/`)
 - Three patches on 0.7.33: `Value::Bytes` non-UTF-8 base64 fallback in `xml_db/dump/entry.rs`; inner-header binary-pool round-trip for `<Binary Ref="..."/>` (upstream TODO); read-back of those refs.
-- Tests covering our patches: `crates/sdpm-core/tests/binary_attachments.rs` (5 fns), `vault_roundtrip.rs` (10 fns).
+- Tests covering our patches: `crates/trove-core/tests/binary_attachments.rs` (5 fns), `vault_roundtrip.rs` (10 fns).
 
 #### Other Rust crates — all disqualified
 - `kdbx-rs` (tonyfinn, Codeberg): GPLv3+, **license incompatible** with our MIT/Apache-2.0 dual license. Last commit Oct 2024.
@@ -66,7 +66,7 @@ A writer bug = users lose every secret. A reader bug that accepts malformed inpu
   - Every keyfile flavor: `FileKey{Binary,Hashed,Hex,Xml,XmlV2}.{kdb,kdbx}`.
   - **Negative fixtures (rare, valuable):** `BrokenHeaderHash.kdbx`, `FileKeyXmlBrokenBase64.kdbx`, `FileKeyXmlV2BrokenHex.kdbx`, `FileKeyXmlV2HashFail.kdbx`, plus 8 `Broken*.xml` covering deleted-objects, history-UUID mismatch, group-ref, missing UUIDs, missing/duplicate root, empty UUIDs.
   - YubiKey, NonAscii, RecycleBin{Disabled,Empty,NotYetCreated,WithData}, ProtectedStrings, Compressed.
-- **Verdict:** mine selected fixtures into both keepass-rs and sdpm-core. Data files are not GPL-tainted source.
+- **Verdict:** mine selected fixtures into both keepass-rs and trove-core. Data files are not GPL-tainted source.
 
 ### Java
 
@@ -170,12 +170,12 @@ Existing `vault_roundtrip.rs` + `binary_attachments.rs` are the regression fence
 
 **Total: ~7 working days** + iteration.
 
-### Defensive testing inside `sdpm-core`
+### Defensive testing inside `trove-core`
 
 Independent of upstream:
-- Mirror items 1, 2, 4 as integration tests in `crates/sdpm-core/tests/` (seeded by `vault_roundtrip.rs` + `binary_attachments.rs`).
+- Mirror items 1, 2, 4 as integration tests in `crates/trove-core/tests/` (seeded by `vault_roundtrip.rs` + `binary_attachments.rs`).
 - CI job running against selected KeePassXC `tests/data/` fixtures (data files, not GPL-tainted source) — or regenerate equivalents.
-- SDPM golden-file lock: small set of `.kdbx` files we ship and guarantee to read+round-trip byte-identically forever; CI fails on any deviation. Defense-in-depth — catches keepass-rs regressions before they touch user data.
+- trove golden-file lock: small set of `.kdbx` files we ship and guarantee to read+round-trip byte-identically forever; CI fails on any deviation. Defense-in-depth — catches keepass-rs regressions before they touch user data.
 
 ## Sources
 
