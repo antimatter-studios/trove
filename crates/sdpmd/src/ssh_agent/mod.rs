@@ -23,6 +23,7 @@ pub mod wire;
 
 pub use keys::LoadedKey;
 
+use crate::idle::IdleTracker;
 use crate::ssh_agent::wire::{
     encode_identities_answer, encode_sign_response, parse_request, read_message, write_message,
     AgentRequest, SSH_AGENT_FAILURE, SSH_AGENT_IDENTITIES_ANSWER, SSH_AGENT_SIGN_RESPONSE,
@@ -56,7 +57,11 @@ pub fn resolve_ssh_socket_path() -> PathBuf {
 ///
 /// `socket_path` must already be cleaned up; we bind, chmod 0600, and remove
 /// it on drop via the caller.
-pub async fn run(socket_path: PathBuf, store: KeyStore) -> std::io::Result<()> {
+pub async fn run(
+    socket_path: PathBuf,
+    store: KeyStore,
+    idle: Arc<IdleTracker>,
+) -> std::io::Result<()> {
     // Stale socket cleanup: if a previous sdpmd died without removing it,
     // bind() will fail with EADDRINUSE; remove and retry. We *don't* try to
     // detect a *live* peer here — that's a deployment error, and the user
@@ -72,12 +77,16 @@ pub async fn run(socket_path: PathBuf, store: KeyStore) -> std::io::Result<()> {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let store = store.clone();
+                let idle = idle.clone();
+                // Bump on every accepted connection — the act of opening a
+                // socket connection is itself client activity.
+                idle.bump();
                 tokio::spawn(async move {
                     // A single bad client must not affect the daemon. Any
                     // error inside `serve_connection` is logged at most once
                     // per connection at debug-equivalent verbosity (silent
                     // in release; we don't depend on the `log` crate).
-                    let _ = serve_connection(stream, store).await;
+                    let _ = serve_connection(stream, store, idle).await;
                 });
             }
             Err(_) => {
@@ -95,7 +104,11 @@ fn set_socket_perms(path: &std::path::Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, perms)
 }
 
-async fn serve_connection(stream: UnixStream, store: KeyStore) -> std::io::Result<()> {
+async fn serve_connection(
+    stream: UnixStream,
+    store: KeyStore,
+    idle: Arc<IdleTracker>,
+) -> std::io::Result<()> {
     let (mut read_half, mut write_half) = stream.into_split();
     loop {
         let (msg_type, payload) = match read_message(&mut read_half).await {
@@ -103,6 +116,10 @@ async fn serve_connection(stream: UnixStream, store: KeyStore) -> std::io::Resul
             Ok(None) => return Ok(()), // client EOF — clean disconnect
             Err(_) => return Ok(()),   // malformed framing — close, daemon lives
         };
+        // Activity: the user just sent us a message. Bump unconditionally —
+        // even if we can't parse it, the user is interacting and shouldn't
+        // get auto-locked mid-keystroke.
+        idle.bump();
 
         let req = match parse_request(msg_type, &payload) {
             Ok(r) => r,

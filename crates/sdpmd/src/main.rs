@@ -10,6 +10,7 @@ compile_error!("sdpmd currently supports macOS and Linux only");
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -18,9 +19,65 @@ use tokio::sync::{Mutex, Notify, RwLock};
 
 use sdpmd::gpg_agent::{self, GpgKeyStore};
 use sdpmd::handler::{handle, SharedState};
+use sdpmd::idle::{IdleTracker, LockCallback, LockFuture};
 use sdpmd::materialize::{self, MaterializedStore};
 use sdpmd::protocol::{Request, Response};
 use sdpmd::ssh_agent::{self, KeyStore};
+
+/// Default idle-lock timeout when no `SDPM_IDLE_TIMEOUT` env var is set.
+/// 15 minutes matches the spec ("v0.0.6.0 default").
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
+
+/// Read the idle timeout override from the environment. Empty / unset / bad
+/// values fall back to the default. `0` disables auto-lock entirely.
+fn resolve_idle_timeout() -> Duration {
+    if let Ok(s) = std::env::var("SDPM_IDLE_TIMEOUT") {
+        if let Ok(n) = s.trim().parse::<u64>() {
+            return Duration::from_secs(n);
+        }
+        eprintln!("SDPM_IDLE_TIMEOUT={s:?} is not a non-negative integer; ignoring");
+    }
+    Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)
+}
+
+/// Build the idle-lock callback: drops the vault, clears both key stores,
+/// and wipes the materialize store. Same set of operations as the explicit
+/// `Lock` RPC, just without the response. We deliberately do NOT touch the
+/// idle tracker from inside the callback (the tracker has already marked
+/// itself "not running" before invoking us).
+fn build_lock_callback(
+    state: SharedState,
+    key_store: KeyStore,
+    gpg_store: GpgKeyStore,
+    mat_store: MaterializedStore,
+) -> LockCallback {
+    Box::new(move || {
+        let state = state.clone();
+        let key_store = key_store.clone();
+        let gpg_store = gpg_store.clone();
+        let mat_store = mat_store.clone();
+        let fut: LockFuture = Box::pin(async move {
+            // Idempotency: if the vault is already locked (e.g. an explicit
+            // `lock` RPC ran a fraction of a second before us), all of these
+            // operations are no-ops. wipe_all takes a write lock and drains;
+            // a second drain returns an empty Vec.
+            materialize::wipe_all(&mat_store).await;
+            {
+                let mut guard = state.lock().await;
+                *guard = None;
+            }
+            {
+                let mut keys = key_store.write().await;
+                keys.clear();
+            }
+            {
+                let mut gkeys = gpg_store.write().await;
+                gkeys.clear();
+            }
+        });
+        fut
+    })
+}
 
 /// Decide where the socket should live.
 ///
@@ -65,6 +122,7 @@ async fn handle_connection(
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
+    idle: Arc<IdleTracker>,
     shutdown: Arc<Notify>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
@@ -82,7 +140,8 @@ async fn handle_connection(
 
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
-                let handled = handle(req, &state, &key_store, &gpg_store, &mat_store).await;
+                let handled =
+                    handle(req, &state, &key_store, &gpg_store, &mat_store, &idle).await;
                 if handled.shutdown {
                     // Best-effort: write the ack, then signal the main loop.
                     let _ = write_response(&mut write_half, &handled.response).await;
@@ -137,6 +196,28 @@ async fn main() -> Result<()> {
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
     let shutdown = Arc::new(Notify::new());
 
+    // Construct the idle tracker. Its background task is spawned at `new()`
+    // time and lives for the duration of the daemon. The lock callback
+    // captures clones of every secret-bearing store; firing it has the same
+    // observable effect as a `Lock` RPC.
+    let idle_timeout = resolve_idle_timeout();
+    let lock_cb = build_lock_callback(
+        state.clone(),
+        key_store.clone(),
+        gpg_store.clone(),
+        mat_store.clone(),
+    );
+    let idle: Arc<IdleTracker> = IdleTracker::new(idle_timeout, lock_cb);
+    eprintln!(
+        "idle-lock timeout: {} seconds{}",
+        idle_timeout.as_secs(),
+        if idle_timeout.as_secs() == 0 {
+            " (auto-lock disabled)"
+        } else {
+            ""
+        }
+    );
+
     // Spawn the SSH agent listener on its own socket. The agent socket is
     // bound now (before any vault is unlocked) so clients can connect at any
     // time; until `unlock` populates the key store, list-identities returns
@@ -146,9 +227,12 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let ssh_store_for_task = key_store.clone();
+    let ssh_idle_for_task = idle.clone();
     let ssh_sock_for_cleanup = ssh_sock_path.clone();
     let _ssh_task = tokio::spawn(async move {
-        if let Err(e) = ssh_agent::run(ssh_sock_path, ssh_store_for_task).await {
+        if let Err(e) =
+            ssh_agent::run(ssh_sock_path, ssh_store_for_task, ssh_idle_for_task).await
+        {
             eprintln!("ssh-agent listener exited: {e}");
         }
     });
@@ -160,9 +244,12 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let gpg_store_for_task = gpg_store.clone();
+    let gpg_idle_for_task = idle.clone();
     let gpg_sock_for_cleanup = gpg_sock_path.clone();
     let _gpg_task = tokio::spawn(async move {
-        if let Err(e) = gpg_agent::run(gpg_sock_path, gpg_store_for_task).await {
+        if let Err(e) =
+            gpg_agent::run(gpg_sock_path, gpg_store_for_task, gpg_idle_for_task).await
+        {
             eprintln!("gpg-agent listener exited: {e}");
         }
     });
@@ -194,9 +281,10 @@ async fn main() -> Result<()> {
                     let key_store = key_store.clone();
                     let gpg_store = gpg_store.clone();
                     let mat_store = mat_store.clone();
+                    let idle = idle.clone();
                     let shutdown = shutdown.clone();
                     tokio::spawn(handle_connection(
-                        stream, state, key_store, gpg_store, mat_store, shutdown,
+                        stream, state, key_store, gpg_store, mat_store, idle, shutdown,
                     ));
                 }
                 Err(_) => {
@@ -212,6 +300,10 @@ async fn main() -> Result<()> {
         _ = accept_loop => {}
         _ = shutdown.notified() => {}
     }
+
+    // Cancel the idle timer first so a near-deadline tick doesn't race
+    // process exit and try to fire while we're tearing down.
+    idle.cancel();
 
     // Cleanup: wipe materialized files, drop vault state, drop SSH+GPG keys
     // (zeroized on drop), remove all socket files. The listener tasks are
@@ -269,11 +361,19 @@ mod tests {
             let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
             let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
             let shutdown = Arc::new(Notify::new());
+            let lock_cb = build_lock_callback(
+                state.clone(),
+                key_store.clone(),
+                gpg_store.clone(),
+                mat_store.clone(),
+            );
+            let idle: Arc<IdleTracker> = IdleTracker::new(Duration::from_secs(900), lock_cb);
 
             let accept_state = state.clone();
             let accept_keys = key_store.clone();
             let accept_gpg = gpg_store.clone();
             let accept_mat = mat_store.clone();
+            let accept_idle = idle.clone();
             let accept_shutdown = shutdown.clone();
             let accept = async move {
                 loop {
@@ -282,8 +382,9 @@ mod tests {
                         let ks = accept_keys.clone();
                         let gks = accept_gpg.clone();
                         let ms = accept_mat.clone();
+                        let id = accept_idle.clone();
                         let sh = accept_shutdown.clone();
-                        tokio::spawn(handle_connection(stream, s, ks, gks, ms, sh));
+                        tokio::spawn(handle_connection(stream, s, ks, gks, ms, id, sh));
                     }
                 }
             };

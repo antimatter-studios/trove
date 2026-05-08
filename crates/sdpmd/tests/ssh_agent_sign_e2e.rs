@@ -22,10 +22,16 @@ use rsa::pkcs1v15;
 use rsa::signature::Verifier as _;
 use sdpm_core::Vault;
 use sdpmd::handler::load_ssh_keys_from_vault;
+use sdpmd::idle::{IdleTracker, LockCallback, LockFuture};
 use sdpmd::ssh_agent::{self, KeyStore};
 use ssh_key::PublicKey;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
+
+fn noop_idle() -> Arc<IdleTracker> {
+    let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
+    IdleTracker::new(Duration::from_secs(0), cb)
+}
 
 const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
 const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
@@ -109,8 +115,9 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
 
     let sock_for_task = sock_path.clone();
     let store_for_task = store.clone();
+    let idle_for_task = noop_idle();
     let listener_handle = tokio::spawn(async move {
-        let _ = ssh_agent::run(sock_for_task, store_for_task).await;
+        let _ = ssh_agent::run(sock_for_task, store_for_task, idle_for_task).await;
     });
     for _ in 0..100 {
         if sock_path.exists() {

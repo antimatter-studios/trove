@@ -111,7 +111,6 @@ pub fn percent_encode(data: &[u8]) -> String {
     out
 }
 
-#[allow(dead_code)]
 pub fn percent_decode(s: &str) -> Result<Vec<u8>, ParseError> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -158,6 +157,27 @@ fn hex_value(b: u8) -> Option<u8> {
 pub async fn read_line(r: &mut AssuanReader) -> io::Result<Option<String>> {
     let mut buf = String::new();
     let n = r.read_line(&mut buf).await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.len() > MAX_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Assuan line exceeds maximum length",
+        ));
+    }
+    Ok(Some(buf))
+}
+
+/// Like `read_line`, but returns raw bytes (including any non-ASCII payload).
+/// Used for INQUIRE data — modern gpg ships ciphertext in `D` lines with
+/// only `%`, CR, LF %-escaped; other bytes (including 0x80..0xFF) appear
+/// literally and would fail the UTF-8 invariant of the `String`-flavoured
+/// `read_line`.
+pub async fn read_line_bytes(r: &mut AssuanReader) -> io::Result<Option<Vec<u8>>> {
+    use tokio::io::AsyncBufReadExt;
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    let n = r.read_until(b'\n', &mut buf).await?;
     if n == 0 {
         return Ok(None);
     }

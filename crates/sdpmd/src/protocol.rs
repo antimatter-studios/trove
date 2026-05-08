@@ -21,6 +21,12 @@ pub enum Request {
     /// even if the vault is locked (returns an empty list in that case).
     /// Added in v0.0.5.0.
     MaterializeStatus,
+    /// v0.0.6.0: configure the idle-lock timeout (in seconds). 0 disables.
+    SetIdleTimeout {
+        seconds: u64,
+    },
+    /// v0.0.6.0: read the current idle-lock state.
+    GetIdleTimeout,
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -37,6 +43,11 @@ impl std::fmt::Debug for Request {
             Request::Lock => f.write_str("Lock"),
             Request::Shutdown => f.write_str("Shutdown"),
             Request::MaterializeStatus => f.write_str("MaterializeStatus"),
+            Request::SetIdleTimeout { seconds } => f
+                .debug_struct("SetIdleTimeout")
+                .field("seconds", seconds)
+                .finish(),
+            Request::GetIdleTimeout => f.write_str("GetIdleTimeout"),
         }
     }
 }
@@ -64,6 +75,13 @@ pub enum OkBody {
     Pong { pong: bool },
     List { entries: Vec<EntryDto> },
     MaterializeStatus { materialized: Vec<crate::materialize::MaterializeStatus> },
+    /// v0.0.6.0: response body for `GetIdleTimeout`.
+    /// `seconds` is the configured timeout (0 == disabled).
+    /// `remaining` is the seconds-until-fire if a vault is unlocked, else null.
+    IdleTimeout {
+        seconds: u64,
+        remaining: Option<u64>,
+    },
 }
 
 impl Response {
@@ -83,5 +101,8 @@ impl Response {
     }
     pub fn err(msg: impl Into<String>) -> Self {
         Response::Err { error: msg.into() }
+    }
+    pub fn ok_idle_timeout(seconds: u64, remaining: Option<u64>) -> Self {
+        Response::Ok(OkBody::IdleTimeout { seconds, remaining })
     }
 }
