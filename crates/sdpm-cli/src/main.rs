@@ -79,6 +79,14 @@ enum Command {
         #[command(subcommand)]
         op: GpgAgentOp,
     },
+
+    /// Materialize all opted-in entries in the vault to disk in-process,
+    /// without going through the daemon. Useful for testing and for
+    /// disconnected workflows. Wipes everything on Ctrl-C / SIGINT.
+    Materialize {
+        /// Path to the .kdbx vault.
+        vault: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +154,38 @@ enum AddResource {
         #[arg(long = "key")]
         key: PathBuf,
     },
+
+    /// Store an arbitrary file (kubeconfig, .env, TLS cert, ...) in the vault
+    /// and configure it to materialize to disk on unlock. The file's bytes
+    /// land in a real KDBX `<Binary>` attachment; the `Materialize.*` custom
+    /// fields tell sdpmd where to write it on unlock.
+    File {
+        /// Path to the .kdbx vault.
+        vault: PathBuf,
+        /// Entry title (e.g. "kubeconfig-prod").
+        title: String,
+        /// Path to the file to read bytes from.
+        #[arg(long = "src")]
+        src: PathBuf,
+        /// Path to materialize the file to on unlock.
+        #[arg(long = "target")]
+        target: PathBuf,
+        /// Optional override for the attachment name. Defaults to the
+        /// basename of `--src`.
+        #[arg(long = "name")]
+        name: Option<String>,
+        /// File mode (octal) to set on the materialized file. 3 or 4 digits.
+        #[arg(long = "mode", default_value = "0600")]
+        mode: String,
+        /// Materialization lifetime in seconds. Default: lifetime of the
+        /// vault unlock state.
+        #[arg(long = "ttl")]
+        ttl: Option<u64>,
+        /// Allow materializing to a non-tmpfs path. Off by default; setting
+        /// this is a deliberate "I accept disk-backed exposure" choice.
+        #[arg(long = "allow-disk-backed", default_value_t = false)]
+        allow_disk_backed: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -168,6 +208,24 @@ enum GetResource {
         /// Entry title to look up.
         title: String,
         /// Write the export to this path (chmod 0600 on Unix). Stdout if omitted.
+        #[arg(long = "out")]
+        out: Option<PathBuf>,
+    },
+
+    /// Read a file attachment to disk WITHOUT going through materialization.
+    /// One-shot equivalent of `sdpm get ssh`. The materialization config
+    /// (Materialize.Target, Mode, ...) is ignored — `--out` controls where
+    /// the bytes land.
+    File {
+        /// Path to the .kdbx vault.
+        vault: PathBuf,
+        /// Entry title to look up.
+        title: String,
+        /// Attachment name to read. Defaults to the entry's
+        /// `Materialize.Source` field, or "blob" if neither is set.
+        #[arg(long = "name")]
+        name: Option<String>,
+        /// Write the bytes to this path (chmod 0600 on Unix). Stdout if omitted.
         #[arg(long = "out")]
         out: Option<PathBuf>,
     },
@@ -200,14 +258,45 @@ fn run(cli: Cli) -> Result<()> {
         Command::Add {
             resource: AddResource::Gpg { vault, title, key },
         } => cmd_add_gpg(&vault, &title, &key, pw_stdin),
+        Command::Add {
+            resource: AddResource::File {
+                vault,
+                title,
+                src,
+                target,
+                name,
+                mode,
+                ttl,
+                allow_disk_backed,
+            },
+        } => cmd_add_file(
+            &vault,
+            &title,
+            &src,
+            &target,
+            name.as_deref(),
+            &mode,
+            ttl,
+            allow_disk_backed,
+            pw_stdin,
+        ),
         Command::Get {
             resource: GetResource::Ssh { vault, title, out },
         } => cmd_get_ssh(&vault, &title, out.as_deref(), pw_stdin),
         Command::Get {
             resource: GetResource::Gpg { vault, title, out },
         } => cmd_get_gpg(&vault, &title, out.as_deref(), pw_stdin),
+        Command::Get {
+            resource: GetResource::File {
+                vault,
+                title,
+                name,
+                out,
+            },
+        } => cmd_get_file(&vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
         Command::Agent { op: AgentOp::Socket } => cmd_agent_socket(),
         Command::GpgAgent { op: GpgAgentOp::Socket } => cmd_gpg_agent_socket(),
+        Command::Materialize { vault } => cmd_materialize(&vault, pw_stdin),
     }
 }
 
@@ -470,6 +559,222 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
         .open(path)?;
     f.write_all(bytes)?;
     Ok(())
+}
+
+/// `sdpm add file`. Stores file bytes as a real KDBX `<Binary>` attachment
+/// and writes the `Materialize.*` custom fields. The basename of `--src` is
+/// the default attachment name; `--name` overrides.
+#[allow(clippy::too_many_arguments)]
+fn cmd_add_file(
+    vault_path: &Path,
+    title: &str,
+    src: &Path,
+    target: &Path,
+    name: Option<&str>,
+    mode: &str,
+    ttl: Option<u64>,
+    allow_disk_backed: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    // Read file bytes BEFORE prompting for password — fail fast on a typo.
+    let bytes = std::fs::read(src)
+        .with_context(|| format!("reading source file {}", src.display()))?;
+
+    let attachment_name: String = match name {
+        Some(n) => n.to_string(),
+        None => src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                anyhow!("could not derive attachment name from --src; pass --name explicitly")
+            })?,
+    };
+
+    let mut vault = open_vault(vault_path, pw_stdin)?;
+    let id = match vault.find_by_title(title) {
+        Some(existing) => existing,
+        None => vault
+            .add_entry(title)
+            .with_context(|| format!("creating entry '{title}'"))?,
+    };
+
+    vault
+        .attach_binary(&id, &attachment_name, &bytes)
+        .context("attaching file bytes")?;
+    vault
+        .set_field(&id, "Materialize.Source", &attachment_name)
+        .context("setting Materialize.Source")?;
+    let target_str = target
+        .to_str()
+        .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
+    vault
+        .set_field(&id, "Materialize.Target", target_str)
+        .context("setting Materialize.Target")?;
+    vault
+        .set_field(&id, "Materialize.Mode", mode)
+        .context("setting Materialize.Mode")?;
+    if let Some(ttl) = ttl {
+        vault
+            .set_field(&id, "Materialize.TTL", &ttl.to_string())
+            .context("setting Materialize.TTL")?;
+    }
+    vault
+        .set_field(
+            &id,
+            "Materialize.AllowDiskBacked",
+            if allow_disk_backed { "true" } else { "false" },
+        )
+        .context("setting Materialize.AllowDiskBacked")?;
+
+    vault.save().context("saving vault")?;
+    println!(
+        "stored '{}' as attachment '{attachment_name}' on entry {id} ({title}); \
+         materializes to {} on unlock",
+        src.display(),
+        target.display()
+    );
+    if !allow_disk_backed {
+        eprintln!(
+            "note: AllowDiskBacked=false. The daemon will refuse to materialize \
+             unless the target is on a tmpfs/memory-backed filesystem (Linux). \
+             On macOS this maps to a soft allowlist (/tmp, /private/tmp, \
+             $XDG_RUNTIME_DIR) — APFS does not provide a real tmpfs."
+        );
+    }
+    Ok(())
+}
+
+/// `sdpm get file` — read an attachment to disk WITHOUT engaging
+/// materialization. One-shot, like `sdpm get ssh`.
+fn cmd_get_file(
+    vault_path: &Path,
+    title: &str,
+    name: Option<&str>,
+    out: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let vault = open_vault(vault_path, pw_stdin)?;
+    let id: EntryId = vault
+        .find_by_title(title)
+        .ok_or_else(|| CoreError::EntryNotFound(title.to_string()))
+        .context("looking up entry by title")?;
+
+    // Resolve the attachment name. Priority:
+    //   1. --name flag (explicit)
+    //   2. Materialize.Source on the entry
+    //   3. literal "blob"
+    let resolved_name: String = match name {
+        Some(n) => n.to_string(),
+        None => match vault.get_field(&id, "Materialize.Source")? {
+            Some(s) => s,
+            None => "blob".to_string(),
+        },
+    };
+
+    let bytes = vault
+        .read_binary(&id, &resolved_name)
+        .context("reading file attachment")?
+        .ok_or_else(|| {
+            anyhow!("entry '{title}' has no attachment named '{resolved_name}'")
+        })?;
+
+    match out {
+        Some(path) => write_private_file(path, &bytes)
+            .with_context(|| format!("writing file to {}", path.display()))?,
+        None => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            handle
+                .write_all(&bytes)
+                .context("writing file to stdout")?;
+        }
+    }
+    Ok(())
+}
+
+/// `sdpm materialize` — open vault, run the materialize plan in-process,
+/// hold open until SIGINT, then wipe.
+///
+/// We deliberately do NOT touch the daemon's MaterializedStore here; this is
+/// a standalone command meant for testing and disconnected use. If you have
+/// the daemon running, use `sdpmd unlock` instead so SSH/GPG agents work too.
+fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
+    let vault = open_vault(vault_path, pw_stdin)?;
+    let (plans, errors) = sdpmd::materialize::build_plans(&vault);
+    for (title, e) in &errors {
+        eprintln!("skip '{title}': {e}");
+    }
+    if plans.is_empty() {
+        println!("no entries opted in to materialization");
+        return Ok(());
+    }
+
+    // Spin up a tokio runtime for the TTL tasks and the SIGINT handler.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+
+    rt.block_on(async {
+        // Local store, not shared with any daemon.
+        let store: sdpmd::materialize::MaterializedStore =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let mut materialised_count = 0usize;
+        for plan in &plans {
+            match sdpmd::materialize::materialize_one(&vault, plan, store.clone()) {
+                Ok(m) => {
+                    println!(
+                        "materialized '{}' -> {} (mode {:o}{}{})",
+                        plan.entry_title,
+                        plan.resolved_target.display(),
+                        plan.mode,
+                        if let Some(t) = plan.ttl {
+                            format!(", ttl {}s", t.as_secs())
+                        } else {
+                            String::new()
+                        },
+                        if !plan.allow_disk_backed {
+                            ""
+                        } else {
+                            ", disk-backed allowed"
+                        },
+                    );
+                    let mut g = store.write().await;
+                    g.push(m);
+                    materialised_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("failed '{}': {}", plan.entry_title, e);
+                }
+            }
+        }
+        if materialised_count == 0 {
+            return Ok::<(), anyhow::Error>(());
+        }
+        println!(
+            "{materialised_count} file(s) materialized. Press Ctrl-C to wipe and exit."
+        );
+
+        // Wait for SIGINT (or SIGTERM). The wipe runs synchronously before
+        // we return so the user sees "wiped" before the shell prompt comes
+        // back. If the user sends SIGKILL, the OS will reap us and the files
+        // will linger — that's the irreducible price of `kill -9` and we
+        // can't help it.
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigint = signal(SignalKind::interrupt())
+            .map_err(|e| anyhow!("install SIGINT handler: {e}"))?;
+        let mut sigterm = signal(SignalKind::terminate())
+            .map_err(|e| anyhow!("install SIGTERM handler: {e}"))?;
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+        }
+        println!("\nwiping materialized files...");
+        sdpmd::materialize::wipe_all(&store).await;
+        println!("done.");
+        Ok(())
+    })
 }
 
 /// Map an error chain to one of our documented exit codes.

@@ -337,6 +337,37 @@ impl Vault {
             Err(Error::EntryNotFound(id.0.clone()))
         }
     }
+
+    /// Read a single string field from an entry. Returns `None` if the field
+    /// is missing. Errors if the entry itself does not exist.
+    ///
+    /// Added in v0.0.5.0 to support the materialization extension: it reads
+    /// `Materialize.Source` / `Materialize.Target` / `Materialize.Mode` /
+    /// `Materialize.TTL` / `Materialize.AllowDiskBacked` from custom fields.
+    /// We expose this as a thin getter (rather than handing out a reference
+    /// to the internal `Entry`) to keep the kdbx crate out of the public API.
+    pub fn get_field(&self, id: &EntryId, field: &str) -> Result<Option<String>> {
+        let entry = find_entry(&self.inner.db.root, id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        Ok(entry.get(field).map(|s| s.to_string()))
+    }
+
+    /// Return the names of every custom string field on an entry whose name
+    /// starts with `prefix`. Field names are returned in unspecified order.
+    /// Errors if the entry does not exist.
+    ///
+    /// Added in v0.0.5.0 so the materialization layer can quickly tell which
+    /// entries opt in (any entry with at least one `Materialize.*` field).
+    pub fn fields_with_prefix(&self, id: &EntryId, prefix: &str) -> Result<Vec<String>> {
+        let entry = find_entry(&self.inner.db.root, id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        Ok(entry
+            .fields
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
 }
 
 // --- helpers ---------------------------------------------------------------

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
-#[serde(tag = "cmd", rename_all = "lowercase")]
+#[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Request {
     Ping,
     Unlock {
@@ -17,6 +17,10 @@ pub enum Request {
     List,
     Lock,
     Shutdown,
+    /// Inspect what the daemon has currently materialized. Read-only; works
+    /// even if the vault is locked (returns an empty list in that case).
+    /// Added in v0.0.5.0.
+    MaterializeStatus,
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -32,6 +36,7 @@ impl std::fmt::Debug for Request {
             Request::List => f.write_str("List"),
             Request::Lock => f.write_str("Lock"),
             Request::Shutdown => f.write_str("Shutdown"),
+            Request::MaterializeStatus => f.write_str("MaterializeStatus"),
         }
     }
 }
@@ -58,6 +63,7 @@ pub enum OkBody {
     Empty {},
     Pong { pong: bool },
     List { entries: Vec<EntryDto> },
+    MaterializeStatus { materialized: Vec<crate::materialize::MaterializeStatus> },
 }
 
 impl Response {
@@ -69,6 +75,11 @@ impl Response {
     }
     pub fn ok_list(entries: Vec<EntryDto>) -> Self {
         Response::Ok(OkBody::List { entries })
+    }
+    pub fn ok_materialize_status(
+        items: Vec<crate::materialize::MaterializeStatus>,
+    ) -> Self {
+        Response::Ok(OkBody::MaterializeStatus { materialized: items })
     }
     pub fn err(msg: impl Into<String>) -> Self {
         Response::Err { error: msg.into() }

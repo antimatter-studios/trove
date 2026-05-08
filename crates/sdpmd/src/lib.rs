@@ -8,5 +8,6 @@
 
 pub mod gpg_agent;
 pub mod handler;
+pub mod materialize;
 pub mod protocol;
 pub mod ssh_agent;

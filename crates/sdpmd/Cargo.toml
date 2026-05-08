@@ -40,6 +40,11 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "z
 # `sha1` is required to compute the libgcrypt "keygrip" identifier that
 # gpg-agent uses on the Assuan wire.
 sha1 = { version = "0.10", default-features = false, features = ["std", "oid"] }
+# v0.0.5.0: random bytes for the materialize secure-wipe pass. We don't need a
+# cryptographic CSPRNG strictly speaking — we're overwriting bytes that the
+# storage device may or may not actually rewrite in place — but using OsRng
+# costs nothing and makes the intent obvious in code review.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
 [dev-dependencies]
 tempfile = "3"
