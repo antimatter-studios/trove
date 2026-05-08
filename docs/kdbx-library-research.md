@@ -1,5 +1,7 @@
 # kdbx library research
 
+> **As of v0.0.10.0 this document is historical.** The recommendation below ("keep `keepass-rs`, un-fork onto upstream master, upstream our patches and tests") was acted on: we now depend on the published `keepass = "0.12.5"` from crates.io and the local fork is retired. Keeping this doc as the migration-decision record.
+
 ## Executive summary
 
 **Recommendation: keep `keepass-rs`, un-fork onto upstream master (~v0.12.x), upstream our two binary-attachment patches, and contribute test PRs covering KDBX 3 write, malformed-input rejection, fuzz harness, and cross-impl golden files.** No other library is more thorough; our patches are small and the maintainer accepts third-party fixes (he merged the same KeePassXC compat fix from a third party on Apr 27 2026). We're pinned at `0.7.33`, ~18 months and 5 minor releases behind master.
