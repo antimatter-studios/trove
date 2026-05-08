@@ -113,7 +113,7 @@ printf '{"cmd":"lock"}\n' | nc -U "$XDG_RUNTIME_DIR/sdpm.sock"
 # any SSH agent message, any GPG Assuan command.
 ```
 
-See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against.
+See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives **with the library** at [vendor/keepass/tests/](vendor/keepass/tests/) and is regenerated programmatically from a seeded RNG on every run; the gap inventory is in [docs/kdbx-test-coverage.md](docs/kdbx-test-coverage.md).
 
 ## Feature exploration
 

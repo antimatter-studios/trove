@@ -129,6 +129,8 @@ Without (1), every binary attachment we write is dropped on the next `save`. Wit
 
 Plan: upstream the fix. Until then, the workspace `[patch.crates-io]` redirect makes the vendored crate transparent — nothing in our crates says `path = "../../vendor/keepass"` directly.
 
+The kdbx test suite lives **with the library**, not the application: [vendor/keepass/tests/](../vendor/keepass/tests/) contains `spec_round_trip.rs`, `broken_files.rs`, `keyfile_formats.rs`, `binary_pool.rs`, and `cross_tool.rs`, plus a `common/` fixture-generation module seeded from `StdRng::seed_from_u64(0xdead_beef_cafe_f00d)`. Every `.kdbx` fixture is regenerated programmatically per test run from the seed — no on-disk corpus, no GPL'd inputs, MIT-licensable so the suite can be upstreamed to keepass-rs alongside the library fixes. See [docs/kdbx-test-coverage.md](kdbx-test-coverage.md) for the matrix.
+
 There is a legacy `_SDPM_BIN_<name>` string-field fallback for vaults written by sdpm v0.0.1 through v0.0.3.x: those versions, before the fork landed, base64-encoded attachments into protected string fields. [Vault::read_binary](../crates/sdpm-core/src/lib.rs) consults real attachments first and falls back to the legacy field; [Vault::attach_binary](../crates/sdpm-core/src/lib.rs) drops the legacy field on write so the vault migrates incrementally. No user action required.
 
 ## Threat model

@@ -23,7 +23,7 @@ include = [
 autolib = false
 autobins = false
 autoexamples = false
-autotests = false
+autotests = true
 autobenches = false
 description = "KeePass .kdbx database file parser"
 homepage = "https://github.com/sseemayer/keepass-rs"
@@ -253,8 +253,37 @@ version = "0.8"
 version = "1"
 features = ["zeroize_derive"]
 
-[dev-dependencies.rustfmt]
-version = "0.10"
+[dev-dependencies.rand]
+version = "0.8"
+features = ["std", "std_rng"]
+
+[dev-dependencies.tempfile]
+version = "3"
+
+[dev-dependencies.hex]
+version = "0.4"
+
+[dev-dependencies.base64]
+version = "0.22"
+
+[dev-dependencies.uuid]
+version = "1.2"
+features = ["v4"]
+
+[dev-dependencies.chrono]
+version = "0.4"
+features = ["clock", "std"]
+default-features = false
+
+[dev-dependencies.rust-argon2]
+version = "2.0"
+
+# Self dev-dependency — pulls in `save_kdbx4` for integration tests under
+# `vendor/keepass/tests/`. The library's writer is feature-gated and the
+# integration suite exercises round-trip save/open, so it must be enabled.
+[dev-dependencies.keepass]
+path = "."
+features = ["save_kdbx4"]
 
 [lints.rust.unexpected_cfgs]
 level = "warn"

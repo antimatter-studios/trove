@@ -16,7 +16,7 @@ Rust KeePass database file parser for KDB, KDBX3 and KDBX4, with experimental su
 ### Open a database
 </summary>
 
-```rust
+```rust,no_run
 use keepass::{
     db::NodeRef,
     Database,
