@@ -21,23 +21,27 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
-# SSH key parsing (OpenSSH private-key format). The `ed25519` feature pulls in
-# `ed25519-dalek` for in-process signing; we don't enable `encryption` because
-# v0.0.2.0 only handles unencrypted private keys.
-ssh-key = { version = "0.6", default-features = false, features = ["std", "alloc", "ed25519"] }
-# `rand` is only needed in tests (to generate fresh keys via `ssh-key`'s
-# `PrivateKey::random`). Keeping it test-only avoids paying for randomness in
-# the production binary.
+# SSH key parsing (OpenSSH private-key format). v0.0.2.1 enables the RustCrypto
+# backends for ed25519, p256, p384, and rsa so `PrivateKey::try_sign` works for
+# all four. We skip `p521` (rare; can be added later) and `encryption` (sdpm
+# vault attachments are stored unencrypted; the vault itself is the encryption
+# boundary).
+ssh-key = { version = "0.6", default-features = false, features = ["std", "alloc", "ed25519", "p256", "p384", "rsa"] }
+# Used directly for the RSA-SHA256 sign path. ssh-key's built-in
+# `Signer<Signature>` impl for `RsaKeypair` hard-codes SHA-512, but the SSH
+# agent protocol lets clients select the hash via flag bits (RFC 8332). We
+# build pkcs1v15::SigningKey<Sha256> directly when the SHA-256 bit is set.
+rsa = { version = "0.9", default-features = false, features = ["std"] }
+sha2 = { version = "0.10", default-features = false, features = ["std", "oid"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 # v0.0.3.0: GPG agent. We hand-roll OpenPGP secret-key packet parsing for the
 # narrow ed25519/EdDSA subcase (algo 22 + curve Ed25519) — pulling in rPGP
 # would balloon compile time by hundreds of crates for 30 lines of parsing.
 # `sha1` is required to compute the libgcrypt "keygrip" identifier that
 # gpg-agent uses on the Assuan wire.
-sha1 = { version = "0.10", default-features = false, features = ["std"] }
+sha1 = { version = "0.10", default-features = false, features = ["std", "oid"] }
 
 [dev-dependencies]
 tempfile = "3"
-sha2 = "0.10"
 base64 = "0.22"
 rand_core = { version = "0.6", features = ["getrandom"] }

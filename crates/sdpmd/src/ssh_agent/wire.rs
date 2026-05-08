@@ -142,6 +142,11 @@ pub fn encode_sign_response(signature_blob: &[u8]) -> Vec<u8> {
 }
 
 /// Build the `ssh-ed25519` signature blob: `string "ssh-ed25519" || string sig_bytes`.
+///
+/// Kept for backwards compatibility with v0.0.2.0 callers; v0.0.2.1 builds
+/// the wire-format signature directly from `ssh_key::Signature`. Used in
+/// the unit test below to document the layout.
+#[allow(dead_code)]
 pub fn encode_ed25519_signature_blob(raw_sig: &[u8; 64]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4 + 11 + 4 + 64);
     write_string(&mut buf, b"ssh-ed25519");
