@@ -209,8 +209,10 @@ pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
 }
 
 /// Walk every entry in `vault`, look for an `id` attachment, and try to parse
-/// it as an OpenSSH ed25519 private key. Skips (with a one-line warning)
-/// anything that doesn't parse, isn't ed25519, or is encrypted. Never panics.
+/// it as an OpenSSH private key (ed25519, RSA >= 2048, ECDSA P-256, or
+/// ECDSA P-384). Skips (with a one-line warning) anything that doesn't
+/// parse, is encrypted, is an unsupported algorithm (DSA, P-521), or is a
+/// weak RSA key. Never panics.
 pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
     const ATTACHMENT_NAME: &str = "id";
     let mut out = Vec::new();
@@ -230,19 +232,25 @@ pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
                 continue;
             }
         };
-        match ssh_keys::parse_openssh_ed25519(&bytes, &entry.title) {
+        match ssh_keys::parse_private_key(&bytes, &entry.title) {
             Ok(loaded) => out.push(loaded),
             Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
                 eprintln!(
                     "ssh-agent: skipping entry '{}': unsupported key algorithm {} \
-                     (v0.0.2.0 ed25519-only)",
+                     (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)",
                     entry.title, alg
+                );
+            }
+            Err(ssh_keys::ParseError::RsaTooSmall(bits)) => {
+                eprintln!(
+                    "ssh-agent: skipping entry '{}': RSA key too short ({} bits, \
+                     minimum 2048)",
+                    entry.title, bits
                 );
             }
             Err(ssh_keys::ParseError::Encrypted) => {
                 eprintln!(
-                    "ssh-agent: skipping entry '{}': encrypted private keys not supported \
-                     in v0.0.2.0",
+                    "ssh-agent: skipping entry '{}': encrypted private keys not supported",
                     entry.title
                 );
             }

@@ -24,9 +24,8 @@ pub mod wire;
 pub use keys::LoadedKey;
 
 use crate::ssh_agent::wire::{
-    encode_ed25519_signature_blob, encode_identities_answer, encode_sign_response, parse_request,
-    read_message, write_message, AgentRequest, SSH_AGENT_FAILURE, SSH_AGENT_IDENTITIES_ANSWER,
-    SSH_AGENT_SIGN_RESPONSE,
+    encode_identities_answer, encode_sign_response, parse_request, read_message, write_message,
+    AgentRequest, SSH_AGENT_FAILURE, SSH_AGENT_IDENTITIES_ANSWER, SSH_AGENT_SIGN_RESPONSE,
 };
 
 /// Shared key store. `RwLock` because reads (sign / list) vastly outnumber
@@ -133,19 +132,27 @@ async fn serve_connection(stream: UnixStream, store: KeyStore) -> std::io::Resul
                 }
             }
 
-            AgentRequest::SignRequest { key_blob, data, flags: _ } => {
+            AgentRequest::SignRequest { key_blob, data, flags } => {
                 // Find the matching key; sign under a brief read lock; drop
-                // the guard before writing to the network.
-                let signature: Option<[u8; 64]> = {
+                // the guard before writing to the network. The signing call
+                // is synchronous (no awaits) so holding the read guard across
+                // it is fine — concurrent signs are still allowed via the
+                // RwLock's multi-reader semantics.
+                //
+                // `LoadedKey::sign` returns the wire-format signature blob
+                // (`string algo || string sig_data`) directly — for ed25519
+                // and ECDSA this comes from `ssh_key::Signature`'s Encode
+                // impl; for RSA we pick the hash from `flags` per RFC 8332
+                // §3.3 / draft-miller-ssh-agent §4.5.1.
+                let sig_blob: Option<Vec<u8>> = {
                     let guard = store.read().await;
                     guard
                         .iter()
                         .find(|k| k.public_blob == key_blob)
-                        .map(|k| k.sign(&data))
+                        .and_then(|k| k.sign(&data, flags).ok())
                 };
-                let resp = match signature {
-                    Some(sig_bytes) => {
-                        let blob = encode_ed25519_signature_blob(&sig_bytes);
+                let resp = match sig_blob {
+                    Some(blob) => {
                         let body = encode_sign_response(&blob);
                         write_message(&mut write_half, SSH_AGENT_SIGN_RESPONSE, &body).await
                     }
