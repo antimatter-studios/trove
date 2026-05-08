@@ -115,7 +115,7 @@ sdpm lock
 # disable. Inspect with `sdpm idle get`.
 ```
 
-See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives **with the library** at [vendor/keepass/tests/](vendor/keepass/tests/) and is regenerated programmatically from a seeded RNG on every run; the gap inventory is in [docs/kdbx-test-coverage.md](docs/kdbx-test-coverage.md).
+See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no sdpm-core involvement; the test crate is a workspace member so `cargo test --workspace` runs it.
 
 ## Feature exploration
 
@@ -300,9 +300,15 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 - **v0.0.2.1** — SSH agent algorithm coverage extended: RSA (>= 2048 bits, signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332), ECDSA P-256, ECDSA P-384.
 - **v0.0.3.0** — GPG agent listener speaking the Assuan protocol; ed25519 OpenPGP signing works against `git commit -S`. Hand-rolled OpenPGP packet parser ([crates/sdpmd/src/gpg_agent/keys.rs](crates/sdpmd/src/gpg_agent/keys.rs)) avoids pulling in `rpgp`.
 - **v0.0.3.1** — GPG `PKDECRYPT` for ECDH-on-Curve25519: AES-128/192/256 KW unwrap of the wrapped session key against gpg 2.5.x. RSA / NIST-curve / Ed448 still out of scope.
-- **v0.0.4.0** — Real KDBX `<Binary>` attachments via the vendored `keepass` fork ([vendor/keepass/](vendor/keepass/)); legacy `_SDPM_BIN_*` string-field fallback kept for read-compat with v0.0.1–v0.0.3.x vaults; migrate-on-write to the real attachment format.
+- **v0.0.4.0** — Real KDBX `<Binary>` attachments via a vendored fork of `keepass` 0.7.33 (since retired in v0.0.10); legacy `_SDPM_BIN_*` string-field fallback kept for read-compat with v0.0.1–v0.0.3.x vaults (also retired in v0.0.10).
 - **v0.0.5.0** — File materialization (the founding feature): `sdpm add file`, `Materialize.{Source,Target,Mode,TTL,AllowDiskBacked}` custom-field schema, in-process `sdpm materialize`, daemon-driven materialize-on-unlock + wipe-on-lock with optional TTL. Linux: refuses non-tmpfs targets unless `AllowDiskBacked=true`. macOS: soft allowlist (`/tmp`, `/private/tmp`, `$XDG_RUNTIME_DIR`) — APFS provides no real tmpfs, so this is a hint, not a guarantee.
 - **v0.0.6.0** — Idle-lock. `IdleTracker` with a tokio driver task ([crates/sdpmd/src/idle.rs](crates/sdpmd/src/idle.rs)); auto-locks after configurable inactivity (default 900s). Activity = any control RPC except `ping`, any SSH agent message, any GPG Assuan command. New `set-idle-timeout` / `get-idle-timeout` RPCs and `SDPM_IDLE_TIMEOUT` env var.
+- **v0.0.7.0** — GitHub Actions CI (`.github/workflows/ci.yml`): test matrix on Linux + macOS, clippy with `-D warnings`, fmt check, cargo-audit, MSRV check at Rust 1.75. Repo run through `cargo fmt --all`.
+- **v0.0.7.1** — Documentation: README quickstart + [docs/architecture.md](docs/architecture.md) + [docs/threat-model.md](docs/threat-model.md) + [docs/cli-reference.md](docs/cli-reference.md).
+- **v0.0.7.2** — Fuzz harnesses for the SSH agent wire decoder and Assuan line parser ([crates/sdpmd/fuzz/](crates/sdpmd/fuzz/), nightly-only) plus proptest property tests on stable. ~4.3M libfuzzer iterations on this machine, 0 crashes.
+- **v0.0.8.0** — Clean-room kdbx spec test suite: round-trip matrix, malformed-input rejection, keyfile formats, binary pool, cross-tool (`keepassxc-cli`) interop. Programmatically generated fixtures from a seeded RNG; no GPL imports. Originally lived under `vendor/keepass/tests/`; relocated to [crates/keepass-spec-tests](crates/keepass-spec-tests/) in v0.0.10.
+- **v0.0.9.0** — Daemon-aware CLI: `sdpm unlock`, `sdpm lock`, `sdpm status`, `sdpm idle set/get`, `sdpm materialize-status`. Replaces the `printf '{...}' | nc -U` incantations from v0.0.6 with proper subcommands.
+- **v0.0.10.0** — Migrated off the vendored `keepass` 0.7.33 fork to the published `keepass = "0.12.5"`. Upstream's PR #294 already restructured attachments as first-class Database-owned objects with `EntryMut::add_attachment(name, Value::Unprotected(bytes))`, which is what our 3 patches were trying to enable. Local fork retired; legacy `_SDPM_BIN_*` migration code retired (no production v0.0.1–v0.0.3.x vaults exist).
 
 Linux + macOS only; Windows not supported. Vault unlock currently takes a password only — no keyfiles, no hardware tokens, no KDBX 3.
 

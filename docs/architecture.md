@@ -7,11 +7,10 @@ A practical guide for someone reading the sdpm codebase for the first time. Aime
 ```
 SuperDuperPasswordManager/
 ├── crates/
-│   ├── sdpm-core/      vault library (kdbx I/O, no networking)
-│   ├── sdpm-cli/       `sdpm` binary — thin CLI client
-│   └── sdpmd/          `sdpmd` binary + library — headless daemon
-└── vendor/
-    └── keepass/        vendored fork of the `keepass` crate
+│   ├── sdpm-core/             vault library (kdbx I/O, no networking)
+│   ├── sdpm-cli/              `sdpm` binary — thin CLI client
+│   ├── sdpmd/                 `sdpmd` binary + library — headless daemon
+│   └── keepass-spec-tests/    clean-room kdbx spec test suite
 ```
 
 **[crates/sdpm-core](../crates/sdpm-core/)** — the vault library. Pure data layer. One public type, [Vault](../crates/sdpm-core/src/lib.rs), with sync methods (`open`, `save`, `add_entry`, `attach_binary`, `read_binary`, `set_field`, `get_field`, `list_entries`, ...). No async. No sockets. No process-level state. Knows nothing about SSH or GPG. The CLI and the daemon both depend on it; nothing depends on the CLI or the daemon.
@@ -20,7 +19,9 @@ SuperDuperPasswordManager/
 
 **[crates/sdpmd](../crates/sdpmd/)** — the headless daemon. This is where secrets live in memory while the vault is unlocked. Owns three Unix sockets, four secret stores, and an idle-lock timer. Compiled both as a binary (`sdpmd`) and as a library (`sdpmd::*`) so the CLI and integration tests can import its modules.
 
-**[vendor/keepass](../vendor/keepass/)** — vendored fork of the upstream `keepass` 0.7 crate, patched at the workspace level. See [Cargo.toml](../Cargo.toml)'s `[patch.crates-io]` block. Forked because upstream 0.7.33 parses `<Binary Ref="..."/>` references inside entries but discards them ("TODO reference into a binary field from the Meta") and panics on non-UTF-8 `Value::Bytes` during save. The fork makes binary attachments round-trip as real KDBX4 inner-header binaries, which restores bit-exact KeePassXC interop. Planned upstream contribution; in the meantime, the vendored copy unblocks shipping.
+**[crates/keepass-spec-tests](../crates/keepass-spec-tests/)** — clean-room test suite for the upstream `keepass = "0.12"` crate (spec round-trip, broken-file rejection, keyfile formats, binary pool, cross-tool interop). Programmatically generated fixtures, no GPL imports. Intended to be contributed upstream; lives in the workspace today so `cargo test --workspace` covers it.
+
+The kdbx parser itself is the published [keepass](https://crates.io/crates/keepass) crate from crates.io. Earlier versions of sdpm vendored a 0.7.33 fork (with three binary-attachment patches) under `vendor/keepass/`; that fork was retired in v0.0.10.0 once upstream's PR #294 made first-class `EntryMut::add_attachment(name, Value::Unprotected(bytes))` available, which is what our patches were trying to enable. The fork's history lives on at https://github.com/antimatter-studios/keepass-rs as a holding place for upstream PRs.
 
 Why split it three ways at all? The daemon is a security-critical surface — it owns decrypted material in process memory. Keeping the cryptographic data path (sdpm-core) free of async, networking, and listener code makes it easier to audit. Keeping the CLI off the daemon's hot path (most subcommands open the kdbx directly) makes one-off operations work even if `sdpmd` is not running.
 
@@ -120,18 +121,18 @@ The honest spectrum: SSH/GPG agents > materialization (with tmpfs + TTL) > mater
 
 `100% .kdbx format compatibility` is the project's hard constraint — you can open the same vault in KeePassXC or any other kdbx client without losing data. We extend; we never break.
 
-We vendor a fork of `keepass` 0.7.33 ([vendor/keepass](../vendor/keepass/)) because upstream has two bugs in our use case:
+**(Historical: v0.0.4–v0.0.9 vendored a fork of `keepass` 0.7.33 in `vendor/keepass/`. The fork had three patches because upstream 0.7.33 had two real bugs in our use case:
 
 1. `<Binary Ref="..."/>` references inside entries are parsed but discarded on read.
 2. Saving a `Value::Bytes` whose contents aren't valid UTF-8 panics in the XML serializer.
 
 Without (1), every binary attachment we write is dropped on the next `save`. Without (2), saving any vault containing a binary key causes a crash. The fork resolves both: real attachments are kept on the inner-header binary pool, references survive round-trip, and `Value::Bytes` is base64-encoded into the XML.
 
-Plan: upstream the fix. Until then, the workspace `[patch.crates-io]` redirect makes the vendored crate transparent — nothing in our crates says `path = "../../vendor/keepass"` directly.
+As of v0.0.10.0 the fork is gone: upstream's PR #294 already restructured attachments as first-class Database-owned objects, and the new `EntryMut::add_attachment(name, Value::Unprotected(bytes))` does what our patches were trying to enable. We now depend on `keepass = "0.12"` from crates.io directly. The fork's `sdpm-patches-v0.7.33` branch on https://github.com/antimatter-studios/keepass-rs is a holding place for upstream-contribution PRs.)**
 
-The kdbx test suite lives **with the library**, not the application: [vendor/keepass/tests/](../vendor/keepass/tests/) contains `spec_round_trip.rs`, `broken_files.rs`, `keyfile_formats.rs`, `binary_pool.rs`, and `cross_tool.rs`, plus a `common/` fixture-generation module seeded from `StdRng::seed_from_u64(0xdead_beef_cafe_f00d)`. Every `.kdbx` fixture is regenerated programmatically per test run from the seed — no on-disk corpus, no GPL'd inputs, MIT-licensable so the suite can be upstreamed to keepass-rs alongside the library fixes. See [docs/kdbx-test-coverage.md](kdbx-test-coverage.md) for the matrix.
+The kdbx test suite lives in [crates/keepass-spec-tests](../crates/keepass-spec-tests/) — a workspace member that depends on the published `keepass = "0.12"` crate and exercises it directly with no sdpm-core involvement. `tests/` contains `spec_round_trip.rs`, `broken_files.rs`, `keyfile_formats.rs`, `binary_pool.rs`, and `cross_tool.rs`, plus a `common/` fixture-generation module seeded from `StdRng::seed_from_u64(0xdead_beef_cafe_f00d)`. Every `.kdbx` fixture is regenerated programmatically per test run from the seed — no on-disk corpus, no GPL'd inputs, MIT-licensable so the suite can be upstreamed to keepass-rs as a dedicated PR.
 
-There is a legacy `_SDPM_BIN_<name>` string-field fallback for vaults written by sdpm v0.0.1 through v0.0.3.x: those versions, before the fork landed, base64-encoded attachments into protected string fields. [Vault::read_binary](../crates/sdpm-core/src/lib.rs) consults real attachments first and falls back to the legacy field; [Vault::attach_binary](../crates/sdpm-core/src/lib.rs) drops the legacy field on write so the vault migrates incrementally. No user action required.
+**(Historical: v0.0.4–v0.0.9 carried a `_SDPM_BIN_<name>` string-field fallback for vaults written by sdpm v0.0.1 through v0.0.3.x; v0.0.10.0 dropped it because no production vaults of that vintage exist — the project hadn't shipped before v0.0.10.)**
 
 ## Threat model
 
@@ -191,7 +192,7 @@ When the timer fires, the `IdleTracker` invokes the same `LockCallback` that the
 
 Honest list. None of these are show-stoppers; all of them are real.
 
-- **`keepass-rs` vendoring.** Real attachments and non-UTF-8 bytes work because of the fork in [vendor/keepass](../vendor/keepass/). Until the fix is upstreamed and a release happens, every contributor needs the fork checked in. Plan: file the upstream PR, drop the patch when it lands.
+- **`keepass-rs` upstream contribution.** v0.0.10.0 dropped the local fork; we now depend on the published `keepass = "0.12"` from crates.io. The clean-room spec test suite in [crates/keepass-spec-tests](../crates/keepass-spec-tests/) is what we plan to contribute upstream.
 - **macOS file materialization.** APFS has no tmpfs. The "tmpfs-or-refuse" guarantee Linux gives users with `AllowDiskBacked=false` becomes a soft allowlist on macOS. Documented in the error path; users should know.
 - **Partial GPG decrypt cipher coverage.** PKDECRYPT works for ed25519+cv25519 keys produced by gpg 2.5.x with default ciphers (AES-128/192/256-KW). RSA, NIST-curve ECDH, Ed448, and other AEAD modes are out of scope and cleanly error out — but `gpg --decrypt` for a message encrypted with a non-supported scheme will fail.
 - **No keyfile / hardware-token vault unlock.** Password only. KeePassXC supports both; we will eventually.

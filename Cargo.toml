@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sdpm-core", "crates/sdpm-cli", "crates/sdpmd"]
+members = ["crates/sdpm-core", "crates/sdpm-cli", "crates/sdpmd", "crates/keepass-spec-tests"]
 
 [workspace.package]
 version = "0.0.0"

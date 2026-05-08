@@ -1,0 +1,25 @@
+[package]
+name = "keepass-spec-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clean-room kdbx spec test suite for the keepass crate (programmatic, MIT-licensable, intended for upstream contribution)"
+publish = false
+
+# This crate intentionally has no library / binary — it's a test-only host
+# that depends on the published `keepass` crate and exercises it directly.
+# Tests live under tests/.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+keepass = { workspace = true, features = ["save_kdbx4"] }
+
+[dev-dependencies]
+tempfile = "3"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rust-argon2 = "3"
