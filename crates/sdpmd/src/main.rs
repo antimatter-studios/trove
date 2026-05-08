@@ -131,8 +131,8 @@ async fn handle_connection(
     loop {
         let line = match lines.next_line().await {
             Ok(Some(l)) => l,
-            Ok(None) => return,        // EOF — client closed
-            Err(_) => return,          // I/O error on this connection — drop it, daemon lives
+            Ok(None) => return, // EOF — client closed
+            Err(_) => return,   // I/O error on this connection — drop it, daemon lives
         };
         if line.trim().is_empty() {
             continue;
@@ -140,8 +140,7 @@ async fn handle_connection(
 
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
-                let handled =
-                    handle(req, &state, &key_store, &gpg_store, &mat_store, &idle).await;
+                let handled = handle(req, &state, &key_store, &gpg_store, &mat_store, &idle).await;
                 if handled.shutdown {
                     // Best-effort: write the ack, then signal the main loop.
                     let _ = write_response(&mut write_half, &handled.response).await;
@@ -185,8 +184,7 @@ async fn main() -> Result<()> {
 
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding {}", sock_path.display()))?;
-    set_socket_perms(&sock_path)
-        .with_context(|| format!("chmod 0600 {}", sock_path.display()))?;
+    set_socket_perms(&sock_path).with_context(|| format!("chmod 0600 {}", sock_path.display()))?;
 
     eprintln!("listening on {}", sock_path.display());
 
@@ -230,9 +228,7 @@ async fn main() -> Result<()> {
     let ssh_idle_for_task = idle.clone();
     let ssh_sock_for_cleanup = ssh_sock_path.clone();
     let _ssh_task = tokio::spawn(async move {
-        if let Err(e) =
-            ssh_agent::run(ssh_sock_path, ssh_store_for_task, ssh_idle_for_task).await
-        {
+        if let Err(e) = ssh_agent::run(ssh_sock_path, ssh_store_for_task, ssh_idle_for_task).await {
             eprintln!("ssh-agent listener exited: {e}");
         }
     });
@@ -247,9 +243,7 @@ async fn main() -> Result<()> {
     let gpg_idle_for_task = idle.clone();
     let gpg_sock_for_cleanup = gpg_sock_path.clone();
     let _gpg_task = tokio::spawn(async move {
-        if let Err(e) =
-            gpg_agent::run(gpg_sock_path, gpg_store_for_task, gpg_idle_for_task).await
-        {
+        if let Err(e) = gpg_agent::run(gpg_sock_path, gpg_store_for_task, gpg_idle_for_task).await {
             eprintln!("gpg-agent listener exited: {e}");
         }
     });

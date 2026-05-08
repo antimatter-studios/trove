@@ -273,8 +273,8 @@ impl Vault {
                 content: bytes.to_vec(),
             });
 
-        let entry = find_entry_mut(&mut self.inner.db.root, id)
-            .expect("entry existence checked above");
+        let entry =
+            find_entry_mut(&mut self.inner.db.root, id).expect("entry existence checked above");
         // Drop any legacy base64-in-string-field attachment with the same
         // name — migrate-on-write.
         let legacy_key = format!("{ATTACHMENT_PREFIX}{name}");
@@ -295,8 +295,8 @@ impl Vault {
     /// carries a legacy `_SDPM_BIN_<name>` field (from sdpm v0.0.1–0.0.3.x),
     /// it is decoded transparently — no migration step required by callers.
     pub fn read_binary(&self, id: &EntryId, name: &str) -> Result<Option<Vec<u8>>> {
-        let entry =
-            find_entry(&self.inner.db.root, id).ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        let entry = find_entry(&self.inner.db.root, id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
 
         // Real attachment first.
         if let Some(identifier) = entry.binaries.get(name) {
@@ -377,8 +377,7 @@ fn summarise(e: &keepass::db::Entry) -> EntrySummary {
     // a stable order: real ones first (insertion order), then legacy ones not
     // already represented as real attachments. Final list is sorted for
     // deterministic output.
-    let mut names: std::collections::BTreeSet<String> =
-        e.binaries.keys().cloned().collect();
+    let mut names: std::collections::BTreeSet<String> = e.binaries.keys().cloned().collect();
     for k in e.fields.keys() {
         if let Some(name) = k.strip_prefix(ATTACHMENT_PREFIX) {
             names.insert(name.to_string());
@@ -394,10 +393,7 @@ fn summarise(e: &keepass::db::Entry) -> EntrySummary {
     }
 }
 
-fn find_entry<'a>(
-    group: &'a keepass::db::Group,
-    id: &EntryId,
-) -> Option<&'a keepass::db::Entry> {
+fn find_entry<'a>(group: &'a keepass::db::Group, id: &EntryId) -> Option<&'a keepass::db::Entry> {
     for node in group.iter() {
         if let keepass::db::NodeRef::Entry(e) = node {
             if e.uuid.to_string() == id.0 {

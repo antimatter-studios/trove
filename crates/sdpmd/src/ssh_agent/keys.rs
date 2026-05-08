@@ -190,11 +190,31 @@ fn encode_ssh_string_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// `[p, p]` bug noted above; `from_components` validates that `p * q == n`
 /// before returning, so passing the same prime twice always fails.
 fn build_rsa_private_key(keypair: &RsaKeypair) -> Result<rsa::RsaPrivateKey, SignError> {
-    let n_bytes = keypair.public.n.as_positive_bytes().ok_or(SignError::Failed)?;
-    let e_bytes = keypair.public.e.as_positive_bytes().ok_or(SignError::Failed)?;
-    let d_bytes = keypair.private.d.as_positive_bytes().ok_or(SignError::Failed)?;
-    let p_bytes = keypair.private.p.as_positive_bytes().ok_or(SignError::Failed)?;
-    let q_bytes = keypair.private.q.as_positive_bytes().ok_or(SignError::Failed)?;
+    let n_bytes = keypair
+        .public
+        .n
+        .as_positive_bytes()
+        .ok_or(SignError::Failed)?;
+    let e_bytes = keypair
+        .public
+        .e
+        .as_positive_bytes()
+        .ok_or(SignError::Failed)?;
+    let d_bytes = keypair
+        .private
+        .d
+        .as_positive_bytes()
+        .ok_or(SignError::Failed)?;
+    let p_bytes = keypair
+        .private
+        .p
+        .as_positive_bytes()
+        .ok_or(SignError::Failed)?;
+    let q_bytes = keypair
+        .private
+        .q
+        .as_positive_bytes()
+        .ok_or(SignError::Failed)?;
     rsa::RsaPrivateKey::from_components(
         rsa::BigUint::from_bytes_be(n_bytes),
         rsa::BigUint::from_bytes_be(e_bytes),
@@ -227,10 +247,10 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
     // or the raw binary of the same. Try PEM first; fall through to binary
     // if the bytes aren't valid UTF-8.
     let pk = match std::str::from_utf8(bytes) {
-        Ok(s) => PrivateKey::from_openssh(s)
-            .map_err(|e| ParseError::NotOpenssh(e.to_string()))?,
-        Err(_) => PrivateKey::from_bytes(bytes)
-            .map_err(|e| ParseError::NotOpenssh(e.to_string()))?,
+        Ok(s) => PrivateKey::from_openssh(s).map_err(|e| ParseError::NotOpenssh(e.to_string()))?,
+        Err(_) => {
+            PrivateKey::from_bytes(bytes).map_err(|e| ParseError::NotOpenssh(e.to_string()))?
+        }
     };
 
     if pk.is_encrypted() {
@@ -250,11 +270,17 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
                     return Err(ParseError::RsaTooSmall(bits));
                 }
             } else {
-                return Err(ParseError::UnsupportedAlgorithm("rsa (no rsa keypair)".into()));
+                return Err(ParseError::UnsupportedAlgorithm(
+                    "rsa (no rsa keypair)".into(),
+                ));
             }
         }
-        Algorithm::Ecdsa { curve: EcdsaCurve::NistP256 } => {}
-        Algorithm::Ecdsa { curve: EcdsaCurve::NistP384 } => {}
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        } => {}
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP384,
+        } => {}
         other => {
             return Err(ParseError::UnsupportedAlgorithm(other.as_str().to_string()));
         }
@@ -304,11 +330,21 @@ fn algorithm_name_static(alg: &Algorithm) -> &'static str {
     match alg {
         Algorithm::Ed25519 => "ssh-ed25519",
         Algorithm::Rsa { hash: None } => "ssh-rsa",
-        Algorithm::Rsa { hash: Some(HashAlg::Sha256) } => "rsa-sha2-256",
-        Algorithm::Rsa { hash: Some(HashAlg::Sha512) } => "rsa-sha2-512",
-        Algorithm::Ecdsa { curve: EcdsaCurve::NistP256 } => "ecdsa-sha2-nistp256",
-        Algorithm::Ecdsa { curve: EcdsaCurve::NistP384 } => "ecdsa-sha2-nistp384",
-        Algorithm::Ecdsa { curve: EcdsaCurve::NistP521 } => "ecdsa-sha2-nistp521",
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha256),
+        } => "rsa-sha2-256",
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512),
+        } => "rsa-sha2-512",
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        } => "ecdsa-sha2-nistp256",
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP384,
+        } => "ecdsa-sha2-nistp384",
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP521,
+        } => "ecdsa-sha2-nistp521",
         _ => "unknown",
     }
 }
@@ -370,7 +406,9 @@ mod tests {
 
     #[test]
     fn parses_ecdsa_p256_and_signs() {
-        let pk = random_key(Algorithm::Ecdsa { curve: EcdsaCurve::NistP256 });
+        let pk = random_key(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        });
         let pem = pem_of(&pk);
         let loaded = parse_private_key(pem.as_bytes(), "test@p256").expect("parse p256");
         // public blob: u32(19) || "ecdsa-sha2-nistp256" ...
@@ -384,7 +422,9 @@ mod tests {
 
     #[test]
     fn parses_ecdsa_p384_and_signs() {
-        let pk = random_key(Algorithm::Ecdsa { curve: EcdsaCurve::NistP384 });
+        let pk = random_key(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP384,
+        });
         let pem = pem_of(&pk);
         let loaded = parse_private_key(pem.as_bytes(), "test@p384").expect("parse p384");
         assert_eq!(&loaded.public_blob[0..4], &19u32.to_be_bytes());
@@ -411,13 +451,19 @@ mod tests {
         // `parse_private_key`. We at least sanity-check the rejection path
         // for a totally bogus PEM that *says* it's a key but isn't ours.
         // (Without `p521` we can't synthesise a real one in-process.)
-        let res = parse_private_key(b"-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n-----END OPENSSH PRIVATE KEY-----\n", "x");
+        let res = parse_private_key(
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n-----END OPENSSH PRIVATE KEY-----\n",
+            "x",
+        );
         assert!(matches!(res, Err(ParseError::NotOpenssh(_))));
     }
 
     #[test]
     fn rsa_hash_choice_from_flags() {
-        assert_eq!(RsaHashChoice::from_agent_flags(0), RsaHashChoice::Sha1Legacy);
+        assert_eq!(
+            RsaHashChoice::from_agent_flags(0),
+            RsaHashChoice::Sha1Legacy
+        );
         assert_eq!(RsaHashChoice::from_agent_flags(0x02), RsaHashChoice::Sha256);
         assert_eq!(RsaHashChoice::from_agent_flags(0x04), RsaHashChoice::Sha512);
         // SHA-512 wins over SHA-256 if both bits are set (matches OpenSSH).

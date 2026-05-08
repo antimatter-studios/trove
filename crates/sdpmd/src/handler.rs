@@ -236,10 +236,7 @@ pub async fn handle(
 /// Build the materialization plan for `vault` and execute every plan,
 /// returning the bookkeeping handles for the ones that succeeded. Per-entry
 /// failures (validation OR I/O) are logged, never propagated.
-async fn materialize_from_vault(
-    vault: &Vault,
-    store: &MaterializedStore,
-) -> Vec<MaterializedFile> {
+async fn materialize_from_vault(vault: &Vault, store: &MaterializedStore) -> Vec<MaterializedFile> {
     let (plans, plan_errors) = materialize::build_plans(vault);
     for (title, e) in plan_errors {
         eprintln!("materialize: skipping entry '{title}': {e}");
@@ -258,10 +255,7 @@ async fn materialize_from_vault(
                 materialized.push(m);
             }
             Err(e) => {
-                eprintln!(
-                    "materialize: failed for '{}': {}",
-                    plan.entry_title, e
-                );
+                eprintln!("materialize: failed for '{}': {}", plan.entry_title, e);
             }
         }
     }
@@ -312,10 +306,7 @@ pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
                 );
             }
             Err(e) => {
-                eprintln!(
-                    "gpg-agent: skipping entry '{}': {}",
-                    entry.title, e
-                );
+                eprintln!("gpg-agent: skipping entry '{}': {}", entry.title, e);
             }
         }
     }
@@ -369,10 +360,7 @@ pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
                 );
             }
             Err(e) => {
-                eprintln!(
-                    "ssh-agent: skipping entry '{}': {}",
-                    entry.title, e
-                );
+                eprintln!("ssh-agent: skipping entry '{}': {}", entry.title, e);
             }
         }
     }

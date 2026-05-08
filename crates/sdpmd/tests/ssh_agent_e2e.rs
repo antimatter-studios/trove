@@ -123,7 +123,10 @@ async fn run_e2e_for(
 
     // 1. Generate a real keypair on disk.
     let mut keygen = Command::new("ssh-keygen");
-    keygen.args(keygen_args).args(["-N", "", "-C", comment, "-f"]).arg(&key_path);
+    keygen
+        .args(keygen_args)
+        .args(["-N", "", "-C", comment, "-f"])
+        .arg(&key_path);
     let kg = keygen.output().expect("spawn ssh-keygen");
     assert!(
         kg.status.success(),

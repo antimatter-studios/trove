@@ -248,27 +248,29 @@ fn run(cli: Cli) -> Result<()> {
         Command::Init { vault } => cmd_init(&vault, pw_stdin),
         Command::List { vault } => cmd_list(&vault, pw_stdin),
         Command::Add {
-            resource: AddResource::Ssh {
-                vault,
-                title,
-                key,
-                user,
-            },
+            resource:
+                AddResource::Ssh {
+                    vault,
+                    title,
+                    key,
+                    user,
+                },
         } => cmd_add_ssh(&vault, &title, &key, user.as_deref(), pw_stdin),
         Command::Add {
             resource: AddResource::Gpg { vault, title, key },
         } => cmd_add_gpg(&vault, &title, &key, pw_stdin),
         Command::Add {
-            resource: AddResource::File {
-                vault,
-                title,
-                src,
-                target,
-                name,
-                mode,
-                ttl,
-                allow_disk_backed,
-            },
+            resource:
+                AddResource::File {
+                    vault,
+                    title,
+                    src,
+                    target,
+                    name,
+                    mode,
+                    ttl,
+                    allow_disk_backed,
+                },
         } => cmd_add_file(
             &vault,
             &title,
@@ -287,15 +289,20 @@ fn run(cli: Cli) -> Result<()> {
             resource: GetResource::Gpg { vault, title, out },
         } => cmd_get_gpg(&vault, &title, out.as_deref(), pw_stdin),
         Command::Get {
-            resource: GetResource::File {
-                vault,
-                title,
-                name,
-                out,
-            },
+            resource:
+                GetResource::File {
+                    vault,
+                    title,
+                    name,
+                    out,
+                },
         } => cmd_get_file(&vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
-        Command::Agent { op: AgentOp::Socket } => cmd_agent_socket(),
-        Command::GpgAgent { op: GpgAgentOp::Socket } => cmd_gpg_agent_socket(),
+        Command::Agent {
+            op: AgentOp::Socket,
+        } => cmd_agent_socket(),
+        Command::GpgAgent {
+            op: GpgAgentOp::Socket,
+        } => cmd_gpg_agent_socket(),
         Command::Materialize { vault } => cmd_materialize(&vault, pw_stdin),
     }
 }
@@ -416,12 +423,7 @@ fn cmd_add_ssh(
     Ok(())
 }
 
-fn cmd_add_gpg(
-    vault_path: &Path,
-    title: &str,
-    key_path: &Path,
-    pw_stdin: bool,
-) -> Result<()> {
+fn cmd_add_gpg(vault_path: &Path, title: &str, key_path: &Path, pw_stdin: bool) -> Result<()> {
     let key_bytes = std::fs::read(key_path)
         .with_context(|| format!("reading gpg secret-key export from {}", key_path.display()))?;
 
@@ -453,11 +455,7 @@ fn cmd_get_gpg(vault_path: &Path, title: &str, out: Option<&Path>, pw_stdin: boo
     let bytes = vault
         .read_binary(&id, GPG_KEY_ATTACHMENT)
         .context("reading gpg secret-key attachment")?
-        .ok_or_else(|| {
-            anyhow!(
-                "entry '{title}' has no '{GPG_KEY_ATTACHMENT}' attachment"
-            )
-        })?;
+        .ok_or_else(|| anyhow!("entry '{title}' has no '{GPG_KEY_ATTACHMENT}' attachment"))?;
 
     match out {
         Some(path) => write_private_file(path, &bytes)
@@ -483,11 +481,7 @@ fn cmd_get_ssh(vault_path: &Path, title: &str, out: Option<&Path>, pw_stdin: boo
     let bytes = vault
         .read_binary(&id, SSH_KEY_ATTACHMENT)
         .context("reading ssh key attachment")?
-        .ok_or_else(|| {
-            anyhow!(
-                "entry '{title}' has no '{SSH_KEY_ATTACHMENT}' attachment"
-            )
-        })?;
+        .ok_or_else(|| anyhow!("entry '{title}' has no '{SSH_KEY_ATTACHMENT}' attachment"))?;
 
     match out {
         Some(path) => write_private_file(path, &bytes)
@@ -512,8 +506,7 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     } else {
         rpassword::prompt_password("Vault password: ").context("reading vault password")?
     };
-    Vault::open(path, &password)
-        .with_context(|| format!("opening vault {}", path.display()))
+    Vault::open(path, &password).with_context(|| format!("opening vault {}", path.display()))
 }
 
 fn prompt_new_password() -> Result<String> {
@@ -553,10 +546,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(not(unix))]
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
     f.write_all(bytes)?;
     Ok(())
 }
@@ -577,8 +567,8 @@ fn cmd_add_file(
     pw_stdin: bool,
 ) -> Result<()> {
     // Read file bytes BEFORE prompting for password — fail fast on a typo.
-    let bytes = std::fs::read(src)
-        .with_context(|| format!("reading source file {}", src.display()))?;
+    let bytes =
+        std::fs::read(src).with_context(|| format!("reading source file {}", src.display()))?;
 
     let attachment_name: String = match name {
         Some(n) => n.to_string(),
@@ -675,9 +665,7 @@ fn cmd_get_file(
     let bytes = vault
         .read_binary(&id, &resolved_name)
         .context("reading file attachment")?
-        .ok_or_else(|| {
-            anyhow!("entry '{title}' has no attachment named '{resolved_name}'")
-        })?;
+        .ok_or_else(|| anyhow!("entry '{title}' has no attachment named '{resolved_name}'"))?;
 
     match out {
         Some(path) => write_private_file(path, &bytes)
@@ -685,9 +673,7 @@ fn cmd_get_file(
         None => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
-            handle
-                .write_all(&bytes)
-                .context("writing file to stdout")?;
+            handle.write_all(&bytes).context("writing file to stdout")?;
         }
     }
     Ok(())
@@ -752,9 +738,7 @@ fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
         if materialised_count == 0 {
             return Ok::<(), anyhow::Error>(());
         }
-        println!(
-            "{materialised_count} file(s) materialized. Press Ctrl-C to wipe and exit."
-        );
+        println!("{materialised_count} file(s) materialized. Press Ctrl-C to wipe and exit.");
 
         // Wait for SIGINT (or SIGTERM). The wipe runs synchronously before
         // we return so the user sees "wiped" before the shell prompt comes
@@ -762,10 +746,10 @@ fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
         // will linger — that's the irreducible price of `kill -9` and we
         // can't help it.
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigint = signal(SignalKind::interrupt())
-            .map_err(|e| anyhow!("install SIGINT handler: {e}"))?;
-        let mut sigterm = signal(SignalKind::terminate())
-            .map_err(|e| anyhow!("install SIGTERM handler: {e}"))?;
+        let mut sigint =
+            signal(SignalKind::interrupt()).map_err(|e| anyhow!("install SIGINT handler: {e}"))?;
+        let mut sigterm =
+            signal(SignalKind::terminate()).map_err(|e| anyhow!("install SIGTERM handler: {e}"))?;
         tokio::select! {
             _ = sigint.recv() => {}
             _ = sigterm.recv() => {}

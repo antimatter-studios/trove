@@ -62,8 +62,11 @@ pub const DEFAULT_MODE: u32 = 0o600;
 /// Why a single entry's materialization failed validation.
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
-    #[error("entry has '{}' but no '{}' (or vice versa); both are required",
-            FIELD_SOURCE, FIELD_TARGET)]
+    #[error(
+        "entry has '{}' but no '{}' (or vice versa); both are required",
+        FIELD_SOURCE,
+        FIELD_TARGET
+    )]
     PartialOptIn,
 
     #[error("attachment '{0}' not found on entry")]
@@ -81,8 +84,10 @@ pub enum PlanError {
     #[error("path: {0}")]
     Path(#[from] paths::PathError),
 
-    #[error("target {0:?} is not on a memory-backed (tmpfs) filesystem; \
-             set Materialize.AllowDiskBacked=true to override")]
+    #[error(
+        "target {0:?} is not on a memory-backed (tmpfs) filesystem; \
+             set Materialize.AllowDiskBacked=true to override"
+    )]
     NotTmpfs(PathBuf),
 
     #[error("vault: {0}")]
@@ -384,13 +389,15 @@ pub async fn status_snapshot(store: &MaterializedStore) -> Vec<MaterializeStatus
         .map(|m| MaterializeStatus {
             title: m.entry_title.clone(),
             target_path: m.target.display().to_string(),
-            ttl_remaining_seconds: m.expires_at.map(|t| {
-                if t > now {
-                    (t - now).as_secs()
-                } else {
-                    0
-                }
-            }),
+            ttl_remaining_seconds: m.expires_at.map(
+                |t| {
+                    if t > now {
+                        (t - now).as_secs()
+                    } else {
+                        0
+                    }
+                },
+            ),
             exists: m.target.exists(),
         })
         .collect()

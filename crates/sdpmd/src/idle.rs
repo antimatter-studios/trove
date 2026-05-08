@@ -137,9 +137,7 @@ impl IdleTracker {
             return;
         }
         let now = self.inner.now_ms();
-        self.inner
-            .last_activity_ms
-            .store(now, Ordering::Release);
+        self.inner.last_activity_ms.store(now, Ordering::Release);
         self.inner.wake.notify_one();
     }
 
@@ -147,28 +145,20 @@ impl IdleTracker {
     /// subsequent `unlock`. If `timeout` is zero, the timer stays disabled.
     pub fn start_or_reset(&self, timeout: Duration) {
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-        self.inner
-            .timeout_ms
-            .store(timeout_ms, Ordering::Release);
+        self.inner.timeout_ms.store(timeout_ms, Ordering::Release);
         if timeout_ms == 0 {
             // Disabled — make sure any prior running state is cleared too.
-            self.inner
-                .last_activity_ms
-                .store(-1, Ordering::Release);
+            self.inner.last_activity_ms.store(-1, Ordering::Release);
         } else {
             let now = self.inner.now_ms();
-            self.inner
-                .last_activity_ms
-                .store(now, Ordering::Release);
+            self.inner.last_activity_ms.store(now, Ordering::Release);
         }
         self.inner.wake.notify_one();
     }
 
     /// Cancel the timer (called on `lock` and `shutdown`).
     pub fn cancel(&self) {
-        self.inner
-            .last_activity_ms
-            .store(-1, Ordering::Release);
+        self.inner.last_activity_ms.store(-1, Ordering::Release);
         self.inner.wake.notify_one();
     }
 
@@ -179,13 +169,9 @@ impl IdleTracker {
     /// any running timer (matches the env-var semantics).
     pub fn set_timeout(&self, timeout: Duration) {
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-        self.inner
-            .timeout_ms
-            .store(timeout_ms, Ordering::Release);
+        self.inner.timeout_ms.store(timeout_ms, Ordering::Release);
         if timeout_ms == 0 {
-            self.inner
-                .last_activity_ms
-                .store(-1, Ordering::Release);
+            self.inner.last_activity_ms.store(-1, Ordering::Release);
         }
         self.inner.wake.notify_one();
     }
@@ -261,9 +247,7 @@ async fn run_driver(inner: Arc<Inner>, lock_cb: LockCallback) {
         // Fire. We mark "not running" BEFORE invoking the callback so a
         // concurrent explicit `lock` won't double-wipe and so a fresh
         // `unlock` during the callback can re-arm cleanly.
-        inner
-            .last_activity_ms
-            .store(-1, Ordering::Release);
+        inner.last_activity_ms.store(-1, Ordering::Release);
 
         let timeout_secs = (timeout_ms_now / 1000).max(1);
         eprintln!("idle lock after {timeout_secs} seconds");
@@ -353,7 +337,11 @@ mod tests {
         t.set_timeout(Duration::from_millis(100));
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        assert_eq!(count.load(Ordering::SeqCst), 1, "shorter timeout should fire");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "shorter timeout should fire"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -406,7 +394,11 @@ mod tests {
         // Re-unlock — full 2s again.
         t.start_or_reset(Duration::from_secs(2));
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert_eq!(count.load(Ordering::SeqCst), 0, "second unlock should have reset");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "second unlock should have reset"
+        );
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }

@@ -1,0 +1,169 @@
+# SuperDuperPasswordManager CI
+#
+# Triggers on push / pull_request against `main` and on manual dispatch.
+# Jobs:
+#   - Test (ubuntu-latest, macos-latest): cargo test --workspace --locked
+#   - Clippy (ubuntu-latest):              cargo clippy ... -- -D warnings (--no-deps)
+#   - Fmt (ubuntu-latest):                 cargo fmt --all -- --check
+#   - Audit (ubuntu-latest):               cargo audit (advisory check; non-blocking)
+#   - MSRV (ubuntu-latest):                cargo check on Rust 1.75 (declared MSRV)
+#
+# Notes:
+#   * `--locked` everywhere so a stale Cargo.lock fails CI.
+#   * `--no-deps` on clippy to skip the vendored `keepass` crate's pre-existing
+#     dead-code warning that we intentionally don't fix.
+#   * Audit is `continue-on-error: true` because the vendored keepass fork may
+#     carry advisories we cannot easily resolve; the result is still surfaced.
+#   * No auto-fmt: if the tree isn't fmt-clean we want the job to fail loudly
+#     rather than mutate code in CI. Run the `fmt-fix` workflow manually to fix.
+#   * No deploy / coverage jobs by design (out of scope).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system tools (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gnupg \
+            git \
+            openssh-client
+        # macOS GitHub runners ship with gpg, git, ssh-keygen, ssh-add already.
+
+      - name: Verify required system tools
+        run: |
+          set -eux
+          command -v gpg
+          command -v git
+          command -v ssh-keygen
+          command -v ssh-add
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2.7.3
+        with:
+          # Include OS + Cargo.lock hash so each runner gets its own cache slot.
+          key: ${{ matrix.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: test
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2.7.3
+        with:
+          key: ubuntu-latest-clippy-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: clippy
+
+      - name: cargo clippy
+        # --no-deps skips the vendored keepass crate's pre-existing warnings.
+        run: cargo clippy --workspace --all-targets --locked --no-deps -- -D warnings
+
+  fmt:
+    name: Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check
+        # Check-only; do not auto-format. If this fails, run the fmt-fix
+        # workflow (manual dispatch) or `cargo fmt --all` locally.
+        run: cargo fmt --all -- --check
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    # Surfaced but non-blocking: the vendored keepass fork may carry advisories
+    # we don't want to gate every PR on. Review failures manually.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2.7.3
+        with:
+          key: ubuntu-latest-audit-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: audit
+          # Cache the cargo-audit binary across runs.
+          cache-all-crates: true
+
+      - name: Install cargo-audit
+        run: |
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install --locked cargo-audit
+          fi
+
+      - name: cargo audit
+        run: cargo audit
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.75 — declared MSRV)
+        uses: dtolnay/rust-toolchain@1.75.0
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2.7.3
+        with:
+          key: ubuntu-latest-msrv-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: msrv
+
+      - name: cargo check (no tests)
+        # Just verify the workspace compiles on the declared minimum toolchain.
+        run: cargo check --workspace --locked

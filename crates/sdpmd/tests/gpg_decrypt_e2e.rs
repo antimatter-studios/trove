@@ -158,8 +158,14 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
             sdpmd::gpg_agent::keys::LoadedGpgKey::Cv25519(_) => have_cv25519 = true,
         }
     }
-    assert!(have_ed25519, "expected an ed25519 signing key in the bundle");
-    assert!(have_cv25519, "expected a cv25519 encryption subkey in the bundle");
+    assert!(
+        have_ed25519,
+        "expected an ed25519 signing key in the bundle"
+    );
+    assert!(
+        have_cv25519,
+        "expected a cv25519 encryption subkey in the bundle"
+    );
     let store: GpgKeyStore = Arc::new(RwLock::new(keys));
 
     // 6. Encrypt a message using *real* gpg-agent (encryption needs only the
@@ -222,7 +228,10 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
         .output()
         .expect("spawn gpg --decrypt");
     let dec_stderr = String::from_utf8_lossy(&dec.stderr).into_owned();
-    eprintln!("gpg --decrypt stdout: {}", String::from_utf8_lossy(&dec.stdout));
+    eprintln!(
+        "gpg --decrypt stdout: {}",
+        String::from_utf8_lossy(&dec.stdout)
+    );
     eprintln!("gpg --decrypt stderr: {dec_stderr}");
     if !dec.status.success() {
         agent_handle.abort();
@@ -230,9 +239,7 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
             .env("GNUPGHOME", &gnupghome)
             .args(["--kill", "all"])
             .output();
-        panic!(
-            "gpg --decrypt against our agent failed.\nstderr:\n{dec_stderr}"
-        );
+        panic!("gpg --decrypt against our agent failed.\nstderr:\n{dec_stderr}");
     }
     let recovered = std::fs::read(&recovered_path).expect("read recovered");
     assert_eq!(
@@ -246,8 +253,14 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
         .args(["--list-keys"])
         .output()
         .expect("spawn gpg --list-keys");
-    eprintln!("gpg --list-keys stdout: {}", String::from_utf8_lossy(&lk2.stdout));
-    eprintln!("gpg --list-keys stderr: {}", String::from_utf8_lossy(&lk2.stderr));
+    eprintln!(
+        "gpg --list-keys stdout: {}",
+        String::from_utf8_lossy(&lk2.stdout)
+    );
+    eprintln!(
+        "gpg --list-keys stderr: {}",
+        String::from_utf8_lossy(&lk2.stderr)
+    );
     // We assert *success* — list-keys reads pubkeys from the keyring, but it
     // does call into the agent for state queries. If READKEY misbehaves, the
     // command may print warnings; we accept warnings, not failures.
