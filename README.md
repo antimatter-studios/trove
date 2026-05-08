@@ -6,6 +6,115 @@ A KeePassXC-compatible password manager that does the things upstream won't. **1
 
 Treat the vault as more than passwords. Entries can carry **files** (kubeconfig, SSH keys, GPG keys, `.env`, TLS certs, signing keys) that **materialize to disk on unlock and are wiped on lock** — opt-in per entry, with a clear acknowledgement of the on-disk-exposure risk. The vault becomes the source of truth for "the secrets a developer machine needs to function."
 
+## Quickstart
+
+Linux + macOS. The daemon (`sdpmd`) is the long-running process; `sdpm` is a thin CLI client.
+
+### 1. Build
+
+```sh
+cargo build --release
+# Binaries land at ./target/release/sdpm and ./target/release/sdpmd.
+# Put them on PATH (cp / symlink / cargo install --path), or use full paths below.
+```
+
+### 2. Create a vault and stash some secrets
+
+```sh
+# Create a fresh kdbx file. Prompts twice for the master password.
+sdpm init my-vault.kdbx
+
+# Store an SSH private key. Title is freeform; the key bytes go into a real
+# KDBX <Binary> attachment named `id` so KeePassXC can read it too.
+sdpm add ssh my-vault.kdbx github.com --key ~/.ssh/id_ed25519
+
+# Store a GPG secret-key export (binary, NOT armored).
+gpg --batch --pinentry-mode loopback --passphrase '' \
+    --export-secret-keys --output /tmp/sec.gpg <KEYID>
+sdpm add gpg my-vault.kdbx git-signing --key /tmp/sec.gpg
+shred -u /tmp/sec.gpg
+
+# Stash a config file and tag it for materialization on unlock. The default
+# AllowDiskBacked=false means sdpmd will refuse to write to a non-tmpfs path
+# (Linux) / non-ephemeral path (macOS soft-allowlist).
+sdpm add file my-vault.kdbx kubeconfig-prod \
+    --src ./kubeconfig --target /tmp/kubeconfig --mode 0600
+
+# Inspect what's in the vault.
+sdpm list my-vault.kdbx
+```
+
+### 3. Run the daemon
+
+```sh
+sdpmd &
+# stderr will print:
+#   listening on $XDG_RUNTIME_DIR/sdpm.sock     (control)
+#   ssh-agent listening on .../sdpm-ssh.sock    (SSH agent)
+#   gpg-agent listening on .../sdpm-gpg.sock    (GPG Assuan)
+#   idle-lock timeout: 900 seconds
+```
+
+The daemon also responds to `SDPM_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock) and `SDPM_SOCK` / `SDPM_SSH_SOCK` / `SDPM_GPG_SOCK` (override socket paths).
+
+### 4. Wire up the SSH agent
+
+```sh
+export SSH_AUTH_SOCK="$(sdpm agent socket)"
+
+# Unlock the vault — keys move into daemon memory, no extra config needed.
+# `nc -U` speaks the line-JSON control protocol; you can use any tool.
+printf '{"cmd":"unlock","path":"%s","password":"%s"}\n' \
+    "$PWD/my-vault.kdbx" "yourpassword" \
+  | nc -U "$XDG_RUNTIME_DIR/sdpm.sock"
+
+ssh-add -L          # should list every ed25519/RSA-3072+/P-256/P-384 key in the vault
+ssh github.com      # signs against the daemon
+```
+
+If you'd rather not pipe a password into `nc`, drive the daemon from a small wrapper script — every secret-bearing surface (SSH agent, GPG agent, materialized files) is populated by the same `unlock` RPC.
+
+### 5. Wire up the GPG agent
+
+```sh
+# Point gpg(1) at our socket. gpg insists on a fixed path under $GNUPGHOME.
+ln -sf "$(sdpm gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
+
+# After `unlock` (above), git commit -S works against an ed25519 OpenPGP key.
+git commit -S -m "signed with sdpmd"
+```
+
+### 6. Materialize a file
+
+The `unlock` RPC also runs every entry's materialization plan. With the `kubeconfig-prod` entry from step 2, after `unlock`:
+
+```sh
+ls -l /tmp/kubeconfig
+# -rw-------  1 you  you  1234 ... /tmp/kubeconfig
+KUBECONFIG=/tmp/kubeconfig kubectl get pods
+```
+
+Inspect what the daemon currently has on disk:
+
+```sh
+printf '{"cmd":"materialize-status"}\n' | nc -U "$XDG_RUNTIME_DIR/sdpm.sock"
+```
+
+For testing without the daemon, `sdpm materialize my-vault.kdbx` runs the same plan in-process and wipes everything on Ctrl-C.
+
+### 7. Lock
+
+```sh
+# Manual lock — wipes materialized files, drops vault + SSH/GPG keys from memory.
+printf '{"cmd":"lock"}\n' | nc -U "$XDG_RUNTIME_DIR/sdpm.sock"
+
+# Or do nothing — the daemon auto-locks after SDPM_IDLE_TIMEOUT seconds of
+# no activity (default 900s). Activity = any control-RPC except `ping`,
+# any SSH agent message, any GPG Assuan command.
+```
+
+See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against.
+
 ## Feature exploration
 
 Grouped by theme. Not a roadmap — a menu.
@@ -182,4 +291,17 @@ It's tempting to argue file materialization weakens the "encrypted at rest" guar
 
 ## Status
 
-Specification phase. Nothing built yet. Open to scope cuts — this list is intentionally broad to provoke "yes that, no not that" reactions.
+Early but real — the headless-daemon path works end-to-end on Linux + macOS for SSH, GPG, and file materialization against a KeePassXC-compatible kdbx. Versions shipped, oldest first:
+
+- **v0.0.1** — kdbx vault read/write ([crates/sdpm-core/src/lib.rs](crates/sdpm-core/src/lib.rs)), `sdpm` CLI scaffold (`init`, `list`, `add ssh`, `get ssh`), `sdpmd` headless daemon with the line-JSON control socket, end-to-end SSH-key roundtrip.
+- **v0.0.2.0** — SSH agent listener serving ed25519 keys over `SSH_AUTH_SOCK`. Keys live only in daemon memory; cleared on lock.
+- **v0.0.2.1** — SSH agent algorithm coverage extended: RSA (>= 2048 bits, signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332), ECDSA P-256, ECDSA P-384.
+- **v0.0.3.0** — GPG agent listener speaking the Assuan protocol; ed25519 OpenPGP signing works against `git commit -S`. Hand-rolled OpenPGP packet parser ([crates/sdpmd/src/gpg_agent/keys.rs](crates/sdpmd/src/gpg_agent/keys.rs)) avoids pulling in `rpgp`.
+- **v0.0.3.1** — GPG `PKDECRYPT` for ECDH-on-Curve25519: AES-128/192/256 KW unwrap of the wrapped session key against gpg 2.5.x. RSA / NIST-curve / Ed448 still out of scope.
+- **v0.0.4.0** — Real KDBX `<Binary>` attachments via the vendored `keepass` fork ([vendor/keepass/](vendor/keepass/)); legacy `_SDPM_BIN_*` string-field fallback kept for read-compat with v0.0.1–v0.0.3.x vaults; migrate-on-write to the real attachment format.
+- **v0.0.5.0** — File materialization (the founding feature): `sdpm add file`, `Materialize.{Source,Target,Mode,TTL,AllowDiskBacked}` custom-field schema, in-process `sdpm materialize`, daemon-driven materialize-on-unlock + wipe-on-lock with optional TTL. Linux: refuses non-tmpfs targets unless `AllowDiskBacked=true`. macOS: soft allowlist (`/tmp`, `/private/tmp`, `$XDG_RUNTIME_DIR`) — APFS provides no real tmpfs, so this is a hint, not a guarantee.
+- **v0.0.6.0** — Idle-lock. `IdleTracker` with a tokio driver task ([crates/sdpmd/src/idle.rs](crates/sdpmd/src/idle.rs)); auto-locks after configurable inactivity (default 900s). Activity = any control RPC except `ping`, any SSH agent message, any GPG Assuan command. New `set-idle-timeout` / `get-idle-timeout` RPCs and `SDPM_IDLE_TIMEOUT` env var.
+
+Linux + macOS only; Windows not supported. Vault unlock currently takes a password only — no keyfiles, no hardware tokens, no KDBX 3.
+
+Still on the menu: per-user-key sidecar, sync engine, browser native messaging, plugin host, mobile sidecar protocol, GUI. Open to scope cuts — the feature exploration above is intentionally broader than what we'll build.

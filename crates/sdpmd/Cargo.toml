@@ -60,3 +60,8 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # `test-util` enables `tokio::test(start_paused = true)` for the IdleTracker
 # unit tests so simulated time advances without real wall-clock waits.
 tokio = { workspace = true, features = ["test-util"] }
+# Property-based testing for the SSH agent wire decoder and Assuan line
+# parser. Runs on stable Rust as part of `cargo test` — complements the
+# nightly-only `crates/sdpmd/fuzz/` libfuzzer harness with a fast, in-CI
+# safety net (256 cases per property by default; runs in seconds).
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
