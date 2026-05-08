@@ -51,10 +51,7 @@ fn non_utf8_binary_round_trips_across_save_reopen() {
 
     // Reopen and verify the bytes survived round-trip.
     let vault = Vault::open(&path, password).expect("reopen");
-    let read = vault
-        .read_binary(&id, "raw")
-        .expect("ok")
-        .expect("present");
+    let read = vault.read_binary(&id, "raw").expect("ok").expect("present");
     assert_eq!(read.len(), blob.len(), "length must match");
     assert_eq!(read, blob, "bytes must match exactly");
 
@@ -90,9 +87,15 @@ fn multiple_attachments_with_mixed_names_and_sizes() {
     let id = {
         let mut vault = Vault::create(&path, password).expect("create");
         let id = vault.add_entry("multi").expect("add");
-        vault.attach_binary(&id, "tiny.bin", &tiny).expect("attach tiny");
-        vault.attach_binary(&id, "note.txt", &ascii).expect("attach ascii");
-        vault.attach_binary(&id, "data.bin", &mid).expect("attach mid");
+        vault
+            .attach_binary(&id, "tiny.bin", &tiny)
+            .expect("attach tiny");
+        vault
+            .attach_binary(&id, "note.txt", &ascii)
+            .expect("attach ascii");
+        vault
+            .attach_binary(&id, "data.bin", &mid)
+            .expect("attach mid");
         vault.save().expect("save");
         id
     };
@@ -110,18 +113,9 @@ fn multiple_attachments_with_mixed_names_and_sizes() {
         ]
     );
 
-    assert_eq!(
-        vault.read_binary(&id, "tiny.bin").unwrap().unwrap(),
-        tiny
-    );
-    assert_eq!(
-        vault.read_binary(&id, "note.txt").unwrap().unwrap(),
-        ascii
-    );
-    assert_eq!(
-        vault.read_binary(&id, "data.bin").unwrap().unwrap(),
-        mid
-    );
+    assert_eq!(vault.read_binary(&id, "tiny.bin").unwrap().unwrap(), tiny);
+    assert_eq!(vault.read_binary(&id, "note.txt").unwrap().unwrap(), ascii);
+    assert_eq!(vault.read_binary(&id, "data.bin").unwrap().unwrap(), mid);
 }
 
 /// Build a vault on disk that uses the legacy v0.0.1–0.0.3.x layout —

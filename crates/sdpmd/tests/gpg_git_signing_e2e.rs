@@ -205,8 +205,14 @@ async fn git_commit_dash_capital_s_against_our_agent() {
         .current_dir(&repo_path)
         .output()
         .expect("git commit");
-    eprintln!("git commit stdout: {}", String::from_utf8_lossy(&commit.stdout));
-    eprintln!("git commit stderr: {}", String::from_utf8_lossy(&commit.stderr));
+    eprintln!(
+        "git commit stdout: {}",
+        String::from_utf8_lossy(&commit.stdout)
+    );
+    eprintln!(
+        "git commit stderr: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
     assert!(
         commit.status.success(),
         "git commit -S should succeed against our gpg agent"

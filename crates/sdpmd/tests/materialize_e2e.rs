@@ -124,7 +124,14 @@ async fn unlock_writes_file_lock_wipes_it() {
 
     {
         let mut v = create_vault(&vault_path);
-        add_materialize_entry(&mut v, "prod-kubeconfig", &payload, &target, Some("0640"), None);
+        add_materialize_entry(
+            &mut v,
+            "prod-kubeconfig",
+            &payload,
+            &target,
+            Some("0640"),
+            None,
+        );
         v.save().expect("save");
     }
 
@@ -141,7 +148,11 @@ async fn unlock_writes_file_lock_wipes_it() {
     assert!(target.exists(), "target file should exist after unlock");
     let actual = std::fs::read(&target).expect("read materialized");
     assert_eq!(actual, payload, "materialized bytes must match attachment");
-    assert_eq!(file_mode(&target), 0o640, "mode must match Materialize.Mode");
+    assert_eq!(
+        file_mode(&target),
+        0o640,
+        "mode must match Materialize.Mode"
+    );
 
     // Status must show the entry as live.
     let resp = d.handle(Request::MaterializeStatus).await;

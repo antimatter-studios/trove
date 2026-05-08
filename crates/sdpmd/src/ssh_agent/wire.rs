@@ -55,9 +55,7 @@ const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// Read one framed agent message from `r`. Returns the raw type-tag and the
 /// payload (without the type byte). EOF before any bytes returns `Ok(None)`
 /// to let callers distinguish "client disconnected" from "protocol error".
-pub async fn read_message<R: AsyncReadExt + Unpin>(
-    r: &mut R,
-) -> io::Result<Option<(u8, Vec<u8>)>> {
+pub async fn read_message<R: AsyncReadExt + Unpin>(r: &mut R) -> io::Result<Option<(u8, Vec<u8>)>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -66,7 +64,10 @@ pub async fn read_message<R: AsyncReadExt + Unpin>(
     }
     let len = u32::from_be_bytes(len_buf) as usize;
     if len == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "zero-length agent message"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zero-length agent message",
+        ));
     }
     if len > MAX_MESSAGE_BYTES {
         return Err(io::Error::new(
@@ -89,7 +90,10 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
 ) -> io::Result<()> {
     let total_len = 1 + payload.len();
     if total_len > u32::MAX as usize {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "message too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "message too large",
+        ));
     }
     // Single buffered write to avoid two syscalls / partial writes.
     let mut out = Vec::with_capacity(4 + total_len);
@@ -117,7 +121,11 @@ pub fn parse_request(msg_type: u8, payload: &[u8]) -> Result<AgentRequest, WireE
             if !cur.is_empty() {
                 return Err(WireError::TrailingBytes);
             }
-            Ok(AgentRequest::SignRequest { key_blob, data, flags })
+            Ok(AgentRequest::SignRequest {
+                key_blob,
+                data,
+                flags,
+            })
         }
         other => Ok(AgentRequest::Unsupported(other)),
     }
@@ -125,7 +133,12 @@ pub fn parse_request(msg_type: u8, payload: &[u8]) -> Result<AgentRequest, WireE
 
 /// Encode an `IDENTITIES_ANSWER` payload from `(key_blob, comment)` pairs.
 pub fn encode_identities_answer(items: &[(Vec<u8>, String)]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(64 + items.iter().map(|(k, c)| k.len() + c.len() + 16).sum::<usize>());
+    let mut buf = Vec::with_capacity(
+        64 + items
+            .iter()
+            .map(|(k, c)| k.len() + c.len() + 16)
+            .sum::<usize>(),
+    );
     write_u32(&mut buf, items.len() as u32);
     for (key_blob, comment) in items {
         write_string(&mut buf, key_blob);
@@ -233,7 +246,11 @@ mod tests {
 
         let r = parse_request(SSH_AGENTC_SIGN_REQUEST, &payload).unwrap();
         match r {
-            AgentRequest::SignRequest { key_blob, data, flags } => {
+            AgentRequest::SignRequest {
+                key_blob,
+                data,
+                flags,
+            } => {
                 assert_eq!(key_blob, b"AAAA");
                 assert_eq!(data, b"hello");
                 assert_eq!(flags, 2);
@@ -303,7 +320,9 @@ mod tests {
     async fn read_write_roundtrip_one_message() {
         // Pipe one message through write_message + read_message.
         let mut buf: Vec<u8> = Vec::new();
-        write_message(&mut buf, SSH_AGENTC_REQUEST_IDENTITIES, &[]).await.unwrap();
+        write_message(&mut buf, SSH_AGENTC_REQUEST_IDENTITIES, &[])
+            .await
+            .unwrap();
         // Frame: len=1, type=11.
         assert_eq!(&buf[0..4], &1u32.to_be_bytes());
         assert_eq!(buf[4], SSH_AGENTC_REQUEST_IDENTITIES);

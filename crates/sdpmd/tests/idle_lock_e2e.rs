@@ -153,7 +153,10 @@ async fn idle_expiry_clears_all_secret_material() {
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
-    assert!(target.exists(), "materialized file should exist after unlock");
+    assert!(
+        target.exists(),
+        "materialized file should exist after unlock"
+    );
 
     // get-idle-timeout now reports a non-null remaining.
     let resp = h.handle(Request::GetIdleTimeout).await;
@@ -191,8 +194,14 @@ async fn idle_expiry_clears_all_secret_material() {
 
     // Both key stores cleared. (Even though we didn't load any keys here,
     // assert empty — the lock callback always clears them.)
-    assert!(h.key_store.read().await.is_empty(), "ssh keys should be empty");
-    assert!(h.gpg_store.read().await.is_empty(), "gpg keys should be empty");
+    assert!(
+        h.key_store.read().await.is_empty(),
+        "ssh keys should be empty"
+    );
+    assert!(
+        h.gpg_store.read().await.is_empty(),
+        "gpg keys should be empty"
+    );
 
     // State is now NotRunning.
     let resp = h.handle(Request::GetIdleTimeout).await;

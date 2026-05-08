@@ -435,7 +435,10 @@ mod tests {
     #[test]
     fn requires_parent_to_exist() {
         let res = resolve_and_validate_target("/tmp/sdpm-no-such-dir-xyz/secret");
-        assert!(matches!(res, Err(PathError::ParentMissing(_))), "got {res:?}");
+        assert!(
+            matches!(res, Err(PathError::ParentMissing(_))),
+            "got {res:?}"
+        );
     }
 
     #[test]
@@ -444,7 +447,10 @@ mod tests {
         let p = tmp.path().join("exists");
         std::fs::write(&p, b"x").expect("write");
         let res = resolve_and_validate_target(p.to_str().unwrap());
-        assert!(matches!(res, Err(PathError::AlreadyExists(_))), "got {res:?}");
+        assert!(
+            matches!(res, Err(PathError::AlreadyExists(_))),
+            "got {res:?}"
+        );
     }
 
     #[test]
@@ -500,10 +506,16 @@ tmpfs /dev/shm tmpfs rw 0 0
 ext4 /home ext4 rw 0 0
 tmpfs /tmp tmpfs rw 0 0
 ";
-        assert!(is_tmpfs_backed_with_mounts(Path::new("/run/user/1000/sdpm.sock"), mounts));
+        assert!(is_tmpfs_backed_with_mounts(
+            Path::new("/run/user/1000/sdpm.sock"),
+            mounts
+        ));
         assert!(is_tmpfs_backed_with_mounts(Path::new("/tmp/x"), mounts));
         assert!(is_tmpfs_backed_with_mounts(Path::new("/dev/shm/y"), mounts));
-        assert!(!is_tmpfs_backed_with_mounts(Path::new("/home/user/x"), mounts));
+        assert!(!is_tmpfs_backed_with_mounts(
+            Path::new("/home/user/x"),
+            mounts
+        ));
         assert!(!is_tmpfs_backed_with_mounts(Path::new("/etc/x"), mounts));
     }
 
@@ -518,8 +530,14 @@ tmpfs /tmp tmpfs rw 0 0
 tmpfs /run/user/1000 tmpfs rw 0 0
 ";
         assert!(is_tmpfs_backed_with_mounts(Path::new("/tmp/foo"), mounts));
-        assert!(is_tmpfs_backed_with_mounts(Path::new("/run/user/1000/x"), mounts));
-        assert!(!is_tmpfs_backed_with_mounts(Path::new("/run/user/0/x"), mounts));
+        assert!(is_tmpfs_backed_with_mounts(
+            Path::new("/run/user/1000/x"),
+            mounts
+        ));
+        assert!(!is_tmpfs_backed_with_mounts(
+            Path::new("/run/user/0/x"),
+            mounts
+        ));
     }
 
     #[test]

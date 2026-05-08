@@ -262,9 +262,7 @@ pub fn parse_gpg_export(bytes: &[u8], comment: &str) -> Result<Vec<LoadedGpgKey>
     // encryption-only key (no signing primary) is a real but exotic
     // configuration; if it ever happens we surface the same error so the
     // operator notices.
-    let has_signing = out
-        .iter()
-        .any(|k| matches!(k, LoadedGpgKey::Ed25519(_)));
+    let has_signing = out.iter().any(|k| matches!(k, LoadedGpgKey::Ed25519(_)));
     if !has_signing {
         // If we saw secret-key packets but none parsed, return NoEd25519 so
         // the operator gets the actionable "wrong algorithm" message rather
@@ -383,12 +381,18 @@ fn parse_secret_key_packet(body: &[u8], comment: &str) -> Result<Option<LoadedGp
         return Ok(None);
     }
     if body.len() < 6 {
-        return Err(ParseError::Malformed("v4 secret-key truncated in header".into()));
+        return Err(ParseError::Malformed(
+            "v4 secret-key truncated in header".into(),
+        ));
     }
     let algo = body[5];
     match algo {
-        22 => parse_ed25519_secret_key_body(body, comment).map(|opt| opt.map(LoadedGpgKey::Ed25519)),
-        18 => parse_cv25519_secret_key_body(body, comment).map(|opt| opt.map(LoadedGpgKey::Cv25519)),
+        22 => {
+            parse_ed25519_secret_key_body(body, comment).map(|opt| opt.map(LoadedGpgKey::Ed25519))
+        }
+        18 => {
+            parse_cv25519_secret_key_body(body, comment).map(|opt| opt.map(LoadedGpgKey::Cv25519))
+        }
         _ => Ok(None),
     }
 }
@@ -417,7 +421,9 @@ fn parse_ed25519_secret_key_body(
     }
 
     if p + 2 > body.len() {
-        return Err(ParseError::Malformed("missing public-Q MPI bit length".into()));
+        return Err(ParseError::Malformed(
+            "missing public-Q MPI bit length".into(),
+        ));
     }
     let q_bits = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
     p += 2;
@@ -453,7 +459,9 @@ fn parse_ed25519_secret_key_body(
     }
 
     if p + 2 > body.len() {
-        return Err(ParseError::Malformed("missing secret-MPI bit length".into()));
+        return Err(ParseError::Malformed(
+            "missing secret-MPI bit length".into(),
+        ));
     }
     let s_bits = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
     p += 2;
@@ -509,7 +517,9 @@ fn parse_cv25519_secret_key_body(
 
     // Public Q MPI.
     if p + 2 > body.len() {
-        return Err(ParseError::Malformed("missing public-Q MPI bit length".into()));
+        return Err(ParseError::Malformed(
+            "missing public-Q MPI bit length".into(),
+        ));
     }
     let q_bits = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
     p += 2;
@@ -557,7 +567,9 @@ fn parse_cv25519_secret_key_body(
 
     // s2k_usage.
     if p >= body.len() {
-        return Err(ParseError::Malformed("missing cv25519 s2k_usage byte".into()));
+        return Err(ParseError::Malformed(
+            "missing cv25519 s2k_usage byte".into(),
+        ));
     }
     let s2k_usage = body[p];
     p += 1;
@@ -570,7 +582,9 @@ fn parse_cv25519_secret_key_body(
     // back to 32 bytes (still big-endian) and then *byte-reverse* to produce
     // the little-endian form `x25519-dalek` consumes.
     if p + 2 > body.len() {
-        return Err(ParseError::Malformed("missing cv25519 secret-MPI bit length".into()));
+        return Err(ParseError::Malformed(
+            "missing cv25519 secret-MPI bit length".into(),
+        ));
     }
     let s_bits = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
     p += 2;
@@ -581,7 +595,9 @@ fn parse_cv25519_secret_key_body(
         )));
     }
     if p + s_byte_len > body.len() {
-        return Err(ParseError::Malformed("cv25519 secret-MPI overruns packet".into()));
+        return Err(ParseError::Malformed(
+            "cv25519 secret-MPI overruns packet".into(),
+        ));
     }
     let s_bytes = &body[p..p + s_byte_len];
     let mut secret_be = Zeroizing::new([0u8; 32]);

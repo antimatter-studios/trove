@@ -134,7 +134,11 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
     // wire-format `string algo || string sig_data`, then `PublicKey::verify`
     // validates it.
     let sig = ssh_key::Signature::try_from(sig_blob.as_slice()).expect("decode signature");
-    eprintln!("verifying {:?} against {:?}", sig.algorithm(), pubkey.algorithm());
+    eprintln!(
+        "verifying {:?} against {:?}",
+        sig.algorithm(),
+        pubkey.algorithm()
+    );
 
     // ssh-key's `PublicKey::verify` via `KeyData` Verifier covers
     // ed25519 + ecdsa. For RSA we use the `rsa` crate directly because

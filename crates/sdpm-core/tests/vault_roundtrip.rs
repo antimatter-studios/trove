@@ -117,11 +117,7 @@ fn list_entries_finds_added_entries() {
     let _ = vault.add_entry("alpha").expect("add alpha");
     let _ = vault.add_entry("beta").expect("add beta");
 
-    let titles: Vec<String> = vault
-        .list_entries()
-        .into_iter()
-        .map(|e| e.title)
-        .collect();
+    let titles: Vec<String> = vault.list_entries().into_iter().map(|e| e.title).collect();
     assert!(titles.contains(&"alpha".to_string()));
     assert!(titles.contains(&"beta".to_string()));
     assert_eq!(titles.len(), 2);
@@ -163,12 +159,11 @@ fn remove_binary_is_no_op_when_missing_and_drops_when_present() {
     // No-op on missing.
     vault.remove_binary(&id, "ghost").expect("noop ok");
     // Now attach and remove.
-    vault.attach_binary(&id, "blob", &[1, 2, 3, 4]).expect("attach");
+    vault
+        .attach_binary(&id, "blob", &[1, 2, 3, 4])
+        .expect("attach");
     assert_eq!(
-        vault
-            .get_entry(&id)
-            .expect("entry")
-            .attachment_names,
+        vault.get_entry(&id).expect("entry").attachment_names,
         vec!["blob".to_string()]
     );
     vault.remove_binary(&id, "blob").expect("remove");

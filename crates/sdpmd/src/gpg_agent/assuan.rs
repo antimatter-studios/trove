@@ -38,11 +38,11 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 /// We don't pull in the `libgpg-error` crate just for these constants — it's
 /// a thin wrapper over a C library and we'd rather hand-pin the values.
 pub const ERR_NO_SECRET_KEY: u32 = 67_108_881; // GPG_ERR_NO_SECKEY (source=4, code=17)
-pub const ERR_NO_SCDAEMON: u32 = 100_663_406;  // GPG_ERR_NO_SCDAEMON (source=6, code=174)
+pub const ERR_NO_SCDAEMON: u32 = 100_663_406; // GPG_ERR_NO_SCDAEMON (source=6, code=174)
 pub const ERR_UNKNOWN_COMMAND: u32 = 100_663_363; // GPG_ERR_UNKNOWN_IPC_COMMAND (source=6, code=275 ish)
-pub const ERR_MISSING_KEY: u32 = 67_108_881;   // alias for clarity at call sites
-pub const ERR_INV_VALUE: u32 = 67_108_919;     // GPG_ERR_INV_VALUE for malformed args
-pub const ERR_GENERAL: u32 = 67_108_877;       // GPG_ERR_GENERAL fallback
+pub const ERR_MISSING_KEY: u32 = 67_108_881; // alias for clarity at call sites
+pub const ERR_INV_VALUE: u32 = 67_108_919; // GPG_ERR_INV_VALUE for malformed args
+pub const ERR_GENERAL: u32 = 67_108_877; // GPG_ERR_GENERAL fallback
 
 /// Cap on a single Assuan input line. Spec says 1000; we accept 4 KiB so a
 /// stray long `OPTION putenv=...` doesn't kill the connection.

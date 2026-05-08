@@ -72,9 +72,15 @@ pub enum Response {
 #[serde(untagged)]
 pub enum OkBody {
     Empty {},
-    Pong { pong: bool },
-    List { entries: Vec<EntryDto> },
-    MaterializeStatus { materialized: Vec<crate::materialize::MaterializeStatus> },
+    Pong {
+        pong: bool,
+    },
+    List {
+        entries: Vec<EntryDto>,
+    },
+    MaterializeStatus {
+        materialized: Vec<crate::materialize::MaterializeStatus>,
+    },
     /// v0.0.6.0: response body for `GetIdleTimeout`.
     /// `seconds` is the configured timeout (0 == disabled).
     /// `remaining` is the seconds-until-fire if a vault is unlocked, else null.
@@ -94,10 +100,10 @@ impl Response {
     pub fn ok_list(entries: Vec<EntryDto>) -> Self {
         Response::Ok(OkBody::List { entries })
     }
-    pub fn ok_materialize_status(
-        items: Vec<crate::materialize::MaterializeStatus>,
-    ) -> Self {
-        Response::Ok(OkBody::MaterializeStatus { materialized: items })
+    pub fn ok_materialize_status(items: Vec<crate::materialize::MaterializeStatus>) -> Self {
+        Response::Ok(OkBody::MaterializeStatus {
+            materialized: items,
+        })
     }
     pub fn err(msg: impl Into<String>) -> Self {
         Response::Err { error: msg.into() }

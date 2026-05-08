@@ -475,22 +475,13 @@ async fn handle_command(
                 }
             };
             if std::env::var("SDPM_GPG_TRACE").is_ok() {
-                eprintln!(
-                    "gpg-agent: got ciphertext {} bytes",
-                    ciphertext_bytes.len()
-                );
+                eprintln!("gpg-agent: got ciphertext {} bytes", ciphertext_bytes.len());
             }
 
             // Pull out the key. We hold the lock for as little as possible —
             // copy what we need into local stack vars, drop the guard.
             #[allow(clippy::type_complexity)]
-            let key_data: Option<(
-                [u8; 32],
-                [u8; 32],
-                [u8; 20],
-                u8,
-                u8,
-            )> = {
+            let key_data: Option<([u8; 32], [u8; 32], [u8; 20], u8, u8)> = {
                 let keys = store.read().await;
                 keys.iter()
                     .find(|k| k.keygrip_hex() == grip)
@@ -509,7 +500,11 @@ async fn handle_command(
             let (secret_le, public_q, fingerprint, kdf_hash, kdf_sym) = match key_data {
                 Some(t) => t,
                 None => {
-                    send!(write_err(w, ERR_NO_SECRET_KEY, "No_Secret_Key_or_wrong_type"));
+                    send!(write_err(
+                        w,
+                        ERR_NO_SECRET_KEY,
+                        "No_Secret_Key_or_wrong_type"
+                    ));
                     session.sigkey = None;
                     return CommandOutcome::Continue;
                 }
@@ -535,11 +530,7 @@ async fn handle_command(
                     // category. Logging at info-level is fine.
                     eprintln!("gpg-agent: PKDECRYPT failed for grip {grip}: {e}");
                     session.sigkey = None;
-                    send!(write_err(
-                        w,
-                        ERR_INV_VALUE,
-                        "decrypt_failed"
-                    ));
+                    send!(write_err(w, ERR_INV_VALUE, "decrypt_failed"));
                 }
             }
         }
@@ -602,7 +593,10 @@ async fn handle_command(
             send!(write_err(
                 w,
                 ERR_UNKNOWN_COMMAND,
-                &format!("Unknown_IPC_Command_{}", percent_encode(cmd.verb.as_bytes()))
+                &format!(
+                    "Unknown_IPC_Command_{}",
+                    percent_encode(cmd.verb.as_bytes())
+                )
             ));
         }
     }
@@ -812,7 +806,10 @@ mod tests {
     #[test]
     fn decode_hex_round_trip() {
         assert_eq!(decode_hex("00ff42").unwrap(), vec![0x00, 0xFF, 0x42]);
-        assert_eq!(decode_hex("DEADBEEF").unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(
+            decode_hex("DEADBEEF").unwrap(),
+            vec![0xDE, 0xAD, 0xBE, 0xEF]
+        );
         assert!(decode_hex("xyz").is_none());
         assert!(decode_hex("abc").is_none()); // odd length
     }

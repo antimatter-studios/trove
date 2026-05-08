@@ -81,7 +81,9 @@ async fn spawn_agent_with_keys(
 
 /// Read the greeting (single OK line). Panics if the agent doesn't speak
 /// proper Assuan.
-async fn expect_greeting(reader: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>) {
+async fn expect_greeting(
+    reader: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+) {
     let line = reader
         .next_line()
         .await
@@ -118,13 +120,11 @@ async fn assuan_basic_handshake() {
     let tmp = TempDir::new().expect("tempdir");
     let sock = tmp.path().join("gpg.sock");
 
-    let key = sdpmd::gpg_agent::keys::parse_gpg_export(
-        &synthetic_ed25519_packet([0x11; 32]),
-        "alice",
-    )
-    .expect("parse synthetic key")
-    .pop()
-    .expect("at least one key");
+    let key =
+        sdpmd::gpg_agent::keys::parse_gpg_export(&synthetic_ed25519_packet([0x11; 32]), "alice")
+            .expect("parse synthetic key")
+            .pop()
+            .expect("at least one key");
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
 
     let stream = UnixStream::connect(&sock).await.expect("connect");
@@ -168,13 +168,11 @@ async fn keyinfo_and_havekey() {
     let tmp = TempDir::new().expect("tempdir");
     let sock = tmp.path().join("gpg.sock");
 
-    let key = sdpmd::gpg_agent::keys::parse_gpg_export(
-        &synthetic_ed25519_packet([0x22; 32]),
-        "bob",
-    )
-    .expect("parse synthetic key")
-    .pop()
-    .expect("at least one key");
+    let key =
+        sdpmd::gpg_agent::keys::parse_gpg_export(&synthetic_ed25519_packet([0x22; 32]), "bob")
+            .expect("parse synthetic key")
+            .pop()
+            .expect("at least one key");
     let grip = key.keygrip_hex();
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
 
@@ -186,7 +184,10 @@ async fn keyinfo_and_havekey() {
     // KEYINFO --list → at least one S KEYINFO line then OK
     wh.write_all(b"KEYINFO --list\n").await.unwrap();
     let lines = read_until_terminator(&mut reader).await;
-    let s_lines: Vec<&String> = lines.iter().filter(|l| l.starts_with("S KEYINFO ")).collect();
+    let s_lines: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("S KEYINFO "))
+        .collect();
     assert_eq!(s_lines.len(), 1);
     assert!(
         s_lines[0].to_lowercase().contains(&grip),
@@ -216,13 +217,10 @@ async fn pksign_full_round_trip_signs_and_verifies() {
     let sock = tmp.path().join("gpg.sock");
 
     let seed = [0x33u8; 32];
-    let key = sdpmd::gpg_agent::keys::parse_gpg_export(
-        &synthetic_ed25519_packet(seed),
-        "carol",
-    )
-    .expect("parse synthetic key")
-    .pop()
-    .expect("at least one key");
+    let key = sdpmd::gpg_agent::keys::parse_gpg_export(&synthetic_ed25519_packet(seed), "carol")
+        .expect("parse synthetic key")
+        .pop()
+        .expect("at least one key");
     let grip = key.keygrip_hex();
     let public_q = *key.public_q();
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
@@ -339,4 +337,3 @@ async fn scd_returns_no_smartcard_daemon() {
     assert!(lines[0].starts_with("ERR "));
     assert!(lines[0].contains("No_SmartCard_Daemon"));
 }
-

@@ -149,7 +149,11 @@ async fn serve_connection(
                 }
             }
 
-            AgentRequest::SignRequest { key_blob, data, flags } => {
+            AgentRequest::SignRequest {
+                key_blob,
+                data,
+                flags,
+            } => {
                 // Find the matching key; sign under a brief read lock; drop
                 // the guard before writing to the network. The signing call
                 // is synchronous (no awaits) so holding the read guard across
