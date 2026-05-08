@@ -14,3 +14,9 @@ sdpm-core.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 rpassword.workspace = true
+# v0.0.5.0: `sdpm materialize` runs the materialize loop in-process. We reuse
+# the daemon's path-validation, tmpfs detection, and wipe code by depending on
+# the sdpmd library crate. This pulls in tokio and a few extra crates, which
+# is fine: anyone running sdpm-cli on their box already needs sdpmd available.
+sdpmd = { path = "../sdpmd" }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }

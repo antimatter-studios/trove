@@ -1141,6 +1141,8 @@ dependencies = [
  "clap",
  "rpassword",
  "sdpm-core",
+ "sdpmd",
+ "tokio",
 ]
 
 [[package]]
@@ -1163,6 +1165,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "ed25519-dalek",
+ "rand",
  "rand_core",
  "rsa",
  "sdpm-core",

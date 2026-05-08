@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use sdpm_core::{EntrySummary, Vault};
 
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
+use crate::materialize::{self, MaterializedFile, MaterializedStore};
 use crate::protocol::{EntryDto, Request, Response};
 use crate::ssh_agent::{keys as ssh_keys, KeyStore, LoadedKey};
 
@@ -34,6 +35,7 @@ pub async fn handle(
     state: &SharedState,
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
+    mat_store: &MaterializedStore,
 ) -> Handled {
     match req {
         Request::Ping => Handled {
@@ -54,6 +56,21 @@ pub async fn handle(
                     // we never hold the state mutex across attachment reads.
                     let loaded_keys = load_ssh_keys_from_vault(&vault);
                     let loaded_gpg = load_gpg_keys_from_vault(&vault);
+
+                    // Materialize opted-in entries while we still own the
+                    // vault locally. We do this BEFORE handing off the vault
+                    // to shared state so we never hold the state mutex across
+                    // file I/O. Per-entry failures are logged; the unlock
+                    // still succeeds. The unlock RESPONSE goes out only after
+                    // every materialize completes — so by the time the user
+                    // sees `ok`, the files are on disk.
+                    let materialized = materialize_from_vault(&vault, mat_store).await;
+                    {
+                        let mut g = mat_store.write().await;
+                        // Replace wholesale, same as ssh/gpg stores.
+                        *g = materialized;
+                    }
+
                     {
                         let mut guard = state.lock().await;
                         *guard = Some(vault);
@@ -112,6 +129,12 @@ pub async fn handle(
         }
 
         Request::Lock => {
+            // Wipe materialized files synchronously. The lock command should
+            // not return ok until every file has at least been visited by
+            // the wipe loop. Errors are logged inside wipe_all; we don't
+            // surface them to the client (lock is best-effort by design).
+            materialize::wipe_all(mat_store).await;
+
             {
                 let mut guard = state.lock().await;
                 *guard = None;
@@ -133,6 +156,11 @@ pub async fn handle(
         }
 
         Request::Shutdown => {
+            // Same wipe-then-drop dance as Lock. We must wipe before
+            // returning, otherwise sdpmd exits and leaves materialized files
+            // sitting on disk for an indefinite time.
+            materialize::wipe_all(mat_store).await;
+
             // Drop vault and keys eagerly; main loop will also clean up.
             {
                 let mut guard = state.lock().await;
@@ -151,7 +179,50 @@ pub async fn handle(
                 shutdown: true,
             }
         }
+
+        Request::MaterializeStatus => {
+            let snapshot = materialize::status_snapshot(mat_store).await;
+            Handled {
+                response: Response::ok_materialize_status(snapshot),
+                shutdown: false,
+            }
+        }
     }
+}
+
+/// Build the materialization plan for `vault` and execute every plan,
+/// returning the bookkeeping handles for the ones that succeeded. Per-entry
+/// failures (validation OR I/O) are logged, never propagated.
+async fn materialize_from_vault(
+    vault: &Vault,
+    store: &MaterializedStore,
+) -> Vec<MaterializedFile> {
+    let (plans, plan_errors) = materialize::build_plans(vault);
+    for (title, e) in plan_errors {
+        eprintln!("materialize: skipping entry '{title}': {e}");
+    }
+    let mut materialized = Vec::with_capacity(plans.len());
+    for plan in plans {
+        match materialize::materialize_one(vault, &plan, store.clone()) {
+            Ok(m) => {
+                eprintln!(
+                    "materialize: '{}' -> {} (mode {:o}, ttl {:?})",
+                    plan.entry_title,
+                    plan.resolved_target.display(),
+                    plan.mode,
+                    plan.ttl,
+                );
+                materialized.push(m);
+            }
+            Err(e) => {
+                eprintln!(
+                    "materialize: failed for '{}': {}",
+                    plan.entry_title, e
+                );
+            }
+        }
+    }
+    materialized
 }
 
 /// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to

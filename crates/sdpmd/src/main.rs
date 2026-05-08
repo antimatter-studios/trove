@@ -18,6 +18,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 
 use sdpmd::gpg_agent::{self, GpgKeyStore};
 use sdpmd::handler::{handle, SharedState};
+use sdpmd::materialize::{self, MaterializedStore};
 use sdpmd::protocol::{Request, Response};
 use sdpmd::ssh_agent::{self, KeyStore};
 
@@ -63,6 +64,7 @@ async fn handle_connection(
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    mat_store: MaterializedStore,
     shutdown: Arc<Notify>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
@@ -80,7 +82,7 @@ async fn handle_connection(
 
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
-                let handled = handle(req, &state, &key_store, &gpg_store).await;
+                let handled = handle(req, &state, &key_store, &gpg_store, &mat_store).await;
                 if handled.shutdown {
                     // Best-effort: write the ack, then signal the main loop.
                     let _ = write_response(&mut write_half, &handled.response).await;
@@ -132,6 +134,7 @@ async fn main() -> Result<()> {
     let state: SharedState = Arc::new(Mutex::new(None));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+    let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
     let shutdown = Arc::new(Notify::new());
 
     // Spawn the SSH agent listener on its own socket. The agent socket is
@@ -190,9 +193,10 @@ async fn main() -> Result<()> {
                     let state = state.clone();
                     let key_store = key_store.clone();
                     let gpg_store = gpg_store.clone();
+                    let mat_store = mat_store.clone();
                     let shutdown = shutdown.clone();
                     tokio::spawn(handle_connection(
-                        stream, state, key_store, gpg_store, shutdown,
+                        stream, state, key_store, gpg_store, mat_store, shutdown,
                     ));
                 }
                 Err(_) => {
@@ -209,9 +213,13 @@ async fn main() -> Result<()> {
         _ = shutdown.notified() => {}
     }
 
-    // Cleanup: drop vault state, drop SSH+GPG keys (zeroized on drop),
-    // remove all socket files. The listener tasks are aborted by dropping
-    // their JoinHandles going out of scope at process exit.
+    // Cleanup: wipe materialized files, drop vault state, drop SSH+GPG keys
+    // (zeroized on drop), remove all socket files. The listener tasks are
+    // aborted by dropping their JoinHandles going out of scope at process
+    // exit. We wipe BEFORE dropping the vault — the wipe itself doesn't need
+    // the vault, but ordering this way matches the per-RPC Lock/Shutdown
+    // sequence.
+    materialize::wipe_all(&mat_store).await;
     {
         let mut guard = state.lock().await;
         *guard = None;
@@ -259,11 +267,13 @@ mod tests {
             let state: SharedState = Arc::new(Mutex::new(None));
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
             let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+            let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
             let shutdown = Arc::new(Notify::new());
 
             let accept_state = state.clone();
             let accept_keys = key_store.clone();
             let accept_gpg = gpg_store.clone();
+            let accept_mat = mat_store.clone();
             let accept_shutdown = shutdown.clone();
             let accept = async move {
                 loop {
@@ -271,8 +281,9 @@ mod tests {
                         let s = accept_state.clone();
                         let ks = accept_keys.clone();
                         let gks = accept_gpg.clone();
+                        let ms = accept_mat.clone();
                         let sh = accept_shutdown.clone();
-                        tokio::spawn(handle_connection(stream, s, ks, gks, sh));
+                        tokio::spawn(handle_connection(stream, s, ks, gks, ms, sh));
                     }
                 }
             };
