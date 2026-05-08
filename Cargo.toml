@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sdpm-core", "crates/sdpm-cli", "crates/sdpmd", "crates/keepass-spec-tests"]
+members = ["crates/trove-core", "crates/trove-cli", "crates/troved", "crates/keepass-spec-tests"]
 
 [workspace.package]
 version = "0.0.0"
@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.75"
 
 [workspace.dependencies]
-sdpm-core = { path = "crates/sdpm-core" }
+trove-core = { path = "crates/trove-core" }
 keepass = "0.12"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 thiserror = "1"

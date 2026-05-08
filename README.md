@@ -1,4 +1,4 @@
-# SuperDuperPasswordManager
+# trove
 
 A KeePassXC-compatible password manager that does the things upstream won't. **100% `.kdbx` format compatibility** is non-negotiable — you can open the same vault in KeePassXC, KeePassDX, Strongbox, or KeePass2 without losing data. We only extend; we never break.
 
@@ -8,13 +8,13 @@ Treat the vault as more than passwords. Entries can carry **files** (kubeconfig,
 
 ## Quickstart
 
-Linux + macOS. The daemon (`sdpmd`) is the long-running process; `sdpm` is a thin CLI client.
+Linux + macOS. The daemon (`troved`) is the long-running process; `trove` is a thin CLI client.
 
 ### 1. Build
 
 ```sh
 cargo build --release
-# Binaries land at ./target/release/sdpm and ./target/release/sdpmd.
+# Binaries land at ./target/release/trove and ./target/release/troved.
 # Put them on PATH (cp / symlink / cargo install --path), or use full paths below.
 ```
 
@@ -22,65 +22,65 @@ cargo build --release
 
 ```sh
 # Create a fresh kdbx file. Prompts twice for the master password.
-sdpm init my-vault.kdbx
+trove init my-vault.kdbx
 
 # Store an SSH private key. Title is freeform; the key bytes go into a real
 # KDBX <Binary> attachment named `id` so KeePassXC can read it too.
-sdpm add ssh my-vault.kdbx github.com --key ~/.ssh/id_ed25519
+trove add ssh my-vault.kdbx github.com --key ~/.ssh/id_ed25519
 
 # Store a GPG secret-key export (binary, NOT armored).
 gpg --batch --pinentry-mode loopback --passphrase '' \
     --export-secret-keys --output /tmp/sec.gpg <KEYID>
-sdpm add gpg my-vault.kdbx git-signing --key /tmp/sec.gpg
+trove add gpg my-vault.kdbx git-signing --key /tmp/sec.gpg
 shred -u /tmp/sec.gpg
 
 # Stash a config file and tag it for materialization on unlock. The default
-# AllowDiskBacked=false means sdpmd will refuse to write to a non-tmpfs path
+# AllowDiskBacked=false means troved will refuse to write to a non-tmpfs path
 # (Linux) / non-ephemeral path (macOS soft-allowlist).
-sdpm add file my-vault.kdbx kubeconfig-prod \
+trove add file my-vault.kdbx kubeconfig-prod \
     --src ./kubeconfig --target /tmp/kubeconfig --mode 0600
 
 # Inspect what's in the vault.
-sdpm list my-vault.kdbx
+trove list my-vault.kdbx
 ```
 
 ### 3. Run the daemon
 
 ```sh
-sdpmd &
+troved &
 # stderr will print:
-#   listening on $XDG_RUNTIME_DIR/sdpm.sock     (control)
-#   ssh-agent listening on .../sdpm-ssh.sock    (SSH agent)
-#   gpg-agent listening on .../sdpm-gpg.sock    (GPG Assuan)
+#   listening on $XDG_RUNTIME_DIR/trove.sock     (control)
+#   ssh-agent listening on .../trove-ssh.sock    (SSH agent)
+#   gpg-agent listening on .../trove-gpg.sock    (GPG Assuan)
 #   idle-lock timeout: 900 seconds
 ```
 
-The daemon also responds to `SDPM_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock) and `SDPM_SOCK` / `SDPM_SSH_SOCK` / `SDPM_GPG_SOCK` (override socket paths).
+The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock) and `TROVE_SOCK` / `TROVE_SSH_SOCK` / `TROVE_GPG_SOCK` (override socket paths).
 
 ### 4. Wire up the SSH agent
 
 ```sh
-export SSH_AUTH_SOCK="$(sdpm agent socket)"
+export SSH_AUTH_SOCK="$(trove agent socket)"
 
 # Unlock the vault — keys move into daemon memory, no extra config needed.
 # Prompts for the master password; populates SSH keys, GPG keys, and the
 # materialization plan in one shot.
-sdpm unlock my-vault.kdbx
+trove unlock my-vault.kdbx
 
 ssh-add -L          # should list every ed25519/RSA-3072+/P-256/P-384 key in the vault
 ssh github.com      # signs against the daemon
 ```
 
-For scripted use, `sdpm --password-stdin unlock my-vault.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).
+For scripted use, `trove --password-stdin unlock my-vault.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).
 
 ### 5. Wire up the GPG agent
 
 ```sh
 # Point gpg(1) at our socket. gpg insists on a fixed path under $GNUPGHOME.
-ln -sf "$(sdpm gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
+ln -sf "$(trove gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
 
 # After `unlock` (above), git commit -S works against an ed25519 OpenPGP key.
-git commit -S -m "signed with sdpmd"
+git commit -S -m "signed with troved"
 ```
 
 ### 6. Materialize a file
@@ -96,26 +96,26 @@ KUBECONFIG=/tmp/kubeconfig kubectl get pods
 Inspect what the daemon currently has on disk:
 
 ```sh
-sdpm materialize-status
+trove materialize-status
 # kubeconfig-prod  /tmp/kubeconfig  ttl=- exists=true
 ```
 
-`sdpm status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `sdpm materialize my-vault.kdbx` runs the same plan in-process and wipes everything on Ctrl-C.
+`trove status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `trove materialize my-vault.kdbx` runs the same plan in-process and wipes everything on Ctrl-C.
 
 ### 7. Lock
 
 ```sh
 # Manual lock — wipes materialized files, drops vault + SSH/GPG keys from memory.
-sdpm lock
+trove lock
 
-# Or do nothing — the daemon auto-locks after SDPM_IDLE_TIMEOUT seconds of
+# Or do nothing — the daemon auto-locks after TROVE_IDLE_TIMEOUT seconds of
 # no activity (default 900s). Activity = any control-RPC except `ping`,
 # any SSH agent message, any GPG Assuan command.
-# Adjust the timeout: `sdpm idle set 300` (5 minutes) or `sdpm idle set 0` to
-# disable. Inspect with `sdpm idle get`.
+# Adjust the timeout: `trove idle set 300` (5 minutes) or `trove idle set 0` to
+# disable. Inspect with `trove idle get`.
 ```
 
-See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no sdpm-core involvement; the test crate is a workspace member so `cargo test --workspace` runs it.
+See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is a workspace member so `cargo test --workspace` runs it.
 
 ## Feature exploration
 
@@ -295,19 +295,19 @@ It's tempting to argue file materialization weakens the "encrypted at rest" guar
 
 Early but real — the headless-daemon path works end-to-end on Linux + macOS for SSH, GPG, and file materialization against a KeePassXC-compatible kdbx. Versions shipped, oldest first:
 
-- **v0.0.1** — kdbx vault read/write ([crates/sdpm-core/src/lib.rs](crates/sdpm-core/src/lib.rs)), `sdpm` CLI scaffold (`init`, `list`, `add ssh`, `get ssh`), `sdpmd` headless daemon with the line-JSON control socket, end-to-end SSH-key roundtrip.
+- **v0.0.1** — kdbx vault read/write ([crates/trove-core/src/lib.rs](crates/trove-core/src/lib.rs)), `trove` CLI scaffold (`init`, `list`, `add ssh`, `get ssh`), `troved` headless daemon with the line-JSON control socket, end-to-end SSH-key roundtrip.
 - **v0.0.2.0** — SSH agent listener serving ed25519 keys over `SSH_AUTH_SOCK`. Keys live only in daemon memory; cleared on lock.
 - **v0.0.2.1** — SSH agent algorithm coverage extended: RSA (>= 2048 bits, signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332), ECDSA P-256, ECDSA P-384.
-- **v0.0.3.0** — GPG agent listener speaking the Assuan protocol; ed25519 OpenPGP signing works against `git commit -S`. Hand-rolled OpenPGP packet parser ([crates/sdpmd/src/gpg_agent/keys.rs](crates/sdpmd/src/gpg_agent/keys.rs)) avoids pulling in `rpgp`.
+- **v0.0.3.0** — GPG agent listener speaking the Assuan protocol; ed25519 OpenPGP signing works against `git commit -S`. Hand-rolled OpenPGP packet parser ([crates/troved/src/gpg_agent/keys.rs](crates/troved/src/gpg_agent/keys.rs)) avoids pulling in `rpgp`.
 - **v0.0.3.1** — GPG `PKDECRYPT` for ECDH-on-Curve25519: AES-128/192/256 KW unwrap of the wrapped session key against gpg 2.5.x. RSA / NIST-curve / Ed448 still out of scope.
 - **v0.0.4.0** — Real KDBX `<Binary>` attachments via a vendored fork of `keepass` 0.7.33 (since retired in v0.0.10); legacy `_SDPM_BIN_*` string-field fallback kept for read-compat with v0.0.1–v0.0.3.x vaults (also retired in v0.0.10).
-- **v0.0.5.0** — File materialization (the founding feature): `sdpm add file`, `Materialize.{Source,Target,Mode,TTL,AllowDiskBacked}` custom-field schema, in-process `sdpm materialize`, daemon-driven materialize-on-unlock + wipe-on-lock with optional TTL. Linux: refuses non-tmpfs targets unless `AllowDiskBacked=true`. macOS: soft allowlist (`/tmp`, `/private/tmp`, `$XDG_RUNTIME_DIR`) — APFS provides no real tmpfs, so this is a hint, not a guarantee.
-- **v0.0.6.0** — Idle-lock. `IdleTracker` with a tokio driver task ([crates/sdpmd/src/idle.rs](crates/sdpmd/src/idle.rs)); auto-locks after configurable inactivity (default 900s). Activity = any control RPC except `ping`, any SSH agent message, any GPG Assuan command. New `set-idle-timeout` / `get-idle-timeout` RPCs and `SDPM_IDLE_TIMEOUT` env var.
+- **v0.0.5.0** — File materialization (the founding feature): `trove add file`, `Materialize.{Source,Target,Mode,TTL,AllowDiskBacked}` custom-field schema, in-process `trove materialize`, daemon-driven materialize-on-unlock + wipe-on-lock with optional TTL. Linux: refuses non-tmpfs targets unless `AllowDiskBacked=true`. macOS: soft allowlist (`/tmp`, `/private/tmp`, `$XDG_RUNTIME_DIR`) — APFS provides no real tmpfs, so this is a hint, not a guarantee.
+- **v0.0.6.0** — Idle-lock. `IdleTracker` with a tokio driver task ([crates/troved/src/idle.rs](crates/troved/src/idle.rs)); auto-locks after configurable inactivity (default 900s). Activity = any control RPC except `ping`, any SSH agent message, any GPG Assuan command. New `set-idle-timeout` / `get-idle-timeout` RPCs and `TROVE_IDLE_TIMEOUT` env var.
 - **v0.0.7.0** — GitHub Actions CI (`.github/workflows/ci.yml`): test matrix on Linux + macOS, clippy with `-D warnings`, fmt check, cargo-audit, MSRV check at Rust 1.75. Repo run through `cargo fmt --all`.
 - **v0.0.7.1** — Documentation: README quickstart + [docs/architecture.md](docs/architecture.md) + [docs/threat-model.md](docs/threat-model.md) + [docs/cli-reference.md](docs/cli-reference.md).
-- **v0.0.7.2** — Fuzz harnesses for the SSH agent wire decoder and Assuan line parser ([crates/sdpmd/fuzz/](crates/sdpmd/fuzz/), nightly-only) plus proptest property tests on stable. ~4.3M libfuzzer iterations on this machine, 0 crashes.
+- **v0.0.7.2** — Fuzz harnesses for the SSH agent wire decoder and Assuan line parser ([crates/troved/fuzz/](crates/troved/fuzz/), nightly-only) plus proptest property tests on stable. ~4.3M libfuzzer iterations on this machine, 0 crashes.
 - **v0.0.8.0** — Clean-room kdbx spec test suite: round-trip matrix, malformed-input rejection, keyfile formats, binary pool, cross-tool (`keepassxc-cli`) interop. Programmatically generated fixtures from a seeded RNG; no GPL imports. Originally lived under `vendor/keepass/tests/`; relocated to [crates/keepass-spec-tests](crates/keepass-spec-tests/) in v0.0.10.
-- **v0.0.9.0** — Daemon-aware CLI: `sdpm unlock`, `sdpm lock`, `sdpm status`, `sdpm idle set/get`, `sdpm materialize-status`. Replaces the `printf '{...}' | nc -U` incantations from v0.0.6 with proper subcommands.
+- **v0.0.9.0** — Daemon-aware CLI: `trove unlock`, `trove lock`, `trove status`, `trove idle set/get`, `trove materialize-status`. Replaces the `printf '{...}' | nc -U` incantations from v0.0.6 with proper subcommands.
 - **v0.0.10.0** — Migrated off the vendored `keepass` 0.7.33 fork to the published `keepass = "0.12.5"`. Upstream's PR #294 already restructured attachments as first-class Database-owned objects with `EntryMut::add_attachment(name, Value::Unprotected(bytes))`, which is what our 3 patches were trying to enable. Local fork retired; legacy `_SDPM_BIN_*` migration code retired (no production v0.0.1–v0.0.3.x vaults exist).
 
 Linux + macOS only; Windows not supported. Vault unlock currently takes a password only — no keyfiles, no hardware tokens, no KDBX 3.

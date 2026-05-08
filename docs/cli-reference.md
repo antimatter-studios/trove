@@ -1,11 +1,11 @@
 # CLI reference
 
-Every `sdpm` subcommand, every `sdpmd` env var, every control RPC. Verified against the code in [crates/sdpm-cli/src/main.rs](../crates/sdpm-cli/src/main.rs), [crates/sdpmd/src/main.rs](../crates/sdpmd/src/main.rs), and [crates/sdpmd/src/protocol.rs](../crates/sdpmd/src/protocol.rs). Run `sdpm <command> --help` for clap's auto-generated copy.
+Every `trove` subcommand, every `troved` env var, every control RPC. Verified against the code in [crates/trove-cli/src/main.rs](../crates/trove-cli/src/main.rs), [crates/troved/src/main.rs](../crates/troved/src/main.rs), and [crates/troved/src/protocol.rs](../crates/troved/src/protocol.rs). Run `trove <command> --help` for clap's auto-generated copy.
 
-## Global flags (sdpm)
+## Global flags (trove)
 
 ```
-sdpm [OPTIONS] <COMMAND>
+trove [OPTIONS] <COMMAND>
 ```
 
 | Flag | Description |
@@ -14,7 +14,7 @@ sdpm [OPTIONS] <COMMAND>
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
 
-Exit codes (from [`classify_exit`](../crates/sdpm-cli/src/main.rs)):
+Exit codes (from [`classify_exit`](../crates/trove-cli/src/main.rs)):
 
 | Code | Meaning |
 | --- | --- |
@@ -22,36 +22,36 @@ Exit codes (from [`classify_exit`](../crates/sdpm-cli/src/main.rs)):
 | 1 | User-recoverable error (bad path, missing entry, I/O error) |
 | 2 | Vault-level error (bad password, corrupt kdbx) |
 
-## sdpm init
+## trove init
 
 ```
-sdpm init <VAULT>
+trove init <VAULT>
 ```
 
 Create a new empty kdbx vault. Prompts twice for the master password (or once with `--password-stdin`). Errors if `<VAULT>` already exists.
 
-Backed by [`Vault::create`](../crates/sdpm-core/src/lib.rs). The default kdbx config is KDBX 4 + AES-256 + GZip + ChaCha20 (inner stream) + Argon2d.
+Backed by [`Vault::create`](../crates/trove-core/src/lib.rs). The default kdbx config is KDBX 4 + AES-256 + GZip + ChaCha20 (inner stream) + Argon2d.
 
-## sdpm list
+## trove list
 
 ```
-sdpm list <VAULT>
+trove list <VAULT>
 ```
 
 Print one line per entry: `<uuid>  <title>  [attachments: ...]`. Recursively walks all groups.
 
-## sdpm add
+## trove add
 
 ```
-sdpm add <COMMAND>
+trove add <COMMAND>
 ```
 
 Subcommands: `ssh`, `gpg`, `file`, `help`.
 
-### sdpm add ssh
+### trove add ssh
 
 ```
-sdpm add ssh [OPTIONS] --key <KEY> <VAULT> <TITLE>
+trove add ssh [OPTIONS] --key <KEY> <VAULT> <TITLE>
 ```
 
 | Argument / flag | Description |
@@ -64,10 +64,10 @@ sdpm add ssh [OPTIONS] --key <KEY> <VAULT> <TITLE>
 
 Stores the key bytes as a real KDBX `<Binary>` attachment named `id`. If an entry with the given title exists, its `id` attachment is replaced; otherwise a new entry is added at the root group.
 
-### sdpm add gpg
+### trove add gpg
 
 ```
-sdpm add gpg [OPTIONS] --key <KEY> <VAULT> <TITLE>
+trove add gpg [OPTIONS] --key <KEY> <VAULT> <TITLE>
 ```
 
 | Argument / flag | Description |
@@ -77,12 +77,12 @@ sdpm add gpg [OPTIONS] --key <KEY> <VAULT> <TITLE>
 | `--key <KEY>` | Path to the binary GPG secret-key export. Required. **Binary, not armored.** |
 | `--password-stdin` | Global — see top. |
 
-The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produces (without `--armor`). Stored under the `gpg-priv` attachment. On vault unlock, sdpmd parses each `gpg-priv` attachment and registers every ed25519 secret key it finds.
+The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produces (without `--armor`). Stored under the `gpg-priv` attachment. On vault unlock, troved parses each `gpg-priv` attachment and registers every ed25519 secret key it finds.
 
-### sdpm add file
+### trove add file
 
 ```
-sdpm add file [OPTIONS] --src <SRC> --target <TARGET> <VAULT> <TITLE>
+trove add file [OPTIONS] --src <SRC> --target <TARGET> <VAULT> <TITLE>
 ```
 
 | Argument / flag | Description |
@@ -97,7 +97,7 @@ sdpm add file [OPTIONS] --src <SRC> --target <TARGET> <VAULT> <TITLE>
 | `--allow-disk-backed` | Allow non-tmpfs target. Off by default. Sets `Materialize.AllowDiskBacked=true`. |
 | `--password-stdin` | Global — see top. |
 
-Stores file bytes as a real KDBX `<Binary>` attachment and sets the following entry custom fields (read by sdpmd's [materialize](../crates/sdpmd/src/materialize/mod.rs) module):
+Stores file bytes as a real KDBX `<Binary>` attachment and sets the following entry custom fields (read by troved's [materialize](../crates/troved/src/materialize/mod.rs) module):
 
 - `Materialize.Source` — the attachment name (`<NAME>` or `--src` basename).
 - `Materialize.Target` — `<TARGET>` (literal string; the daemon expands `~`, `$HOME`, `$XDG_RUNTIME_DIR`).
@@ -105,18 +105,18 @@ Stores file bytes as a real KDBX `<Binary>` attachment and sets the following en
 - `Materialize.TTL` — seconds, only set if `--ttl` is given.
 - `Materialize.AllowDiskBacked` — `"true"` or `"false"`.
 
-## sdpm get
+## trove get
 
 ```
-sdpm get <COMMAND>
+trove get <COMMAND>
 ```
 
 Subcommands: `ssh`, `gpg`, `file`, `help`. All three open the vault, find the entry by exact title match, read the relevant attachment, and write to `--out` (or stdout). On Unix, `--out` files are created `0600` via `O_CREAT|O_EXCL`.
 
-### sdpm get ssh
+### trove get ssh
 
 ```
-sdpm get ssh [OPTIONS] <VAULT> <TITLE>
+trove get ssh [OPTIONS] <VAULT> <TITLE>
 ```
 
 | Argument / flag | Description |
@@ -128,18 +128,18 @@ sdpm get ssh [OPTIONS] <VAULT> <TITLE>
 
 Reads the `id` attachment.
 
-### sdpm get gpg
+### trove get gpg
 
 ```
-sdpm get gpg [OPTIONS] <VAULT> <TITLE>
+trove get gpg [OPTIONS] <VAULT> <TITLE>
 ```
 
 Same shape as `get ssh`. Reads the `gpg-priv` attachment.
 
-### sdpm get file
+### trove get file
 
 ```
-sdpm get file [OPTIONS] <VAULT> <TITLE>
+trove get file [OPTIONS] <VAULT> <TITLE>
 ```
 
 | Argument / flag | Description |
@@ -152,90 +152,90 @@ sdpm get file [OPTIONS] <VAULT> <TITLE>
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
-## sdpm agent
+## trove agent
 
 ```
-sdpm agent <COMMAND>
+trove agent <COMMAND>
 ```
 
-### sdpm agent socket
+### trove agent socket
 
 ```
-sdpm agent socket
+trove agent socket
 ```
 
-Print the path to the sdpmd SSH agent socket, then exit. Resolution order:
+Print the path to the troved SSH agent socket, then exit. Resolution order:
 
-1. `SDPM_SSH_SOCK` env var (override).
-2. `$XDG_RUNTIME_DIR/sdpm-ssh.sock`.
-3. `${TMPDIR:-/tmp}/sdpm-ssh-$UID.sock`.
+1. `TROVE_SSH_SOCK` env var (override).
+2. `$XDG_RUNTIME_DIR/trove-ssh.sock`.
+3. `${TMPDIR:-/tmp}/trove-ssh-$UID.sock`.
 
-Typical use: `export SSH_AUTH_SOCK="$(sdpm agent socket)"`.
+Typical use: `export SSH_AUTH_SOCK="$(trove agent socket)"`.
 
-## sdpm gpg-agent
-
-```
-sdpm gpg-agent <COMMAND>
-```
-
-### sdpm gpg-agent socket
+## trove gpg-agent
 
 ```
-sdpm gpg-agent socket
+trove gpg-agent <COMMAND>
 ```
 
-Print the path to the sdpmd GPG agent socket. Resolution order:
+### trove gpg-agent socket
 
-1. `SDPM_GPG_SOCK` env var (override).
-2. `$XDG_RUNTIME_DIR/sdpm-gpg.sock`.
-3. `${TMPDIR:-/tmp}/sdpm-gpg-$UID.sock`.
+```
+trove gpg-agent socket
+```
+
+Print the path to the troved GPG agent socket. Resolution order:
+
+1. `TROVE_GPG_SOCK` env var (override).
+2. `$XDG_RUNTIME_DIR/trove-gpg.sock`.
+3. `${TMPDIR:-/tmp}/trove-gpg-$UID.sock`.
 
 gpg(1) wants a fixed path under `$GNUPGHOME`. Typical use:
 
 ```sh
-ln -sf "$(sdpm gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
+ln -sf "$(trove gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
 ```
 
-## sdpm materialize
+## trove materialize
 
 ```
-sdpm materialize <VAULT>
+trove materialize <VAULT>
 ```
 
-Open the vault, run every entry's materialize plan **in-process** (not via the daemon), hold open until SIGINT / SIGTERM, then wipe everything and exit. Useful for testing and disconnected workflows. Does **not** touch the daemon's `MaterializedStore`; if `sdpmd` is also running, drive it via the `unlock` RPC instead so SSH and GPG agents come up at the same time.
+Open the vault, run every entry's materialize plan **in-process** (not via the daemon), hold open until SIGINT / SIGTERM, then wipe everything and exit. Useful for testing and disconnected workflows. Does **not** touch the daemon's `MaterializedStore`; if `troved` is also running, drive it via the `unlock` RPC instead so SSH and GPG agents come up at the same time.
 
 Per-entry materialize errors are logged but don't abort the others.
 
-## sdpmd — the daemon
+## troved — the daemon
 
 ```
-sdpmd
+troved
 ```
 
 Long-running. Listens on three Unix sockets; serves clients until `shutdown` RPC, SIGINT, or SIGTERM. Removes its own socket files on exit.
 
 Permission model: every socket is bound by the daemon, then `chmod 0600` so only the same UID can connect.
 
-### sdpmd environment variables
+### troved environment variables
 
 All env vars are read at process start.
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `SDPM_SOCK` | `$XDG_RUNTIME_DIR/sdpm.sock` or `${TMPDIR:-/tmp}/sdpm-$UID.sock` | Path of the control socket. |
-| `SDPM_SSH_SOCK` | `$XDG_RUNTIME_DIR/sdpm-ssh.sock` or `${TMPDIR:-/tmp}/sdpm-ssh-$UID.sock` | Path of the SSH agent socket. |
-| `SDPM_GPG_SOCK` | `$XDG_RUNTIME_DIR/sdpm-gpg.sock` or `${TMPDIR:-/tmp}/sdpm-gpg-$UID.sock` | Path of the GPG agent socket. |
-| `SDPM_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. |
+| `TROVE_SOCK` | `$XDG_RUNTIME_DIR/trove.sock` or `${TMPDIR:-/tmp}/trove-$UID.sock` | Path of the control socket. |
+| `TROVE_SSH_SOCK` | `$XDG_RUNTIME_DIR/trove-ssh.sock` or `${TMPDIR:-/tmp}/trove-ssh-$UID.sock` | Path of the SSH agent socket. |
+| `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |
+| `TROVE_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
 | `TMPDIR` | `/tmp` | Used as fallback when `XDG_RUNTIME_DIR` is unset/empty. |
-| `UID` | `0` | Used in the `$TMPDIR` fallback path only. (`UID` is rarely set by login shells; the fallback path is essentially "/tmp/sdpm-0.sock" in practice — set `SDPM_SOCK` explicitly if running multi-user on a shared machine.) |
+| `UID` | `0` | Used in the `$TMPDIR` fallback path only. (`UID` is rarely set by login shells; the fallback path is essentially "/tmp/trove-0.sock" in practice — set `TROVE_SOCK` explicitly if running multi-user on a shared machine.) |
 | `HOME` | (system) | Used by the materialize path resolver to expand `~` / `$HOME` in `Materialize.Target`. |
 
-The CLI's `agent socket` / `gpg-agent socket` subcommands resolve the same way as the daemon, so they always agree (no need to pass `SDPM_*` to both).
+The CLI's `agent socket` / `gpg-agent socket` subcommands resolve the same way as the daemon, so they always agree (no need to pass `TROVE_*` to both).
 
 ### Control protocol (line-JSON)
 
-Connect to the control socket, write one JSON object per line, read one response per line. The protocol is defined in [crates/sdpmd/src/protocol.rs](../crates/sdpmd/src/protocol.rs).
+Connect to the control socket, write one JSON object per line, read one response per line. The protocol is defined in [crates/troved/src/protocol.rs](../crates/troved/src/protocol.rs).
 
 Request envelope: `{"cmd": "<name>", ...}`. Response envelope: `{"status": "ok"|"err", ...}`.
 
@@ -267,7 +267,7 @@ Anything else returns `SSH_AGENT_FAILURE` (5). Supported algorithms: ed25519, RS
 
 ### GPG Assuan protocol
 
-Standard Assuan ASCII protocol on a separate socket. The implemented commands are documented in [crates/sdpmd/src/gpg_agent/](../crates/sdpmd/src/gpg_agent/). The minimum required to make `git commit -S` work for an ed25519 OpenPGP key, plus PKDECRYPT for ed25519+cv25519. Unknown commands return `ERR <code> <message>` so clients fail cleanly rather than hang.
+Standard Assuan ASCII protocol on a separate socket. The implemented commands are documented in [crates/troved/src/gpg_agent/](../crates/troved/src/gpg_agent/). The minimum required to make `git commit -S` work for an ed25519 OpenPGP key, plus PKDECRYPT for ed25519+cv25519. Unknown commands return `ERR <code> <message>` so clients fail cleanly rather than hang.
 
 ## Per-entry custom-field schema
 
