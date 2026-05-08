@@ -230,6 +230,34 @@ pub async fn handle(
                 shutdown: false,
             }
         }
+
+        Request::Status => {
+            // Capture vault path (if any) without holding the state lock
+            // across other reads.
+            let vault_path = {
+                let guard = state.lock().await;
+                guard.as_ref().map(|v| v.path().to_path_buf())
+            };
+            let idle_timeout_secs = idle.current_timeout_secs();
+            let idle_remaining_secs = match idle.current_state() {
+                IdleState::Running { remaining_secs } => Some(remaining_secs),
+                IdleState::Disabled | IdleState::NotRunning => None,
+            };
+            let ssh_keys = key_store.read().await.len();
+            let gpg_keys = gpg_store.read().await.len();
+            let materialized = mat_store.read().await.len();
+            Handled {
+                response: Response::ok_status(
+                    vault_path,
+                    idle_timeout_secs,
+                    idle_remaining_secs,
+                    ssh_keys,
+                    gpg_keys,
+                    materialized,
+                ),
+                shutdown: false,
+            }
+        }
     }
 }
 

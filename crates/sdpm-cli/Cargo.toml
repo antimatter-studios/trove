@@ -14,9 +14,19 @@ sdpm-core.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 rpassword.workspace = true
+thiserror.workspace = true
 # v0.0.5.0: `sdpm materialize` runs the materialize loop in-process. We reuse
 # the daemon's path-validation, tmpfs detection, and wipe code by depending on
 # the sdpmd library crate. This pulls in tokio and a few extra crates, which
 # is fine: anyone running sdpm-cli on their box already needs sdpmd available.
 sdpmd = { path = "../sdpmd" }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }
+# v0.0.9.0: daemon-aware CLI commands (lock/unlock/status/idle) speak the
+# control protocol over Unix domain sockets. We reuse the wire types from
+# `sdpmd::protocol` and parse responses as untyped serde_json::Value (the
+# `OkBody` enum is `#[serde(untagged)]` and not safe to deserialize strictly).
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "io-util", "sync", "process"] }

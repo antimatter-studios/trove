@@ -3,9 +3,11 @@
 //! Newline-delimited JSON. One request per line, one response per line.
 //! Requests are tagged on `cmd`; responses on `status` (`"ok"` / `"err"`).
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Request {
     Ping,
@@ -27,6 +29,9 @@ pub enum Request {
     },
     /// v0.0.6.0: read the current idle-lock state.
     GetIdleTimeout,
+    /// v0.0.9.0: snapshot of daemon state — vault path (if unlocked), idle
+    /// timer state, and counts of in-memory secret stores. Read-only.
+    Status,
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -48,6 +53,7 @@ impl std::fmt::Debug for Request {
                 .field("seconds", seconds)
                 .finish(),
             Request::GetIdleTimeout => f.write_str("GetIdleTimeout"),
+            Request::Status => f.write_str("Status"),
         }
     }
 }
@@ -88,6 +94,19 @@ pub enum OkBody {
         seconds: u64,
         remaining: Option<u64>,
     },
+    /// v0.0.9.0: response body for `Status`. `vault_path` is `Some` only when
+    /// a vault is unlocked. `idle_timeout_secs` is the configured timeout
+    /// (0 == disabled). `idle_remaining_secs` is `Some` only when the timer
+    /// is running. `ssh_keys` / `gpg_keys` / `materialized` count the entries
+    /// in the corresponding in-memory stores.
+    Status {
+        vault_path: Option<PathBuf>,
+        idle_timeout_secs: u64,
+        idle_remaining_secs: Option<u64>,
+        ssh_keys: usize,
+        gpg_keys: usize,
+        materialized: usize,
+    },
 }
 
 impl Response {
@@ -110,5 +129,22 @@ impl Response {
     }
     pub fn ok_idle_timeout(seconds: u64, remaining: Option<u64>) -> Self {
         Response::Ok(OkBody::IdleTimeout { seconds, remaining })
+    }
+    pub fn ok_status(
+        vault_path: Option<PathBuf>,
+        idle_timeout_secs: u64,
+        idle_remaining_secs: Option<u64>,
+        ssh_keys: usize,
+        gpg_keys: usize,
+        materialized: usize,
+    ) -> Self {
+        Response::Ok(OkBody::Status {
+            vault_path,
+            idle_timeout_secs,
+            idle_remaining_secs,
+            ssh_keys,
+            gpg_keys,
+            materialized,
+        })
     }
 }
