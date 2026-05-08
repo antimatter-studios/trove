@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use sdpm_core::Vault;
 use sdpmd::handler::{handle, SharedState};
+use sdpmd::idle::{IdleTracker, LockCallback, LockFuture};
 use sdpmd::materialize::MaterializedStore;
 use sdpmd::protocol::{Request, Response};
 use tempfile::TempDir;
@@ -28,15 +29,26 @@ struct Daemon {
     key_store: sdpmd::ssh_agent::KeyStore,
     gpg_store: sdpmd::gpg_agent::GpgKeyStore,
     mat_store: MaterializedStore,
+    idle: Arc<IdleTracker>,
 }
 
 impl Daemon {
     fn new() -> Self {
+        let state: SharedState = Arc::new(Mutex::new(None));
+        let key_store: sdpmd::ssh_agent::KeyStore = Arc::new(RwLock::new(Vec::new()));
+        let gpg_store: sdpmd::gpg_agent::GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+        let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+        // No-op lock callback: these tests drive `Lock` explicitly and don't
+        // need the idle path. Auto-lock is also disabled (timeout=0) so the
+        // tracker stays out of the way.
+        let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
+        let idle = IdleTracker::new(Duration::from_secs(0), cb);
         Self {
-            state: Arc::new(Mutex::new(None)),
-            key_store: Arc::new(RwLock::new(Vec::new())),
-            gpg_store: Arc::new(RwLock::new(Vec::new())),
-            mat_store: Arc::new(RwLock::new(Vec::new())),
+            state,
+            key_store,
+            gpg_store,
+            mat_store,
+            idle,
         }
     }
 
@@ -47,6 +59,7 @@ impl Daemon {
             &self.key_store,
             &self.gpg_store,
             &self.mat_store,
+            &self.idle,
         )
         .await
         .response

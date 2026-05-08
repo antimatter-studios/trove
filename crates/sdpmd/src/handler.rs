@@ -12,12 +12,14 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 
 use sdpm_core::{EntrySummary, Vault};
 
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
+use crate::idle::{IdleState, IdleTracker};
 use crate::materialize::{self, MaterializedFile, MaterializedStore};
 use crate::protocol::{EntryDto, Request, Response};
 use crate::ssh_agent::{keys as ssh_keys, KeyStore, LoadedKey};
@@ -36,7 +38,15 @@ pub async fn handle(
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
     mat_store: &MaterializedStore,
+    idle: &Arc<IdleTracker>,
 ) -> Handled {
+    // Bump on every command except ping. Ping is the keepalive heartbeat —
+    // counting it would let a stuck client trivially defeat the auto-lock.
+    // unlock/lock/shutdown handle the timer state explicitly below; bumping
+    // them here is harmless because start_or_reset / cancel run after.
+    if !matches!(req, Request::Ping) {
+        idle.bump();
+    }
     match req {
         Request::Ping => Handled {
             response: Response::ok_pong(),
@@ -85,6 +95,11 @@ pub async fn handle(
                         let mut gkeys = gpg_store.write().await;
                         *gkeys = loaded_gpg;
                     }
+                    // Arm the idle-lock timer with the current configured
+                    // timeout. If the timeout is 0 the tracker treats this as
+                    // "disabled" and never fires.
+                    let timeout_secs = idle.current_timeout_secs();
+                    idle.start_or_reset(Duration::from_secs(timeout_secs));
                     Handled {
                         response: Response::ok_empty(),
                         shutdown: false,
@@ -129,6 +144,12 @@ pub async fn handle(
         }
 
         Request::Lock => {
+            // Cancel the idle timer FIRST so a near-deadline tick can't
+            // race us into a double-wipe. The timer-fire path also serializes
+            // through the same lock callback, but cancelling here is cheaper
+            // and clearer.
+            idle.cancel();
+
             // Wipe materialized files synchronously. The lock command should
             // not return ok until every file has at least been visited by
             // the wipe loop. Errors are logged inside wipe_all; we don't
@@ -156,6 +177,8 @@ pub async fn handle(
         }
 
         Request::Shutdown => {
+            idle.cancel();
+
             // Same wipe-then-drop dance as Lock. We must wipe before
             // returning, otherwise sdpmd exits and leaves materialized files
             // sitting on disk for an indefinite time.
@@ -184,6 +207,26 @@ pub async fn handle(
             let snapshot = materialize::status_snapshot(mat_store).await;
             Handled {
                 response: Response::ok_materialize_status(snapshot),
+                shutdown: false,
+            }
+        }
+
+        Request::SetIdleTimeout { seconds } => {
+            idle.set_timeout(Duration::from_secs(seconds));
+            Handled {
+                response: Response::ok_empty(),
+                shutdown: false,
+            }
+        }
+
+        Request::GetIdleTimeout => {
+            let secs = idle.current_timeout_secs();
+            let remaining = match idle.current_state() {
+                IdleState::Running { remaining_secs } => Some(remaining_secs),
+                IdleState::Disabled | IdleState::NotRunning => None,
+            };
+            Handled {
+                response: Response::ok_idle_timeout(secs, remaining),
                 shutdown: false,
             }
         }

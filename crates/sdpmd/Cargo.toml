@@ -40,6 +40,13 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "z
 # `sha1` is required to compute the libgcrypt "keygrip" identifier that
 # gpg-agent uses on the Assuan wire.
 sha1 = { version = "0.10", default-features = false, features = ["std", "oid"] }
+# v0.0.3.1: PKDECRYPT support. ECDH-on-Curve25519 needs Montgomery-form X25519
+# scalar multiplication; `x25519-dalek` v2 is pure-rust and re-uses the
+# `curve25519-dalek` crate already pulled in by `ed25519-dalek`. AES Key Wrap
+# (RFC 3394) is used to unwrap the OpenPGP session key.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+aes-kw = { version = "0.2", features = ["alloc"] }
+aes = { version = "0.8", default-features = false }
 # v0.0.5.0: random bytes for the materialize secure-wipe pass. We don't need a
 # cryptographic CSPRNG strictly speaking — we're overwriting bytes that the
 # storage device may or may not actually rewrite in place — but using OsRng
@@ -50,3 +57,6 @@ rand = { version = "0.8", default-features = false, features = ["std", "std_rng"
 tempfile = "3"
 base64 = "0.22"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# `test-util` enables `tokio::test(start_paused = true)` for the IdleTracker
+# unit tests so simulated time advances without real wall-clock waits.
+tokio = { workspace = true, features = ["test-util"] }

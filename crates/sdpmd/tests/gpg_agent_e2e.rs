@@ -11,10 +11,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sdpmd::gpg_agent::{self, keys::LoadedGpgKey, GpgKeyStore};
+use sdpmd::idle::{IdleTracker, LockCallback, LockFuture};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
+
+fn noop_idle() -> Arc<IdleTracker> {
+    let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
+    IdleTracker::new(Duration::from_secs(0), cb)
+}
 
 /// Build a synthetic ed25519 OpenPGP secret-key packet and parse it. Used by
 /// the e2e tests below to load keys without depending on `gpg` being on PATH.
@@ -55,8 +61,9 @@ async fn spawn_agent_with_keys(
 ) -> tokio::task::JoinHandle<()> {
     let store: GpgKeyStore = Arc::new(RwLock::new(keys));
     let sock = sock_path.to_path_buf();
+    let idle = noop_idle();
     let handle = tokio::spawn(async move {
-        let _ = gpg_agent::run(sock, store).await;
+        let _ = gpg_agent::run(sock, store, idle).await;
     });
     for _ in 0..100 {
         if sock_path.exists() {
@@ -217,7 +224,7 @@ async fn pksign_full_round_trip_signs_and_verifies() {
     .pop()
     .expect("at least one key");
     let grip = key.keygrip_hex();
-    let public_q = key.public_q;
+    let public_q = *key.public_q();
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
 
     let stream = UnixStream::connect(&sock).await.expect("connect");

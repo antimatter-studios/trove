@@ -23,8 +23,14 @@ use std::time::Duration;
 use sdpm_core::Vault;
 use sdpmd::gpg_agent::{self, GpgKeyStore};
 use sdpmd::handler::load_gpg_keys_from_vault;
+use sdpmd::idle::{IdleTracker, LockCallback, LockFuture};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
+
+fn noop_idle() -> Arc<IdleTracker> {
+    let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
+    IdleTracker::new(Duration::from_secs(0), cb)
+}
 
 fn have_tool(name: &str) -> bool {
     Command::new("which")
@@ -142,8 +148,9 @@ async fn git_commit_dash_capital_s_against_our_agent() {
     // 6. Start our agent on a temp socket and symlink it as gnupghome/S.gpg-agent.
     let store_for_task = store.clone();
     let sock_for_task = sock_path.clone();
+    let idle_for_task = noop_idle();
     let agent_handle = tokio::spawn(async move {
-        let _ = gpg_agent::run(sock_for_task, store_for_task).await;
+        let _ = gpg_agent::run(sock_for_task, store_for_task, idle_for_task).await;
     });
     for _ in 0..100 {
         if sock_path.exists() {

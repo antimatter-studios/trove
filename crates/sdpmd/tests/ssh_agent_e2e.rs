@@ -23,9 +23,15 @@ use std::time::Duration;
 
 use sdpm_core::Vault;
 use sdpmd::handler::load_ssh_keys_from_vault;
+use sdpmd::idle::{IdleTracker, LockCallback, LockFuture};
 use sdpmd::ssh_agent::{self, KeyStore};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
+
+fn noop_idle() -> Arc<IdleTracker> {
+    let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
+    IdleTracker::new(Duration::from_secs(0), cb)
+}
 
 fn have_tool(name: &str) -> bool {
     Command::new("which")
@@ -164,8 +170,9 @@ async fn run_e2e_for(
     // 4b. Start the SSH agent listener on a temp socket.
     let sock_for_task = sock_path.clone();
     let store_for_task = store.clone();
+    let idle_for_task = noop_idle();
     let listener_handle = tokio::spawn(async move {
-        let _ = ssh_agent::run(sock_for_task, store_for_task).await;
+        let _ = ssh_agent::run(sock_for_task, store_for_task, idle_for_task).await;
     });
 
     for _ in 0..100 {
