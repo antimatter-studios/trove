@@ -63,16 +63,15 @@ The daemon also responds to `SDPM_IDLE_TIMEOUT` (env var, seconds; `0` disables 
 export SSH_AUTH_SOCK="$(sdpm agent socket)"
 
 # Unlock the vault — keys move into daemon memory, no extra config needed.
-# `nc -U` speaks the line-JSON control protocol; you can use any tool.
-printf '{"cmd":"unlock","path":"%s","password":"%s"}\n' \
-    "$PWD/my-vault.kdbx" "yourpassword" \
-  | nc -U "$XDG_RUNTIME_DIR/sdpm.sock"
+# Prompts for the master password; populates SSH keys, GPG keys, and the
+# materialization plan in one shot.
+sdpm unlock my-vault.kdbx
 
 ssh-add -L          # should list every ed25519/RSA-3072+/P-256/P-384 key in the vault
 ssh github.com      # signs against the daemon
 ```
 
-If you'd rather not pipe a password into `nc`, drive the daemon from a small wrapper script — every secret-bearing surface (SSH agent, GPG agent, materialized files) is populated by the same `unlock` RPC.
+For scripted use, `sdpm --password-stdin unlock my-vault.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).
 
 ### 5. Wire up the GPG agent
 
@@ -97,20 +96,23 @@ KUBECONFIG=/tmp/kubeconfig kubectl get pods
 Inspect what the daemon currently has on disk:
 
 ```sh
-printf '{"cmd":"materialize-status"}\n' | nc -U "$XDG_RUNTIME_DIR/sdpm.sock"
+sdpm materialize-status
+# kubeconfig-prod  /tmp/kubeconfig  ttl=- exists=true
 ```
 
-For testing without the daemon, `sdpm materialize my-vault.kdbx` runs the same plan in-process and wipes everything on Ctrl-C.
+`sdpm status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `sdpm materialize my-vault.kdbx` runs the same plan in-process and wipes everything on Ctrl-C.
 
 ### 7. Lock
 
 ```sh
 # Manual lock — wipes materialized files, drops vault + SSH/GPG keys from memory.
-printf '{"cmd":"lock"}\n' | nc -U "$XDG_RUNTIME_DIR/sdpm.sock"
+sdpm lock
 
 # Or do nothing — the daemon auto-locks after SDPM_IDLE_TIMEOUT seconds of
 # no activity (default 900s). Activity = any control-RPC except `ping`,
 # any SSH agent message, any GPG Assuan command.
+# Adjust the timeout: `sdpm idle set 300` (5 minutes) or `sdpm idle set 0` to
+# disable. Inspect with `sdpm idle get`.
 ```
 
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives **with the library** at [vendor/keepass/tests/](vendor/keepass/tests/) and is regenerated programmatically from a seeded RNG on every run; the gap inventory is in [docs/kdbx-test-coverage.md](docs/kdbx-test-coverage.md).

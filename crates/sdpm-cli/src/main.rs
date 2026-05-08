@@ -3,6 +3,10 @@
 //! v0.0.1 surface: `init`, `list`, `add ssh`, `get ssh`. Master key only;
 //! no keyfiles, no env-var passwords.
 
+#![forbid(unsafe_code)]
+
+mod daemon;
+
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -11,6 +15,7 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use sdpm_core::{EntryId, Error as CoreError, Vault};
+use serde_json::Value;
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -87,6 +92,51 @@ enum Command {
         /// Path to the .kdbx vault.
         vault: PathBuf,
     },
+
+    /// Tell the running `sdpmd` to unlock a vault. The keys + materialize
+    /// plan land in daemon memory; SSH and GPG agents serve them.
+    ///
+    /// Prompts for the master password unless `--password-stdin` is set.
+    /// The password never lands on the command line.
+    Unlock {
+        /// Path to the .kdbx vault.
+        vault: PathBuf,
+    },
+
+    /// Tell the running `sdpmd` to lock the vault: wipe materialized files,
+    /// drop SSH+GPG keys, drop the vault. Idempotent.
+    Lock,
+
+    /// Print a human-readable summary of the running `sdpmd`'s state:
+    /// vault path (if unlocked), idle-lock state, and counts of SSH keys,
+    /// GPG keys, and materialized files in memory.
+    Status,
+
+    /// Configure or read the daemon's idle-lock timeout.
+    Idle {
+        #[command(subcommand)]
+        op: IdleOp,
+    },
+
+    /// One line per active materialization: title, target path, TTL
+    /// remaining, and whether the file is still on disk.
+    MaterializeStatus,
+}
+
+#[derive(Debug, Subcommand)]
+enum IdleOp {
+    /// Set the idle-lock timeout in seconds. `0` disables auto-lock entirely.
+    /// Takes effect immediately; if the new value is shorter than the time
+    /// since last activity, the daemon locks on the next driver wake.
+    Set {
+        /// Timeout in seconds. `0` disables auto-lock.
+        seconds: u64,
+    },
+
+    /// Print the current idle-lock state. `disabled` if timeout is 0,
+    /// otherwise `<N>s (remaining: <M>s)` while the timer is running, or
+    /// `<N>s (vault locked)` while it isn't.
+    Get,
 }
 
 #[derive(Debug, Subcommand)]
@@ -304,6 +354,14 @@ fn run(cli: Cli) -> Result<()> {
             op: GpgAgentOp::Socket,
         } => cmd_gpg_agent_socket(),
         Command::Materialize { vault } => cmd_materialize(&vault, pw_stdin),
+        Command::Unlock { vault } => cmd_unlock(&vault, pw_stdin),
+        Command::Lock => cmd_lock(),
+        Command::Status => cmd_status(),
+        Command::Idle {
+            op: IdleOp::Set { seconds },
+        } => cmd_idle_set(seconds),
+        Command::Idle { op: IdleOp::Get } => cmd_idle_get(),
+        Command::MaterializeStatus => cmd_materialize_status(),
     }
 }
 
@@ -761,9 +819,268 @@ fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
     })
 }
 
+/// Sentinel error returned by the daemon-aware commands. Carries an
+/// already-classified exit code so `classify_exit` can short-circuit the
+/// usual `CoreError` walk. We use this for cases where the error originated
+/// from the daemon (a string we can only parse heuristically) rather than
+/// from sdpm-core (where rich types are available).
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct DaemonClassified {
+    message: String,
+    exit: u8,
+}
+
+/// `sdpm unlock <vault>` — send `unlock` to the daemon. Prompts for password
+/// (or reads stdin) before calling out, so we fail fast on a typo.
+fn cmd_unlock(vault: &Path, pw_stdin: bool) -> Result<()> {
+    if !vault.exists() {
+        return Err(DaemonClassified {
+            message: format!("vault file not found: {}", vault.display()),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let vault_str = vault
+        .to_str()
+        .ok_or_else(|| anyhow!("vault path is not valid utf-8"))?
+        .to_string();
+    let password = if pw_stdin {
+        read_password_from_stdin().context("reading vault password from stdin")?
+    } else {
+        rpassword::prompt_password("Vault password: ").context("reading vault password")?
+    };
+
+    let req = daemon::Request::Unlock {
+        path: vault_str,
+        password,
+    };
+    let resp = match daemon::send(&req) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+
+    if let Some(msg) = daemon::response_error(&resp) {
+        // Heuristic: anything that mentions "password" or "kdbx" is a vault
+        // error (exit 2); everything else is a user error (exit 1). This
+        // matches the existing `classify_exit` mapping for sdpm-core errors.
+        let exit = if looks_like_vault_error(&msg) {
+            EXIT_VAULT_ERROR
+        } else {
+            EXIT_USER_ERROR
+        };
+        return Err(DaemonClassified { message: msg, exit }.into());
+    }
+
+    println!("vault unlocked: {}", vault.display());
+    Ok(())
+}
+
+/// Heuristic mapping from a daemon-reported error string to vault-error
+/// status. Anything mentioning "password" or "kdbx" is treated as a vault
+/// error; anything else is a user error.
+fn looks_like_vault_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("password") || lower.contains("kdbx") || lower.contains("decrypt")
+}
+
+/// `sdpm lock` — send `lock` to the daemon. Idempotent on the daemon side;
+/// we treat its response as the source of truth.
+fn cmd_lock() -> Result<()> {
+    let resp = match daemon::send(&daemon::Request::Lock) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    println!("vault locked");
+    Ok(())
+}
+
+/// `sdpm status` — pretty-print the daemon's `Status` response.
+fn cmd_status() -> Result<()> {
+    let resp = match daemon::send(&daemon::Request::Status) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    print_status(&resp);
+    Ok(())
+}
+
+fn print_status(resp: &Value) {
+    // Vault path. `null` -> "no vault unlocked".
+    let vault_line = match resp.get("vault_path") {
+        Some(v) if v.is_null() => "no vault unlocked".to_string(),
+        Some(v) => v.as_str().unwrap_or("(unparseable vault_path)").to_string(),
+        None => "no vault unlocked".to_string(),
+    };
+    println!("Vault:           {vault_line}");
+
+    let idle_secs = resp.get("idle_timeout_secs").and_then(Value::as_u64);
+    let idle_line = match idle_secs {
+        Some(0) => "disabled".to_string(),
+        Some(n) => format!("{n}s"),
+        None => "(unknown)".to_string(),
+    };
+    println!("Idle timeout:    {idle_line}");
+
+    if let Some(remaining) = resp.get("idle_remaining_secs").and_then(Value::as_u64) {
+        println!("Idle remaining:  {remaining}s");
+    }
+
+    let ssh = resp.get("ssh_keys").and_then(Value::as_u64).unwrap_or(0);
+    let gpg = resp.get("gpg_keys").and_then(Value::as_u64).unwrap_or(0);
+    let mat = resp.get("materialized").and_then(Value::as_u64).unwrap_or(0);
+    println!("SSH keys:        {ssh} loaded");
+    println!("GPG keys:        {gpg} loaded");
+    println!("Materialized:    {mat} files");
+}
+
+/// `sdpm idle set <seconds>`.
+fn cmd_idle_set(seconds: u64) -> Result<()> {
+    let resp = match daemon::send(&daemon::Request::SetIdleTimeout { seconds }) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    if seconds == 0 {
+        println!("idle timeout: disabled");
+    } else {
+        println!("idle timeout: {seconds}s");
+    }
+    Ok(())
+}
+
+/// `sdpm idle get`. Pretty-prints the current state.
+fn cmd_idle_get() -> Result<()> {
+    let resp = match daemon::send(&daemon::Request::GetIdleTimeout) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let secs = resp.get("seconds").and_then(Value::as_u64).unwrap_or(0);
+    let remaining = resp.get("remaining").and_then(Value::as_u64);
+    if secs == 0 {
+        println!("disabled");
+    } else if let Some(r) = remaining {
+        println!("{secs}s (remaining: {r}s)");
+    } else {
+        println!("{secs}s (vault locked)");
+    }
+    Ok(())
+}
+
+/// `sdpm materialize-status` — list of active materializations, one per line.
+fn cmd_materialize_status() -> Result<()> {
+    let resp = match daemon::send(&daemon::Request::MaterializeStatus) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let arr = resp
+        .get("materialized")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if arr.is_empty() {
+        println!("(no active materializations)");
+        return Ok(());
+    }
+    for entry in arr {
+        let title = entry.get("title").and_then(Value::as_str).unwrap_or("?");
+        let target = entry
+            .get("target_path")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let exists = entry.get("exists").and_then(Value::as_bool).unwrap_or(false);
+        let ttl_str = match entry.get("ttl_remaining_seconds") {
+            Some(v) if v.is_null() => "none".to_string(),
+            Some(v) => v.as_u64().map(|n| format!("{n}s")).unwrap_or_else(|| "?".to_string()),
+            None => "none".to_string(),
+        };
+        println!("{title}  {target}  ttl={ttl_str}  exists={exists}");
+    }
+    Ok(())
+}
+
 /// Map an error chain to one of our documented exit codes.
 fn classify_exit(err: &anyhow::Error) -> u8 {
     for cause in err.chain() {
+        if let Some(d) = cause.downcast_ref::<DaemonClassified>() {
+            return d.exit;
+        }
         if let Some(core) = cause.downcast_ref::<CoreError>() {
             return match core {
                 CoreError::BadPassword | CoreError::Kdbx(_) => EXIT_VAULT_ERROR,
