@@ -154,9 +154,9 @@ proptest! {
     ) {
         let line = format!("{verb}{eol}");
         let parsed = Line::parse(&line).expect("non-empty");
-        prop_assert_eq!(parsed.verb, verb);
         prop_assert!(!parsed.verb.ends_with('\r'));
         prop_assert!(!parsed.verb.ends_with('\n'));
+        prop_assert_eq!(parsed.verb, verb);
     }
 
     /// REGRESSION GUARD: an empty (or pure-EOL) line MUST return
@@ -164,7 +164,7 @@ proptest! {
     /// loop relies on to ignore blank lines without dispatching them.
     #[test]
     fn line_parse_empty_errors(eol in prop_oneof!["", "\n", "\r\n", "\r", "\n\n"]) {
-        let res = Line::parse(eol);
+        let res = Line::parse(&eol);
         prop_assert_eq!(res, Err(ParseError::Empty));
     }
 }

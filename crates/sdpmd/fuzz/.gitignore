@@ -1,0 +1,8 @@
+# The fuzz subcrate is a standalone workspace. Its lockfile and build
+# artefacts are developer-local — only the source files (Cargo.toml,
+# fuzz_targets/, README.md) belong in version control.
+/target
+/Cargo.lock
+/corpus
+/artifacts
+/coverage

@@ -152,7 +152,7 @@ proptest! {
 
         let mut payload = Vec::with_capacity(4 + body_len);
         payload.extend_from_slice(&announced_len.to_be_bytes());
-        payload.extend(std::iter::repeat(0u8).take(body_len));
+        payload.extend(std::iter::repeat_n(0u8, body_len));
         // Plus a second string and flags so the payload ALMOST looks valid —
         // the failure must come from the first string's length check, not from
         // hitting EOF on the second string.
