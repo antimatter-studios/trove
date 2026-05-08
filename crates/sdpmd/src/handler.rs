@@ -341,54 +341,81 @@ pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
     out
 }
 
-/// Walk every entry in `vault`, look for an `id` attachment, and try to parse
-/// it as an OpenSSH private key (ed25519, RSA >= 2048, ECDSA P-256, or
-/// ECDSA P-384). Skips (with a one-line warning) anything that doesn't
-/// parse, is encrypted, is an unsupported algorithm (DSA, P-521), or is a
-/// weak RSA key. Never panics.
+/// Walk every attachment on every entry in `vault`. For each attachment whose
+/// bytes look like an OpenSSH private key (PEM `-----BEGIN OPENSSH PRIVATE
+/// KEY-----` envelope), parse it and load. Supports ed25519, RSA >= 2048,
+/// ECDSA P-256, ECDSA P-384.
+///
+/// Discovery is by content, not by attachment name. KeePassXC users typically
+/// store SSH keys as attachments named after the file (`id_ed25519`,
+/// `id_rsa`, `id_ecdsa`, `github.pem`, etc.) — there is no single canonical
+/// name across the ecosystem. Iterating everything and trying to parse is
+/// cheaper than maintaining a name allowlist, and lets any KeePassXC vault
+/// "just work".
+///
+/// Logging policy: silent skip for attachments that don't carry the OpenSSH
+/// PEM header (typical: docs, configs, screenshots — log spam wastes the
+/// reader's attention). Warning log only for attachments that *look* like
+/// keys but fail parse (encrypted, weak RSA, unsupported algorithm). The
+/// ssh-agent comment shown by `ssh-add -l` is `<entry title>:<attachment name>`
+/// so users can tell multiple keys per entry apart.
 pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
-    const ATTACHMENT_NAME: &str = "id";
     let mut out = Vec::new();
     let entries: Vec<EntrySummary> = vault.list_entries();
     for entry in entries {
-        if !entry.attachment_names.iter().any(|a| a == ATTACHMENT_NAME) {
-            continue;
-        }
-        let bytes = match vault.read_binary(&entry.id, ATTACHMENT_NAME) {
-            Ok(Some(b)) => b,
-            Ok(None) => continue,
-            Err(e) => {
-                eprintln!(
-                    "ssh-agent: failed to read 'id' attachment on entry '{}': {}",
-                    entry.title, e
-                );
-                continue;
-            }
-        };
-        match ssh_keys::parse_private_key(&bytes, &entry.title) {
-            Ok(loaded) => out.push(loaded),
-            Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
-                eprintln!(
-                    "ssh-agent: skipping entry '{}': unsupported key algorithm {} \
-                     (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)",
-                    entry.title, alg
-                );
-            }
-            Err(ssh_keys::ParseError::RsaTooSmall(bits)) => {
-                eprintln!(
-                    "ssh-agent: skipping entry '{}': RSA key too short ({} bits, \
-                     minimum 2048)",
-                    entry.title, bits
-                );
-            }
-            Err(ssh_keys::ParseError::Encrypted) => {
-                eprintln!(
-                    "ssh-agent: skipping entry '{}': encrypted private keys not supported",
-                    entry.title
-                );
-            }
-            Err(e) => {
-                eprintln!("ssh-agent: skipping entry '{}': {}", entry.title, e);
+        for attachment_name in &entry.attachment_names {
+            let bytes = match vault.read_binary(&entry.id, attachment_name) {
+                Ok(Some(b)) => b,
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "ssh-agent: failed to read attachment '{}' on entry '{}': {}",
+                        attachment_name, entry.title, e
+                    );
+                    continue;
+                }
+            };
+            // The agent identity comment users will see in `ssh-add -l`.
+            // `<title>:<attachment>` for entries with multiple keys; just
+            // `<title>` if the attachment name is the conventional `id`.
+            let comment = if attachment_name == "id" {
+                entry.title.clone()
+            } else {
+                format!("{}:{}", entry.title, attachment_name)
+            };
+            match ssh_keys::parse_private_key(&bytes, &comment) {
+                Ok(loaded) => out.push(loaded),
+                Err(ssh_keys::ParseError::NotOpenssh(_)) => {
+                    // Not an SSH key — typical case for non-key attachments.
+                    // Silent skip; logging would be noise for any vault that
+                    // mixes keys and other files.
+                }
+                Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
+                    eprintln!(
+                        "ssh-agent: skipping {}/{}: unsupported key algorithm {} \
+                         (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)",
+                        entry.title, attachment_name, alg
+                    );
+                }
+                Err(ssh_keys::ParseError::RsaTooSmall(bits)) => {
+                    eprintln!(
+                        "ssh-agent: skipping {}/{}: RSA key too short ({} bits, \
+                         minimum 2048)",
+                        entry.title, attachment_name, bits
+                    );
+                }
+                Err(ssh_keys::ParseError::Encrypted) => {
+                    eprintln!(
+                        "ssh-agent: skipping {}/{}: encrypted private keys not supported",
+                        entry.title, attachment_name
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "ssh-agent: skipping {}/{}: {}",
+                        entry.title, attachment_name, e
+                    );
+                }
             }
         }
     }
