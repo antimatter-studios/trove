@@ -10,12 +10,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use troved::gpg_agent::{self, keys::LoadedGpgKey, GpgKeyStore};
-use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
+use troved::gpg_agent::{self, keys::LoadedGpgKey, GpgKeyStore};
+use troved::idle::{IdleTracker, LockCallback, LockFuture};
 
 fn noop_idle() -> Arc<IdleTracker> {
     let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });

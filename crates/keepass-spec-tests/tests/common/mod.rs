@@ -157,9 +157,8 @@ pub fn round_trip_combos() -> Vec<Combo> {
         for (cm_l, cm) in &comp {
             for (ic_l, ic) in &inner {
                 for (kd_l, kd) in &kdfs {
-                    let label: &'static str = Box::leak(
-                        format!("{oc_l}+{cm_l}+{ic_l}+{kd_l}").into_boxed_str(),
-                    );
+                    let label: &'static str =
+                        Box::leak(format!("{oc_l}+{cm_l}+{ic_l}+{kd_l}").into_boxed_str());
                     combos.push(Combo {
                         label,
                         outer_cipher: oc.clone(),

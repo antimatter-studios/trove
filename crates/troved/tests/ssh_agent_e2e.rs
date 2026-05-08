@@ -21,12 +21,12 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tempfile::TempDir;
+use tokio::sync::RwLock;
 use trove_core::Vault;
 use troved::handler::load_ssh_keys_from_vault;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::ssh_agent::{self, KeyStore};
-use tempfile::TempDir;
-use tokio::sync::RwLock;
 
 fn noop_idle() -> Arc<IdleTracker> {
     let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });

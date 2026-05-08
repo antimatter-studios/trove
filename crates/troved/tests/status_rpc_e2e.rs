@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tempfile::TempDir;
+use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SharedState};
@@ -15,8 +17,6 @@ use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
 use troved::ssh_agent::KeyStore;
-use tempfile::TempDir;
-use tokio::sync::{Mutex, RwLock};
 
 const PASSWORD: &str = "status-rpc-test-pw";
 
@@ -186,12 +186,7 @@ async fn status_request_bumps_idle_timer() {
         password: PASSWORD.to_string(),
     };
     let _ = handle(
-        req_unlock,
-        &state,
-        &key_store,
-        &gpg_store,
-        &mat_store,
-        &idle,
+        req_unlock, &state, &key_store, &gpg_store, &mat_store, &idle,
     )
     .await;
 
