@@ -6,19 +6,42 @@ A KeePassXC-compatible password manager that does the things upstream won't. **1
 
 Treat the vault as more than passwords. Entries can carry **files** (kubeconfig, SSH keys, GPG keys, `.env`, TLS certs, signing keys) that **materialize to disk on unlock and are wiped on lock** — opt-in per entry, with a clear acknowledgement of the on-disk-exposure risk. The vault becomes the source of truth for "the secrets a developer machine needs to function."
 
+## Install
+
+### macOS / Linuxbrew (via Homebrew)
+
+```sh
+brew install antimatter-studios/tap/trove
+```
+
+That installs both binaries (`trove` CLI + `troved` daemon) from the [antimatter-studios/homebrew-tap](https://github.com/antimatter-studios/homebrew-tap) tap. Builds from source via `cargo`, so first install takes a few minutes for the dependency tree.
+
+### From source (cargo)
+
+```sh
+git clone https://github.com/antimatter-studios/trove
+cd trove
+cargo install --path crates/trove-cli
+cargo install --path crates/troved
+```
+
+Both commands install into `~/.cargo/bin/` (or `$CARGO_INSTALL_ROOT` if set). Make sure that's on `$PATH`.
+
+### From source (development build)
+
+```sh
+git clone https://github.com/antimatter-studios/trove
+cd trove
+cargo build --release
+# Binaries land at ./target/release/trove and ./target/release/troved.
+# Run from there directly, or copy / symlink onto PATH.
+```
+
 ## Quickstart
 
 Linux + macOS. The daemon (`troved`) is the long-running process; `trove` is a thin CLI client.
 
-### 1. Build
-
-```sh
-cargo build --release
-# Binaries land at ./target/release/trove and ./target/release/troved.
-# Put them on PATH (cp / symlink / cargo install --path), or use full paths below.
-```
-
-### 2. Create a vault and stash some secrets
+### 1. Create a vault and stash some secrets
 
 ```sh
 # Create a fresh kdbx file. Prompts twice for the master password.
@@ -44,7 +67,7 @@ trove add file my-vault.kdbx kubeconfig-prod \
 trove list my-vault.kdbx
 ```
 
-### 3. Run the daemon
+### 2. Run the daemon
 
 ```sh
 troved &
@@ -57,7 +80,7 @@ troved &
 
 The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock) and `TROVE_SOCK` / `TROVE_SSH_SOCK` / `TROVE_GPG_SOCK` (override socket paths).
 
-### 4. Wire up the SSH agent
+### 3. Wire up the SSH agent
 
 ```sh
 export SSH_AUTH_SOCK="$(trove agent socket)"
@@ -73,7 +96,7 @@ ssh github.com      # signs against the daemon
 
 For scripted use, `trove --password-stdin unlock my-vault.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).
 
-### 5. Wire up the GPG agent
+### 4. Wire up the GPG agent
 
 ```sh
 # Point gpg(1) at our socket. gpg insists on a fixed path under $GNUPGHOME.
@@ -83,9 +106,9 @@ ln -sf "$(trove gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
 git commit -S -m "signed with troved"
 ```
 
-### 6. Materialize a file
+### 5. Materialize a file
 
-The `unlock` RPC also runs every entry's materialization plan. With the `kubeconfig-prod` entry from step 2, after `unlock`:
+The `unlock` RPC also runs every entry's materialization plan. With the `kubeconfig-prod` entry from step 1, after `unlock`:
 
 ```sh
 ls -l /tmp/kubeconfig
@@ -102,7 +125,7 @@ trove materialize-status
 
 `trove status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `trove materialize my-vault.kdbx` runs the same plan in-process and wipes everything on Ctrl-C.
 
-### 7. Lock
+### 6. Lock
 
 ```sh
 # Manual lock — wipes materialized files, drops vault + SSH/GPG keys from memory.
