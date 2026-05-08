@@ -110,6 +110,7 @@ pub enum ChallengeResponseKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[allow(dead_code)] // only constructed under `feature = "challenge_response"`
 pub struct Yubikey {
     pub serial_number: u32,
     pub name: Option<String>,
