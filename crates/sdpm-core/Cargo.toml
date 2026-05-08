@@ -14,3 +14,9 @@ secstr = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
+# Used by integration tests to synthesise a legacy vault (the v0.0.1
+# `_SDPM_BIN_*` Protected-string layout) by writing kdbx directly.
+keepass = { workspace = true, features = ["save_kdbx4"] }
+secstr = "0.5"
+base64 = "0.22"
+rand = "0.8"

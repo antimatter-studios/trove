@@ -15,12 +15,23 @@ pub use error::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Prefix used to encode per-entry binary attachments as protected string
-/// fields. The `keepass` crate (v0.7.x) parses `<Binary>` references inside
-/// `<Entry>` but discards them (see entry.rs: "TODO reference into a binary
-/// field from the Meta"), so genuine per-entry attachments don't round-trip.
-/// We sidestep that by stashing the bytes as base64 inside a Protected
-/// string field whose key starts with this prefix; on read we decode back.
+/// Legacy prefix used by sdpm v0.0.1–0.0.3.x to encode per-entry binary
+/// attachments as protected string fields. The published `keepass` crate
+/// (v0.7.x) parsed `<Binary>` references inside `<Entry>` but discarded them
+/// (see entry.rs: "TODO reference into a binary field from the Meta"), and
+/// crashed on save when the bytes weren't UTF-8. We sidestepped that by
+/// stashing bytes as base64 in a Protected string field with this prefix.
+///
+/// Starting with this version we use the vendored `keepass` fork which
+/// round-trips real KDBX `<Binary>` attachments (see `vendor/keepass/`),
+/// so [`Vault::attach_binary`] writes a real attachment and entries that
+/// previously used the legacy field are migrated on read/save:
+///
+/// * [`Vault::read_binary`] consults real attachments first, then falls
+///   back to a legacy `_SDPM_BIN_<name>` field if any exists.
+/// * [`Vault::attach_binary`] drops any legacy field for the same name on
+///   write so it gets purged the next time the vault is saved.
+/// * [`EntrySummary::attachment_names`] reports the de-duplicated union.
 const ATTACHMENT_PREFIX: &str = "_SDPM_BIN_";
 
 /// Stable identifier for an entry within a vault. Backed by the kdbx UUID.
@@ -232,37 +243,89 @@ impl Vault {
 
     /// Attach a binary blob (e.g. an SSH private key) to an entry under `name`.
     /// Replaces any existing attachment with the same name.
+    ///
+    /// Bytes are stored as a real KDBX4 inner-header binary attachment with a
+    /// `<Binary Ref="N"/>` reference inside the entry, matching what KeePassXC
+    /// writes. The Protected flag is left at the default (off) — KeePassXC
+    /// likewise stores SSH private keys without it.
+    ///
+    /// If the entry currently carries a legacy `_SDPM_BIN_<name>` field for
+    /// the same name (from sdpm v0.0.1–0.0.3.x), that field is dropped so the
+    /// next save migrates it away. We never garbage-collect the binary pool
+    /// itself, so a previous attachment's bytes may remain orphaned in the
+    /// pool until rewrite — small and rare; TODO: dedupe / GC.
     pub fn attach_binary(&mut self, id: &EntryId, name: &str, bytes: &[u8]) -> Result<()> {
+        // Validate the entry exists before mutating the binary pool.
+        if find_entry(&self.inner.db.root, id).is_none() {
+            return Err(Error::EntryNotFound(id.0.clone()));
+        }
+
+        // Append a fresh attachment to the inner-header binary pool. We do
+        // not dedupe identical blobs; KeePassXC handles either layout fine.
+        let pool_index = self.inner.db.header_attachments.len();
+        self.inner
+            .db
+            .header_attachments
+            .push(keepass::db::HeaderAttachment {
+                // 0x00 = unprotected. SSH/GPG keys live here unprotected in
+                // KeePassXC by default; the inner header itself is encrypted.
+                flags: 0,
+                content: bytes.to_vec(),
+            });
+
         let entry = find_entry_mut(&mut self.inner.db.root, id)
-            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        let key = format!("{ATTACHMENT_PREFIX}{name}");
-        let encoded = base64_encode(bytes);
+            .expect("entry existence checked above");
+        // Drop any legacy base64-in-string-field attachment with the same
+        // name — migrate-on-write.
+        let legacy_key = format!("{ATTACHMENT_PREFIX}{name}");
+        entry.fields.remove(&legacy_key);
+        // Record the real reference. Replaces any previous reference for the
+        // same name on this entry (the previous bytes stay in the pool but
+        // are unreferenced).
         entry
-            .fields
-            .insert(key, keepass::db::Value::Protected(secstr_from_str(&encoded)));
+            .binaries
+            .insert(name.to_string(), pool_index.to_string());
         Ok(())
     }
 
     /// Read an attachment's bytes. Returns `Ok(None)` if the entry exists but has no such attachment.
     /// Errors if the entry itself does not exist.
+    ///
+    /// Real KDBX `<Binary>` attachments are preferred. If the entry only
+    /// carries a legacy `_SDPM_BIN_<name>` field (from sdpm v0.0.1–0.0.3.x),
+    /// it is decoded transparently — no migration step required by callers.
     pub fn read_binary(&self, id: &EntryId, name: &str) -> Result<Option<Vec<u8>>> {
         let entry =
             find_entry(&self.inner.db.root, id).ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        let key = format!("{ATTACHMENT_PREFIX}{name}");
-        let Some(encoded) = entry.get(&key) else {
-            return Ok(None);
-        };
-        let bytes = base64_decode(encoded)
-            .map_err(|e| Error::Kdbx(format!("attachment '{name}' is not valid base64: {e}")))?;
-        Ok(Some(bytes))
+
+        // Real attachment first.
+        if let Some(identifier) = entry.binaries.get(name) {
+            return Ok(resolve_pool_bytes(&self.inner.db, identifier));
+        }
+
+        // Legacy fallback: base64 in a Protected string field.
+        let legacy_key = format!("{ATTACHMENT_PREFIX}{name}");
+        if let Some(encoded) = entry.get(&legacy_key) {
+            let bytes = base64_decode(encoded).map_err(|e| {
+                Error::Kdbx(format!("attachment '{name}' is not valid base64: {e}"))
+            })?;
+            return Ok(Some(bytes));
+        }
+        Ok(None)
     }
 
     /// Remove an attachment from an entry. No-op if the attachment is missing.
+    ///
+    /// Strips both the real reference and any legacy `_SDPM_BIN_<name>` field
+    /// so old entries get cleaned up on save. Bytes in the inner-header pool
+    /// are left in place; they don't take up entry-side space and a future
+    /// rewrite can GC unreferenced blobs.
     pub fn remove_binary(&mut self, id: &EntryId, name: &str) -> Result<()> {
         let entry = find_entry_mut(&mut self.inner.db.root, id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        let key = format!("{ATTACHMENT_PREFIX}{name}");
-        entry.fields.remove(&key);
+        entry.binaries.remove(name);
+        let legacy_key = format!("{ATTACHMENT_PREFIX}{name}");
+        entry.fields.remove(&legacy_key);
         Ok(())
     }
 
@@ -279,11 +342,18 @@ impl Vault {
 // --- helpers ---------------------------------------------------------------
 
 fn summarise(e: &keepass::db::Entry) -> EntrySummary {
-    let attachment_names = e
-        .fields
-        .keys()
-        .filter_map(|k| k.strip_prefix(ATTACHMENT_PREFIX).map(str::to_owned))
-        .collect();
+    // Union of real attachments and legacy `_SDPM_BIN_*` fields, deduped, in
+    // a stable order: real ones first (insertion order), then legacy ones not
+    // already represented as real attachments. Final list is sorted for
+    // deterministic output.
+    let mut names: std::collections::BTreeSet<String> =
+        e.binaries.keys().cloned().collect();
+    for k in e.fields.keys() {
+        if let Some(name) = k.strip_prefix(ATTACHMENT_PREFIX) {
+            names.insert(name.to_string());
+        }
+    }
+    let attachment_names: Vec<String> = names.into_iter().collect();
     EntrySummary {
         id: EntryId(e.uuid.to_string()),
         title: e.get_title().unwrap_or("").to_string(),
@@ -347,13 +417,29 @@ fn remove_entry_recursive(group: &mut keepass::db::Group, id: &EntryId) -> bool 
     false
 }
 
-fn secstr_from_str(s: &str) -> secstr::SecStr {
-    secstr::SecStr::from(s.to_string())
+/// Resolve a `<Binary Ref="N"/>` identifier to the concrete bytes it points to.
+///
+/// In KDBX4 the identifier is the index into the inner-header binary pool
+/// (`Database::header_attachments`). In KDBX3 the identifier matches a
+/// `BinaryAttachment::identifier` in `Meta::binaries`. We try inner-header
+/// first (the only path our writer emits) and fall back to meta-level for
+/// vaults imported from KDBX3 sources that we may parse later.
+fn resolve_pool_bytes(db: &keepass::Database, identifier: &str) -> Option<Vec<u8>> {
+    if let Ok(idx) = identifier.parse::<usize>() {
+        if let Some(att) = db.header_attachments.get(idx) {
+            return Some(att.content.clone());
+        }
+    }
+    db.meta
+        .binaries
+        .binaries
+        .iter()
+        .find(|b| b.identifier.as_deref() == Some(identifier))
+        .map(|b| b.content.clone())
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+fn secstr_from_str(s: &str) -> secstr::SecStr {
+    secstr::SecStr::from(s.to_string())
 }
 
 fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
