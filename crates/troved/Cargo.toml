@@ -31,7 +31,7 @@ ssh-key = { version = "0.6", default-features = false, features = ["std", "alloc
 # `Signer<Signature>` impl for `RsaKeypair` hard-codes SHA-512, but the SSH
 # agent protocol lets clients select the hash via flag bits (RFC 8332). We
 # build pkcs1v15::SigningKey<Sha256> directly when the SHA-256 bit is set.
-rsa = { version = "0.9", default-features = false, features = ["std"] }
+rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
 sha2 = { version = "0.10", default-features = false, features = ["std", "oid"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 # v0.0.3.0: GPG agent. We hand-roll OpenPGP secret-key packet parsing for the
