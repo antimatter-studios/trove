@@ -317,6 +317,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0a7a9bfdb35811f9e59832f0f05975114d2251b415fb534108e6f34060fd772"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -483,6 +492,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -891,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "keepass-spec-tests"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1685,10 +1695,11 @@ dependencies = [
 
 [[package]]
 name = "trove-cli"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "rpassword",
  "serde_json",
  "tempfile",
@@ -1700,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "trove-core"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "keepass",
  "rand 0.8.6",
@@ -1712,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "troved"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "aes 0.8.4",
  "aes-kw",
