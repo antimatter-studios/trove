@@ -14,8 +14,8 @@ use std::process::ExitCode;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use trove_core::{EntryId, Error as CoreError, Vault};
 use serde_json::Value;
+use trove_core::{EntryId, Error as CoreError, Vault};
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -963,7 +963,10 @@ fn print_status(resp: &Value) {
 
     let ssh = resp.get("ssh_keys").and_then(Value::as_u64).unwrap_or(0);
     let gpg = resp.get("gpg_keys").and_then(Value::as_u64).unwrap_or(0);
-    let mat = resp.get("materialized").and_then(Value::as_u64).unwrap_or(0);
+    let mat = resp
+        .get("materialized")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     println!("SSH keys:        {ssh} loaded");
     println!("GPG keys:        {gpg} loaded");
     println!("Materialized:    {mat} files");
@@ -1064,10 +1067,16 @@ fn cmd_materialize_status() -> Result<()> {
             .get("target_path")
             .and_then(Value::as_str)
             .unwrap_or("?");
-        let exists = entry.get("exists").and_then(Value::as_bool).unwrap_or(false);
+        let exists = entry
+            .get("exists")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let ttl_str = match entry.get("ttl_remaining_seconds") {
             Some(v) if v.is_null() => "none".to_string(),
-            Some(v) => v.as_u64().map(|n| format!("{n}s")).unwrap_or_else(|| "?".to_string()),
+            Some(v) => v
+                .as_u64()
+                .map(|n| format!("{n}s"))
+                .unwrap_or_else(|| "?".to_string()),
             None => "none".to_string(),
         };
         println!("{title}  {target}  ttl={ttl_str}  exists={exists}");

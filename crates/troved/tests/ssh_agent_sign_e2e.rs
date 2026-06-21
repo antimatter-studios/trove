@@ -20,13 +20,13 @@ use std::time::Duration;
 
 use rsa::pkcs1v15;
 use rsa::signature::Verifier as _;
+use ssh_key::PublicKey;
+use tempfile::TempDir;
+use tokio::sync::RwLock;
 use trove_core::Vault;
 use troved::handler::load_ssh_keys_from_vault;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::ssh_agent::{self, KeyStore};
-use ssh_key::PublicKey;
-use tempfile::TempDir;
-use tokio::sync::RwLock;
 
 fn noop_idle() -> Arc<IdleTracker> {
     let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });

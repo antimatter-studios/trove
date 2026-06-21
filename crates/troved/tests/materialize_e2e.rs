@@ -14,13 +14,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tempfile::TempDir;
+use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
 use troved::handler::{handle, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
-use tempfile::TempDir;
-use tokio::sync::{Mutex, RwLock};
 
 const PASSWORD: &str = "test-password-materialize";
 

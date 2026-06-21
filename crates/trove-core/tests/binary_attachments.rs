@@ -13,10 +13,10 @@
 //! already use real `<Binary>` references.
 
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use trove_core::Vault;
 use std::fs::File;
 use std::path::Path;
 use tempfile::TempDir;
+use trove_core::Vault;
 
 /// Bytes 0..=255 in order, plus a 4 KiB pseudo-random tail (deterministic
 /// seed for reproducibility). Includes invalid UTF-8 sequences and embedded

@@ -24,6 +24,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SharedState};
@@ -31,10 +35,6 @@ use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
 use troved::ssh_agent::{self, KeyStore};
-use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
-use tokio::sync::{Mutex, RwLock};
 
 const PASSWORD: &str = "idle-lock-test-pw";
 

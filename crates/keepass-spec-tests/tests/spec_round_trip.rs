@@ -32,7 +32,10 @@ fn root_child_count(db: &Database) -> usize {
 #[test]
 fn matrix_round_trip_minimal_database() {
     let combos = round_trip_combos();
-    eprintln!("matrix_round_trip_minimal_database: {} combos", combos.len());
+    eprintln!(
+        "matrix_round_trip_minimal_database: {} combos",
+        combos.len()
+    );
     for combo in &combos {
         eprintln!("  combo: {}", combo.label);
         let (cfg, key) = config_and_key_for(combo);
@@ -117,11 +120,21 @@ fn matrix_round_trip_rich_database_subset() {
         let small = entry
             .attachment_by_name("small.bin")
             .expect("small.bin present");
-        assert_eq!(small.data.get().as_slice(), b"small", "{} small.bin", combo.label);
+        assert_eq!(
+            small.data.get().as_slice(),
+            b"small",
+            "{} small.bin",
+            combo.label
+        );
         let noise = entry
             .attachment_by_name("noise.bin")
             .expect("noise.bin present");
-        assert_eq!(noise.data.get().len(), 4096, "{} noise.bin len", combo.label);
+        assert_eq!(
+            noise.data.get().len(),
+            4096,
+            "{} noise.bin len",
+            combo.label
+        );
         let nonutf8 = entry
             .attachment_by_name("nonutf8.bin")
             .expect("nonutf8.bin present");
@@ -138,9 +151,21 @@ fn matrix_round_trip_rich_database_subset() {
             .attachments_named()
             .map(|(n, _)| n.to_string())
             .collect();
-        assert!(names.contains(&"small.bin".to_string()), "{} small.bin name", combo.label);
-        assert!(names.contains(&"noise.bin".to_string()), "{} noise.bin name", combo.label);
-        assert!(names.contains(&"nonutf8.bin".to_string()), "{} nonutf8.bin name", combo.label);
+        assert!(
+            names.contains(&"small.bin".to_string()),
+            "{} small.bin name",
+            combo.label
+        );
+        assert!(
+            names.contains(&"noise.bin".to_string()),
+            "{} noise.bin name",
+            combo.label
+        );
+        assert!(
+            names.contains(&"nonutf8.bin".to_string()),
+            "{} nonutf8.bin name",
+            combo.label
+        );
 
         // Custom data on Meta.
         assert!(
