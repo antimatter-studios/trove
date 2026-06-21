@@ -1,0 +1,224 @@
+# trove release pipeline
+#
+# Fires when a `vX.Y.Z` tag is pushed (or via manual dispatch against an
+# existing tag). It builds the `trove` + `troved` binaries on native runners,
+# attaches them to a GitHub Release on THIS repo, then renders the Homebrew
+# formula and pushes it to antimatter-studios/homebrew-tap.
+#
+# This is the "source repo owns build + packaging" model: the tap is a thin
+# consumer that only references the artifacts produced here. (Contrast the
+# older pattern where the tap cloned source and built it itself.)
+#
+# Targets — all built on NATIVE runners, so there's no cross-compilation:
+#   * darwin-arm64    (macos-15)        aarch64-apple-darwin
+#   * darwin-x86_64   (macos-15-intel)  x86_64-apple-darwin
+#   * linux-x86_64    (ubuntu-latest)   x86_64-unknown-linux-gnu
+#   * linux-arm64     (ubuntu-24.04-arm) aarch64-unknown-linux-gnu
+#
+# Windows: trove's IPC is Unix-domain-socket based (control, ssh-agent and
+# gpg-agent sockets). Windows users run trove under WSL2 — a real Linux
+# kernel — so the linux-* artifacts cover them. There is no native Windows
+# target here (Homebrew doesn't run on Windows anyway). See docs and the
+# README "Windows (WSL)" note.
+#
+# Prerequisite secret: HOMEBREW_TAP_TOKEN — a fine-grained PAT with
+# contents:write on antimatter-studios/homebrew-tap. GITHUB_TOKEN cannot write
+# to a different repo. If the secret is absent the GitHub Release still
+# succeeds; only the tap publish is skipped (with a warning).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)release, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Gate the release on a green test run. Re-uses the same suite CI runs, so a
+  # tag pushed past a broken main never ships.
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnupg git openssh-client
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2.7.3
+        with:
+          shared-key: release-test
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: darwin-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - label: darwin-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - label: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - label: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2.7.3
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }} -p trove-cli -p troved
+
+      - name: Package tarball + checksum
+        shell: bash
+        run: |
+          set -eux
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW#v}"
+          NAME="trove-${VERSION}-${{ matrix.label }}"
+          BIN="target/${{ matrix.target }}/release"
+          mkdir -p staging
+          cp "${BIN}/trove" "${BIN}/troved" staging/
+          tar czf "${NAME}.tar.gz" -C staging trove troved
+          shasum -a 256 "${NAME}.tar.gz" | cut -d' ' -f1 > "${NAME}.tar.gz.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: |
+            trove-*.tar.gz
+            trove-*.tar.gz.sha256
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build SHA256SUMS
+        shell: bash
+        run: |
+          set -eux
+          cd dist
+          : > SHA256SUMS
+          for f in trove-*.tar.gz; do
+            echo "$(cat "${f}.sha256")  ${f}" >> SHA256SUMS
+          done
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: trove ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/trove-*.tar.gz
+            dist/SHA256SUMS
+
+  bump-tap:
+    name: Publish to Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts (for checksums)
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checkout trove (formula template)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          path: src
+
+      - name: Render formula and push to tap
+        shell: bash
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -eux
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping Homebrew tap publish. \
+          The GitHub Release was created; add the secret and re-run to publish the formula."
+            exit 0
+          fi
+
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW#v}"
+
+          sha() { cat "dist/trove-${VERSION}-$1.tar.gz.sha256"; }
+          SHA_DARWIN_ARM64="$(sha darwin-arm64)"
+          SHA_DARWIN_X86_64="$(sha darwin-x86_64)"
+          SHA_LINUX_ARM64="$(sha linux-arm64)"
+          SHA_LINUX_X86_64="$(sha linux-x86_64)"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/antimatter-studios/homebrew-tap.git" tap
+
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@SHA_DARWIN_ARM64@|${SHA_DARWIN_ARM64}|g" \
+            -e "s|@SHA_DARWIN_X86_64@|${SHA_DARWIN_X86_64}|g" \
+            -e "s|@SHA_LINUX_ARM64@|${SHA_LINUX_ARM64}|g" \
+            -e "s|@SHA_LINUX_X86_64@|${SHA_LINUX_X86_64}|g" \
+            src/packaging/homebrew/trove.rb.tmpl > tap/Formula/trove.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/trove.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for ${VERSION}; nothing to push."
+            exit 0
+          fi
+          git commit -m "trove ${VERSION}: prebuilt binaries (darwin/linux, arm64/x86_64)"
+          git push
