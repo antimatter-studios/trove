@@ -22,7 +22,7 @@ use std::path::Path;
 #[cfg(unix)]
 pub use unix_imp::{bind, connect, ClientStream, Listener, Stream};
 #[cfg(windows)]
-pub use windows_imp::{bind, connect, ClientStream, Listener, Stream};
+pub use windows_imp::{bind, connect, pipe_name, ClientStream, Listener, Stream};
 
 #[cfg(unix)]
 mod unix_imp {
@@ -86,7 +86,7 @@ mod windows_imp {
     /// Map a socket path to a stable pipe name. Pipe names share one flat
     /// namespace, so hash the full path (FNV-1a) to avoid collisions while
     /// staying identical across processes that pass the same path.
-    fn pipe_name(path: &Path) -> OsString {
+    pub fn pipe_name(path: &Path) -> OsString {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in path.to_string_lossy().as_bytes() {
             hash ^= u64::from(*byte);
