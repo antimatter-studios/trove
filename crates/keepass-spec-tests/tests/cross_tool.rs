@@ -1,8 +1,3 @@
-//! Cross-tool reference test: if `keepassxc-cli` is on `PATH`, write a vault
-//! and assert it can list entries. Skip-if-missing — this is the only
-//! "external tool sees our output" test we have until KeePassXC is
-//! installable in CI.
-
 #![forbid(unsafe_code)]
 
 mod common;
@@ -10,7 +5,7 @@ mod common;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use common::{config_and_key_for, rich_database, round_trip_combos};
+use common::{baseline_combo, DEMO_PASSWORD};
 
 fn keepassxc_cli_present() -> bool {
     Command::new("keepassxc-cli")
@@ -29,14 +24,9 @@ fn keepassxc_cli_lists_our_vault() {
         return;
     }
 
-    let combos = round_trip_combos();
-    let combo = combos
-        .iter()
-        .find(|c| c.label == "aes256+gz+inner-chacha20+argon2d")
-        .expect("baseline combo");
-    let (cfg, key) = config_and_key_for(combo);
-    let db = rich_database(cfg);
-    let bytes = common::save_to_vec(&db, key);
+    let combo = baseline_combo();
+    let db = combo.rich_database();
+    let bytes = common::save_to_vec(&db, combo.get_key());
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("fixture.kdbx");
@@ -54,7 +44,7 @@ fn keepassxc_cli_lists_our_vault() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"correct horse battery staple\n")
+        .write_all(format!("{DEMO_PASSWORD}\n").as_bytes())
         .expect("write password");
     let out = child.wait_with_output().expect("wait keepassxc-cli");
     if !out.status.success() {
