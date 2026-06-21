@@ -22,7 +22,7 @@ use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::idle::{IdleState, IdleTracker};
 use crate::materialize::{self, MaterializedFile, MaterializedStore};
 use crate::protocol::{EntryDto, Request, Response};
-use crate::ssh_agent::{keys as ssh_keys, KeyStore, LoadedKey};
+use crate::ssh_agent::{keeagent, keys as ssh_keys, KeyStore, LoadedKey};
 
 pub type SharedState = Arc<Mutex<Option<Vault>>>;
 
@@ -40,12 +40,17 @@ pub async fn handle(
     mat_store: &MaterializedStore,
     idle: &Arc<IdleTracker>,
 ) -> Handled {
-    // Bump on every command except ping. Ping is the keepalive heartbeat —
-    // counting it would let a stuck client trivially defeat the auto-lock.
-    // unlock/lock/shutdown handle the timer state explicitly below; bumping
-    // them here is harmless because start_or_reset / cancel run after.
-    if !matches!(req, Request::Ping) {
-        idle.bump();
+    // Bump only on commands that represent real user activity. Read-only
+    // inspection commands (Status, GetIdleTimeout, MaterializeStatus) and the
+    // keepalive (Ping) deliberately don't bump — a `watch -n1 trove status`
+    // or a polling materialize-status UI would otherwise indefinitely defeat
+    // the auto-lock. unlock/lock/shutdown manage the timer state explicitly
+    // below; bumping them here would be redundant but harmless. SSH and GPG
+    // agent traffic bumps the timer from inside the agent listeners, not via
+    // this path.
+    match req {
+        Request::Ping | Request::Status | Request::GetIdleTimeout | Request::MaterializeStatus => {}
+        _ => idle.bump(),
     }
     match req {
         Request::Ping => Handled {
@@ -53,7 +58,11 @@ pub async fn handle(
             shutdown: false,
         },
 
-        Request::Unlock { path, password } => {
+        Request::Unlock {
+            path,
+            password,
+            timeout,
+        } => {
             let path_buf = PathBuf::from(path);
             // trove-core's Vault::open is sync (and may do blocking file I/O +
             // KDF work). Wrap it in spawn_blocking to keep the runtime healthy.
@@ -95,10 +104,13 @@ pub async fn handle(
                         let mut gkeys = gpg_store.write().await;
                         *gkeys = loaded_gpg;
                     }
-                    // Arm the idle-lock timer with the current configured
-                    // timeout. If the timeout is 0 the tracker treats this as
-                    // "disabled" and never fires.
-                    let timeout_secs = idle.current_timeout_secs();
+                    // Arm the idle-lock timer. If the unlock request carried
+                    // an explicit `timeout`, that value also becomes the new
+                    // configured timeout going forward (start_or_reset writes
+                    // both the timeout and last-activity). Otherwise we fall
+                    // back to whatever the daemon already had configured.
+                    // `0` disables auto-lock for either path.
+                    let timeout_secs = timeout.unwrap_or_else(|| idle.current_timeout_secs());
                     idle.start_or_reset(Duration::from_secs(timeout_secs));
                     Handled {
                         response: Response::ok_empty(),
@@ -133,6 +145,7 @@ pub async fn handle(
                             username: s.username,
                             url: s.url,
                             attachments: s.attachment_names,
+                            group_path: s.group_path,
                         })
                         .collect();
                     Handled {
@@ -341,83 +354,121 @@ pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
     out
 }
 
-/// Walk every attachment on every entry in `vault`. For each attachment whose
-/// bytes look like an OpenSSH private key (PEM `-----BEGIN OPENSSH PRIVATE
-/// KEY-----` envelope), parse it and load. Supports ed25519, RSA >= 2048,
-/// ECDSA P-256, ECDSA P-384.
+/// Walk every entry in `vault` and collect SSH private keys.
 ///
-/// Discovery is by content, not by attachment name. KeePassXC users typically
-/// store SSH keys as attachments named after the file (`id_ed25519`,
-/// `id_rsa`, `id_ecdsa`, `github.pem`, etc.) — there is no single canonical
-/// name across the ecosystem. Iterating everything and trying to parse is
-/// cheaper than maintaining a name allowlist, and lets any KeePassXC vault
-/// "just work".
+/// If an entry has a `KeeAgent.settings` attachment, we follow it: load only
+/// the attachment it declares (if `AllowUseOfSshKey` + `AddAtDatabaseOpen`
+/// are both true). Entries that explicitly opt out are skipped entirely.
 ///
-/// Logging policy: silent skip for attachments that don't carry the OpenSSH
-/// PEM header (typical: docs, configs, screenshots — log spam wastes the
-/// reader's attention). Warning log only for attachments that *look* like
-/// keys but fail parse (encrypted, weak RSA, unsupported algorithm). The
-/// ssh-agent comment shown by `ssh-add -l` is `<entry title>:<attachment name>`
-/// so users can tell multiple keys per entry apart.
+/// If no `KeeAgent.settings` is present we fall back to content scanning:
+/// every attachment is probed, and anything that parses as a private key is
+/// loaded. This keeps plain KeePassXC vaults working without any settings blob.
+///
+/// The ssh-agent comment (`ssh-add -l`) is `<path>:<attachment>` (or just
+/// `<path>` for the conventional `id` attachment name) where `<path>` is the
+/// full group-prefixed title (`Work/SSH/github`).
 pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
     let mut out = Vec::new();
     let entries: Vec<EntrySummary> = vault.list_entries();
     for entry in entries {
-        for attachment_name in &entry.attachment_names {
-            let bytes = match vault.read_binary(&entry.id, attachment_name) {
+        if entry
+            .attachment_names
+            .iter()
+            .any(|a| a == keeagent::ATTACHMENT_NAME)
+        {
+            // KeeAgent.settings present — let it decide which attachment to load.
+            let settings_bytes = match vault.read_binary(&entry.id, keeagent::ATTACHMENT_NAME) {
                 Ok(Some(b)) => b,
                 Ok(None) => continue,
                 Err(e) => {
                     eprintln!(
-                        "ssh-agent: failed to read attachment '{}' on entry '{}': {}",
-                        attachment_name, entry.title, e
+                        "keeagent: failed to read KeeAgent.settings on '{}': {}",
+                        entry.title, e
                     );
                     continue;
                 }
             };
-            // The agent identity comment users will see in `ssh-add -l`.
-            // `<title>:<attachment>` for entries with multiple keys; just
-            // `<title>` if the attachment name is the conventional `id`.
-            let comment = if attachment_name == "id" {
-                entry.title.clone()
-            } else {
-                format!("{}:{}", entry.title, attachment_name)
-            };
-            match ssh_keys::parse_private_key(&bytes, &comment) {
-                Ok(loaded) => out.push(loaded),
-                Err(ssh_keys::ParseError::NotOpenssh(_)) => {
-                    // Not an SSH key — typical case for non-key attachments.
-                    // Silent skip; logging would be noise for any vault that
-                    // mixes keys and other files.
+            match keeagent::parse(&settings_bytes, &entry.title) {
+                keeagent::Decision::Skip => {}
+                keeagent::Decision::Load(att_name) => {
+                    if let Some(k) = try_load_ssh_attachment(vault, &entry, &att_name) {
+                        out.push(k);
+                    }
                 }
-                Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
-                    eprintln!(
-                        "ssh-agent: skipping {}/{}: unsupported key algorithm {} \
-                         (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)",
-                        entry.title, attachment_name, alg
-                    );
-                }
-                Err(ssh_keys::ParseError::RsaTooSmall(bits)) => {
-                    eprintln!(
-                        "ssh-agent: skipping {}/{}: RSA key too short ({} bits, \
-                         minimum 2048)",
-                        entry.title, attachment_name, bits
-                    );
-                }
-                Err(ssh_keys::ParseError::Encrypted) => {
-                    eprintln!(
-                        "ssh-agent: skipping {}/{}: encrypted private keys not supported",
-                        entry.title, attachment_name
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "ssh-agent: skipping {}/{}: {}",
-                        entry.title, attachment_name, e
-                    );
+            }
+        } else {
+            // No KeeAgent.settings — content scan every attachment.
+            for att_name in &entry.attachment_names {
+                if let Some(k) = try_load_ssh_attachment(vault, &entry, att_name) {
+                    out.push(k);
                 }
             }
         }
     }
     out
+}
+
+/// Try to read and parse a single attachment as an SSH private key.
+/// Silent on non-key content; warns on PEM-shaped blobs that fail to parse.
+fn try_load_ssh_attachment(
+    vault: &Vault,
+    entry: &EntrySummary,
+    attachment_name: &str,
+) -> Option<LoadedKey> {
+    let bytes = match vault.read_binary(&entry.id, attachment_name) {
+        Ok(Some(b)) => b,
+        Ok(None) => return None,
+        Err(e) => {
+            eprintln!(
+                "ssh-agent: failed to read '{}' on '{}': {}",
+                attachment_name, entry.title, e
+            );
+            return None;
+        }
+    };
+    let display = entry.display_path();
+    let comment = if attachment_name == "id" {
+        display.clone()
+    } else {
+        format!("{display}:{attachment_name}")
+    };
+    match ssh_keys::parse_private_key(&bytes, &comment) {
+        Ok(loaded) => Some(loaded),
+        Err(ssh_keys::ParseError::NotOpenssh(detail)) => {
+            if bytes.starts_with(b"-----BEGIN") {
+                eprintln!(
+                    "ssh-agent: skipping {}/{}: looks like a private key \
+                     but failed to parse ({detail})",
+                    display, attachment_name
+                );
+            }
+            None
+        }
+        Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
+            eprintln!(
+                "ssh-agent: skipping {}/{}: unsupported key algorithm {} \
+                 (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)",
+                display, attachment_name, alg
+            );
+            None
+        }
+        Err(ssh_keys::ParseError::RsaTooSmall(bits)) => {
+            eprintln!(
+                "ssh-agent: skipping {}/{}: RSA key too short ({} bits, minimum 2048)",
+                display, attachment_name, bits
+            );
+            None
+        }
+        Err(ssh_keys::ParseError::Encrypted) => {
+            eprintln!(
+                "ssh-agent: skipping {}/{}: encrypted private keys not supported",
+                display, attachment_name
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("ssh-agent: skipping {}/{}: {}", display, attachment_name, e);
+            None
+        }
+    }
 }

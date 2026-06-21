@@ -150,6 +150,7 @@ async fn idle_expiry_clears_all_secret_material() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -224,6 +225,7 @@ async fn explicit_lock_cancels_timer() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(target.exists());
@@ -240,9 +242,14 @@ async fn explicit_lock_cancels_timer() {
     assert!(matches!(resp, Response::Err { .. }));
 }
 
-/// Activity from the CLI control RPC resets the timer. While we're running
-/// `MaterializeStatus` (which counts as activity per the handler) at 500ms
-/// intervals, the 1s timer should never fire. Stop activity, wait, fire.
+/// Activity from a "real action" RPC resets the timer. `List` reads vault
+/// contents and counts as activity per the handler — at 500ms intervals the
+/// 1s timer should never fire. Stop the activity, wait past the deadline,
+/// fire.
+///
+/// (Read-only inspection commands like `Status` / `MaterializeStatus` /
+/// `GetIdleTimeout` deliberately do NOT bump — covered by
+/// `status_request_does_not_bump_idle_timer` in status_rpc_e2e.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_rpc_activity_keeps_vault_unlocked() {
     let tmp = TempDir::new().expect("tempdir");
@@ -255,6 +262,7 @@ async fn control_rpc_activity_keeps_vault_unlocked() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(target.exists());
@@ -263,7 +271,7 @@ async fn control_rpc_activity_keeps_vault_unlocked() {
     // fire should occur.
     for _ in 0..6 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let _ = h.handle(Request::MaterializeStatus).await;
+        let _ = h.handle(Request::List).await;
     }
     let resp = h.handle(Request::List).await;
     assert!(
@@ -317,6 +325,7 @@ async fn ssh_agent_traffic_resets_idle_timer() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(target.exists());
@@ -364,4 +373,87 @@ async fn send_request_identities(sock: &Path) {
     let n = u32::from_be_bytes(len_buf) as usize;
     let mut body = vec![0u8; n];
     let _ = stream.read_exact(&mut body).await;
+}
+
+/// `trove unlock --timeout=N` semantics: the timeout carried on the Unlock
+/// request overrides whatever was previously configured on the daemon (the
+/// startup default, or any prior `set-idle-timeout`). The new value also
+/// sticks as the configured timeout for subsequent unlocks/queries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unlock_timeout_overrides_configured_value() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("v.kdbx");
+    let target = tmp.path().join("m");
+    create_vault_with_materialize(&vault_path, &target);
+
+    // Daemon comes up with a long default — the unlock request must override.
+    let h = Harness::new(Duration::from_secs(300));
+
+    // Sanity: configured timeout reads as 300 before unlock.
+    let resp = h.handle(Request::GetIdleTimeout).await;
+    let body = serde_json::to_value(&resp).unwrap();
+    assert_eq!(body["seconds"], 300);
+
+    // Unlock with timeout=1 second. Should arm the timer at 1s, not 300s.
+    let resp = h
+        .handle(Request::Unlock {
+            path: vault_path.to_string_lossy().into_owned(),
+            password: PASSWORD.to_string(),
+            timeout: Some(1),
+        })
+        .await;
+    assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
+    assert!(target.exists());
+
+    // Configured timeout is now 1 (start_or_reset writes both fields).
+    let resp = h.handle(Request::GetIdleTimeout).await;
+    let body = serde_json::to_value(&resp).unwrap();
+    assert_eq!(
+        body["seconds"], 1,
+        "expected timeout=1 after unlock; got {body}"
+    );
+    assert!(body["remaining"].is_number());
+
+    // Wait past the 1s deadline with no activity. If the override didn't
+    // take, the original 300s would keep the vault live and this assertion
+    // would fail.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let resp = h.handle(Request::List).await;
+    assert!(
+        matches!(resp, Response::Err { .. }),
+        "vault should have auto-locked at the overridden 1s timeout"
+    );
+    assert!(!target.exists());
+}
+
+/// `trove unlock` (no `--timeout`) keeps whatever timeout was already
+/// configured on the daemon. Exercises the `timeout: None` path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unlock_without_timeout_preserves_configured_value() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("v.kdbx");
+    let target = tmp.path().join("m");
+    create_vault_with_materialize(&vault_path, &target);
+
+    // Default 300s — but we'll reduce via SetIdleTimeout, then unlock without
+    // a flag, and check that the daemon still uses the prior value.
+    let h = Harness::new(Duration::from_secs(300));
+    let _ = h.handle(Request::SetIdleTimeout { seconds: 1 }).await;
+
+    let resp = h
+        .handle(Request::Unlock {
+            path: vault_path.to_string_lossy().into_owned(),
+            password: PASSWORD.to_string(),
+            timeout: None,
+        })
+        .await;
+    assert!(matches!(resp, Response::Ok(_)));
+
+    let resp = h.handle(Request::GetIdleTimeout).await;
+    let body = serde_json::to_value(&resp).unwrap();
+    assert_eq!(body["seconds"], 1, "prior set-idle-timeout must survive");
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let resp = h.handle(Request::List).await;
+    assert!(matches!(resp, Response::Err { .. }));
 }

@@ -15,6 +15,12 @@ pub enum Request {
         path: String,
         // NOTE: sensitive — never Debug-print a Request that may carry this.
         password: String,
+        /// Optional idle-lock timeout (seconds) to set as part of this
+        /// unlock. `Some(0)` disables auto-lock. `None` keeps whatever the
+        /// daemon already has configured (env var default, or whatever a
+        /// prior `set-idle-timeout` left behind). Wire-optional for back-compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
     },
     List,
     Lock,
@@ -39,10 +45,11 @@ impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Request::Ping => f.write_str("Ping"),
-            Request::Unlock { path, .. } => f
+            Request::Unlock { path, timeout, .. } => f
                 .debug_struct("Unlock")
                 .field("path", path)
                 .field("password", &"<redacted>")
+                .field("timeout", timeout)
                 .finish(),
             Request::List => f.write_str("List"),
             Request::Lock => f.write_str("Lock"),
@@ -65,6 +72,12 @@ pub struct EntryDto {
     pub username: Option<String>,
     pub url: Option<String>,
     pub attachments: Vec<String>,
+    /// Names of the groups containing this entry, root → leaf. Root group
+    /// itself is excluded — an entry directly under root has an empty
+    /// `group_path`. Older clients that ignore this field still get a
+    /// usable `title`.
+    #[serde(default)]
+    pub group_path: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

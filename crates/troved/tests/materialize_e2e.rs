@@ -142,6 +142,7 @@ async fn unlock_writes_file_lock_wipes_it() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -192,6 +193,7 @@ async fn ttl_wipes_file_while_vault_remains_unlocked() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
@@ -232,6 +234,7 @@ async fn multi_file_unlock_and_lock() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
@@ -281,6 +284,7 @@ async fn one_bad_entry_does_not_block_others() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock should still ok");
@@ -308,6 +312,7 @@ async fn missing_parent_dir_rejected_other_entries_still_materialize() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
