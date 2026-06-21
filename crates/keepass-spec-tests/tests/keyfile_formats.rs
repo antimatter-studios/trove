@@ -20,7 +20,10 @@ fn drive(kind: KeyfileKind, label: &str) {
     // pick the keyfile-only combo for a deterministic key
     let combo = combos
         .iter()
-        .find(|c| c.label.contains("aes256+gz+inner-chacha20+argon2d+kf-raw32"))
+        .find(|c| {
+            c.label
+                .contains("aes256+gz+inner-chacha20+argon2d+kf-raw32")
+        })
         .expect("baseline keyfile combo");
     let (cfg, _) = config_and_key_for(combo);
 
@@ -68,7 +71,10 @@ fn keyfile_invalid_xml_falls_back_to_hash() {
     // which is itself a bug.
     let combo = round_trip_combos()
         .into_iter()
-        .find(|c| c.label.contains("aes256+gz+inner-chacha20+argon2d+kf-raw32"))
+        .find(|c| {
+            c.label
+                .contains("aes256+gz+inner-chacha20+argon2d+kf-raw32")
+        })
         .unwrap();
     let (cfg, _) = config_and_key_for(&combo);
     let garbage = b"<not><a><keyfile></a></not>".to_vec();
@@ -90,7 +96,10 @@ fn keyfile_empty_is_rejected_or_consistent() {
     // consistent — same input → same key → same vault opens.
     let combo = round_trip_combos()
         .into_iter()
-        .find(|c| c.label.contains("aes256+gz+inner-chacha20+argon2d+kf-raw32"))
+        .find(|c| {
+            c.label
+                .contains("aes256+gz+inner-chacha20+argon2d+kf-raw32")
+        })
         .unwrap();
     let (cfg, _) = config_and_key_for(&combo);
     let key = DatabaseKey::new()

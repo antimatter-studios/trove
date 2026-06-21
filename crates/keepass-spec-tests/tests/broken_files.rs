@@ -301,12 +301,8 @@ fn locate_header_end(blob: &[u8]) -> Option<usize> {
     let mut off = 12usize;
     while off + 5 <= blob.len() {
         let tag = blob[off];
-        let len = u32::from_le_bytes([
-            blob[off + 1],
-            blob[off + 2],
-            blob[off + 3],
-            blob[off + 4],
-        ]) as usize;
+        let len = u32::from_le_bytes([blob[off + 1], blob[off + 2], blob[off + 3], blob[off + 4]])
+            as usize;
         off += 5 + len;
         if tag == 0 {
             // HEADER_END — its payload (4 bytes "\r\n\r\n") is also consumed by `+= 5 + len`.
@@ -322,12 +318,8 @@ fn locate_header_field(blob: &[u8], tag_wanted: u8) -> Option<usize> {
     let mut off = 12usize;
     while off + 5 <= blob.len() {
         let tag = blob[off];
-        let len = u32::from_le_bytes([
-            blob[off + 1],
-            blob[off + 2],
-            blob[off + 3],
-            blob[off + 4],
-        ]) as usize;
+        let len = u32::from_le_bytes([blob[off + 1], blob[off + 2], blob[off + 3], blob[off + 4]])
+            as usize;
         if tag == tag_wanted {
             return Some(off + 5);
         }

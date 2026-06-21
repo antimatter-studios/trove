@@ -3,8 +3,8 @@
 //! Headline scenario: create a vault, store an SSH-style private key as a
 //! binary attachment, save, drop, reopen, and verify byte-for-byte equality.
 
-use trove_core::{Error, Vault};
 use tempfile::TempDir;
+use trove_core::{Error, Vault};
 
 /// A realistic ~400-byte stand-in for an OpenSSH ed25519 private key. Not a
 /// real key — just shaped like one so the binary path is exercised on data

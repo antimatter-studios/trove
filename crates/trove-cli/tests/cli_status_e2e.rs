@@ -11,16 +11,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Mutex, Notify, RwLock};
 use trove_core::Vault;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::ssh_agent::KeyStore;
-use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, Notify, RwLock};
 
 const PASSWORD: &str = "cli-e2e-test-pw";
 

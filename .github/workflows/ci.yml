@@ -5,15 +5,19 @@
 #   - Test (ubuntu-latest, macos-latest): cargo test --workspace --locked
 #   - Clippy (ubuntu-latest):              cargo clippy ... -- -D warnings (--no-deps)
 #   - Fmt (ubuntu-latest):                 cargo fmt --all -- --check
-#   - Audit (ubuntu-latest):               cargo audit (advisory check; non-blocking)
-#   - MSRV (ubuntu-latest):                cargo check on Rust 1.75 (declared MSRV)
+#   - Audit (ubuntu-latest):               cargo audit (advisory check)
 #
 # Notes:
 #   * `--locked` everywhere so a stale Cargo.lock fails CI.
-#   * `--no-deps` on clippy to skip the vendored `keepass` crate's pre-existing
-#     dead-code warning that we intentionally don't fix.
-#   * Audit is `continue-on-error: true` because the vendored keepass fork may
-#     carry advisories we cannot easily resolve; the result is still surfaced.
+#   * `--no-deps` on clippy to skip pre-existing warnings in third-party crates.
+#   * Audit ignores RUSTSEC-2023-0071 (Marvin attack on `rsa` 0.9.x) because
+#     trove only uses `rsa` for SSH-agent signing, not decryption — see the
+#     audit step's inline comment for the full rationale.
+#   * No MSRV job: trove is a binary application, not a library, so MSRV
+#     (which exists for library consumers to pick a version) doesn't apply.
+#     Build policy is "current stable Rust"; the Test jobs verify that.
+#     Transitive deps adopting Edition 2024 was making the MSRV floor
+#     ratchet on every dep update with no real benefit.
 #   * No auto-fmt: if the tree isn't fmt-clean we want the job to fail loudly
 #     rather than mutate code in CI. Run the `fmt-fix` workflow manually to fix.
 #   * No deploy / coverage jobs by design (out of scope).
@@ -146,24 +150,10 @@ jobs:
           fi
 
       - name: cargo audit
-        run: cargo audit
-
-  msrv:
-    name: MSRV
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (1.75 — declared MSRV)
-        uses: dtolnay/rust-toolchain@1.75.0
-
-      - name: Cargo cache
-        uses: Swatinem/rust-cache@v2.7.3
-        with:
-          key: ubuntu-latest-msrv-${{ hashFiles('**/Cargo.lock') }}
-          shared-key: msrv
-
-      - name: cargo check (no tests)
-        # Just verify the workspace compiles on the declared minimum toolchain.
-        run: cargo check --workspace --locked
+        # RUSTSEC-2023-0071 (Marvin Attack on `rsa` 0.9.x) is ignored: it's a
+        # timing-sidechannel in RSA *decryption*, no upstream fix exists, and
+        # the only paths in trove that touch `rsa` are SSH-agent signing
+        # (different code path) and key parsing — not decryption. The threat
+        # model also requires same-UID adversary, who can already ptrace the
+        # daemon. Re-evaluate when an `rsa` 0.9.x patch ships.
+        run: cargo audit --ignore RUSTSEC-2023-0071
