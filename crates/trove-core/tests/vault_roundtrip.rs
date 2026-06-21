@@ -174,6 +174,88 @@ fn remove_binary_is_no_op_when_missing_and_drops_when_present() {
         .is_empty());
 }
 
+/// Path-form titles create the group hierarchy on add and the entry lives
+/// in the leaf group. `list_entries` surfaces the path via `group_path` and
+/// `display_path()`, and the structure survives save+reopen.
+#[test]
+fn add_entry_with_path_creates_groups_and_round_trips() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.kdbx");
+    let id = {
+        let mut vault = Vault::create(&path, "pw").expect("create");
+        let id = vault
+            .add_entry("Work/SSH/github")
+            .expect("add nested entry");
+        vault.save().expect("save");
+        id
+    };
+
+    let vault = Vault::open(&path, "pw").expect("reopen");
+    let summary = vault.get_entry(&id).expect("entry survives reopen");
+    assert_eq!(summary.title, "github", "leaf becomes the entry title");
+    assert_eq!(
+        summary.group_path,
+        vec!["Work".to_string(), "SSH".to_string()],
+        "group_path mirrors the leading segments of the input"
+    );
+    assert_eq!(summary.display_path(), "Work/SSH/github");
+
+    // mkdir -p semantics: a second entry under the same prefix must reuse
+    // the existing groups rather than create duplicates.
+    let mut vault = vault;
+    let _ = vault
+        .add_entry("Work/SSH/gitlab")
+        .expect("add second nested entry");
+
+    let display_paths: Vec<String> = vault
+        .list_entries()
+        .into_iter()
+        .map(|e| e.display_path())
+        .collect();
+    assert!(display_paths.contains(&"Work/SSH/github".into()));
+    assert!(display_paths.contains(&"Work/SSH/gitlab".into()));
+    assert_eq!(display_paths.len(), 2);
+}
+
+/// Path-aware `find_by_title`: a query with `/` matches by exact path, a
+/// query without `/` falls back to leaf-only matching across all groups.
+#[test]
+fn find_by_title_supports_paths_and_leaf_fallback() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.kdbx");
+    let mut vault = Vault::create(&path, "pw").expect("create");
+    let nested = vault
+        .add_entry("Work/SSH/github")
+        .expect("add nested entry");
+    let _root = vault.add_entry("root-only").expect("add root entry");
+
+    assert_eq!(
+        vault.find_by_title("Work/SSH/github"),
+        Some(nested.clone()),
+        "exact path lookup hits the nested entry"
+    );
+    // Leaf-only lookup walks all groups; "github" still resolves to the
+    // nested entry because nothing at root shares the leaf.
+    assert_eq!(vault.find_by_title("github"), Some(nested));
+    // Wrong path → None even though the leaf exists somewhere.
+    assert!(vault.find_by_title("Personal/github").is_none());
+    assert!(vault.find_by_title("missing").is_none());
+}
+
+/// Path validation: empty segments and the empty title are rejected.
+#[test]
+fn add_entry_rejects_malformed_paths() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.kdbx");
+    let mut vault = Vault::create(&path, "pw").expect("create");
+    for bad in ["", "/leading", "trailing/", "double//slash", "/"] {
+        match vault.add_entry(bad) {
+            Err(Error::InvalidPath(_)) => {}
+            other => panic!("expected InvalidPath for {bad:?}, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn delete_entry_removes_from_listing() {
     let dir = TempDir::new().unwrap();
