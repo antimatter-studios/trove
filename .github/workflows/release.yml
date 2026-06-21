@@ -92,6 +92,13 @@ jobs:
           - label: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          # Windows builds the native target (trove.exe / troved.exe over named
+          # pipes). Not consumed by Homebrew (Unix-only); shipped as a .zip on
+          # the GitHub Release for direct download. WSL users take a linux-*
+          # build instead.
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -111,7 +118,10 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }} -p trove-cli -p troved
 
-      - name: Package tarball + checksum
+      # Checksums are computed centrally on Ubuntu (release + bump-tap jobs)
+      # where `shasum` is reliable, so packaging here is archive-only.
+      - name: Package tarball (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -eux
@@ -122,7 +132,18 @@ jobs:
           mkdir -p staging
           cp "${BIN}/trove" "${BIN}/troved" staging/
           tar czf "${NAME}.tar.gz" -C staging trove troved
-          shasum -a 256 "${NAME}.tar.gz" | cut -d' ' -f1 > "${NAME}.tar.gz.sha256"
+
+      - name: Package zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $raw = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = $raw -replace '^v', ''
+          $name = "trove-$version-${{ matrix.label }}"
+          $bin = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item "$bin/trove.exe","$bin/troved.exe" staging/
+          Compress-Archive -Path staging/* -DestinationPath "$name.zip" -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -130,7 +151,7 @@ jobs:
           name: ${{ matrix.label }}
           path: |
             trove-*.tar.gz
-            trove-*.tar.gz.sha256
+            trove-*.zip
           retention-days: 1
 
   release:
@@ -149,10 +170,8 @@ jobs:
         run: |
           set -eux
           cd dist
-          : > SHA256SUMS
-          for f in trove-*.tar.gz; do
-            echo "$(cat "${f}.sha256")  ${f}" >> SHA256SUMS
-          done
+          shasum -a 256 trove-*.tar.gz trove-*.zip > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
@@ -162,6 +181,7 @@ jobs:
           generate_release_notes: true
           files: |
             dist/trove-*.tar.gz
+            dist/trove-*.zip
             dist/SHA256SUMS
 
   bump-tap:
@@ -196,7 +216,9 @@ jobs:
           RAW="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${RAW#v}"
 
-          sha() { cat "dist/trove-${VERSION}-$1.tar.gz.sha256"; }
+          # Compute the per-target checksums the formula needs (Unix only —
+          # Windows ships via the GitHub Release, not Homebrew).
+          sha() { shasum -a 256 "dist/trove-${VERSION}-$1.tar.gz" | cut -d' ' -f1; }
           SHA_DARWIN_ARM64="$(sha darwin-arm64)"
           SHA_DARWIN_X86_64="$(sha darwin-x86_64)"
           SHA_LINUX_ARM64="$(sha linux-arm64)"

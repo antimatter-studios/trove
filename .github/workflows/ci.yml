@@ -83,6 +83,29 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+  # Windows is supported by compiling to native named-pipe IPC. We build the
+  # shipping binaries (not the test suite — some integration-test helpers are
+  # Unix-socket specific) so a regression in the cross-platform `ipc` layer
+  # fails CI here rather than only on a release tag.
+  build-windows:
+    name: Build (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2.7.3
+        with:
+          key: windows-build-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: windows
+
+      - name: cargo build (trove + troved)
+        run: cargo build --locked -p trove-cli -p troved
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
