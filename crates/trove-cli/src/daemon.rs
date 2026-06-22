@@ -19,6 +19,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
@@ -93,6 +94,95 @@ pub fn send(req: &Request) -> Result<Value> {
 /// error) vs. surfacing the raw daemon message.
 pub fn is_daemon_not_running(err: &anyhow::Error) -> bool {
     err.to_string().contains("troved is not running")
+}
+
+/// Like `send`, but if the daemon isn't running we spawn `troved` ourselves,
+/// wait for the socket to come up, then retry. Used by every CLI command that
+/// talks to the daemon so users never need to start `troved` manually.
+///
+/// Opt out by setting `TROVE_NO_AUTOSPAWN=1` (used by tests that assert the
+/// "not running" error path).
+///
+/// Race note: two concurrent `send_autospawn` calls may both see "not running"
+/// and both spawn — and `troved` unconditionally unlinks the existing socket
+/// on startup, so the second spawn wins and the first daemon is orphaned.
+/// Humans don't run `trove` commands in parallel; if you script around this,
+/// serialize externally.
+pub fn send_autospawn(req: &Request) -> Result<Value> {
+    match send(req) {
+        Ok(v) => Ok(v),
+        Err(e) if is_daemon_not_running(&e) && !autospawn_disabled() => {
+            spawn_daemon()?;
+            wait_for_socket(Duration::from_secs(5))?;
+            send(req)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn autospawn_disabled() -> bool {
+    matches!(std::env::var("TROVE_NO_AUTOSPAWN").as_deref(), Ok("1"))
+}
+
+/// Resolve which `troved` binary to spawn. Order:
+/// 1. `TROVE_DAEMON_BIN` env var (explicit override; used by tests).
+/// 2. Sibling of the current `trove` executable — covers the common install
+///    layouts: `cargo install` deposits both binaries in `~/.cargo/bin`;
+///    `target/{debug,release}/` during development.
+/// 3. Bare `troved` — falls back to a PATH lookup at spawn time.
+fn troved_binary_path() -> PathBuf {
+    if let Ok(p) = std::env::var("TROVE_DAEMON_BIN") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    if let Ok(this) = std::env::current_exe() {
+        if let Some(parent) = this.parent() {
+            let sibling = parent.join("troved");
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from("troved")
+}
+
+/// Spawn `troved` detached from this process: own process group, nulled
+/// stdio. After `trove` exits, the daemon is reparented to init/launchd and
+/// keeps running.
+fn spawn_daemon() -> Result<()> {
+    let bin = troved_binary_path();
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Detach from trove's process group so a Ctrl-C in the shell after
+        // trove returns won't propagate to the daemon.
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+        .with_context(|| format!("spawning daemon binary {}", bin.display()))?;
+    Ok(())
+}
+
+/// Poll the control socket until a connect succeeds, or `total` elapses.
+fn wait_for_socket(total: Duration) -> Result<()> {
+    let sock = control_socket_path();
+    let deadline = Instant::now() + total;
+    while Instant::now() < deadline {
+        if UnixStream::connect(&sock).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(anyhow!(
+        "spawned troved but socket {} never became reachable within {}s",
+        sock.display(),
+        total.as_secs()
+    ))
 }
 
 /// Extract `{"status":"err","error":"..."}` from a parsed daemon response.
@@ -208,6 +298,103 @@ mod tests {
         let req_json: Value = serde_json::from_str(req_line.trim()).expect("parse req");
         assert_eq!(req_json["cmd"], "status");
 
+        std::env::remove_var("TROVE_SOCK");
+    }
+
+    /// `TROVE_NO_AUTOSPAWN=1` is the documented opt-out switch. Anything else
+    /// (unset, "0", "true") leaves auto-spawn enabled.
+    #[test]
+    fn autospawn_disabled_only_for_exactly_one() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("TROVE_NO_AUTOSPAWN", "1");
+        assert!(autospawn_disabled(), "\"1\" must disable autospawn");
+        std::env::set_var("TROVE_NO_AUTOSPAWN", "0");
+        assert!(!autospawn_disabled(), "\"0\" must NOT disable autospawn");
+        std::env::set_var("TROVE_NO_AUTOSPAWN", "true");
+        assert!(!autospawn_disabled(), "\"true\" must NOT disable autospawn");
+        std::env::remove_var("TROVE_NO_AUTOSPAWN");
+        assert!(!autospawn_disabled(), "unset must NOT disable autospawn");
+    }
+
+    /// `TROVE_DAEMON_BIN` (when non-empty) wins. An empty value is ignored and
+    /// resolution falls through to the sibling/PATH lookup, which always ends
+    /// in a file named `troved`.
+    #[test]
+    fn troved_binary_path_honors_override() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("TROVE_DAEMON_BIN", "/opt/custom/troved-x");
+        assert_eq!(troved_binary_path(), PathBuf::from("/opt/custom/troved-x"));
+
+        // Empty override is ignored — fall through. Whatever we land on, the
+        // basename is `troved` (sibling-of-exe or the bare PATH fallback).
+        std::env::set_var("TROVE_DAEMON_BIN", "");
+        let p = troved_binary_path();
+        assert_eq!(
+            p.file_name().and_then(|s| s.to_str()),
+            Some("troved"),
+            "empty override should fall through to a path ending in `troved`; got {p:?}"
+        );
+        std::env::remove_var("TROVE_DAEMON_BIN");
+    }
+
+    /// `wait_for_socket` polls until a connect succeeds. With nothing bound it
+    /// must give up and return an error roughly after the deadline (not hang).
+    #[test]
+    fn wait_for_socket_times_out_when_unbound() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("never.sock");
+        std::env::set_var("TROVE_SOCK", &sock);
+
+        let start = Instant::now();
+        let err = wait_for_socket(Duration::from_millis(150)).expect_err("should time out");
+        let elapsed = start.elapsed();
+
+        assert!(
+            err.to_string().contains("never became reachable"),
+            "unexpected error: {err}"
+        );
+        // Bounded: at least the deadline, and not absurdly longer.
+        assert!(elapsed >= Duration::from_millis(150), "returned too early");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "overshot deadline: {elapsed:?}"
+        );
+        std::env::remove_var("TROVE_SOCK");
+    }
+
+    /// When a listener IS bound at the resolved path, `wait_for_socket` returns
+    /// `Ok` quickly.
+    #[test]
+    fn wait_for_socket_succeeds_when_listener_bound() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("up.sock");
+        let _listener = UnixListener::bind(&sock).expect("bind");
+        std::env::set_var("TROVE_SOCK", &sock);
+
+        wait_for_socket(Duration::from_secs(2)).expect("socket is bound; should succeed");
+        std::env::remove_var("TROVE_SOCK");
+    }
+
+    /// With auto-spawn disabled and no daemon, `send_autospawn` must surface the
+    /// friendly "not running" error WITHOUT spawning anything (the spawn path is
+    /// what the opt-out exists to suppress).
+    #[test]
+    fn send_autospawn_opt_out_reports_not_running() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("absent.sock");
+        std::env::set_var("TROVE_SOCK", &sock);
+        std::env::set_var("TROVE_NO_AUTOSPAWN", "1");
+
+        let err = send_autospawn(&Request::Ping).expect_err("no daemon, no spawn");
+        assert!(
+            is_daemon_not_running(&err),
+            "expected 'not running' classification; got {err}"
+        );
+
+        std::env::remove_var("TROVE_NO_AUTOSPAWN");
         std::env::remove_var("TROVE_SOCK");
     }
 }

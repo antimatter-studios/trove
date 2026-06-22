@@ -63,6 +63,25 @@ pub struct EntrySummary {
     pub username: Option<String>,
     pub url: Option<String>,
     pub attachment_names: Vec<String>,
+    /// Names of the groups containing this entry, root → leaf. Root group
+    /// itself is excluded (an entry directly under root has an empty
+    /// `group_path`). Use `display_path()` to render as `Group/Sub/Title`.
+    pub group_path: Vec<String>,
+}
+
+impl EntrySummary {
+    /// Format the full path as `Group/Sub/.../Title`. Falls back to just
+    /// the title when the entry lives at the root.
+    pub fn display_path(&self) -> String {
+        if self.group_path.is_empty() {
+            self.title.clone()
+        } else {
+            let mut s = self.group_path.join("/");
+            s.push('/');
+            s.push_str(&self.title);
+            s
+        }
+    }
 }
 
 /// An open, in-memory vault.
@@ -180,11 +199,46 @@ impl Vault {
         &self.inner.path
     }
 
-    /// Add a new entry at the root group with the given title. Returns its stable ID.
+    /// Add a new entry. The `title` is interpreted as a `/`-separated path:
+    /// the leading segments name a group hierarchy (created as needed,
+    /// `mkdir -p` semantics), and the trailing segment becomes the entry
+    /// title. A title with no `/` lands at the root group, matching the
+    /// previous behavior.
+    ///
+    /// Examples:
+    ///   * `add_entry("github")`            → root entry "github"
+    ///   * `add_entry("Work/SSH/github")`   → group "Work" > "SSH", entry "github"
+    ///
+    /// Empty segments (`//`, `/foo`, `foo/`) and the empty title are rejected
+    /// with `Error::InvalidPath`. Group lookups are case-insensitive (matches
+    /// keepass-rs and KeePassXC behavior), so `work/ssh` resolves to an
+    /// existing `Work/SSH`. Returns the entry's stable ID.
     pub fn add_entry(&mut self, title: &str) -> Result<EntryId> {
-        let mut root = self.inner.db.root_mut();
-        let mut entry = root.add_entry();
-        entry.set_unprotected("Title", title);
+        let (group_path, leaf) = parse_entry_path(title)?;
+        // Walk by GroupId rather than by mutable reference — we can't carry a
+        // GroupMut across the loop because each iteration's lookup re-borrows
+        // through the previous one.
+        let mut current_id = self.inner.db.root().id();
+        for segment in &group_path {
+            let mut current = self
+                .inner
+                .db
+                .group_mut(current_id)
+                .expect("walked GroupId always resolves");
+            let existing = current.group_by_name_mut(segment).map(|g| g.id());
+            let next_id = match existing {
+                Some(id) => id,
+                None => current.add_group().edit(|g| g.name = segment.clone()).id(),
+            };
+            current_id = next_id;
+        }
+        let mut leaf_group = self
+            .inner
+            .db
+            .group_mut(current_id)
+            .expect("leaf GroupId always resolves");
+        let mut entry = leaf_group.add_entry();
+        entry.set_unprotected("Title", &leaf);
         Ok(EntryId(entry.id().uuid().to_string()))
     }
 
@@ -206,8 +260,29 @@ impl Vault {
             .map(|e| summarise(&e))
     }
 
-    /// Find an entry by exact title match. Returns the first match if multiple share a title.
+    /// Look up an entry by title or path.
+    ///
+    /// * Plain title with no `/`: returns the first entry whose leaf title
+    ///   matches (current behavior). Search is exact (case-sensitive) on the
+    ///   leaf title across all groups.
+    /// * Path with `/`: navigates `group/sub/.../leaf` and matches only the
+    ///   entry at exactly that path. Group navigation is case-insensitive
+    ///   (matching keepass-rs); the leaf title comparison is exact.
+    ///
+    /// Returns `None` if no such entry exists, or if any group segment in
+    /// the path is missing.
     pub fn find_by_title(&self, title: &str) -> Option<EntryId> {
+        if title.contains('/') {
+            let (group_path, leaf) = parse_entry_path(title).ok()?;
+            // `title.contains('/')` guarantees at least one group segment.
+            let segs: Vec<&str> = group_path.iter().map(String::as_str).collect();
+            let root = self.inner.db.root();
+            let group = root.group_by_path(&segs)?;
+            return group
+                .entries()
+                .find(|e| e.get_title() == Some(leaf.as_str()))
+                .map(|e| EntryId(e.id().uuid().to_string()));
+        }
         self.inner
             .db
             .iter_all_entries()
@@ -358,7 +433,55 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
         username: e.get_username().map(str::to_owned),
         url: e.get_url().map(str::to_owned),
         attachment_names,
+        group_path: build_group_path(e),
     }
+}
+
+/// Walk an entry's parent chain to the database root, collecting group
+/// names. The root group is excluded — entries directly under root return
+/// an empty vec. Output is ordered root → leaf so it joins as a path.
+///
+/// Walks by `GroupId` rather than `GroupRef` because the borrow checker
+/// can't see that `cur.parent()` and `cur = parent` use disjoint slots of
+/// the same `&Database`.
+fn build_group_path(e: &keepass::db::EntryRef<'_>) -> Vec<String> {
+    let db = e.database();
+    let mut rev: Vec<String> = Vec::new();
+    let mut cur_id = e.parent().id();
+    while let Some(g) = db.group(cur_id) {
+        match g.parent() {
+            // Not at root yet — record this group's name and step up.
+            Some(parent) => {
+                rev.push(g.name.clone());
+                cur_id = parent.id();
+            }
+            // Reached root (no parent). Root is excluded from the path.
+            None => break,
+        }
+    }
+    rev.reverse();
+    rev
+}
+
+/// Split a `/`-separated entry path into `(group_segments, leaf_title)`.
+/// Returns `Err(Error::InvalidPath)` on any empty segment, empty leaf,
+/// or trailing slash. A path with no `/` returns `(vec![], path)`.
+fn parse_entry_path(s: &str) -> Result<(Vec<String>, String)> {
+    if s.is_empty() {
+        return Err(Error::InvalidPath("title must not be empty".into()));
+    }
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(Error::InvalidPath(format!(
+            "path '{s}' has empty segment; leading/trailing/double '/' is not allowed"
+        )));
+    }
+    let mut iter = parts.into_iter();
+    let last = iter
+        .next_back()
+        .expect("non-empty split always yields at least one element");
+    let groups: Vec<String> = iter.map(String::from).collect();
+    Ok((groups, last.to_string()))
 }
 
 fn open_err_to_error(e: keepass::error::DatabaseOpenError) -> Error {

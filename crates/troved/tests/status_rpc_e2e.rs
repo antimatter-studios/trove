@@ -112,6 +112,7 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -146,6 +147,7 @@ async fn status_with_disabled_idle_reports_zero_timeout() {
         .handle(Request::Unlock {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
+            timeout: None,
         })
         .await;
 
@@ -156,16 +158,18 @@ async fn status_with_disabled_idle_reports_zero_timeout() {
     assert!(body["idle_remaining_secs"].is_null());
 }
 
-#[tokio::test]
-async fn status_request_bumps_idle_timer() {
-    // status counts as activity. To prove it: arm a 1s timeout, send status
-    // every 400ms for 2s, verify the timer never fires (vault still unlocked).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_request_does_not_bump_idle_timer() {
+    // Status is a passive observation — polling it (e.g. `watch -n1 trove
+    // status`) MUST NOT defeat auto-lock. To prove it: arm a 1s timeout,
+    // send status every 200ms for 1.6s, then verify the vault has been
+    // dropped (the timer must have fired despite the status traffic).
     let tmp = TempDir::new().expect("tempdir");
     let vault_path = tmp.path().join("v.kdbx");
     create_simple_vault(&vault_path);
 
     // Use the "real" callback that drops the vault when it fires, so we can
-    // assert via List.
+    // assert via List / direct state read.
     let state: SharedState = Arc::new(Mutex::new(None));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
@@ -184,14 +188,16 @@ async fn status_request_bumps_idle_timer() {
     let req_unlock = Request::Unlock {
         path: vault_path.to_string_lossy().into_owned(),
         password: PASSWORD.to_string(),
+        timeout: None,
     };
     let _ = handle(
         req_unlock, &state, &key_store, &gpg_store, &mat_store, &idle,
     )
     .await;
 
-    for _ in 0..5 {
-        tokio::time::sleep(Duration::from_millis(400)).await;
+    // 8 status calls at 200ms = 1.6s, comfortably past the 1s deadline.
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let _ = handle(
             Request::Status,
             &state,
@@ -203,9 +209,9 @@ async fn status_request_bumps_idle_timer() {
         .await;
     }
 
-    // Vault should still be unlocked: status counted as activity.
+    // Vault should be locked: status did NOT bump.
     assert!(
-        state.lock().await.is_some(),
-        "status must keep the idle timer alive"
+        state.lock().await.is_none(),
+        "status must not keep the idle timer alive"
     );
 }

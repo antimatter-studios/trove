@@ -56,9 +56,14 @@ enum Command {
     },
 
     /// List entries in a vault, one per line.
+    ///
+    /// If `<VAULT>` is omitted, list the entries of the vault currently
+    /// unlocked in the running daemon (auto-spawning if needed) — no
+    /// password prompt. Passing a path always reopens the file directly.
     List {
-        /// Path to an existing .kdbx file.
-        vault: PathBuf,
+        /// Path to an existing .kdbx file. Optional: omit to list from the
+        /// daemon's currently unlocked vault.
+        vault: Option<PathBuf>,
     },
 
     /// Add a resource (SSH key, password, ...) to a vault.
@@ -101,6 +106,12 @@ enum Command {
     Unlock {
         /// Path to the .kdbx vault.
         vault: PathBuf,
+        /// Idle-lock timeout in seconds. Resets on every daemon request
+        /// (control RPC, ssh-agent op, gpg-agent op). `0` disables auto-lock.
+        /// When omitted, keeps the daemon's currently configured timeout
+        /// (the env-var default or whatever a prior `idle set` left).
+        #[arg(long = "timeout")]
+        timeout: Option<u64>,
     },
 
     /// Tell the running `troved` to lock the vault: wipe materialized files,
@@ -121,6 +132,21 @@ enum Command {
     /// One line per active materialization: title, target path, TTL
     /// remaining, and whether the file is still on disk.
     MaterializeStatus,
+
+    /// Print a shell completion script to stdout.
+    ///
+    /// Without this, your shell falls back to filename completion for `trove`
+    /// (or, on zsh, to whatever unrelated completion happens to claim the name
+    /// `trove`). Install the generated script so the shell can complete trove's
+    /// own subcommands and flags.
+    ///
+    /// zsh:  `trove completions zsh > "${fpath[1]}/_trove"` then restart the shell.
+    /// bash: `trove completions bash > ~/.local/share/bash-completion/completions/trove`.
+    /// fish: `trove completions fish > ~/.config/fish/completions/trove.fish`.
+    Completions {
+        /// Shell dialect: bash, zsh, fish, powershell, or elvish.
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -296,7 +322,7 @@ fn run(cli: Cli) -> Result<()> {
     let pw_stdin = cli.password_stdin;
     match cli.command {
         Command::Init { vault } => cmd_init(&vault, pw_stdin),
-        Command::List { vault } => cmd_list(&vault, pw_stdin),
+        Command::List { vault } => cmd_list(vault.as_deref(), pw_stdin),
         Command::Add {
             resource:
                 AddResource::Ssh {
@@ -354,7 +380,7 @@ fn run(cli: Cli) -> Result<()> {
             op: GpgAgentOp::Socket,
         } => cmd_gpg_agent_socket(),
         Command::Materialize { vault } => cmd_materialize(&vault, pw_stdin),
-        Command::Unlock { vault } => cmd_unlock(&vault, pw_stdin),
+        Command::Unlock { vault, timeout } => cmd_unlock(&vault, timeout, pw_stdin),
         Command::Lock => cmd_lock(),
         Command::Status => cmd_status(),
         Command::Idle {
@@ -362,7 +388,18 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_idle_set(seconds),
         Command::Idle { op: IdleOp::Get } => cmd_idle_get(),
         Command::MaterializeStatus => cmd_materialize_status(),
+        Command::Completions { shell } => cmd_completions(shell),
     }
+}
+
+/// `trove completions <shell>` — generate a completion script for `shell` from
+/// the clap command tree and write it to stdout. Pure local operation: no
+/// vault, no daemon, no password.
+fn cmd_completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    let bin = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, bin, &mut std::io::stdout());
+    Ok(())
 }
 
 fn cmd_gpg_agent_socket() -> Result<()> {
@@ -429,21 +466,91 @@ fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(vault_path: &Path, pw_stdin: bool) -> Result<()> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    for entry in vault.list_entries() {
-        if entry.attachment_names.is_empty() {
-            println!("{}  {}", entry.id, entry.title);
-        } else {
-            println!(
-                "{}  {}  [attachments: {}]",
-                entry.id,
-                entry.title,
-                entry.attachment_names.join(", ")
-            );
+fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool) -> Result<()> {
+    match vault_path {
+        Some(path) => {
+            let vault = open_vault(path, pw_stdin)?;
+            for entry in vault.list_entries() {
+                print_list_row(
+                    &entry.id.to_string(),
+                    &entry.display_path(),
+                    &entry.attachment_names,
+                );
+            }
+            Ok(())
         }
+        None => cmd_list_via_daemon(),
+    }
+}
+
+/// Daemon-backed list. The vault must already be unlocked in the daemon;
+/// otherwise the daemon returns "no vault unlocked" and we surface that as
+/// a user error (exit 1). Auto-spawn semantics are inherited from
+/// `daemon::send_autospawn` — if no daemon is running we spawn one, but it
+/// will come up with no vault unlocked, so the user gets the same friendly
+/// "no vault unlocked" message and a hint to run `trove unlock`.
+fn cmd_list_via_daemon() -> Result<()> {
+    let resp = match daemon::send_autospawn(&daemon::Request::List) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        let hint = if msg.contains("no vault") {
+            "; pass a vault path or run `trove unlock <vault>` first"
+        } else {
+            ""
+        };
+        return Err(DaemonClassified {
+            message: format!("{msg}{hint}"),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let entries = resp
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for entry in entries {
+        let id = entry.get("id").and_then(Value::as_str).unwrap_or("?");
+        let title = entry.get("title").and_then(Value::as_str).unwrap_or("?");
+        let group_path: Vec<&str> = entry
+            .get("group_path")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let display = if group_path.is_empty() {
+            title.to_string()
+        } else {
+            format!("{}/{title}", group_path.join("/"))
+        };
+        let attachments: Vec<String> = entry
+            .get("attachments")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        print_list_row(id, &display, &attachments);
     }
     Ok(())
+}
+
+fn print_list_row(id: &str, title: &str, attachments: &[String]) {
+    if attachments.is_empty() {
+        println!("{id}  {title}");
+    } else {
+        println!("{id}  {title}  [attachments: {}]", attachments.join(", "));
+    }
 }
 
 fn cmd_add_ssh(
@@ -469,6 +576,12 @@ fn cmd_add_ssh(
     vault
         .attach_binary(&id, SSH_KEY_ATTACHMENT, &key_bytes)
         .context("attaching ssh key")?;
+
+    // Write KeeAgent.settings so KeePassXC's SSH agent picks this entry up.
+    let settings = troved::ssh_agent::keeagent::settings_xml(SSH_KEY_ATTACHMENT);
+    vault
+        .attach_binary(&id, troved::ssh_agent::keeagent::ATTACHMENT_NAME, &settings)
+        .context("attaching KeeAgent.settings")?;
 
     if let Some(user) = user {
         vault
@@ -833,7 +946,7 @@ struct DaemonClassified {
 
 /// `trove unlock <vault>` — send `unlock` to the daemon. Prompts for password
 /// (or reads stdin) before calling out, so we fail fast on a typo.
-fn cmd_unlock(vault: &Path, pw_stdin: bool) -> Result<()> {
+fn cmd_unlock(vault: &Path, timeout: Option<u64>, pw_stdin: bool) -> Result<()> {
     if !vault.exists() {
         return Err(DaemonClassified {
             message: format!("vault file not found: {}", vault.display()),
@@ -854,8 +967,9 @@ fn cmd_unlock(vault: &Path, pw_stdin: bool) -> Result<()> {
     let req = daemon::Request::Unlock {
         path: vault_str,
         password,
+        timeout,
     };
-    let resp = match daemon::send(&req) {
+    let resp = match daemon::send_autospawn(&req) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -894,7 +1008,7 @@ fn looks_like_vault_error(msg: &str) -> bool {
 /// `trove lock` — send `lock` to the daemon. Idempotent on the daemon side;
 /// we treat its response as the source of truth.
 fn cmd_lock() -> Result<()> {
-    let resp = match daemon::send(&daemon::Request::Lock) {
+    let resp = match daemon::send_autospawn(&daemon::Request::Lock) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -918,7 +1032,7 @@ fn cmd_lock() -> Result<()> {
 
 /// `trove status` — pretty-print the daemon's `Status` response.
 fn cmd_status() -> Result<()> {
-    let resp = match daemon::send(&daemon::Request::Status) {
+    let resp = match daemon::send_autospawn(&daemon::Request::Status) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -952,13 +1066,13 @@ fn print_status(resp: &Value) {
     let idle_secs = resp.get("idle_timeout_secs").and_then(Value::as_u64);
     let idle_line = match idle_secs {
         Some(0) => "disabled".to_string(),
-        Some(n) => format!("{n}s"),
+        Some(n) => format_seconds(n),
         None => "(unknown)".to_string(),
     };
     println!("Idle timeout:    {idle_line}");
 
     if let Some(remaining) = resp.get("idle_remaining_secs").and_then(Value::as_u64) {
-        println!("Idle remaining:  {remaining}s");
+        println!("Idle remaining:  {}", format_seconds(remaining));
     }
 
     let ssh = resp.get("ssh_keys").and_then(Value::as_u64).unwrap_or(0);
@@ -972,9 +1086,33 @@ fn print_status(resp: &Value) {
     println!("Materialized:    {mat} files");
 }
 
+/// Render a second count as `<n>s` with a humanized suffix in brackets for
+/// anything ≥ 1 minute: `65s (1m 05s)`, `3725s (1h 02m 05s)`. Sub-minute
+/// values get just the raw seconds — the bracket would be redundant.
+fn format_seconds(secs: u64) -> String {
+    match humanize_seconds(secs) {
+        Some(h) => format!("{secs}s ({h})"),
+        None => format!("{secs}s"),
+    }
+}
+
+fn humanize_seconds(secs: u64) -> Option<String> {
+    if secs < 60 {
+        return None;
+    }
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    Some(if h > 0 {
+        format!("{h}h {m:02}m {s:02}s")
+    } else {
+        format!("{m}m {s:02}s")
+    })
+}
+
 /// `trove idle set <seconds>`.
 fn cmd_idle_set(seconds: u64) -> Result<()> {
-    let resp = match daemon::send(&daemon::Request::SetIdleTimeout { seconds }) {
+    let resp = match daemon::send_autospawn(&daemon::Request::SetIdleTimeout { seconds }) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -1002,7 +1140,7 @@ fn cmd_idle_set(seconds: u64) -> Result<()> {
 
 /// `trove idle get`. Pretty-prints the current state.
 fn cmd_idle_get() -> Result<()> {
-    let resp = match daemon::send(&daemon::Request::GetIdleTimeout) {
+    let resp = match daemon::send_autospawn(&daemon::Request::GetIdleTimeout) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -1034,7 +1172,7 @@ fn cmd_idle_get() -> Result<()> {
 
 /// `trove materialize-status` — list of active materializations, one per line.
 fn cmd_materialize_status() -> Result<()> {
-    let resp = match daemon::send(&daemon::Request::MaterializeStatus) {
+    let resp = match daemon::send_autospawn(&daemon::Request::MaterializeStatus) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -1096,9 +1234,123 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
                 CoreError::AlreadyExists(_)
                 | CoreError::NotFound(_)
                 | CoreError::EntryNotFound(_)
+                | CoreError::InvalidPath(_)
                 | CoreError::Io(_) => EXIT_USER_ERROR,
             };
         }
     }
     EXIT_USER_ERROR
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn format_seconds_renders_durations() {
+        assert_eq!(format_seconds(0), "0s");
+        assert_eq!(format_seconds(5), "5s");
+        assert_eq!(format_seconds(59), "59s");
+        assert_eq!(format_seconds(60), "60s (1m 00s)");
+        assert_eq!(format_seconds(65), "65s (1m 05s)");
+        assert_eq!(format_seconds(3600), "3600s (1h 00m 00s)");
+        assert_eq!(format_seconds(3725), "3725s (1h 02m 05s)");
+        assert_eq!(format_seconds(46566), "46566s (12h 56m 06s)");
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    /// The heuristic that decides whether a daemon-reported error string maps
+    /// to exit 2 (vault error) vs exit 1 (user error). Must be case-insensitive
+    /// and key only off the password/kdbx/decrypt vocabulary.
+    #[test]
+    fn looks_like_vault_error_matches_vault_vocabulary() {
+        assert!(looks_like_vault_error(
+            "invalid password or corrupted vault"
+        ));
+        assert!(looks_like_vault_error("kdbx error: bad header id"));
+        assert!(looks_like_vault_error("failed to decrypt inner stream"));
+        // Case-insensitive.
+        assert!(looks_like_vault_error("PASSWORD incorrect"));
+        assert!(looks_like_vault_error("KDBX corrupt"));
+
+        // Non-vault daemon errors stay user-level.
+        assert!(!looks_like_vault_error("no vault unlocked"));
+        assert!(!looks_like_vault_error("vault file not found: /x"));
+        assert!(!looks_like_vault_error(""));
+    }
+
+    #[test]
+    fn classify_exit_maps_daemon_classified_verbatim() {
+        let vault: anyhow::Error = DaemonClassified {
+            message: "bad password".into(),
+            exit: EXIT_VAULT_ERROR,
+        }
+        .into();
+        assert_eq!(classify_exit(&vault), EXIT_VAULT_ERROR);
+
+        let user: anyhow::Error = DaemonClassified {
+            message: "no vault unlocked".into(),
+            exit: EXIT_USER_ERROR,
+        }
+        .into();
+        assert_eq!(classify_exit(&user), EXIT_USER_ERROR);
+    }
+
+    #[test]
+    fn classify_exit_maps_core_errors() {
+        // Vault-level (exit 2).
+        assert_eq!(
+            classify_exit(&CoreError::BadPassword.into()),
+            EXIT_VAULT_ERROR
+        );
+        assert_eq!(
+            classify_exit(&CoreError::Kdbx("bad block".into()).into()),
+            EXIT_VAULT_ERROR
+        );
+
+        // User-level (exit 1).
+        assert_eq!(
+            classify_exit(&CoreError::NotFound(PathBuf::from("/x.kdbx")).into()),
+            EXIT_USER_ERROR
+        );
+        assert_eq!(
+            classify_exit(&CoreError::EntryNotFound("github".into()).into()),
+            EXIT_USER_ERROR
+        );
+        assert_eq!(
+            classify_exit(&CoreError::AlreadyExists(PathBuf::from("/x")).into()),
+            EXIT_USER_ERROR
+        );
+        assert_eq!(
+            classify_exit(&CoreError::InvalidPath("a//b".into()).into()),
+            EXIT_USER_ERROR
+        );
+        let io: anyhow::Error = CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "x",
+        ))
+        .into();
+        assert_eq!(classify_exit(&io), EXIT_USER_ERROR);
+    }
+
+    /// `classify_exit` walks the whole error chain, so a `CoreError` buried
+    /// under `.context(...)` still maps correctly (the real code path: every
+    /// command wraps core errors in context strings).
+    #[test]
+    fn classify_exit_walks_context_chain() {
+        let wrapped = anyhow::Error::new(CoreError::BadPassword)
+            .context("opening vault /home/x.kdbx")
+            .context("running unlock");
+        assert_eq!(classify_exit(&wrapped), EXIT_VAULT_ERROR);
+    }
+
+    /// Anything we don't recognise defaults to the user-error exit code.
+    #[test]
+    fn classify_exit_defaults_to_user_error() {
+        assert_eq!(classify_exit(&anyhow!("totally unknown")), EXIT_USER_ERROR);
+    }
 }

@@ -19,4 +19,7 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("invalid entry path: {0}")]
+    InvalidPath(String),
 }

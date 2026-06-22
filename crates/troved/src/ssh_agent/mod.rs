@@ -18,6 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
+pub mod keeagent;
 pub mod keys;
 pub mod wire;
 
