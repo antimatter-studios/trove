@@ -20,7 +20,9 @@
 //! (`string algo || string sig_data`) — exactly what the SSH agent
 //! protocol's `SIGN_RESPONSE` carries.
 
+use rsa::pkcs1::DecodeRsaPrivateKey as _;
 use rsa::pkcs1v15;
+use rsa::pkcs8::DecodePrivateKey as _;
 use rsa::signature::{SignatureEncoding as _, Signer as _};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
@@ -243,11 +245,17 @@ impl std::fmt::Debug for LoadedKey {
 /// supported algorithms. Returns the loaded key plus a pre-built SSH
 /// wire-format public-key blob.
 pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, ParseError> {
-    // `ssh-key` accepts either text-PEM ("-----BEGIN OPENSSH PRIVATE KEY-----")
-    // or the raw binary of the same. Try PEM first; fall through to binary
-    // if the bytes aren't valid UTF-8.
+    // Accepted RSA wrappers:
+    //   * `-----BEGIN OPENSSH PRIVATE KEY-----`  (new-format, ssh-keygen default since 2019)
+    //   * `-----BEGIN RSA PRIVATE KEY-----`      (PKCS#1 PEM, the legacy ssh-keygen / openssl
+    //                                             genrsa default; what KeePassXC's KeeAgent
+    //                                             plugin keeps for many older keys)
+    //   * `-----BEGIN PRIVATE KEY-----`          (PKCS#8 PEM)
+    //
+    // Try PEM first (covers all three); fall through to binary OpenSSH if
+    // the bytes aren't valid UTF-8.
     let pk = match std::str::from_utf8(bytes) {
-        Ok(s) => PrivateKey::from_openssh(s).map_err(|e| ParseError::NotOpenssh(e.to_string()))?,
+        Ok(s) => parse_pem_private_key(s)?,
         Err(_) => {
             PrivateKey::from_bytes(bytes).map_err(|e| ParseError::NotOpenssh(e.to_string()))?
         }
@@ -299,6 +307,32 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
         comment: comment.to_string(),
         private_key: pk,
     })
+}
+
+/// Try the three PEM private-key formats we accept, in order: OpenSSH new
+/// wrapper, PKCS#1 (RSA-specific), PKCS#8 (any algorithm but only RSA is
+/// useful here, since ed25519/ecdsa OpenSSH keys are already covered above).
+///
+/// Returns the first successful parse. On total failure, returns the
+/// OpenSSH parser's error — it's the most informative for the common case
+/// of a malformed new-format key, and PKCS#1/#8 errors on non-RSA inputs
+/// are uninformative ("expected RSA PRIVATE KEY tag").
+fn parse_pem_private_key(s: &str) -> Result<PrivateKey, ParseError> {
+    let openssh_err = match PrivateKey::from_openssh(s) {
+        Ok(pk) => return Ok(pk),
+        Err(e) => e,
+    };
+    if let Ok(rsa) = rsa::RsaPrivateKey::from_pkcs1_pem(s) {
+        let kp = RsaKeypair::try_from(rsa)
+            .map_err(|e| ParseError::NotOpenssh(format!("rsa pkcs1: {e}")))?;
+        return Ok(PrivateKey::from(kp));
+    }
+    if let Ok(rsa) = rsa::RsaPrivateKey::from_pkcs8_pem(s) {
+        let kp = RsaKeypair::try_from(rsa)
+            .map_err(|e| ParseError::NotOpenssh(format!("rsa pkcs8: {e}")))?;
+        return Ok(PrivateKey::from(kp));
+    }
+    Err(ParseError::NotOpenssh(openssh_err.to_string()))
 }
 
 /// Backwards-compat alias kept so any external test still compiles. New code
@@ -456,6 +490,53 @@ mod tests {
             "x",
         );
         assert!(matches!(res, Err(ParseError::NotOpenssh(_))));
+    }
+
+    /// Generate a fresh 2048-bit RSA key via the `rsa` crate. Slow (a few
+    /// seconds in debug), so the two PEM-format tests below share it via a
+    /// `OnceLock` — both formats just re-encode the same key.
+    fn rsa_2048() -> &'static rsa::RsaPrivateKey {
+        use std::sync::OnceLock;
+        static KEY: OnceLock<rsa::RsaPrivateKey> = OnceLock::new();
+        KEY.get_or_init(|| {
+            use rand_core::OsRng;
+            rsa::RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen")
+        })
+    }
+
+    /// PKCS#1 PEM (`-----BEGIN RSA PRIVATE KEY-----`) is what ssh-keygen
+    /// produced for years and what `openssl genrsa` still emits. KeePassXC's
+    /// KeeAgent plugin happily keeps keys in this wrapper, so we accept it.
+    #[test]
+    fn parses_rsa_pkcs1_pem() {
+        use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
+        let pem = rsa_2048()
+            .to_pkcs1_pem(LineEnding::LF)
+            .expect("encode pkcs1 pem");
+        assert!(pem.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+
+        let loaded = parse_private_key(pem.as_bytes(), "test@rsa-pkcs1").expect("parse pkcs1");
+        assert_eq!(&loaded.public_blob[0..4], &7u32.to_be_bytes());
+        assert_eq!(&loaded.public_blob[4..11], b"ssh-rsa");
+        // And it actually signs — the rsa-crate→ssh-key conversion didn't
+        // drop any private components.
+        let sig = loaded.sign(b"hello", 0x02).expect("sign sha256");
+        assert_eq!(&sig[4..16], b"rsa-sha2-256");
+    }
+
+    /// PKCS#8 PEM (`-----BEGIN PRIVATE KEY-----`) is the modern OpenSSL
+    /// default. Less common than PKCS#1 for SSH keys but trivial to support
+    /// since the rsa crate already decodes it.
+    #[test]
+    fn parses_rsa_pkcs8_pem() {
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+        let pem = rsa_2048()
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("encode pkcs8 pem");
+        assert!(pem.starts_with("-----BEGIN PRIVATE KEY-----"));
+
+        let loaded = parse_private_key(pem.as_bytes(), "test@rsa-pkcs8").expect("parse pkcs8");
+        assert_eq!(&loaded.public_blob[4..11], b"ssh-rsa");
     }
 
     #[test]

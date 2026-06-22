@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/trove-core", "crates/trove-cli", "crates/troved", "crates/keepass-spec-tests"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 # trove is a binary application, not a published library, so the

@@ -112,7 +112,15 @@ async fn trove_status_round_trip_against_real_daemon() {
     let sock = tmp.path().join("trove.sock");
     let vault_path = tmp.path().join("v.kdbx");
     {
-        let _ = Vault::create(&vault_path, PASSWORD).expect("create vault");
+        // Pre-populate two entries: one at the root and one nested under
+        // `Work/SSH/`. The list assertions below check that both paths
+        // surface correctly.
+        let mut v = Vault::create(&vault_path, PASSWORD).expect("create vault");
+        let id = v.add_entry("e2e-entry").expect("add root entry");
+        v.attach_binary(&id, "blob", b"payload")
+            .expect("attach blob");
+        let _nested = v.add_entry("Work/SSH/github").expect("add nested entry");
+        v.save().expect("save vault");
     }
 
     // Stand up the daemon. Use a 60s timeout so `status` reports a
@@ -144,6 +152,25 @@ async fn trove_status_round_trip_against_real_daemon() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(sock.exists(), "daemon socket never appeared");
+
+    // trove list (no vault path, no vault unlocked yet) — should exit 1
+    // with a friendly hint pointing the user at `trove unlock`.
+    let out = tokio::process::Command::new(&trove)
+        .arg("list")
+        .env("TROVE_SOCK", &sock)
+        .env("TROVE_NO_AUTOSPAWN", "1")
+        .output()
+        .await
+        .expect("run trove list (no vault unlocked)");
+    assert!(
+        !out.status.success(),
+        "trove list should fail when nothing is unlocked"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no vault") && stderr.contains("trove unlock"),
+        "expected hint pointing at `trove unlock`; got: {stderr}"
+    );
 
     // trove status (vault locked) — expect "no vault unlocked".
     let out = tokio::process::Command::new(&trove)
@@ -197,6 +224,34 @@ async fn trove_status_round_trip_against_real_daemon() {
     assert!(
         stdout.contains("vault unlocked"),
         "expected 'vault unlocked' in output:\n{stdout}"
+    );
+
+    // trove list (no vault path) — now succeeds, hits the daemon's unlocked
+    // vault, and prints the pre-populated entry.
+    let out = tokio::process::Command::new(&trove)
+        .arg("list")
+        .env("TROVE_SOCK", &sock)
+        .env("TROVE_NO_AUTOSPAWN", "1")
+        .output()
+        .await
+        .expect("run trove list (daemon)");
+    assert!(
+        out.status.success(),
+        "trove list (daemon) failed: stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("e2e-entry"),
+        "expected root entry title in list output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("attachments: blob"),
+        "expected attachment to be listed:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Work/SSH/github"),
+        "expected nested entry to render with its full group path:\n{stdout}"
     );
 
     // trove status (vault unlocked) — expect the vault path AND remaining time.
@@ -257,6 +312,11 @@ async fn trove_status_against_no_daemon_exits_one() {
     let out = tokio::process::Command::new(&trove)
         .arg("status")
         .env("TROVE_SOCK", &sock)
+        // Disable auto-spawn so we exercise the "not running" error path.
+        // Without this the CLI would launch a real `troved` bound to the
+        // tmpdir socket and the assertion below would fail for the wrong
+        // reason.
+        .env("TROVE_NO_AUTOSPAWN", "1")
         .output()
         .await
         .expect("run trove status");

@@ -1,40 +1,14 @@
-//! Round-trip a variety of binary attachment shapes through the kdbx4 inner
-//! header binary pool. Sizes: 0, 1, 16, 4 KiB, 1 MiB. Byte patterns: zero,
-//! 0xFF, 0..256 sequence, deterministic random, non-UTF-8 mix.
-//!
-//! Ported to keepass 0.12.5: attachments are now first-class database-owned
-//! objects. We attach payloads through `EntryMut::add_attachment(name, data)`
-//! and read them back via `EntryRef::attachment_by_name(name)` rather than
-//! poking `db.header_attachments` and `entry.binaries` by hand.
-
 #![forbid(unsafe_code)]
 
 mod common;
 
-use common::{config_and_key_for, round_trip_combos};
-use keepass::{
-    config::DatabaseConfig,
-    db::{Database, Value},
-    DatabaseKey,
-};
+use common::combo_by_label;
+use keepass::db::{Database, Value};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-fn baseline_setup() -> (DatabaseConfig, DatabaseKey, impl Fn() -> DatabaseKey) {
-    let combos = round_trip_combos();
-    let combo = combos
-        .iter()
-        .find(|c| c.label == "aes256+none+inner-chacha20+argon2d")
-        .expect("baseline combo")
-        .clone();
-    let (cfg, key) = config_and_key_for(&combo);
-    let combo2 = combo;
-    let reopen_key = move || config_and_key_for(&combo2).1;
-    (cfg, key, reopen_key)
-}
-
 fn drive(label: &str, payloads: Vec<Vec<u8>>) {
-    let (cfg, key, reopen_key) = baseline_setup();
-    let mut db = Database::with_config(cfg);
+    let combo = combo_by_label("aes256+none+inner-chacha20+argon2d");
+    let mut db = Database::with_config(combo.get_config());
 
     {
         let mut root = db.root_mut();
@@ -45,8 +19,8 @@ fn drive(label: &str, payloads: Vec<Vec<u8>>) {
         }
     }
 
-    let bytes = common::save_to_vec(&db, key);
-    let parsed = Database::open(&mut bytes.as_slice(), reopen_key())
+    let bytes = common::save_to_vec(&db, combo.get_key());
+    let parsed = Database::open(&mut bytes.as_slice(), combo.get_key())
         .unwrap_or_else(|err| panic!("{}: reopen failed: {:?}", label, err));
 
     assert_eq!(
@@ -67,11 +41,10 @@ fn drive(label: &str, payloads: Vec<Vec<u8>>) {
         let att = entry
             .attachment_by_name(&name)
             .unwrap_or_else(|| panic!("{}: missing attachment {}", label, name));
-        let data = att.data.get();
         assert_eq!(
-            data.as_slice(),
+            att.data.get().as_slice(),
             expected.as_slice(),
-            "{}: payload {} differs after round trip",
+            "{}: payload {} differs",
             label,
             i
         );
