@@ -9,10 +9,9 @@ dir=$(cd "$(dirname "$0")/.." && pwd)
 . "$dir/lib/common.sh"
 
 slug=$(gg_repo_slug); [ -n "$slug" ] || exit 0
-gg_throttled protect-main && exit 0
 gg_have_gh || { echo "github-guard: gh not installed/authed — skipping branch-protection check for $slug" >&2; exit 0; }
 owner=${slug%%/*}
-gg_user_owns "$owner" || { gg_stamp protect-main; exit 0; }
+gg_user_owns "$owner" || exit 0
 
 branch=$(gh api "repos/$slug" --jq '.default_branch' 2>/dev/null) || {
   echo "github-guard: couldn't read default branch for $slug — skipping" >&2; exit 0; }
@@ -22,7 +21,7 @@ branch=$(gh api "repos/$slug" --jq '.default_branch' 2>/dev/null) || {
 prot=$(gh api "repos/$slug/branches/$branch/protection" 2>/dev/null)
 if printf '%s' "$prot" | grep -q '"required_pull_request_reviews"' \
    && printf '%s' "$prot" | grep -q '"enforce_admins"[^}]*"enabled":[[:space:]]*true'; then
-  gg_stamp protect-main; exit 0
+  exit 0
 fi
 
 echo "github-guard: protecting $slug:$branch (require PR, enforce admins, linear history)…" >&2
@@ -44,5 +43,4 @@ if printf '%s' "$payload" | gh api -X PUT "repos/$slug/branches/$branch/protecti
 else
   echo "github-guard: protection PUT failed for $slug:$branch (need repo admin?) — not blocking" >&2
 fi
-gg_stamp protect-main
 exit 0
