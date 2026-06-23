@@ -15,8 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
+
+use crate::ipc;
 
 pub mod keeagent;
 pub mod keys;
@@ -63,20 +64,15 @@ pub async fn run(
     store: KeyStore,
     idle: Arc<IdleTracker>,
 ) -> std::io::Result<()> {
-    // Stale socket cleanup: if a previous troved died without removing it,
-    // bind() will fail with EADDRINUSE; remove and retry. We *don't* try to
-    // detect a *live* peer here — that's a deployment error, and the user
-    // should kill the previous daemon themselves.
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-    let listener = UnixListener::bind(&socket_path)?;
-    set_socket_perms(&socket_path)?;
+    // Bind via the platform IPC transport. On Unix this removes a stale
+    // socket left by a dead daemon (bind would otherwise fail EADDRINUSE) and
+    // locks the socket to the owner; on Windows it stands up a named pipe.
+    let mut listener = ipc::bind(&socket_path).await?;
     eprintln!("ssh-agent listening on {}", socket_path.display());
 
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok(stream) => {
                 let store = store.clone();
                 let idle = idle.clone();
                 // Bump on every accepted connection — the act of opening a
@@ -98,19 +94,12 @@ pub async fn run(
     }
 }
 
-fn set_socket_perms(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)
-}
-
 async fn serve_connection(
-    stream: UnixStream,
+    stream: ipc::Stream,
     store: KeyStore,
     idle: Arc<IdleTracker>,
 ) -> std::io::Result<()> {
-    let (mut read_half, mut write_half) = stream.into_split();
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
     loop {
         let (msg_type, payload) = match read_message(&mut read_half).await {
             Ok(Some(p)) => p,
@@ -201,7 +190,7 @@ async fn serve_connection(
 /// Currently unused (the listener task is just dropped), but kept for the
 /// future case where we want a clean fd close before unlinking the socket.
 #[allow(dead_code)]
-pub async fn shutdown_stream(mut stream: UnixStream) {
+pub async fn shutdown_stream(mut stream: ipc::Stream) {
     let _ = stream.shutdown().await;
 }
 
