@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod daemon;
+mod ipc;
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
@@ -916,14 +917,24 @@ fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
         // back. If the user sends SIGKILL, the OS will reap us and the files
         // will linger — that's the irreducible price of `kill -9` and we
         // can't help it.
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigint =
-            signal(SignalKind::interrupt()).map_err(|e| anyhow!("install SIGINT handler: {e}"))?;
-        let mut sigterm =
-            signal(SignalKind::terminate()).map_err(|e| anyhow!("install SIGTERM handler: {e}"))?;
-        tokio::select! {
-            _ = sigint.recv() => {}
-            _ = sigterm.recv() => {}
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt())
+                .map_err(|e| anyhow!("install SIGINT handler: {e}"))?;
+            let mut sigterm = signal(SignalKind::terminate())
+                .map_err(|e| anyhow!("install SIGTERM handler: {e}"))?;
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows: Ctrl-C is the portable wipe trigger tokio exposes.
+            tokio::signal::ctrl_c()
+                .await
+                .map_err(|e| anyhow!("install Ctrl-C handler: {e}"))?;
         }
         println!("\nwiping materialized files...");
         troved::materialize::wipe_all(&store).await;

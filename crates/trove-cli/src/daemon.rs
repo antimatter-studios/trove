@@ -17,13 +17,13 @@
 //! 3. `${TMPDIR:-/tmp}/trove-$UID.sock`.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
+use crate::ipc;
 pub use troved::protocol::Request;
 
 /// Resolve the control-socket path the same way `troved` does. Used by every
@@ -51,7 +51,7 @@ pub fn control_socket_path() -> PathBuf {
 /// preserved via `Context`.
 pub fn send(req: &Request) -> Result<Value> {
     let path = control_socket_path();
-    let stream = UnixStream::connect(&path).map_err(|e| match e.kind() {
+    let stream = ipc::connect(&path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
             anyhow!(
                 "troved is not running (socket {} unreachable: {}); start it with `troved &`",
@@ -163,6 +163,15 @@ fn spawn_daemon() -> Result<()> {
         // trove returns won't propagate to the daemon.
         cmd.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS (0x8) | CREATE_NEW_PROCESS_GROUP (0x200): the
+        // daemon gets no console and its own process group, so a Ctrl-C in the
+        // launching shell doesn't reach it — the Windows analogue of the
+        // process_group(0) detach above.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
     cmd.spawn()
         .with_context(|| format!("spawning daemon binary {}", bin.display()))?;
     Ok(())
@@ -173,7 +182,7 @@ fn wait_for_socket(total: Duration) -> Result<()> {
     let sock = control_socket_path();
     let deadline = Instant::now() + total;
     while Instant::now() < deadline {
-        if UnixStream::connect(&sock).is_ok() {
+        if ipc::connect(&sock).is_ok() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(25));

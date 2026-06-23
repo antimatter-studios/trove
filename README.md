@@ -14,7 +14,14 @@ Treat the vault as more than passwords. Entries can carry **files** (kubeconfig,
 brew install antimatter-studios/tap/trove
 ```
 
-That installs both binaries (`trove` CLI + `troved` daemon) from the [antimatter-studios/homebrew-tap](https://github.com/antimatter-studios/homebrew-tap) tap. Builds from source via `cargo`, so first install takes a few minutes for the dependency tree.
+That installs prebuilt `trove` + `troved` binaries from the [antimatter-studios/homebrew-tap](https://github.com/antimatter-studios/homebrew-tap) tap (macOS arm64/x86_64, Linux arm64/x86_64). The binaries are built and released by trove's own [release pipeline](.github/workflows/release.yml) — the tap just references them, so installs are a download, not a multi-minute compile.
+
+### Windows
+
+There are two ways to run trove on Windows:
+
+- **Native** — download `trove-<version>-windows-x86_64.zip` from [Releases](https://github.com/antimatter-studios/trove/releases). The native build uses Windows **named pipes** instead of Unix-domain sockets for its control, ssh-agent and gpg-agent channels. (Homebrew is Unix-only, so there's no `brew` path on native Windows.)
+- **WSL2** — run the Linux build inside WSL2 (a real Linux environment): install via Linuxbrew exactly as above, or grab a `linux-*` tarball. Inside WSL everything works as on Linux; bridging the agent to native-Windows clients (Git for Windows, Windows OpenSSH) needs a socket→named-pipe relay such as [npiperelay](https://github.com/jstarks/npiperelay).
 
 ### From source (cargo)
 

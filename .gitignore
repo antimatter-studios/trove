@@ -1,6 +1,7 @@
 /target
 .history/
 .DS_Store
+.secrets
 *.swp
 *.kdbx
 !tests/fixtures/*.kdbx

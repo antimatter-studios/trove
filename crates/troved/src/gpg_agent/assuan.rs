@@ -27,8 +27,7 @@
 
 use std::io;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 
 /// libgpg-error codes we return. Each is `(source<<24) | errnum`. `source=4`
 /// is `GPG_ERR_SOURCE_GPGAGENT`; `source=6` is `GPG_ERR_SOURCE_ASSUAN`. The
@@ -48,10 +47,12 @@ pub const ERR_GENERAL: u32 = 67_108_877; // GPG_ERR_GENERAL fallback
 /// stray long `OPTION putenv=...` doesn't kill the connection.
 pub const MAX_LINE_BYTES: usize = 4096;
 
-/// Reader half wrapped for line-buffered reads.
-pub type AssuanReader = BufReader<OwnedReadHalf>;
+/// Reader half wrapped for line-buffered reads. Split from the platform IPC
+/// stream via `tokio::io::split`, so the same type covers a Unix socket or a
+/// Windows named pipe.
+pub type AssuanReader = BufReader<ReadHalf<crate::ipc::Stream>>;
 /// Writer half — the agent writes ASCII bytes directly.
-pub type AssuanWriter = OwnedWriteHalf;
+pub type AssuanWriter = WriteHalf<crate::ipc::Stream>;
 
 /// One parsed Assuan request line. We split the verb and the rest on the
 /// first ASCII space; trailing `\r` is stripped along with `\n`.

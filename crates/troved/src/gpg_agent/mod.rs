@@ -24,8 +24,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
+
+use crate::ipc;
 
 pub mod assuan;
 pub mod keys;
@@ -71,16 +72,12 @@ pub async fn run(
     store: GpgKeyStore,
     idle: Arc<IdleTracker>,
 ) -> std::io::Result<()> {
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-    let listener = UnixListener::bind(&socket_path)?;
-    set_socket_perms(&socket_path)?;
+    let mut listener = ipc::bind(&socket_path).await?;
     eprintln!("gpg-agent listening on {}", socket_path.display());
 
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok(stream) => {
                 let store = store.clone();
                 let idle = idle.clone();
                 idle.bump();
@@ -93,13 +90,6 @@ pub async fn run(
             }
         }
     }
-}
-
-fn set_socket_perms(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)
 }
 
 /// Per-connection mutable state. This is recreated on every `RESET` and on
@@ -121,11 +111,11 @@ struct Session {
 }
 
 async fn serve_connection(
-    stream: UnixStream,
+    stream: ipc::Stream,
     store: GpgKeyStore,
     idle: Arc<IdleTracker>,
 ) -> std::io::Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
     // Greeting: gpg-agent prints `OK Pleased to meet you, process %d` on

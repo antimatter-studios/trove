@@ -1,12 +1,14 @@
 //! troved — the trove headless daemon.
 //!
-//! Listens on a Unix domain socket; serves newline-delimited JSON requests.
-//! See `protocol.rs` for the wire format. macOS + Linux only.
+//! Serves newline-delimited JSON requests over a local IPC endpoint: a Unix
+//! domain socket on macOS/Linux, a named pipe on Windows (see `ipc`). On
+//! Windows, run inside WSL2 for the full Unix experience. See `protocol.rs`
+//! for the wire format.
 
 #![forbid(unsafe_code)]
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-compile_error!("troved currently supports macOS and Linux only");
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+compile_error!("troved currently supports macOS, Linux and Windows only");
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,12 +16,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use troved::gpg_agent::{self, GpgKeyStore};
 use troved::handler::{handle, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
+use troved::ipc;
 use troved::materialize::{self, MaterializedStore};
 use troved::protocol::{Request, Response};
 use troved::ssh_agent::{self, KeyStore};
@@ -109,15 +111,8 @@ fn resolve_socket_path() -> PathBuf {
     PathBuf::from(tmp).join(format!("trove-{uid}.sock"))
 }
 
-fn set_socket_perms(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)
-}
-
 async fn handle_connection(
-    stream: UnixStream,
+    stream: ipc::Stream,
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
@@ -125,7 +120,7 @@ async fn handle_connection(
     idle: Arc<IdleTracker>,
     shutdown: Arc<Notify>,
 ) {
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
 
     loop {
@@ -158,8 +153,8 @@ async fn handle_connection(
     }
 }
 
-async fn write_response(
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+async fn write_response<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
     resp: &Response,
 ) -> std::io::Result<()> {
     let mut buf = serde_json::to_vec(resp)
@@ -176,15 +171,11 @@ async fn main() -> Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    // Remove stale socket from a previous run.
-    if sock_path.exists() {
-        std::fs::remove_file(&sock_path)
-            .with_context(|| format!("removing stale socket {}", sock_path.display()))?;
-    }
-
-    let listener = UnixListener::bind(&sock_path)
+    // Bind the control endpoint via the platform IPC transport (removes a
+    // stale Unix socket + locks it 0600; stands up a named pipe on Windows).
+    let mut listener = ipc::bind(&sock_path)
+        .await
         .with_context(|| format!("binding {}", sock_path.display()))?;
-    set_socket_perms(&sock_path).with_context(|| format!("chmod 0600 {}", sock_path.display()))?;
 
     eprintln!("listening on {}", sock_path.display());
 
@@ -248,21 +239,31 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Signal handlers — SIGINT + SIGTERM both trigger graceful shutdown.
+    // Signal handlers trigger graceful shutdown. On Unix, SIGINT + SIGTERM;
+    // on Windows, Ctrl-C (the closest portable equivalent tokio exposes).
     let shutdown_signal = shutdown.clone();
     tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let mut sigint = match signal(SignalKind::interrupt()) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        tokio::select! {
-            _ = sigterm.recv() => {}
-            _ = sigint.recv() => {}
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let mut sigint = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
         }
         shutdown_signal.notify_one();
     });
@@ -270,7 +271,7 @@ async fn main() -> Result<()> {
     let accept_loop = async {
         loop {
             match listener.accept().await {
-                Ok((stream, _addr)) => {
+                Ok(stream) => {
                     let state = state.clone();
                     let key_store = key_store.clone();
                     let gpg_store = gpg_store.clone();
@@ -330,7 +331,6 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use tokio::io::AsyncBufReadExt;
-    use tokio::net::UnixStream;
 
     /// Smoke test: start the daemon, send ping, then shutdown.
     /// Doesn't touch trove-core — that crate is still stubbed.
@@ -344,11 +344,7 @@ mod tests {
         // because it's `#[tokio::main]`, but we can replicate the body.
         let sock_path = tmp.clone();
         let server = tokio::spawn(async move {
-            if sock_path.exists() {
-                std::fs::remove_file(&sock_path).unwrap();
-            }
-            let listener = UnixListener::bind(&sock_path).unwrap();
-            set_socket_perms(&sock_path).unwrap();
+            let mut listener = ipc::bind(&sock_path).await.unwrap();
 
             let state: SharedState = Arc::new(Mutex::new(None));
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
@@ -371,7 +367,7 @@ mod tests {
             let accept_shutdown = shutdown.clone();
             let accept = async move {
                 loop {
-                    if let Ok((stream, _)) = listener.accept().await {
+                    if let Ok(stream) = listener.accept().await {
                         let s = accept_state.clone();
                         let ks = accept_keys.clone();
                         let gks = accept_gpg.clone();
@@ -400,8 +396,8 @@ mod tests {
         }
         assert!(tmp.exists(), "socket never appeared");
 
-        let stream = UnixStream::connect(&tmp).await.expect("connect");
-        let (r, mut w) = stream.into_split();
+        let stream = ipc::connect(&tmp).await.expect("connect");
+        let (r, mut w) = tokio::io::split(stream);
         let mut reader = BufReader::new(r).lines();
 
         // ping
