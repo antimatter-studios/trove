@@ -8,10 +8,9 @@ dir=$(cd "$(dirname "$0")/.." && pwd)   # .githooks/
 . "$dir/lib/common.sh"
 
 slug=$(gg_repo_slug); [ -n "$slug" ] || exit 0
-gg_throttled merge-settings && exit 0
 gg_have_gh || { echo "github-guard: gh not installed/authed — skipping merge-settings check for $slug" >&2; exit 0; }
 owner=${slug%%/*}
-gg_user_owns "$owner" || { gg_stamp merge-settings; exit 0; }
+gg_user_owns "$owner" || exit 0
 
 allow=$(gh api "repos/$slug" --jq '.allow_merge_commit' 2>/dev/null) || {
   echo "github-guard: couldn't read merge settings for $slug — skipping" >&2; exit 0; }
@@ -26,5 +25,4 @@ if [ "$allow" = "true" ]; then
     echo "github-guard: PATCH failed for $slug (need repo admin?) — not blocking" >&2
   fi
 fi
-gg_stamp merge-settings
 exit 0
