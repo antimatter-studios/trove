@@ -38,22 +38,48 @@ gg_user_owns() {
   [ "$role" = "admin" ]
 }
 
-# Throttle: return 0 (= "skip, checked recently") if the named check ran within
-# $GITHUB_GUARD_TTL seconds. Default TTL 0 = never throttle (check every time).
-gg_throttled() {
-  local key="$1" ttl stamp now last gitdir
-  ttl=${GITHUB_GUARD_TTL:-0}
-  [ "$ttl" -gt 0 ] 2>/dev/null || return 1
-  gitdir=$(git rev-parse --git-dir 2>/dev/null) || return 1
-  stamp="$gitdir/github-guard-$key.checked"
-  [ -f "$stamp" ] || return 1
-  now=$(date +%s); last=$(date -r "$stamp" +%s 2>/dev/null || echo 0)
-  [ $((now - last)) -lt "$ttl" ]
+# NOTE: deliberately no throttling. The network guards run only on commit/push
+# — sparse, event-driven, a few calls each, nowhere near the 5000/hour API
+# limit — so the ~1-2s they add to the occasional commit isn't worth a
+# stamp-file/TTL mechanism.
+
+# True if this repo keeps a changelog — a root CHANGELOG.md, or a "Changelog"
+# (release notes / history) section in the root README.md. Guards that enforce
+# changelog discipline self-gate on this: no changelog convention → they no-op,
+# so projects without one are unaffected.
+gg_has_changelog() {
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -f "$root/CHANGELOG.md" ] && return 0
+  [ -f "$root/README.md" ] \
+    && grep -qiE '^#{2,}[[:space:]]+(change ?log|release notes|recent changes|releases|history)\b' "$root/README.md" \
+    && return 0
+  return 1
 }
 
-# Record that the named check just ran (for throttling).
-gg_stamp() {
-  local key="$1" gitdir
-  gitdir=$(git rev-parse --git-dir 2>/dev/null) || return 0
-  : > "$gitdir/github-guard-$key.checked" 2>/dev/null || true
+# --- Rust helpers (shared by the rust-* guards) ------------------------------
+
+# True if the repo root holds a Cargo.toml (i.e. it's a Cargo project).
+gg_is_rust() {
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -f "$root/Cargo.toml" ]
+}
+
+# Run cargo via the rustup SHIM (`~/.cargo/bin/cargo`) so a repo's
+# rust-toolchain.toml pin is honored automatically — local fmt/clippy then use
+# the same toolchain as CI. A bare `cargo` can be Homebrew's, which ignores the
+# pin entirely; the shim is the rustup proxy and respects it (installing the
+# pinned toolchain on first use, as rustup intends). Falls back to whatever
+# `cargo` is on PATH if the shim isn't present; returns 2 if there's no cargo
+# at all (callers treat that as "skip, don't block").
+gg_cargo() {
+  local shim="$HOME/.cargo/bin/cargo"
+  if [ -x "$shim" ]; then
+    "$shim" "$@"
+  elif command -v cargo >/dev/null 2>&1; then
+    cargo "$@"
+  else
+    return 2
+  fi
 }
