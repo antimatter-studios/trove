@@ -17,18 +17,22 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
-use troved::handler::{handle, SharedState};
+use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
 
 const PASSWORD: &str = "test-password-materialize";
 
+/// Fixed peer uid for the harness — these tests don't vary the caller uid.
+const TEST_UID: u32 = 1000;
+
 struct Daemon {
     state: SharedState,
     key_store: troved::ssh_agent::KeyStore,
     gpg_store: troved::gpg_agent::GpgKeyStore,
     mat_store: MaterializedStore,
+    session: SessionStore,
     idle: Arc<IdleTracker>,
 }
 
@@ -38,6 +42,7 @@ impl Daemon {
         let key_store: troved::ssh_agent::KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: troved::gpg_agent::GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+        let session: SessionStore = Arc::new(Mutex::new(None));
         // No-op lock callback: these tests drive `Lock` explicitly and don't
         // need the idle path. Auto-lock is also disabled (timeout=0) so the
         // tracker stays out of the way.
@@ -48,6 +53,7 @@ impl Daemon {
             key_store,
             gpg_store,
             mat_store,
+            session,
             idle,
         }
     }
@@ -59,7 +65,9 @@ impl Daemon {
             &self.key_store,
             &self.gpg_store,
             &self.mat_store,
+            &self.session,
             &self.idle,
+            TEST_UID,
         )
         .await
         .response

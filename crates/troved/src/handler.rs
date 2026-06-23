@@ -26,19 +26,42 @@ use crate::ssh_agent::{keeagent, keys as ssh_keys, KeyStore, LoadedKey};
 
 pub type SharedState = Arc<Mutex<Option<Vault>>>;
 
+/// A provisioning session: the one-time code minted at `Unlock` plus the uid
+/// that unlocked. Code-gated extraction (`Get`) requires presenting this code
+/// from the same uid (SO_PEERCRED). Dropped on `Lock`/`Shutdown`/idle-lock.
+pub struct Session {
+    pub code: String,
+    pub uid: u32,
+}
+
+pub type SessionStore = Arc<Mutex<Option<Session>>>;
+
+/// Mint a fresh session code: 24 random bytes, URL-safe base64 (no padding, so
+/// it's safe as an env-var value and on a command line).
+fn mint_session_code() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut b = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut b);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
 /// Outcome control — let the connection loop know when to ask the daemon to exit.
 pub struct Handled {
     pub response: Response,
     pub shutdown: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle(
     req: Request,
     state: &SharedState,
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
     mat_store: &MaterializedStore,
+    session: &SessionStore,
     idle: &Arc<IdleTracker>,
+    peer_uid: u32,
 ) -> Handled {
     // Bump only on commands that represent real user activity. Read-only
     // inspection commands (Status, GetIdleTimeout, MaterializeStatus) and the
@@ -112,8 +135,20 @@ pub async fn handle(
                     // `0` disables auto-lock for either path.
                     let timeout_secs = timeout.unwrap_or_else(|| idle.current_timeout_secs());
                     idle.start_or_reset(Duration::from_secs(timeout_secs));
+
+                    // Mint the session code, bound to the uid that unlocked.
+                    // Extraction (`Get`) will demand both. Returned to the CLI,
+                    // which emits it as `export TROVE_SESSION=…`.
+                    let code = mint_session_code();
+                    {
+                        let mut sess = session.lock().await;
+                        *sess = Some(Session {
+                            code: code.clone(),
+                            uid: peer_uid,
+                        });
+                    }
                     Handled {
-                        response: Response::ok_empty(),
+                        response: Response::ok_unlocked(code),
                         shutdown: false,
                     }
                 }
@@ -183,6 +218,10 @@ pub async fn handle(
                 let mut gkeys = gpg_store.write().await;
                 gkeys.clear();
             }
+            {
+                let mut sess = session.lock().await;
+                *sess = None;
+            }
             Handled {
                 response: Response::ok_empty(),
                 shutdown: false,
@@ -209,6 +248,10 @@ pub async fn handle(
             {
                 let mut gkeys = gpg_store.write().await;
                 gkeys.clear();
+            }
+            {
+                let mut sess = session.lock().await;
+                *sess = None;
             }
             Handled {
                 response: Response::ok_empty(),
@@ -271,6 +314,76 @@ pub async fn handle(
                 shutdown: false,
             }
         }
+
+        Request::Get {
+            title,
+            attachment,
+            code,
+        } => get_secret(state, session, peer_uid, &title, &attachment, &code).await,
+    }
+}
+
+/// Code-gated extraction. Validates the session (unlocked + code matches + same
+/// uid as the unlocker), then reads `attachment` from the entry titled `title`
+/// out of the held vault and returns it base64-encoded. The error is
+/// deliberately generic on a session-validation failure so it isn't an oracle
+/// for "is the vault unlocked?" vs "is the code wrong?".
+async fn get_secret(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    title: &str,
+    attachment: &str,
+    code: &str,
+) -> Handled {
+    {
+        let sess = session.lock().await;
+        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+        if !ok {
+            return Handled {
+                response: Response::err(
+                    "refused: vault locked, or session code missing/invalid for this uid",
+                ),
+                shutdown: false,
+            };
+        }
+    }
+    let guard = state.lock().await;
+    let vault = match guard.as_ref() {
+        Some(v) => v,
+        None => {
+            return Handled {
+                response: Response::err("no vault unlocked"),
+                shutdown: false,
+            }
+        }
+    };
+    let id = match vault.find_by_title(title) {
+        Some(id) => id,
+        None => {
+            return Handled {
+                response: Response::err(format!("entry not found: {title}")),
+                shutdown: false,
+            }
+        }
+    };
+    match vault.read_binary(&id, attachment) {
+        Ok(Some(bytes)) => {
+            use base64::Engine;
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            Handled {
+                response: Response::ok_secret(data),
+                shutdown: false,
+            }
+        }
+        Ok(None) => Handled {
+            response: Response::err(format!("entry '{title}' has no attachment '{attachment}'")),
+            shutdown: false,
+        },
+        Err(e) => Handled {
+            response: Response::err(format!("reading attachment: {e}")),
+            shutdown: false,
+        },
     }
 }
 
