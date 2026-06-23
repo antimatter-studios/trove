@@ -64,7 +64,8 @@ The biggest gaps blocking daily-driver use against a real KeePassXC vault are: *
 ```sh
 trove init <vault.kdbx>
 trove list <vault.kdbx>
-trove add ssh <vault> <title> --key <id_ed25519> [--user <name>]
+trove add ssh <entry-path> <id_ed25519> [--user <name>]   # daemon's unlocked vault; add --vault <kdbx> for direct-file
+trove get ssh <entry-path> [--public] [--out <path>]      # from the daemon; --public emits the authorized_keys line
 trove add gpg <vault> <title> --key <secret-key.gpg>
 trove add file <vault> <title> --src <local> --target <materialize-path> [--mode 0600] [--ttl 600] [--allow-disk-backed]
 trove materialize <vault>            # in-process; SIGINT-wipes
@@ -77,19 +78,21 @@ All prompt for the master password unless `--password-stdin` is set.
 ### CLI daemon-aware mode — `trove` talking to `troved`
 
 ```sh
-eval "$(trove unlock <vault.kdbx>)"  # unlock + mint session code → $TROVE_SESSION
+trove unlock <vault.kdbx>      # interactive: opens a session subshell with $TROVE_SESSION set
+                               # scripts:     eval "$(trove unlock <vault.kdbx>)"
 trove lock                     # wipes everything + invalidates the code (idempotent)
 trove status                   # vault path, idle remaining, key counts
 trove idle set <seconds>       # 0 disables auto-lock
 trove idle get
 trove materialize-status       # one line per active materialization
-trove get ssh  <vault> <title> [--out <path>]            # code-gated extraction
+trove get ssh  <entry-path> [--public] [--out <path>]    # code-gated extraction
 trove get gpg  <vault> <title> [--out <path>]            # via the unlocked daemon
 trove get file <vault> <title> [--name <att>] [--out <path>]
 ```
 
 `get` routes extraction through the *unlocked daemon*: it requires
-`$TROVE_SESSION` (from `eval "$(trove unlock …)"`) and is served only to the
+`$TROVE_SESSION` (set by `trove unlock` — in your session subshell, or via
+`eval "$(trove unlock …)"` in scripts) and is served only to the
 unlocking uid (`SO_PEERCRED`). The `<vault>` positional is vestigial — the daemon
 serves whatever's unlocked. See [provisioning-sessions.md](provisioning-sessions.md).
 
