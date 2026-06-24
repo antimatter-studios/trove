@@ -269,3 +269,82 @@ fn delete_entry_removes_from_listing() {
         other => panic!("expected EntryNotFound on second delete, got {other:?}"),
     }
 }
+
+/// The top-level group is named "Root" on disk (matching KeePassXC), so other
+/// clients show a named folder instead of a blank one. Naming it must not leak
+/// into trove's own paths: a root-level entry keeps an empty `group_path` and a
+/// nested entry still excludes the root from its path.
+#[test]
+fn save_names_root_group_without_polluting_paths() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.kdbx");
+    {
+        let mut vault = Vault::create(&path, "pw").expect("create");
+        vault.add_entry("top-level").expect("add root entry");
+        vault.add_entry("Work/SSH/github").expect("add nested");
+        vault.save().expect("save");
+    }
+
+    // Inspect the persisted database the way KeePassXC would: the single
+    // top-level group carries the name "Root".
+    let mut f = std::fs::File::open(&path).expect("open file");
+    let key = keepass::DatabaseKey::new().with_password("pw");
+    let db = keepass::Database::open(&mut f, key).expect("decrypt");
+    assert_eq!(db.root().name, "Root", "root group is named on disk");
+
+    // The named root stays out of trove's entry paths.
+    let vault = Vault::open(&path, "pw").expect("reopen");
+    let by_title = |t: &str| {
+        vault
+            .list_entries()
+            .into_iter()
+            .find(|e| e.title == t)
+            .unwrap_or_else(|| panic!("missing entry {t}"))
+    };
+    assert!(
+        by_title("top-level").group_path.is_empty(),
+        "root-level entry keeps an empty group_path despite the named root"
+    );
+    assert_eq!(
+        by_title("github").group_path,
+        vec!["Work".to_string(), "SSH".to_string()],
+        "nested entry path still excludes the root group"
+    );
+}
+
+/// A leading `Root/` segment names the root group itself, not a child of it.
+/// `Root/x` is exactly equivalent to bare `x` (case-insensitively) on both the
+/// write and read paths, and never creates a nested `Root` group — the "weird
+/// position" we want to avoid now that the root is named.
+#[test]
+fn root_prefix_aliases_the_root_group_without_nesting() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.kdbx");
+    let mut vault = Vault::create(&path, "pw").expect("create");
+
+    let id = vault.add_entry("Root/alpha").expect("add via Root/ prefix");
+    let summary = vault.get_entry(&id).expect("entry exists");
+    assert!(
+        summary.group_path.is_empty(),
+        "leading Root must address the root group, not create a child: {:?}",
+        summary.group_path
+    );
+    assert_eq!(summary.display_path(), "alpha");
+
+    // Every spelling resolves to the same entry.
+    assert_eq!(vault.find_by_title("Root/alpha").as_ref(), Some(&id));
+    assert_eq!(vault.find_by_title("root/alpha").as_ref(), Some(&id));
+    assert_eq!(vault.find_by_title("alpha").as_ref(), Some(&id));
+
+    // No child group named "Root" was created under the (named) root.
+    vault.save().expect("save");
+    let mut f = std::fs::File::open(&path).expect("open file");
+    let key = keepass::DatabaseKey::new().with_password("pw");
+    let db = keepass::Database::open(&mut f, key).expect("decrypt");
+    assert_eq!(db.root().name, "Root");
+    assert_eq!(
+        db.root().groups().count(),
+        0,
+        "Root/ prefix must not nest a second Root group"
+    );
+}
