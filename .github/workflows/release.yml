@@ -60,9 +60,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install system tools
+        # keepassxc-cli is the mandatory cross-tool conformance oracle — the
+        # matrix tests hard-fail (never skip) if it's absent, so the release
+        # gate must install it just like CI does.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gnupg git openssh-client
+          sudo apt-get install -y --no-install-recommends \
+            gnupg \
+            git \
+            openssh-client \
+            keepassxc
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2.7.3
