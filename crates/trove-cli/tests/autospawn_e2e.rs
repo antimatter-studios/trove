@@ -1,10 +1,11 @@
-//! End-to-end test for the auto-spawn path: when no daemon is running, a
+//! End-to-end tests for the auto-spawn path: when no daemon is running, a
 //! daemon-aware `trove` command should launch `troved` itself, wait for the
 //! socket, and succeed — without the user ever running `troved &`.
 //!
-//! This is the counterpart to `cli_status_e2e::trove_status_against_no_daemon_exits_one`,
-//! which covers the *opt-out* (`TROVE_NO_AUTOSPAWN=1`) path. Here we exercise
-//! the default-on path against a real `troved` binary.
+//! `status` is the deliberate exception: since the daemon exits once nothing is
+//! unlocked, "no daemon" already means "nothing unlocked", so `status` answers
+//! from that fact rather than spawning a process just to report emptiness. We
+//! cover both: `unlock` DOES autospawn; `status` does NOT.
 //!
 //! Skips gracefully when either binary is missing — `cargo test -p trove-cli`
 //! on its own does not build the `troved` *binary* (it's a separate package).
@@ -47,8 +48,31 @@ fn shutdown_daemon(sock: &Path) {
     }
 }
 
+const PASSWORD: &str = "autospawn-e2e-pw";
+
+/// Run `cmd` feeding `input + "\n"` on stdin; return its captured Output.
+fn run_with_stdin(cmd: &mut Command, input: &str) -> std::process::Output {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    {
+        let mut stdin = child.stdin.take().expect("child stdin");
+        stdin
+            .write_all(format!("{input}\n").as_bytes())
+            .expect("write stdin");
+    }
+    child.wait_with_output().expect("wait")
+}
+
+/// The autospawn path itself, via a command that uses it: `unlock` brings up
+/// `troved` when none is running, unlocks the vault, and the daemon stays up
+/// (a vault is open) — so the user never has to run `troved &`.
 #[test]
-fn status_autospawns_troved_when_none_running() {
+fn unlock_autospawns_troved_when_none_running() {
     let Some(trove) = find_trove() else {
         eprintln!("trove binary not found; skipping autospawn e2e");
         return;
@@ -63,22 +87,37 @@ fn status_autospawns_troved_when_none_running() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let sock = tmp.path().join("trove.sock");
-    let ssh_sock = tmp.path().join("ssh.sock");
-    let gpg_sock = tmp.path().join("gpg.sock");
+    let vault = tmp.path().join("v.kdbx");
+
+    // Create the vault offline — `init` talks to no daemon.
+    let init = run_with_stdin(
+        Command::new(&trove)
+            .arg("init")
+            .arg(&vault)
+            .arg("--password-stdin"),
+        PASSWORD,
+    );
+    assert!(
+        init.status.success(),
+        "trove init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
 
     assert!(!sock.exists(), "precondition: no daemon socket yet");
 
-    // `trove status` with NO TROVE_NO_AUTOSPAWN — the CLI should spawn troved.
-    // Isolate the ssh/gpg agent sockets into the tempdir so we never collide
-    // with a real daemon the developer might have running.
-    let out = Command::new(&trove)
-        .arg("status")
-        .env("TROVE_SOCK", &sock)
-        .env("TROVE_SSH_SOCK", &ssh_sock)
-        .env("TROVE_GPG_SOCK", &gpg_sock)
-        .env("TROVE_DAEMON_BIN", &troved)
-        .output()
-        .expect("run trove status");
+    // `unlock` with no daemon running must spawn troved. Isolate the ssh/gpg
+    // agent sockets into the tempdir so we never collide with a real daemon.
+    let out = run_with_stdin(
+        Command::new(&trove)
+            .arg("unlock")
+            .arg(&vault)
+            .arg("--password-stdin")
+            .env("TROVE_SOCK", &sock)
+            .env("TROVE_SSH_SOCK", tmp.path().join("ssh.sock"))
+            .env("TROVE_GPG_SOCK", tmp.path().join("gpg.sock"))
+            .env("TROVE_DAEMON_BIN", &troved),
+        PASSWORD,
+    );
 
     // Capture observations, then tear the daemon down BEFORE asserting so a
     // failed assertion can't leak the spawned process.
@@ -90,15 +129,64 @@ fn status_autospawns_troved_when_none_running() {
 
     assert!(
         success,
-        "trove status should auto-spawn troved and succeed.\nstdout: {stdout}\nstderr: {stderr}"
+        "trove unlock should auto-spawn troved and succeed.\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         socket_came_up,
         "auto-spawned troved should have created the control socket"
     );
-    // Fresh daemon, nothing unlocked yet.
+    // Piped stdout → export mode: the session code is emitted for `eval`.
     assert!(
-        stdout.contains("no vault unlocked"),
-        "expected a fresh daemon reporting no vault.\nstdout: {stdout}"
+        stdout.contains("export TROVE_SESSION="),
+        "expected the session-code export on stdout:\n{stdout}"
+    );
+}
+
+/// `status` must NOT autospawn — with no daemon, nothing is unlocked, which is
+/// itself the answer. Real binaries, NO `TROVE_NO_AUTOSPAWN` opt-out and a valid
+/// `TROVE_DAEMON_BIN`: proves `status` itself declines to spawn (not that the
+/// opt-out suppressed it). It still succeeds, reporting the locked default.
+#[test]
+fn status_does_not_autospawn_when_none_running() {
+    let Some(trove) = find_trove() else {
+        eprintln!("trove binary not found; skipping autospawn e2e");
+        return;
+    };
+    let troved = sibling_troved(&trove);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("trove.sock");
+
+    assert!(!sock.exists(), "precondition: no daemon socket yet");
+
+    let mut cmd = Command::new(&trove);
+    cmd.arg("status")
+        .env("TROVE_SOCK", &sock)
+        .env("TROVE_SSH_SOCK", tmp.path().join("ssh.sock"))
+        .env("TROVE_GPG_SOCK", tmp.path().join("gpg.sock"));
+    // Point at a real troved so that IF status tried to spawn, it would succeed
+    // and the socket would appear — making the negative assertion meaningful.
+    if let Some(ref t) = troved {
+        cmd.env("TROVE_DAEMON_BIN", t);
+    }
+    let out = cmd.output().expect("run trove status");
+
+    let socket_came_up = sock.exists();
+    let success = out.status.success();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Clean up in case status unexpectedly spawned something.
+    shutdown_daemon(&sock);
+
+    assert!(
+        success,
+        "status with no daemon should succeed (nothing unlocked); stdout: {stdout}"
+    );
+    assert!(
+        !socket_came_up,
+        "status must NOT autospawn a daemon — no control socket should appear"
+    );
+    assert!(
+        stdout.contains("no vault unlocked") && stdout.contains("not running"),
+        "expected the locked/not-running default:\n{stdout}"
     );
 }

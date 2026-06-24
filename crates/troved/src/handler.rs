@@ -72,7 +72,12 @@ pub async fn handle(
     // agent traffic bumps the timer from inside the agent listeners, not via
     // this path.
     match req {
-        Request::Ping | Request::Status | Request::GetIdleTimeout | Request::MaterializeStatus => {}
+        Request::Ping
+        | Request::Status
+        | Request::GetIdleTimeout
+        | Request::MaterializeStatus
+        | Request::SshAgentList
+        | Request::GpgAgentList => {}
         _ => idle.bump(),
     }
     match req {
@@ -222,9 +227,22 @@ pub async fn handle(
                 let mut sess = session.lock().await;
                 *sess = None;
             }
+            // The daemon exists only to hold unlocked vaults and to clean up
+            // materialized files. The last vault is now locked and its files
+            // wiped, so if nothing remains to serve the daemon has no reason to
+            // live — signal shutdown (the connection loop acks first, then tears
+            // down) so the next `unlock` autospawns a fresh process: always the
+            // current binary, no lingering keyless daemon, no orphan pile-up.
+            //
+            // It stays alive iff a vault is still open OR materialized files
+            // still need cleanup. Single-vault today, but the condition already
+            // generalizes — locking one of several vaults won't exit; only the
+            // last one (with nothing left to clean) does.
+            let vault_open = state.lock().await.is_some();
+            let has_materialized = !mat_store.read().await.is_empty();
             Handled {
                 response: Response::ok_empty(),
-                shutdown: false,
+                shutdown: !vault_open && !has_materialized,
             }
         }
 
@@ -263,6 +281,44 @@ pub async fn handle(
             let snapshot = materialize::status_snapshot(mat_store).await;
             Handled {
                 response: Response::ok_materialize_status(snapshot),
+                shutdown: false,
+            }
+        }
+
+        Request::SshAgentList => {
+            use base64::Engine as _;
+            let keys = key_store.read().await;
+            let dtos = keys
+                .iter()
+                .map(|k| crate::protocol::SshKeyDto {
+                    algo: k.algorithm_name().to_string(),
+                    blob_b64: base64::engine::general_purpose::STANDARD.encode(&k.public_blob),
+                    comment: k.comment.clone(),
+                })
+                .collect();
+            Handled {
+                response: Response::ok_ssh_agent_list(dtos),
+                shutdown: false,
+            }
+        }
+
+        Request::GpgAgentList => {
+            use crate::gpg_agent::keys::LoadedGpgKey;
+            let keys = gpg_store.read().await;
+            let dtos = keys
+                .iter()
+                .map(|k| crate::protocol::GpgKeyDto {
+                    keygrip: k.keygrip_hex(),
+                    key_type: match k {
+                        LoadedGpgKey::Ed25519(_) => "ed25519/sign",
+                        LoadedGpgKey::Cv25519(_) => "cv25519/encr",
+                    }
+                    .to_string(),
+                    comment: k.comment().to_string(),
+                })
+                .collect();
+            Handled {
+                response: Response::ok_gpg_agent_list(dtos),
                 shutdown: false,
             }
         }
@@ -320,6 +376,25 @@ pub async fn handle(
             attachment,
             code,
         } => get_secret(state, session, peer_uid, &title, &attachment, &code).await,
+
+        Request::AddSsh {
+            path,
+            key,
+            user,
+            code,
+        } => {
+            add_ssh(
+                state,
+                session,
+                key_store,
+                peer_uid,
+                &path,
+                &key,
+                user.as_deref(),
+                &code,
+            )
+            .await
+        }
     }
 }
 
@@ -384,6 +459,133 @@ async fn get_secret(
             response: Response::err(format!("reading attachment: {e}")),
             shutdown: false,
         },
+    }
+}
+
+/// Code-gated write. Validates the session (same gate as `get_secret`: vault
+/// unlocked + code matches + same uid as the unlocker), decodes the base64 key
+/// bytes, then stores them on the entry at `path` — creating the entry mkdir-p
+/// if absent, or replacing the `id` attachment in place if it exists. Writes a
+/// `KeeAgent.settings` blob so KeePassXC's agent loads it, sets `UserName` when
+/// given, persists with `save()`, and finally reloads the SSH agent key store
+/// from the updated vault so the new key is served without a re-unlock.
+#[allow(clippy::too_many_arguments)]
+async fn add_ssh(
+    state: &SharedState,
+    session: &SessionStore,
+    key_store: &KeyStore,
+    peer_uid: u32,
+    path: &str,
+    key_b64: &str,
+    user: Option<&str>,
+    code: &str,
+) -> Handled {
+    {
+        let sess = session.lock().await;
+        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+        if !ok {
+            return Handled {
+                response: Response::err(
+                    "refused: vault locked, or session code missing/invalid for this uid",
+                ),
+                shutdown: false,
+            };
+        }
+    }
+
+    let key_bytes = {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(key_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                return Handled {
+                    response: Response::err(format!("decoding key bytes: {e}")),
+                    shutdown: false,
+                }
+            }
+        }
+    };
+
+    // Mutate the held vault and persist, then reload the agent key set off the
+    // now-updated vault — all under the state lock, moving the reloaded Vec out
+    // so we never hold the state lock across the key_store write below.
+    let reloaded = {
+        let mut guard = state.lock().await;
+        let vault = match guard.as_mut() {
+            Some(v) => v,
+            None => {
+                return Handled {
+                    response: Response::err("no vault unlocked"),
+                    shutdown: false,
+                }
+            }
+        };
+        let id = match vault.find_by_title(path) {
+            Some(existing) => existing,
+            None => match vault.add_entry(path) {
+                Ok(id) => id,
+                Err(e) => {
+                    return Handled {
+                        response: Response::err(format!("creating entry '{path}': {e}")),
+                        shutdown: false,
+                    }
+                }
+            },
+        };
+        if let Err(e) = vault.attach_binary(&id, "id", &key_bytes) {
+            return Handled {
+                response: Response::err(format!("attaching ssh key: {e}")),
+                shutdown: false,
+            };
+        }
+        // Persist the public key as a real `id.pub` attachment so any tool can
+        // read the public half without deriving it from the private key.
+        match ssh_keys::openssh_public_line(&key_bytes, path) {
+            Ok(pub_line) => {
+                if let Err(e) = vault.attach_binary(&id, "id.pub", pub_line.as_bytes()) {
+                    return Handled {
+                        response: Response::err(format!("attaching public key: {e}")),
+                        shutdown: false,
+                    };
+                }
+            }
+            Err(e) => {
+                return Handled {
+                    response: Response::err(format!("deriving public key: {e}")),
+                    shutdown: false,
+                };
+            }
+        }
+        let settings = keeagent::settings_xml("id");
+        if let Err(e) = vault.attach_binary(&id, keeagent::ATTACHMENT_NAME, &settings) {
+            return Handled {
+                response: Response::err(format!("attaching KeeAgent.settings: {e}")),
+                shutdown: false,
+            };
+        }
+        if let Some(user) = user {
+            if let Err(e) = vault.set_field(&id, "UserName", user) {
+                return Handled {
+                    response: Response::err(format!("setting UserName: {e}")),
+                    shutdown: false,
+                };
+            }
+        }
+        if let Err(e) = vault.save() {
+            return Handled {
+                response: Response::err(format!("saving vault: {e}")),
+                shutdown: false,
+            };
+        }
+        load_ssh_keys_from_vault(vault)
+    };
+    {
+        let mut keys = key_store.write().await;
+        *keys = reloaded;
+    }
+    Handled {
+        response: Response::ok_empty(),
+        shutdown: false,
     }
 }
 
