@@ -66,6 +66,10 @@ pub enum Request {
         path: String,
         // NOTE: sensitive — base64 of the private key bytes. Never Debug-print.
         key: String,
+        /// Public-key comment for the derived `id.pub` (usually an email).
+        /// Absent → the daemon falls back to `path`, preserving old behaviour.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user: Option<String>,
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
@@ -104,10 +108,16 @@ impl std::fmt::Debug for Request {
                 .field("attachment", attachment)
                 .field("code", &"<redacted>")
                 .finish(),
-            Request::AddSsh { path, user, .. } => f
+            Request::AddSsh {
+                path,
+                comment,
+                user,
+                ..
+            } => f
                 .debug_struct("AddSsh")
                 .field("path", path)
                 .field("key", &"<redacted>")
+                .field("comment", comment)
                 .field("user", user)
                 .field("code", &"<redacted>")
                 .finish(),

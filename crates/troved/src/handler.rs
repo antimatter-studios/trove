@@ -380,6 +380,7 @@ pub async fn handle(
         Request::AddSsh {
             path,
             key,
+            comment,
             user,
             code,
         } => {
@@ -390,6 +391,7 @@ pub async fn handle(
                 peer_uid,
                 &path,
                 &key,
+                comment.as_deref(),
                 user.as_deref(),
                 &code,
             )
@@ -477,6 +479,7 @@ async fn add_ssh(
     peer_uid: u32,
     path: &str,
     key_b64: &str,
+    comment: Option<&str>,
     user: Option<&str>,
     code: &str,
 ) -> Handled {
@@ -539,8 +542,9 @@ async fn add_ssh(
             };
         }
         // Persist the public key as a real `id.pub` attachment so any tool can
-        // read the public half without deriving it from the private key.
-        match ssh_keys::openssh_public_line(&key_bytes, path) {
+        // read the public half without deriving it from the private key. The
+        // comment (usually an email) defaults to the entry path when absent.
+        match ssh_keys::openssh_public_line(&key_bytes, comment.unwrap_or(path)) {
             Ok(pub_line) => {
                 if let Err(e) = vault.attach_binary(&id, "id.pub", pub_line.as_bytes()) {
                     return Handled {

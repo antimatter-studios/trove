@@ -302,7 +302,8 @@ enum AddResource {
     /// created as needed and an existing entry has its `id` key replaced in
     /// place. `<KEY_FILE>` is the private key on disk — it is validated before
     /// being stored, so a public key, an encrypted key, or an unsupported/weak
-    /// algorithm is rejected with a precise error.
+    /// algorithm is rejected with a precise error. `<COMMENT>` is the public-key
+    /// comment (usually an email) recorded in the derived `id.pub`.
     ///
     /// By default the key is added to the vault currently unlocked in the
     /// running daemon — no vault path needed — using the `TROVE_SESSION` code
@@ -314,6 +315,10 @@ enum AddResource {
         /// Path to the SSH private key file (e.g. ~/.ssh/id_ed25519).
         #[arg(value_name = "KEY_FILE")]
         key: PathBuf,
+        /// Key comment for the public-key line — typically an email like
+        /// `you@host`. This is what lands in `id.pub` and so in a server's
+        /// authorized_keys, identifying the key to humans.
+        comment: String,
         /// Optional UserName field to record on the entry (e.g. git user).
         #[arg(long = "user")]
         user: Option<String>,
@@ -455,9 +460,17 @@ fn run(cli: Cli) -> Result<()> {
                 AddResource::Ssh {
                     entry_path,
                     key,
+                    comment,
                     user,
                 },
-        } => cmd_add_ssh(&entry_path, &key, vault, user.as_deref(), pw_stdin),
+        } => cmd_add_ssh(
+            &entry_path,
+            &key,
+            &comment,
+            vault,
+            user.as_deref(),
+            pw_stdin,
+        ),
         Command::Add {
             resource: AddResource::Gpg { title, key },
         } => cmd_add_gpg(require_vault(vault)?, &title, &key, pw_stdin),
@@ -1018,6 +1031,7 @@ fn print_list_row(id: &str, title: &str, attachments: &[String]) {
 fn cmd_add_ssh(
     entry_path: &str,
     key_path: &Path,
+    comment: &str,
     vault: Option<&Path>,
     user: Option<&str>,
     pw_stdin: bool,
@@ -1027,9 +1041,11 @@ fn cmd_add_ssh(
 
     // Validate before storing: reject a public key, an encrypted key, or an
     // unsupported/weak algorithm with a precise, user-facing message.
-    validate_ssh_private_key(&key_bytes, entry_path)?;
+    validate_ssh_private_key(&key_bytes, comment)?;
 
-    store_ssh_key("stored", entry_path, &key_bytes, vault, user, pw_stdin)
+    store_ssh_key(
+        "stored", entry_path, &key_bytes, comment, vault, user, pw_stdin,
+    )
 }
 
 /// `trove generate ssh`: mint a fresh keypair in-tool and store it exactly like
@@ -1055,7 +1071,15 @@ fn cmd_generate_ssh(
     };
     let key_bytes = troved::ssh_agent::keys::generate_private_key(kt, comment)
         .map_err(|e| anyhow!("generating ssh key: {e}"))?;
-    store_ssh_key("generated", entry_path, &key_bytes, vault, user, pw_stdin)
+    store_ssh_key(
+        "generated",
+        entry_path,
+        &key_bytes,
+        comment,
+        vault,
+        user,
+        pw_stdin,
+    )
 }
 
 /// Store SSH private-key bytes on an entry, the single path shared by `add ssh`
@@ -1070,6 +1094,7 @@ fn store_ssh_key(
     verb: &str,
     entry_path: &str,
     key_bytes: &[u8],
+    comment: &str,
     vault: Option<&Path>,
     user: Option<&str>,
     pw_stdin: bool,
@@ -1094,7 +1119,7 @@ fn store_ssh_key(
                 .context("attaching KeeAgent.settings")?;
             // Persist the public key as real data so any tool can read it
             // without deriving it from the private key (a trove-only ability).
-            let pub_line = ssh_public_line(key_bytes, entry_path)?;
+            let pub_line = ssh_public_line(key_bytes, comment)?;
             vault
                 .attach_binary(&id, SSH_PUBKEY_ATTACHMENT, pub_line.as_bytes())
                 .context("attaching public key")?;
@@ -1117,6 +1142,7 @@ fn store_ssh_key(
             let req = daemon::Request::AddSsh {
                 path: entry_path.to_string(),
                 key,
+                comment: Some(comment.to_string()),
                 user: user.map(str::to_string),
                 code,
             };

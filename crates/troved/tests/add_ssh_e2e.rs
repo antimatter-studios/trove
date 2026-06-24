@@ -29,6 +29,7 @@ use troved::ssh_agent::KeyStore;
 
 const PASSWORD: &str = "add-ssh-test-pw";
 const ENTRY: &str = "work/github.com";
+const COMMENT: &str = "dev@trove.test";
 
 /// A throwaway, passphrase-less ed25519 key. Real (so the agent key store can
 /// actually parse + load it on reload), but NOT a credential of any kind.
@@ -102,6 +103,7 @@ fn add_ssh(code: &str, path: &str, key: &[u8], user: Option<&str>) -> Request {
     Request::AddSsh {
         path: path.to_string(),
         key: base64::engine::general_purpose::STANDARD.encode(key),
+        comment: Some(COMMENT.to_string()),
         user: user.map(str::to_string),
         code: code.to_string(),
     }
@@ -164,6 +166,17 @@ async fn add_ssh_writes_persists_and_reloads_then_round_trips() {
             .expect("read settings")
             .is_some(),
         "KeeAgent.settings should be written so KeePassXC loads the key"
+    );
+    let pub_line = String::from_utf8(
+        reopened
+            .read_binary(&id, "id.pub")
+            .expect("read id.pub")
+            .expect("id.pub should be written"),
+    )
+    .expect("id.pub is utf8");
+    assert!(
+        pub_line.trim_end().ends_with(COMMENT),
+        "id.pub must carry the supplied comment, got {pub_line:?}"
     );
     assert_eq!(
         reopened.get_entry(&id).and_then(|e| e.username).as_deref(),
