@@ -4,15 +4,18 @@
 //! Interop tests for the real `trove` CLI as a conformance-matrix participant.
 //!
 //! These exercise the actual `trove` binary (subprocess) against the linked
-//! `keepass` crate and the `keepassxc-cli` oracle, proving three things:
+//! `keepass` crate and the `keepassxc-cli` oracle, proving four things:
 //!   1. trove's output is a valid KDBX carrying its extension fields
 //!      (`Materialize.*`, `KeeAgent.settings`, attachments) — readable by the
 //!      keepass crate.
 //!   2. trove can OPEN a keepass-crate-produced vault and enumerate the right
 //!      entries/groups.
-//!   3. trove's output is NOT yet openable by keepassxc 2.7.11 — the documented
-//!      current state caused by trove linking keepass 0.12.5 (empty numeric
-//!      `<Meta>` elements → keepassxc "Invalid number value").
+//!   3. trove's output is openable by keepassxc, and its extension fields
+//!      survive a keepassxc open+save (trove now writes KDBX 4.1 with the empty
+//!      numeric `<Meta>` defect gone).
+//!   4. trove HEALS a legacy keepass-0.12.5 KDBX 4.0 vault on re-save: it bumps
+//!      the file to 4.1 and re-emits `<Meta>` without the empty numerics that
+//!      made keepassxc reject it ("Invalid number value").
 //!
 //! Tests are hermetic (everything stages inside tempdirs) and never silently
 //! skip: a missing trove binary or oracle is a hard panic.
@@ -49,6 +52,18 @@ fn require_trove() -> Trove {
     })
 }
 
+/// A throwaway, passphrase-less ed25519 private key used only so `trove add
+/// ssh`'s validate-on-add accepts the fixture. NOT a real credential.
+const TEST_ED25519_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACBoqrjUPTHgj7L0kKQHDQCV/ct5QA85zPE9oj2wJik4xgAAAKgw4IFwMOCB
+cAAAAAtzc2gtZWQyNTUxOQAAACBoqrjUPTHgj7L0kKQHDQCV/ct5QA85zPE9oj2wJik4xg
+AAAEAsyZCyYmG3xaKTupOv0zRUu34nnomcphEX1RYpWrG19miquNQ9MeCPsvSQpAcNAJX9
+y3lADznM8T2iPbAmKTjGAAAAHnRyb3ZlLWNvbmZvcm1hbmNlLXRlc3RAZXhhbXBsZQECAw
+QFBgc=
+-----END OPENSSH PRIVATE KEY-----
+";
+
 /// The shared two-entry trove vault used by tests 1 and 3: one SSH entry and one
 /// materialize-file entry, exercising both attachment kinds and trove's two
 /// extension-field families.
@@ -57,8 +72,10 @@ fn sample_adds() -> Vec<TroveAdd> {
         TroveAdd::Ssh {
             title: "github.com".to_string(),
             user: "git".to_string(),
-            key: b"-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n"
-                .to_vec(),
+            // A real (throwaway, passphrase-less) ed25519 key: `trove add ssh`
+            // now validates the key before storing, so a placeholder blob would
+            // be rejected. Not a real credential.
+            key: TEST_ED25519_KEY.as_bytes().to_vec(),
         },
         TroveAdd::File {
             title: "kubeconfig-prod".to_string(),
@@ -217,5 +234,93 @@ fn trove_output_is_readable_by_keepassxc_and_survives_open_and_save() {
             "keepassxc@{} must preserve trove's Materialize.*/KeeAgent.settings/attachments across open+save",
             oracle.version
         );
+    }
+}
+
+/// Read the KDBX4 minor version from a `.kdbx` header. Layout: magic1 (4 bytes),
+/// magic2 (4 bytes), minor (u16 LE at offset 8), major (u16 LE at offset 10).
+fn kdbx4_minor(bytes: &[u8]) -> u16 {
+    assert!(bytes.len() >= 12, "kdbx header too short");
+    assert_eq!(
+        u16::from_le_bytes([bytes[10], bytes[11]]),
+        4,
+        "fixture is not a KDBX4 file"
+    );
+    u16::from_le_bytes([bytes[8], bytes[9]])
+}
+
+/// 4. trove HEALS a legacy KDBX 4.0 vault on re-save. A vault written by keepass
+///    0.12.5 (KDBX 4.0, with empty numeric `<Meta>` elements) is rejected by
+///    keepassxc with "Invalid number value". Current trove (keepass 0.13.10)
+///    opens it, and on save (a) bumps the version to KDBX 4.1 and (b) re-emits
+///    `<Meta>` without the empty numerics — so keepassxc then opens it cleanly.
+///
+///    This guards the `Vault::save()` fix: the version bump (otherwise the
+///    0.13.10 writer rejects KDB4(0) with "Unsupported database version") and
+///    the Meta default-policy backfill.
+///
+///    REGRESSION WATCH: a failure at the `resave_with_added_ssh` step means
+///    trove can no longer rewrite a legacy 4.0 vault (version bump dropped); a
+///    failure at the final keepassxc read means the empty-`<Meta>` defect is
+///    back, or trove stopped writing 4.1.
+#[test]
+fn trove_resave_heals_legacy_kdbx4_0_for_keepassxc() {
+    let trove = require_trove();
+
+    let oracles = keepassxc_party::discover();
+    assert!(
+        !oracles.is_empty(),
+        "no keepassxc-cli found — this oracle test must not be skipped. Install \
+         KeePassXC (macOS: `brew install --cask keepassxc`) or set \
+         TROVE_KEEPASSXC_CLI / TROVE_KEEPASSXC_CLIS (colon-separated paths)."
+    );
+
+    // A legacy vault as old trove wrote it: keepass 0.12.5, KDBX 4.0 (minor 0
+    // forced explicitly rather than relying on 0.12.5's native default).
+    let mut legacy_spec = pw_spec();
+    legacy_spec.config.kdbx4_minor = Some(0);
+    let legacy = crate_party::kp012::produce(&legacy_spec)
+        .expect("keepass 0.12.5 should produce a legacy vault");
+
+    // Precondition: it really is 4.0, and keepassxc really rejects it with the
+    // documented numeric-<Meta> error. (If this stops holding, the bug or the
+    // producer changed — the rest of the test would be meaningless.)
+    assert_eq!(kdbx4_minor(&legacy), 0, "legacy fixture must be KDBX 4.0");
+    for oracle in &oracles {
+        let err = keepassxc_party::consume(oracle, &legacy, &pw_spec())
+            .expect_err("keepassxc must reject the legacy 0.12.5 4.0 vault");
+        assert!(
+            err.to_lowercase().contains("number"),
+            "keepassxc@{} should reject the legacy vault with a numeric-<Meta> error, got: {err}",
+            oracle.version
+        );
+    }
+
+    // trove opens the legacy 4.0 vault and re-saves it (adding one SSH entry to
+    // force the write). This must succeed — pre-fix it failed with
+    // "Unsupported database version".
+    let healed = trove_party::resave_with_added_ssh(
+        &trove,
+        &legacy,
+        PW,
+        "github.com",
+        TEST_ED25519_KEY.as_bytes(),
+    )
+    .expect("trove should open and re-save a legacy KDBX 4.0 vault");
+
+    // The rewrite is KDBX 4.1, and keepassxc now opens it cleanly.
+    assert_eq!(
+        kdbx4_minor(&healed),
+        1,
+        "trove must rewrite the vault as KDBX 4.1"
+    );
+    for oracle in &oracles {
+        keepassxc_party::consume(oracle, &healed, &pw_spec()).unwrap_or_else(|e| {
+            panic!(
+                "keepassxc@{} should open the trove-healed vault, but failed: {e}\n\
+                 (the empty-<Meta> defect is back, or trove stopped writing KDBX 4.1)",
+                oracle.version
+            )
+        });
     }
 }
