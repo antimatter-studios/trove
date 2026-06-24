@@ -89,10 +89,12 @@ fn unlock_autospawns_troved_when_none_running() {
     let sock = tmp.path().join("trove.sock");
     let vault = tmp.path().join("v.kdbx");
 
-    // Create the vault offline — `init` talks to no daemon.
+    // Create the vault offline — `init` talks to no daemon. Vault via the
+    // global `--vault`.
     let init = run_with_stdin(
         Command::new(&trove)
             .arg("init")
+            .arg("--vault")
             .arg(&vault)
             .arg("--password-stdin"),
         PASSWORD,
