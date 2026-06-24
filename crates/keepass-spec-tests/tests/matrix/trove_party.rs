@@ -87,9 +87,10 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
     run(
         trove,
         &[
+            "--vault".as_ref(),
+            vault.as_os_str(),
             "--password-stdin".as_ref(),
             "init".as_ref(),
-            vault.as_os_str(),
         ],
         password,
     )?;
@@ -128,10 +129,11 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
                 run(
                     trove,
                     &[
+                        "--vault".as_ref(),
+                        vault.as_os_str(),
                         "--password-stdin".as_ref(),
                         "add".as_ref(),
                         "file".as_ref(),
-                        vault.as_os_str(),
                         title.as_ref(),
                         "--src".as_ref(),
                         srcfile.as_os_str(),
@@ -200,9 +202,10 @@ pub fn consume(trove: &Trove, bytes: &[u8], password: &str) -> Result<VaultRepr,
     let out = run(
         trove,
         &[
+            "--vault".as_ref(),
+            vault.as_os_str(),
             "--password-stdin".as_ref(),
             "list".as_ref(),
-            vault.as_os_str(),
         ],
         password,
     )?;

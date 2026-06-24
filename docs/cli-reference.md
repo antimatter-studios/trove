@@ -10,9 +10,21 @@ trove [OPTIONS] <COMMAND>
 
 | Flag | Description |
 | --- | --- |
+| `--vault <PATH>` | Operate **offline** on this kdbx file, bypassing the daemon. Global — works before or after the subcommand. See "Operating modes" below. |
 | `--password-stdin` | Read the vault password from stdin (one line) instead of prompting. For `init`, the single line becomes the password without a confirm step. Global — works on every subcommand. |
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
+
+### Operating modes
+
+`trove` has two modes, selected by the global `--vault` flag (both placements are equivalent: `trove --vault V list` == `trove list --vault V`):
+
+- **Offline (`--vault <PATH>`)** — the command opens the kdbx file directly. The password comes from `--password-stdin` or a prompt (never the command line). No daemon, no `TROVE_SESSION`. This is the stateless path automation should use. `init`, `add gpg/file`, and `materialize` always operate this way; with `--vault`, so do `add ssh`, `generate ssh`, `get`, and `list`.
+- **Daemon (no `--vault`)** — `add ssh`/`generate ssh`, `get`, and `list` act on the vault unlocked in the running `troved`, gated by the `TROVE_SESSION` code `trove unlock` minted. `init`, `add gpg/file`, and `materialize` have no daemon mode and error without `--vault`.
+
+`unlock` is the exception: it is inherently daemon-directed, so it keeps its own positional `<VAULT>` and ignores `--vault`.
+
+Entry-addressing commands accept a `group/sub/title` **entry path**; intermediate groups are created on write as needed.
 
 Exit codes (from [`classify_exit`](../crates/trove-cli/src/main.rs)):
 
@@ -25,20 +37,20 @@ Exit codes (from [`classify_exit`](../crates/trove-cli/src/main.rs)):
 ## trove init
 
 ```
-trove init <VAULT>
+trove --vault <PATH> init
 ```
 
-Create a new empty kdbx vault. Prompts twice for the master password (or once with `--password-stdin`). Errors if `<VAULT>` already exists.
+Create a new empty kdbx vault at `--vault <PATH>` (required). Prompts twice for the master password (or once with `--password-stdin`). Errors if the file already exists.
 
 Backed by [`Vault::create`](../crates/trove-core/src/lib.rs). The default kdbx config is KDBX 4 + AES-256 + GZip + ChaCha20 (inner stream) + Argon2d.
 
 ## trove list
 
 ```
-trove list <VAULT>
+trove [--vault <PATH>] list
 ```
 
-Print one line per entry: `<uuid>  <title>  [attachments: ...]`. Recursively walks all groups.
+Print one line per entry: `<uuid>  <path>  [attachments: ...]`. Recursively walks all groups. With `--vault` it reads the file directly (offline); without it, it lists the daemon's currently unlocked vault.
 
 ## trove add
 
@@ -51,29 +63,29 @@ Subcommands: `ssh`, `gpg`, `file`, `help`.
 ### trove add ssh
 
 ```
-trove add ssh [OPTIONS] --key <KEY> <VAULT> <TITLE>
+trove [--vault <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
-| `<VAULT>` | Path to the .kdbx vault. |
-| `<TITLE>` | Entry title (e.g. `"github.com"`). |
-| `--key <KEY>` | Path to the SSH private key file (e.g. `~/.ssh/id_ed25519`). Required. |
+| `<ENTRY_PATH>` | Entry path, e.g. `"github.com"` or `"Work/SSH/github"`. Groups auto-created. |
+| `<KEY_FILE>` | Path to the SSH private key file (e.g. `~/.ssh/id_ed25519`). Validated before storing. |
 | `--user <USER>` | Optional `UserName` field. |
-| `--password-stdin` | Global — see top. |
+| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--password-stdin` | Global — see top (offline mode only). |
 
-Stores the key bytes as a real KDBX `<Binary>` attachment named `id`. If an entry with the given title exists, its `id` attachment is replaced; otherwise a new entry is added at the root group.
+Stores the private key in the `id` attachment, the derived public key in `id.pub`, and `KeeAgent.settings`. An existing entry has its attachments replaced in place. See also `trove generate ssh` (mints a keypair in-tool).
 
 ### trove add gpg
 
 ```
-trove add gpg [OPTIONS] --key <KEY> <VAULT> <TITLE>
+trove --vault <PATH> add gpg [OPTIONS] --key <KEY> <TITLE>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
-| `<VAULT>` | Path to the .kdbx vault. |
-| `<TITLE>` | Entry title (e.g. `"git-signing"`). |
+| `--vault <PATH>` | Global. Required for `add gpg` (offline only). |
+| `<TITLE>` | Entry path or title (e.g. `"git-signing"`). |
 | `--key <KEY>` | Path to the binary GPG secret-key export. Required. **Binary, not armored.** |
 | `--password-stdin` | Global — see top. |
 
@@ -82,13 +94,13 @@ The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produ
 ### trove add file
 
 ```
-trove add file [OPTIONS] --src <SRC> --target <TARGET> <VAULT> <TITLE>
+trove --vault <PATH> add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
-| `<VAULT>` | Path to the .kdbx vault. |
-| `<TITLE>` | Entry title (e.g. `"kubeconfig-prod"`). |
+| `--vault <PATH>` | Global. Required for `add file` (offline only). |
+| `<TITLE>` | Entry path or title (e.g. `"kubeconfig-prod"`). |
 | `--src <SRC>` | File to read bytes from. Required. |
 | `--target <TARGET>` | Path to materialize the file to on unlock. Required. |
 | `--name <NAME>` | Override attachment name. Default: basename of `--src`. |
@@ -111,44 +123,45 @@ Stores file bytes as a real KDBX `<Binary>` attachment and sets the following en
 trove get <COMMAND>
 ```
 
-Subcommands: `ssh`, `gpg`, `file`, `help`. All three open the vault, find the entry by exact title match, read the relevant attachment, and write to `--out` (or stdout). On Unix, `--out` files are created `0600` via `O_CREAT|O_EXCL`.
+Subcommands: `ssh`, `gpg`, `file`, `help`. Each resolves the entry by path/title and writes to `--out` (or stdout). With `--vault` they read the file directly (offline); without it, they ask the daemon, gated by `TROVE_SESSION`. On Unix, private `--out` files are created `0600` via `O_CREAT|O_EXCL`.
 
 ### trove get ssh
 
 ```
-trove get ssh [OPTIONS] <VAULT> <TITLE>
+trove [--vault <PATH>] get ssh [OPTIONS] <ENTRY_PATH>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
-| `<VAULT>` | Path to the .kdbx vault. |
-| `<TITLE>` | Entry title to look up. |
-| `--out <OUT>` | Write the key to this path. Stdout if omitted. |
-| `--password-stdin` | Global — see top. |
+| `<ENTRY_PATH>` | Entry path to look up, e.g. `"github.com"` or `"Work/SSH/github"`. |
+| `--public` | Emit the public key (authorized_keys line) instead of the private key. |
+| `--out <OUT>` | Write to this path (private → 0600, plus `<OUT>.pub` → 0644). Stdout if omitted. |
+| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--password-stdin` | Global — see top (offline mode only). |
 
-Reads the `id` attachment.
+Reads the `id` (and `id.pub`) attachments; the public key falls back to being derived from the private key for legacy entries.
 
 ### trove get gpg
 
 ```
-trove get gpg [OPTIONS] <VAULT> <TITLE>
+trove [--vault <PATH>] get gpg [OPTIONS] <TITLE>
 ```
 
-Same shape as `get ssh`. Reads the `gpg-priv` attachment.
+Reads the `gpg-priv` attachment. `--vault` → offline; otherwise daemon (`TROVE_SESSION`). `--out` writes to a path (0600), else stdout.
 
 ### trove get file
 
 ```
-trove get file [OPTIONS] <VAULT> <TITLE>
+trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
-| `<VAULT>` | Path to the .kdbx vault. |
-| `<TITLE>` | Entry title to look up. |
-| `--name <NAME>` | Attachment name to read. Default: `"blob"`. The daemon does not resolve `Materialize.Source`; pass `--name` for entries using a non-`blob` slot. |
+| `<TITLE>` | Entry path or title to look up. |
+| `--name <NAME>` | Attachment name to read (e.g. `id.pub`). Default: `"blob"`. In daemon mode `Materialize.Source` is not resolved; pass `--name` for a non-`blob` slot. |
 | `--out <OUT>` | Write to this path. Stdout if omitted. |
-| `--password-stdin` | Global — see top. |
+| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--password-stdin` | Global — see top (offline mode only). |
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
@@ -199,7 +212,7 @@ ln -sf "$(trove gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
 ## trove materialize
 
 ```
-trove materialize <VAULT>
+trove --vault <PATH> materialize
 ```
 
 Open the vault, run every entry's materialize plan **in-process** (not via the daemon), hold open until SIGINT / SIGTERM, then wipe everything and exit. Useful for testing and disconnected workflows. Does **not** touch the daemon's `MaterializedStore`; if `troved` is also running, drive it via the `unlock` RPC instead so SSH and GPG agents come up at the same time.
