@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
+use keepass::config::DatabaseVersion;
 use keepass::db::Value;
 use zeroize::Zeroize;
 
@@ -149,6 +150,18 @@ impl Vault {
 
     /// Persist in-memory state back to the original path (atomic replace).
     pub fn save(&mut self) -> Result<()> {
+        // trove only ever writes KDBX 4.1. Force the version before serializing
+        // so re-saving a legacy 4.0 vault (written by keepass 0.12.5) succeeds:
+        // the 0.13.10 writer emits only 4.1 and would otherwise reject KDB4(0)
+        // with "Unsupported database version". The re-serialize also drops
+        // 0.12.5's empty numeric <Meta> elements that made KeePassXC reject the
+        // file with "Invalid number value".
+        self.inner.db.config.version = DatabaseVersion::KDB4(1);
+        // Pin the optional <Meta> policy fields to KeePassXC's own defaults so a
+        // trove vault behaves identically in any reader. Backfill-only — a value
+        // already set (by KeePassXC, or a future trove setting) is left as-is.
+        apply_default_meta_policy(&mut self.inner.db.meta);
+
         let dir = self
             .inner
             .path
@@ -515,4 +528,28 @@ fn save_err_to_error(e: keepass::error::DatabaseSaveError) -> Error {
         DatabaseSaveError::Io(io) => Error::Io(io),
         other => Error::Kdbx(other.to_string()),
     }
+}
+
+/// Backfill the optional `<Meta>` policy fields with KeePassXC's own defaults.
+///
+/// trove never sets these itself, so left alone every reader substitutes its
+/// own defaults and the effective policy depends on whichever tool last wrote
+/// the file. Pinning them to the values `keepassxc-cli db-create` writes makes
+/// a trove vault behave identically anywhere (and keeps the cross-tool
+/// conformance matrix deterministic):
+///   * 365-day maintenance-history window,
+///   * master-key-change recommend/force both off (`-1`, the KeePass
+///     "disabled" sentinel — these are *not* counters),
+///   * 10-item / 6 MiB per-entry history limits,
+///   * recycle bin enabled.
+///
+/// Backfill-only: a field already `Some(_)` is left untouched, so a policy a
+/// user set in KeePassXC survives a trove round-trip.
+fn apply_default_meta_policy(meta: &mut keepass::db::Meta) {
+    meta.maintenance_history_days.get_or_insert(365);
+    meta.master_key_change_rec.get_or_insert(-1);
+    meta.master_key_change_force.get_or_insert(-1);
+    meta.history_max_items.get_or_insert(10);
+    meta.history_max_size.get_or_insert(6 * 1024 * 1024);
+    meta.recyclebin_enabled.get_or_insert(true);
 }

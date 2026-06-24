@@ -309,6 +309,73 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
     })
 }
 
+/// Derive the OpenSSH public-key line (`<algo> <base64-blob> <comment>\n`) from
+/// private-key bytes — exactly the contents of an `id.pub` file.
+///
+/// trove persists this alongside the private key so any tool (keepassxc, ssh)
+/// can read the public key directly. Deriving the public key from the private
+/// key is something only trove knows how to do, so storing it makes the public
+/// half a first-class artifact rather than a trove-only computation.
+pub fn openssh_public_line(private_key_bytes: &[u8], comment: &str) -> Result<String, ParseError> {
+    use base64::Engine as _;
+    let loaded = parse_private_key(private_key_bytes, comment)?;
+    let algo = loaded.algorithm_name();
+    let blob = base64::engine::general_purpose::STANDARD.encode(&loaded.public_blob);
+    Ok(format!("{algo} {blob} {comment}\n"))
+}
+
+/// SSH key algorithms `trove generate ssh` can mint. Ed25519 is the default and
+/// is effectively instant; RSA (4096-bit) generation takes a few seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyType {
+    Ed25519,
+    Rsa,
+    EcdsaP256,
+    EcdsaP384,
+}
+
+/// Errors from [`generate_private_key`].
+#[derive(Debug, thiserror::Error)]
+pub enum GenerateError {
+    #[error("generating {0} key: {1}")]
+    Generation(&'static str, String),
+    #[error("serializing generated key: {0}")]
+    Serialization(String),
+}
+
+/// Generate a fresh, unencrypted OpenSSH private key carrying `comment`,
+/// returned as `-----BEGIN OPENSSH PRIVATE KEY-----` PEM bytes — exactly what
+/// [`parse_private_key`] (and so `add ssh`) accepts, so generation and import
+/// share one storage path. Keys are minted from the OS CSPRNG (`OsRng`).
+///
+/// The key is unencrypted: the trove vault is the encryption boundary, matching
+/// how `add ssh` stores imported keys.
+pub fn generate_private_key(key_type: KeyType, comment: &str) -> Result<Vec<u8>, GenerateError> {
+    let (algorithm, label) = match key_type {
+        KeyType::Ed25519 => (Algorithm::Ed25519, "ed25519"),
+        KeyType::Rsa => (Algorithm::Rsa { hash: None }, "rsa"),
+        KeyType::EcdsaP256 => (
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP256,
+            },
+            "ecdsa-p256",
+        ),
+        KeyType::EcdsaP384 => (
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP384,
+            },
+            "ecdsa-p384",
+        ),
+    };
+    let mut key = PrivateKey::random(&mut rand_core::OsRng, algorithm)
+        .map_err(|e| GenerateError::Generation(label, e.to_string()))?;
+    key.set_comment(comment);
+    let pem = key
+        .to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|e| GenerateError::Serialization(e.to_string()))?;
+    Ok(pem.as_bytes().to_vec())
+}
+
 /// Try the three PEM private-key formats we accept, in order: OpenSSH new
 /// wrapper, PKCS#1 (RSA-specific), PKCS#8 (any algorithm but only RSA is
 /// useful here, since ed25519/ecdsa OpenSSH keys are already covered above).
@@ -549,5 +616,32 @@ mod tests {
         assert_eq!(RsaHashChoice::from_agent_flags(0x04), RsaHashChoice::Sha512);
         // SHA-512 wins over SHA-256 if both bits are set (matches OpenSSH).
         assert_eq!(RsaHashChoice::from_agent_flags(0x06), RsaHashChoice::Sha512);
+    }
+
+    #[test]
+    fn generated_ed25519_round_trips_through_parser() {
+        // `generate ssh` mints a key; the same parser `add ssh` uses must accept
+        // it, with the comment preserved and the algorithm correct.
+        let pem = generate_private_key(KeyType::Ed25519, "gen@host").expect("generate");
+        let loaded = parse_private_key(&pem, "gen@host").expect("parse generated key");
+        assert_eq!(loaded.algorithm_name(), "ssh-ed25519");
+        assert_eq!(loaded.comment, "gen@host");
+        // It signs (i.e. it's a usable private key, not a stub).
+        assert!(loaded.sign(b"msg", 0).is_ok(), "generated key should sign");
+    }
+
+    #[test]
+    fn openssh_public_line_matches_format_and_blob() {
+        // The persisted id.pub line is `<algo> <base64-blob> <comment>` and its
+        // blob equals the public_blob the parser/agent derive.
+        use base64::Engine as _;
+        let pem = generate_private_key(KeyType::Ed25519, "pub@host").expect("generate");
+        let line = openssh_public_line(&pem, "pub@host").expect("public line");
+        let loaded = parse_private_key(&pem, "pub@host").expect("parse");
+        let expected_blob = base64::engine::general_purpose::STANDARD.encode(&loaded.public_blob);
+        assert_eq!(
+            line.trim_end(),
+            format!("ssh-ed25519 {expected_blob} pub@host")
+        );
     }
 }

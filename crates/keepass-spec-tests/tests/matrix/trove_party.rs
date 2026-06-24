@@ -56,7 +56,7 @@ pub fn locate() -> Option<Trove> {
 
 /// A resource trove can add via its subcommands.
 pub enum TroveAdd {
-    /// `trove add ssh <vault> <title> --key <keyfile> --user <user>`.
+    /// `trove add ssh <title> <keyfile> --vault <vault> --user <user>`.
     Ssh {
         title: String,
         user: String,
@@ -105,10 +105,10 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
                         "--password-stdin".as_ref(),
                         "add".as_ref(),
                         "ssh".as_ref(),
-                        vault.as_os_str(),
                         title.as_ref(),
-                        "--key".as_ref(),
                         keyfile.as_os_str(),
+                        "--vault".as_ref(),
+                        vault.as_os_str(),
                         "--user".as_ref(),
                         user.as_ref(),
                     ],
@@ -147,6 +147,43 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
     }
 
     std::fs::read(&vault).map_err(|e| format!("read produced vault: {e}"))
+}
+
+/// Open a *foreign* vault's bytes with trove and force a full re-save by adding
+/// one SSH entry, returning the rewritten `.kdbx` bytes.
+///
+/// Unlike [`produce`] (which `init`s a fresh vault), this writes `bytes` to disk
+/// first, so it exercises trove's open → mutate → save path on a vault it did
+/// not create — the path that rewrites a legacy KDBX 4.0 file into trove's
+/// current 4.1 on-disk format.
+pub fn resave_with_added_ssh(
+    trove: &Trove,
+    bytes: &[u8],
+    password: &str,
+    title: &str,
+    key: &[u8],
+) -> Result<Vec<u8>, String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let vault = dir.path().join("v.kdbx");
+    std::fs::write(&vault, bytes).map_err(|e| format!("write db: {e}"))?;
+    let keyfile = dir.path().join("key");
+    std::fs::write(&keyfile, key).map_err(|e| format!("write key file: {e}"))?;
+
+    run(
+        trove,
+        &[
+            "--password-stdin".as_ref(),
+            "add".as_ref(),
+            "ssh".as_ref(),
+            title.as_ref(),
+            keyfile.as_os_str(),
+            "--vault".as_ref(),
+            vault.as_os_str(),
+        ],
+        password,
+    )?;
+
+    std::fs::read(&vault).map_err(|e| format!("read resaved vault: {e}"))
 }
 
 /// Open a vault with `trove list` and recover entry PATHS + attachment NAMES.
