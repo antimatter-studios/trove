@@ -109,12 +109,19 @@ pub fn is_daemon_not_running(err: &anyhow::Error) -> bool {
 /// Humans don't run `trove` commands in parallel; if you script around this,
 /// serialize externally.
 pub fn send_autospawn(req: &Request) -> Result<Value> {
+    send_autospawn_reporting(req).map(|(v, _)| v)
+}
+
+/// Like [`send_autospawn`], but also reports whether THIS call spawned the
+/// daemon (`true`) or reused an already-running one (`false`). `unlock` uses it
+/// to tell the operator how the session's daemon came to be.
+pub fn send_autospawn_reporting(req: &Request) -> Result<(Value, bool)> {
     match send(req) {
-        Ok(v) => Ok(v),
+        Ok(v) => Ok((v, false)),
         Err(e) if is_daemon_not_running(&e) && !autospawn_disabled() => {
             spawn_daemon()?;
             wait_for_socket(Duration::from_secs(5))?;
-            send(req)
+            send(req).map(|v| (v, true))
         }
         Err(e) => Err(e),
     }

@@ -226,3 +226,105 @@ async fn status_request_does_not_bump_idle_timer() {
         "status must not keep the idle timer alive"
     );
 }
+
+/// After unlocking, an explicit `Lock` must signal daemon shutdown: the last
+/// vault is now locked and nothing is materialized, so the daemon has no reason
+/// to live (the connection loop turns `shutdown: true` into a clean exit, and
+/// the next `unlock` autospawns a fresh process). Guards the core
+/// "daemon lifetime = lifetime of the open set" invariant. The `Harness::handle`
+/// wrapper discards the flag, so we call `handle()` directly to inspect it.
+#[tokio::test]
+async fn lock_signals_daemon_shutdown_when_open_set_empties() {
+    let dir = TempDir::new().expect("tempdir");
+    let vault = dir.path().join("v.kdbx");
+    create_simple_vault(&vault);
+
+    let h = Harness::new(Duration::from_secs(900));
+    let resp = h
+        .handle(Request::Unlock {
+            path: vault.to_string_lossy().into_owned(),
+            password: PASSWORD.to_string(),
+            timeout: None,
+        })
+        .await;
+    assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
+
+    let handled = handle(
+        Request::Lock,
+        &h.state,
+        &h.key_store,
+        &h.gpg_store,
+        &h.mat_store,
+        &h.session,
+        &h.idle,
+        TEST_UID,
+    )
+    .await;
+    assert!(
+        handled.shutdown,
+        "Lock must signal shutdown once no vault is open and nothing is materialized"
+    );
+}
+
+/// Build a vault with one SSH key entry (`id` + `KeeAgent.settings`) so an
+/// unlock loads it into the agent key store. The key is minted with trove's own
+/// generator.
+fn create_ssh_vault(path: &Path) {
+    let key_pem = troved::ssh_agent::keys::generate_private_key(
+        troved::ssh_agent::keys::KeyType::Ed25519,
+        "agent@test",
+    )
+    .expect("generate key");
+    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+    let id = v.add_entry("server").expect("add entry");
+    v.attach_binary(&id, "id", &key_pem).expect("attach id");
+    let settings = troved::ssh_agent::keeagent::settings_xml("id");
+    v.attach_binary(&id, troved::ssh_agent::keeagent::ATTACHMENT_NAME, &settings)
+        .expect("attach KeeAgent.settings");
+    v.save().expect("save");
+}
+
+/// `SshAgentList` returns the public keys the agent serves (ssh-add -L data):
+/// one `{algo, blob_b64, comment}` per loaded key.
+#[tokio::test]
+async fn ssh_agent_list_returns_served_keys() {
+    let dir = TempDir::new().expect("tempdir");
+    let vault = dir.path().join("v.kdbx");
+    create_ssh_vault(&vault);
+
+    let h = Harness::new(Duration::from_secs(900));
+    let resp = h
+        .handle(Request::Unlock {
+            path: vault.to_string_lossy().into_owned(),
+            password: PASSWORD.to_string(),
+            timeout: None,
+        })
+        .await;
+    assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
+
+    let resp = h.handle(Request::SshAgentList).await;
+    let body = serde_json::to_value(&resp).unwrap();
+    assert_eq!(body["status"], "ok");
+    let keys = body["ssh_keys"].as_array().expect("ssh_keys array");
+    assert_eq!(keys.len(), 1, "one served key expected: {body:?}");
+    assert_eq!(keys[0]["algo"], "ssh-ed25519");
+    assert!(
+        keys[0]["blob_b64"].as_str().is_some_and(|s| !s.is_empty()),
+        "blob_b64 should be present"
+    );
+}
+
+/// `GpgAgentList` returns an empty list when no GPG keys are loaded (locked, or
+/// a vault without `gpg-priv` attachments) — never an error.
+#[tokio::test]
+async fn gpg_agent_list_empty_when_no_keys() {
+    let h = Harness::new(Duration::from_secs(900));
+    let resp = h.handle(Request::GpgAgentList).await;
+    let body = serde_json::to_value(&resp).unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(
+        body["gpg_keys"].as_array().map(Vec::len),
+        Some(0),
+        "expected empty gpg key list: {body:?}"
+    );
+}

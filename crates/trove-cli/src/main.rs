@@ -9,7 +9,7 @@ mod daemon;
 mod ipc;
 
 use std::fs::OpenOptions;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -25,6 +25,11 @@ const EXIT_VAULT_ERROR: u8 = 2;
 
 /// Attachment slot used for SSH private keys. Kept short and conventional.
 const SSH_KEY_ATTACHMENT: &str = "id";
+
+/// Attachment slot for the derived OpenSSH public key, stored alongside the
+/// private key so any tool can read the public half without re-deriving it.
+/// Mirrors the `id` / `id.pub` filename pair ssh-keygen produces.
+const SSH_PUBKEY_ATTACHMENT: &str = "id.pub";
 
 /// Attachment slot used for GPG secret-key exports. Matches what
 /// `troved::handler::load_gpg_keys_from_vault` looks for.
@@ -75,6 +80,12 @@ enum Command {
         resource: AddResource,
     },
 
+    /// Generate a new key in-tool and store it (no ssh-keygen needed).
+    Generate {
+        #[command(subcommand)]
+        resource: GenerateResource,
+    },
+
     /// Retrieve a resource from a vault.
     Get {
         #[command(subcommand)]
@@ -101,11 +112,17 @@ enum Command {
         vault: PathBuf,
     },
 
-    /// Tell the running `troved` to unlock a vault. The keys + materialize
-    /// plan land in daemon memory; SSH and GPG agents serve them.
+    /// Unlock a vault and start a session. The keys + materialize plan land in
+    /// daemon memory; the SSH and GPG agents serve them.
     ///
-    /// Prompts for the master password unless `--password-stdin` is set.
-    /// The password never lands on the command line.
+    /// Prompts for the master password unless `--password-stdin` is set; the
+    /// password never lands on the command line.
+    ///
+    /// On an interactive terminal this drops you into a session subshell with
+    /// `$TROVE_SESSION` already set, so `add`/`get` work immediately — `exit`
+    /// ends the session. When stdout is piped (e.g. `eval "$(trove unlock …)"`)
+    /// it instead prints `export TROVE_SESSION=…` for the calling shell.
+    /// `--export` / `--shell` force a mode.
     Unlock {
         /// Path to the .kdbx vault.
         vault: PathBuf,
@@ -115,6 +132,13 @@ enum Command {
         /// (the env-var default or whatever a prior `idle set` left).
         #[arg(long = "timeout")]
         timeout: Option<u64>,
+        /// Print `export TROVE_SESSION=…` for `eval "$(…)"` instead of opening a
+        /// session subshell. Implied when stdout is not a terminal.
+        #[arg(long = "export")]
+        export: bool,
+        /// Open a session subshell even when stdout is not a terminal.
+        #[arg(long = "shell", conflicts_with = "export")]
+        shell: bool,
     },
 
     /// Tell the running `troved` to lock the vault: wipe materialized files,
@@ -189,6 +213,12 @@ enum GpgAgentOp {
     /// symlink the standard location at `~/.gnupg/S.gpg-agent` to ours):
     ///   `ln -sf "$(trove gpg-agent socket)" ~/.gnupg/S.gpg-agent`.
     Socket,
+
+    /// List the GPG keys the running agent is serving (keygrip, type, comment).
+    ///
+    /// Reads the running daemon; if it isn't running (nothing unlocked) it
+    /// prints nothing and exits 0. One key per line, tab-separated.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -202,22 +232,78 @@ enum SshAgentOp {
     ///
     /// Typical usage: `export SSH_AUTH_SOCK="$(trove ssh-agent socket)"`.
     Socket,
+
+    /// List the SSH public keys the running agent is serving — the consistent
+    /// equivalent of `ssh-add -L` (`<algo> <base64-key> <comment>`, one per
+    /// line). Reads the running daemon; prints nothing and exits 0 if it isn't
+    /// running (nothing unlocked).
+    List,
+}
+
+/// SSH key algorithm for `trove generate ssh`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum SshKeyType {
+    /// Ed25519 — modern, fast, recommended (default).
+    Ed25519,
+    /// RSA 4096-bit (slower to generate; broadest compatibility).
+    Rsa,
+    /// ECDSA NIST P-256.
+    #[value(name = "ecdsa-p256")]
+    EcdsaP256,
+    /// ECDSA NIST P-384.
+    #[value(name = "ecdsa-p384")]
+    EcdsaP384,
+}
+
+#[derive(Debug, Subcommand)]
+enum GenerateResource {
+    /// Generate a new SSH keypair and store it on the vault, addressed by entry
+    /// path — no need to run `ssh-keygen` yourself. Stores the private key, the
+    /// derived `id.pub`, and `KeeAgent.settings`, exactly like `add ssh`.
+    ///
+    /// Like `add ssh`, this targets the vault unlocked in the running daemon by
+    /// default (using `TROVE_SESSION` from `trove unlock`); pass `--vault
+    /// <path>` to write a kdbx file directly (offline).
+    Ssh {
+        /// Entry path, e.g. "github.com" or "Work/SSH/github".
+        entry_path: String,
+        /// Key comment (e.g. an email like you@host). Defaults to the entry path.
+        comment: Option<String>,
+        /// Key algorithm. Defaults to ed25519.
+        #[arg(long = "type", value_enum, default_value_t = SshKeyType::Ed25519)]
+        key_type: SshKeyType,
+        /// Operate on this kdbx file directly instead of the unlocked daemon.
+        #[arg(long = "vault")]
+        vault: Option<PathBuf>,
+        /// Optional UserName field to record on the entry (e.g. git user).
+        #[arg(long = "user")]
+        user: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum AddResource {
-    /// Store an SSH private key in the vault.
+    /// Store an SSH private key on the unlocked vault, addressed by entry path.
     ///
-    /// If an entry with the given title already exists, its `id` attachment is
-    /// replaced in place. Otherwise a fresh entry is created at the root group.
+    /// `<ENTRY_PATH>` is a `/`-separated path (`group/sub/title`); groups are
+    /// created as needed and an existing entry has its `id` key replaced in
+    /// place. `<KEY_FILE>` is the private key on disk — it is validated before
+    /// being stored, so a public key, an encrypted key, or an unsupported/weak
+    /// algorithm is rejected with a precise error.
+    ///
+    /// By default the key is added to the vault currently unlocked in the
+    /// running daemon — no vault path needed — using the `TROVE_SESSION` code
+    /// from `trove unlock`. Pass `--vault <path>` to operate on a kdbx file
+    /// directly (offline), prompting for the master password.
     Ssh {
-        /// Path to the .kdbx vault.
-        vault: PathBuf,
-        /// Entry title (e.g. "github.com").
-        title: String,
+        /// Entry path, e.g. "github.com" or "Work/SSH/github".
+        entry_path: String,
         /// Path to the SSH private key file (e.g. ~/.ssh/id_ed25519).
-        #[arg(long = "key")]
+        #[arg(value_name = "KEY_FILE")]
         key: PathBuf,
+        /// Operate on this kdbx file directly instead of the unlocked daemon.
+        #[arg(long = "vault")]
+        vault: Option<PathBuf>,
         /// Optional UserName field to record on the entry (e.g. git user).
         #[arg(long = "user")]
         user: Option<String>,
@@ -277,13 +363,21 @@ enum AddResource {
 
 #[derive(Debug, Subcommand)]
 enum GetResource {
-    /// Retrieve a previously stored SSH private key by entry title.
+    /// Retrieve a stored SSH key from the unlocked daemon, by entry path.
+    ///
+    /// Served by the running daemon and gated by the `TROVE_SESSION` code from
+    /// `trove unlock` — there is no vault path. By default the PRIVATE key is
+    /// written to stdout. `--public` emits the public key (an authorized_keys
+    /// line) instead. `--out <path>` writes the private key to <path> (0600)
+    /// and the public key to <path>.pub (0644); with `--public` it writes only
+    /// the public key to <path> (0644).
     Ssh {
-        /// Path to the .kdbx vault.
-        vault: PathBuf,
-        /// Entry title to look up.
-        title: String,
-        /// Write the key to this path (chmod 0600 on Unix). Stdout if omitted.
+        /// Entry path to look up, e.g. "github.com" or "Work/SSH/github".
+        entry_path: String,
+        /// Emit the public key (authorized_keys line) instead of the private key.
+        #[arg(long = "public")]
+        public: bool,
+        /// Write to this path instead of stdout (see the command help).
         #[arg(long = "out")]
         out: Option<PathBuf>,
     },
@@ -337,12 +431,18 @@ fn run(cli: Cli) -> Result<()> {
         Command::Add {
             resource:
                 AddResource::Ssh {
-                    vault,
-                    title,
+                    entry_path,
                     key,
+                    vault,
                     user,
                 },
-        } => cmd_add_ssh(&vault, &title, &key, user.as_deref(), pw_stdin),
+        } => cmd_add_ssh(
+            &entry_path,
+            &key,
+            vault.as_deref(),
+            user.as_deref(),
+            pw_stdin,
+        ),
         Command::Add {
             resource: AddResource::Gpg { vault, title, key },
         } => cmd_add_gpg(&vault, &title, &key, pw_stdin),
@@ -369,9 +469,31 @@ fn run(cli: Cli) -> Result<()> {
             allow_disk_backed,
             pw_stdin,
         ),
+        Command::Generate {
+            resource:
+                GenerateResource::Ssh {
+                    entry_path,
+                    comment,
+                    key_type,
+                    vault,
+                    user,
+                },
+        } => cmd_generate_ssh(
+            &entry_path,
+            comment.as_deref(),
+            key_type,
+            vault.as_deref(),
+            user.as_deref(),
+            pw_stdin,
+        ),
         Command::Get {
-            resource: GetResource::Ssh { vault, title, out },
-        } => cmd_get_ssh(&vault, &title, out.as_deref(), pw_stdin),
+            resource:
+                GetResource::Ssh {
+                    entry_path,
+                    public,
+                    out,
+                },
+        } => cmd_get_ssh(&entry_path, public, out.as_deref()),
         Command::Get {
             resource: GetResource::Gpg { vault, title, out },
         } => cmd_get_gpg(&vault, &title, out.as_deref(), pw_stdin),
@@ -387,11 +509,22 @@ fn run(cli: Cli) -> Result<()> {
         Command::SshAgent {
             op: SshAgentOp::Socket,
         } => cmd_ssh_agent_socket(),
+        Command::SshAgent {
+            op: SshAgentOp::List,
+        } => cmd_ssh_agent_list(),
         Command::GpgAgent {
             op: GpgAgentOp::Socket,
         } => cmd_gpg_agent_socket(),
+        Command::GpgAgent {
+            op: GpgAgentOp::List,
+        } => cmd_gpg_agent_list(),
         Command::Materialize { vault } => cmd_materialize(&vault, pw_stdin),
-        Command::Unlock { vault, timeout } => cmd_unlock(&vault, timeout, pw_stdin),
+        Command::Unlock {
+            vault,
+            timeout,
+            export,
+            shell,
+        } => cmd_unlock(&vault, timeout, export, shell, pw_stdin),
         Command::Lock => cmd_lock(),
         Command::Status => cmd_status(),
         Command::Idle {
@@ -710,6 +843,65 @@ fn ssh_socket_tmp_fallback() -> PathBuf {
     PathBuf::from(tmp).join(format!("trove-ssh-{uid}.sock"))
 }
 
+/// `trove ssh-agent list` — the consistent equivalent of `ssh-add -L`: one
+/// `<algo> <base64-key> <comment>` line per served key. Reads the running
+/// daemon without autospawning; if it isn't running (nothing unlocked), there
+/// are no served keys, so we print nothing and exit 0.
+fn cmd_ssh_agent_list() -> Result<()> {
+    match daemon::send(&daemon::Request::SshAgentList) {
+        Ok(resp) => {
+            if let Some(msg) = daemon::response_error(&resp) {
+                return Err(DaemonClassified {
+                    message: msg,
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
+            }
+            if let Some(keys) = resp.get("ssh_keys").and_then(Value::as_array) {
+                for k in keys {
+                    let algo = k.get("algo").and_then(Value::as_str).unwrap_or("");
+                    let blob = k.get("blob_b64").and_then(Value::as_str).unwrap_or("");
+                    let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
+                    println!("{algo} {blob} {comment}");
+                }
+            }
+            Ok(())
+        }
+        // No daemon ⇒ nothing unlocked ⇒ nothing served. Like `status`, don't
+        // autospawn and don't error — just print nothing.
+        Err(e) if daemon::is_daemon_not_running(&e) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// `trove gpg-agent list` — list the GPG keys the running agent serves, one per
+/// line: `<keygrip>\t<type>\t<comment>`. Same daemon-or-nothing semantics as
+/// `ssh-agent list`.
+fn cmd_gpg_agent_list() -> Result<()> {
+    match daemon::send(&daemon::Request::GpgAgentList) {
+        Ok(resp) => {
+            if let Some(msg) = daemon::response_error(&resp) {
+                return Err(DaemonClassified {
+                    message: msg,
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
+            }
+            if let Some(keys) = resp.get("gpg_keys").and_then(Value::as_array) {
+                for k in keys {
+                    let keygrip = k.get("keygrip").and_then(Value::as_str).unwrap_or("");
+                    let key_type = k.get("key_type").and_then(Value::as_str).unwrap_or("");
+                    let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
+                    println!("{keygrip}\t{key_type}\t{comment}");
+                }
+            }
+            Ok(())
+        }
+        Err(e) if daemon::is_daemon_not_running(&e) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
     if vault_path.exists() {
         return Err(anyhow!(
@@ -815,44 +1007,132 @@ fn print_list_row(id: &str, title: &str, attachments: &[String]) {
 }
 
 fn cmd_add_ssh(
-    vault_path: &Path,
-    title: &str,
+    entry_path: &str,
     key_path: &Path,
+    vault: Option<&Path>,
     user: Option<&str>,
     pw_stdin: bool,
 ) -> Result<()> {
     let key_bytes = std::fs::read(key_path)
         .with_context(|| format!("reading ssh key from {}", key_path.display()))?;
 
-    let mut vault = open_vault(vault_path, pw_stdin)?;
+    // Validate before storing: reject a public key, an encrypted key, or an
+    // unsupported/weak algorithm with a precise, user-facing message.
+    validate_ssh_private_key(&key_bytes, entry_path)?;
 
-    // Reuse existing entry if title matches; otherwise create a new one.
-    let id = match vault.find_by_title(title) {
-        Some(existing) => existing,
-        None => vault
-            .add_entry(title)
-            .with_context(|| format!("creating entry '{title}'"))?,
+    store_ssh_key("stored", entry_path, &key_bytes, vault, user, pw_stdin)
+}
+
+/// `trove generate ssh`: mint a fresh keypair in-tool and store it exactly like
+/// `add ssh` (private key + derived `id.pub` + `KeeAgent.settings`), so users
+/// never have to drive `ssh-keygen` themselves. Defaults to ed25519.
+fn cmd_generate_ssh(
+    entry_path: &str,
+    comment: Option<&str>,
+    key_type: SshKeyType,
+    vault: Option<&Path>,
+    user: Option<&str>,
+    pw_stdin: bool,
+) -> Result<()> {
+    use troved::ssh_agent::keys::KeyType;
+    // A key comment is purely cosmetic in the .pub line; default it to the entry
+    // path so a generated key is still identifiable without the user supplying one.
+    let comment = comment.unwrap_or(entry_path);
+    let kt = match key_type {
+        SshKeyType::Ed25519 => KeyType::Ed25519,
+        SshKeyType::Rsa => KeyType::Rsa,
+        SshKeyType::EcdsaP256 => KeyType::EcdsaP256,
+        SshKeyType::EcdsaP384 => KeyType::EcdsaP384,
     };
+    let key_bytes = troved::ssh_agent::keys::generate_private_key(kt, comment)
+        .map_err(|e| anyhow!("generating ssh key: {e}"))?;
+    store_ssh_key("generated", entry_path, &key_bytes, vault, user, pw_stdin)
+}
 
-    vault
-        .attach_binary(&id, SSH_KEY_ATTACHMENT, &key_bytes)
-        .context("attaching ssh key")?;
-
-    // Write KeeAgent.settings so KeePassXC's SSH agent picks this entry up.
-    let settings = troved::ssh_agent::keeagent::settings_xml(SSH_KEY_ATTACHMENT);
-    vault
-        .attach_binary(&id, troved::ssh_agent::keeagent::ATTACHMENT_NAME, &settings)
-        .context("attaching KeeAgent.settings")?;
-
-    if let Some(user) = user {
-        vault
-            .set_field(&id, "UserName", user)
-            .context("setting UserName")?;
+/// Store SSH private-key bytes on an entry, the single path shared by `add ssh`
+/// (imported key) and `generate ssh` (freshly minted): the private key, the
+/// derived `id.pub`, and `KeeAgent.settings`. `verb` ("stored"/"generated")
+/// only flavours the success line.
+///
+/// `Some(vault)` opens the kdbx file directly (offline); the default routes
+/// through the unlocked daemon, which derives id.pub + KeeAgent itself and
+/// reloads the agent key store so a new key is served immediately.
+fn store_ssh_key(
+    verb: &str,
+    entry_path: &str,
+    key_bytes: &[u8],
+    vault: Option<&Path>,
+    user: Option<&str>,
+    pw_stdin: bool,
+) -> Result<()> {
+    match vault {
+        // Offline: open the kdbx file directly and write to it.
+        Some(vault_path) => {
+            let mut vault = open_vault(vault_path, pw_stdin)?;
+            let id = match vault.find_by_title(entry_path) {
+                Some(existing) => existing,
+                None => vault
+                    .add_entry(entry_path)
+                    .with_context(|| format!("creating entry '{entry_path}'"))?,
+            };
+            vault
+                .attach_binary(&id, SSH_KEY_ATTACHMENT, key_bytes)
+                .context("attaching ssh key")?;
+            // KeeAgent.settings so KeePassXC's SSH agent picks this entry up.
+            let settings = troved::ssh_agent::keeagent::settings_xml(SSH_KEY_ATTACHMENT);
+            vault
+                .attach_binary(&id, troved::ssh_agent::keeagent::ATTACHMENT_NAME, &settings)
+                .context("attaching KeeAgent.settings")?;
+            // Persist the public key as real data so any tool can read it
+            // without deriving it from the private key (a trove-only ability).
+            let pub_line = ssh_public_line(key_bytes, entry_path)?;
+            vault
+                .attach_binary(&id, SSH_PUBKEY_ATTACHMENT, pub_line.as_bytes())
+                .context("attaching public key")?;
+            if let Some(user) = user {
+                vault
+                    .set_field(&id, "UserName", user)
+                    .context("setting UserName")?;
+            }
+            vault.save().context("saving vault")?;
+            println!("{verb} ssh key on entry {id} ({entry_path})");
+            Ok(())
+        }
+        // Default: store into the daemon's currently unlocked vault. The daemon
+        // mutates the held vault, persists it, and reloads the agent key store
+        // so the new key is served immediately.
+        None => {
+            let code = require_session_code()?;
+            use base64::Engine;
+            let key = base64::engine::general_purpose::STANDARD.encode(key_bytes);
+            let req = daemon::Request::AddSsh {
+                path: entry_path.to_string(),
+                key,
+                user: user.map(str::to_string),
+                code,
+            };
+            let resp = match daemon::send_autospawn(&req) {
+                Ok(v) => v,
+                Err(e) if daemon::is_daemon_not_running(&e) => {
+                    return Err(DaemonClassified {
+                        message: e.to_string(),
+                        exit: EXIT_USER_ERROR,
+                    }
+                    .into());
+                }
+                Err(e) => return Err(e),
+            };
+            if let Some(msg) = daemon::response_error(&resp) {
+                return Err(DaemonClassified {
+                    message: msg,
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
+            }
+            println!("{verb} ssh key for {entry_path}");
+            Ok(())
+        }
     }
-
-    vault.save().context("saving vault")?;
-    println!("stored ssh key on entry {id} ({title})");
-    Ok(())
 }
 
 fn cmd_add_gpg(vault_path: &Path, title: &str, key_path: &Path, pw_stdin: bool) -> Result<()> {
@@ -886,15 +1166,7 @@ fn cmd_add_gpg(vault_path: &Path, title: &str, key_path: &Path, pw_stdin: bool) 
 /// uid that unlocked (SO_PEERCRED). The daemon returns the bytes base64-encoded
 /// on the JSON wire; we decode them here. See docs/provisioning-sessions.md.
 fn daemon_get_attachment(title: &str, attachment: &str) -> Result<Vec<u8>> {
-    let code = std::env::var("TROVE_SESSION")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| DaemonClassified {
-            message: "session code required: run `eval \"$(trove unlock <vault>)\"` first, \
-                      then retry in the same shell"
-                .to_string(),
-            exit: EXIT_USER_ERROR,
-        })?;
+    let code = require_session_code()?;
 
     let req = daemon::Request::Get {
         title: title.to_string(),
@@ -951,9 +1223,165 @@ fn cmd_get_gpg(_vault_path: &Path, title: &str, out: Option<&Path>, _pw_stdin: b
     write_secret_out(out, &bytes, "gpg secret key")
 }
 
-fn cmd_get_ssh(_vault_path: &Path, title: &str, out: Option<&Path>, _pw_stdin: bool) -> Result<()> {
-    let bytes = daemon_get_attachment(title, SSH_KEY_ATTACHMENT)?;
-    write_secret_out(out, &bytes, "ssh key")
+/// Fetch an entry's SSH public key: prefer the persisted `id.pub` attachment
+/// (the whole point of storing it — no derivation, works for any tool), and
+/// fall back to deriving it from the private key only for legacy entries that
+/// predate id.pub. A public-key request thus never pulls the private key when
+/// the public half is already stored.
+fn fetch_ssh_public(entry_path: &str) -> Result<Vec<u8>> {
+    if let Ok(b) = daemon_get_attachment(entry_path, SSH_PUBKEY_ATTACHMENT) {
+        return Ok(b);
+    }
+    let priv_bytes = daemon_get_attachment(entry_path, SSH_KEY_ATTACHMENT)?;
+    Ok(ssh_public_line(&priv_bytes, entry_path)?.into_bytes())
+}
+
+fn cmd_get_ssh(entry_path: &str, public: bool, out: Option<&Path>) -> Result<()> {
+    // Public-key request: hand back the persisted id.pub (deriving only as a
+    // fallback for legacy entries).
+    if public {
+        let pub_bytes = fetch_ssh_public(entry_path)?;
+        return match out {
+            None => {
+                print!("{}", String::from_utf8_lossy(&pub_bytes));
+                Ok(())
+            }
+            Some(p) => write_public_file(p, &pub_bytes)
+                .with_context(|| format!("writing public key to {}", p.display())),
+        };
+    }
+
+    // Private-key request.
+    let priv_bytes = daemon_get_attachment(entry_path, SSH_KEY_ATTACHMENT)?;
+    match out {
+        // Private key straight to stdout.
+        None => write_secret_out(None, &priv_bytes, "ssh key"),
+        // Reconstruct the pair: private to <out> (0600), public to <out>.pub (0644).
+        Some(p) => {
+            write_private_file(p, &priv_bytes)
+                .with_context(|| format!("writing ssh key to {}", p.display()))?;
+            let pub_bytes = fetch_ssh_public(entry_path)?;
+            let pub_path = {
+                let mut s = p.as_os_str().to_os_string();
+                s.push(".pub");
+                PathBuf::from(s)
+            };
+            write_public_file(&pub_path, &pub_bytes)
+                .with_context(|| format!("writing public key to {}", pub_path.display()))
+        }
+    }
+}
+
+/// Read the one-time session code minted by `trove unlock` from `TROVE_SESSION`.
+/// Daemon-gated reads (`get`) and the daemon-routed `add ssh` both present it.
+fn require_session_code() -> Result<String> {
+    std::env::var("TROVE_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            DaemonClassified {
+                message: "session code required: run `eval \"$(trove unlock <vault>)\"` first, \
+                          then retry in the same shell"
+                    .to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into()
+        })
+}
+
+/// Parse `bytes` as an SSH private key purely to validate it, mapping each
+/// failure to a precise, user-facing message. `Ok(())` means it is storable.
+fn validate_ssh_private_key(bytes: &[u8], comment: &str) -> Result<()> {
+    use troved::ssh_agent::keys::{parse_private_key, ParseError};
+    let user_err = |message: String| -> anyhow::Error {
+        DaemonClassified {
+            message,
+            exit: EXIT_USER_ERROR,
+        }
+        .into()
+    };
+    match parse_private_key(bytes, comment) {
+        Ok(_) => Ok(()),
+        Err(ParseError::Encrypted) => Err(user_err(
+            "the key is passphrase-encrypted; decrypt a copy first \
+             (`ssh-keygen -p -f <file>`) and add that"
+                .to_string(),
+        )),
+        Err(ParseError::RsaTooSmall(bits)) => Err(user_err(format!(
+            "RSA key too small: {bits} bits (minimum 2048)"
+        ))),
+        Err(ParseError::UnsupportedAlgorithm(alg)) => Err(user_err(format!(
+            "unsupported key algorithm: {alg} \
+             (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)"
+        ))),
+        Err(ParseError::NotOpenssh(detail)) => {
+            if looks_like_public_key(bytes) {
+                Err(user_err(
+                    "that looks like a public key; pass the PRIVATE key file \
+                     (e.g. ~/.ssh/id_ed25519, not id_ed25519.pub)"
+                        .to_string(),
+                ))
+            } else {
+                Err(user_err(format!(
+                    "couldn't parse as an SSH private key: {detail}"
+                )))
+            }
+        }
+        Err(ParseError::PublicBlob(e)) => Err(anyhow!("internal: encoding public key: {e}")),
+    }
+}
+
+/// Heuristic: does `bytes` look like an OpenSSH *public* key line
+/// (`ssh-ed25519 AAAA…`, `ssh-rsa AAAA…`, `ecdsa-sha2-… AAAA…`, `sk-…`)? Used
+/// only to turn a parse failure into a clearer "you passed the .pub" message.
+fn looks_like_public_key(bytes: &[u8]) -> bool {
+    let head = match std::str::from_utf8(bytes) {
+        Ok(s) => s.trim_start(),
+        Err(_) => return false,
+    };
+    const PREFIXES: [&str; 5] = [
+        "ssh-ed25519 ",
+        "ssh-rsa ",
+        "ecdsa-sha2-",
+        "sk-ssh-",
+        "ssh-dss ",
+    ];
+    PREFIXES.iter().any(|p| head.starts_with(p))
+}
+
+/// Derive the OpenSSH public-key line (`<algo> <base64-blob> <comment>`) from
+/// raw private-key bytes, via `troved`'s shared helper so the encoding matches
+/// exactly what the agent serves and what `add ssh` persists as `id.pub`.
+fn ssh_public_line(priv_bytes: &[u8], comment: &str) -> Result<String> {
+    troved::ssh_agent::keys::openssh_public_line(priv_bytes, comment)
+        .map_err(|e| anyhow!("deriving public key: {e}"))
+}
+
+/// Write a non-secret file (public key) at mode 0644, truncating any existing
+/// content. The private-key counterpart is [`write_private_file`] (0600,
+/// create-new).
+#[cfg(unix)]
+fn write_public_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(path)?;
+    f.write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_public_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    f.write_all(bytes)?;
+    Ok(())
 }
 
 fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
@@ -1220,7 +1648,13 @@ struct DaemonClassified {
 
 /// `trove unlock <vault>` — send `unlock` to the daemon. Prompts for password
 /// (or reads stdin) before calling out, so we fail fast on a typo.
-fn cmd_unlock(vault: &Path, timeout: Option<u64>, pw_stdin: bool) -> Result<()> {
+fn cmd_unlock(
+    vault: &Path,
+    timeout: Option<u64>,
+    export: bool,
+    shell: bool,
+    pw_stdin: bool,
+) -> Result<()> {
     if !vault.exists() {
         return Err(DaemonClassified {
             message: format!("vault file not found: {}", vault.display()),
@@ -1250,7 +1684,7 @@ fn cmd_unlock(vault: &Path, timeout: Option<u64>, pw_stdin: bool) -> Result<()> 
         password,
         timeout,
     };
-    let resp = match daemon::send_autospawn(&req) {
+    let (resp, autospawned) = match daemon::send_autospawn_reporting(&req) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -1274,21 +1708,93 @@ fn cmd_unlock(vault: &Path, timeout: Option<u64>, pw_stdin: bool) -> Result<()> 
         return Err(DaemonClassified { message: msg, exit }.into());
     }
 
-    // The daemon minted a one-time session code for this unlock. We emit it as
-    // a shell-eval'able export on STDOUT so `eval "$(trove unlock …)"` lands it
-    // in the operator's environment — never printed to a terminal, never in
-    // `ps`. The human-readable notice goes to STDERR. Code-gated `get` reads
-    // it back from $TROVE_SESSION. See docs/provisioning-sessions.md.
+    // The daemon minted a one-time session code for this unlock. Code-gated
+    // `add`/`get` read it back from $TROVE_SESSION. See docs/provisioning-sessions.md.
     let code = resp
         .get("code")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("daemon unlocked but returned no session code"))?;
+
+    // Diagnostic banner on stderr (never the `export …` stdout that
+    // `eval "$(…)"` consumes): the CLI + daemon build versions and how the
+    // daemon came to be. Rarely needed, but decisive when a stale binary is in
+    // play — e.g. a daemon still running pre-rebuild code after a `cargo build`.
+    let spawn_state = if autospawned {
+        "spawned now"
+    } else {
+        "already running"
+    };
+    let cli_version = env!("TROVE_BUILD_VERSION");
+    match resp.get("daemon_version").and_then(Value::as_str) {
+        Some(daemon_version) => {
+            eprintln!("trove: cli {cli_version} · daemon {daemon_version} ({spawn_state})");
+        }
+        // No version field ⇒ the daemon was built before version reporting, so
+        // it's older than this CLI and running stale code. That's exactly the
+        // case worth flagging — spell it out and say how to fix it, rather than
+        // the ambiguous bare "unknown".
+        None => {
+            eprintln!(
+                "trove: cli {cli_version} · daemon ({spawn_state}) is an older build that \
+                 predates version reporting — it's running stale code. Restart it to load the \
+                 current binary: kill troved, then re-unlock."
+            );
+        }
+    }
+
+    // Two delivery modes, so the operator never has to type `eval`:
+    //   * subshell — set $TROVE_SESSION and exec the operator's own $SHELL, so
+    //     they land in a session shell where `add`/`get` work immediately. The
+    //     code is passed only through the child's environment — never written
+    //     to disk — so barrier #3 (docs/provisioning-sessions.md) is preserved:
+    //     it lives in process env, just the subshell's.
+    //   * export — print `export TROVE_SESSION=…` on stdout for `eval "$(…)"`.
+    // Pick by context: an interactive terminal → subshell; piped stdout (an
+    // `eval "$(…)"` or a script) → export, so those keep working unchanged.
+    // `--shell` / `--export` force a mode.
+    let spawn_shell = shell || (!export && std::io::stdout().is_terminal());
+    if spawn_shell {
+        eprintln!(
+            "trove: unlocked {} · session active in this shell — run add/get here, `exit` to end",
+            vault.display()
+        );
+        return exec_session_shell(code);
+    }
     println!("export TROVE_SESSION={code}");
     eprintln!(
         "trove: unlocked {} · session code exported to $TROVE_SESSION",
         vault.display()
     );
     Ok(())
+}
+
+/// Launch the operator's own shell with `TROVE_SESSION` set, so they land in a
+/// subshell where the session code is live and `add`/`get` work with no `eval`.
+/// On Unix we `exec` (replace this process) so no stray `trove` lingers; on
+/// other platforms we spawn and wait, forwarding the shell's exit status. The
+/// code is passed only via the child's environment — never written to disk.
+fn exec_session_shell(code: &str) -> Result<()> {
+    // The user's login shell (zsh, bash, fish, …); fall back to /bin/sh.
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| std::ffi::OsString::from("/bin/sh"));
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.env("TROVE_SESSION", code);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // `exec` returns only if it failed to replace this process.
+        let err = cmd.exec();
+        Err(anyhow!(
+            "starting session shell {}: {err}",
+            shell.to_string_lossy()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .with_context(|| format!("starting session shell {}", shell.to_string_lossy()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 /// Heuristic mapping from a daemon-reported error string to vault-error
@@ -1326,25 +1832,31 @@ fn cmd_lock() -> Result<()> {
 
 /// `trove status` — pretty-print the daemon's `Status` response.
 fn cmd_status() -> Result<()> {
-    let resp = match daemon::send_autospawn(&daemon::Request::Status) {
-        Ok(v) => v,
-        Err(e) if daemon::is_daemon_not_running(&e) => {
-            return Err(DaemonClassified {
-                message: e.to_string(),
-                exit: EXIT_USER_ERROR,
+    // `status` never autospawns. The daemon runs only while a vault is unlocked
+    // (or materialized files still need cleanup), so "no daemon" is itself the
+    // answer: nothing is unlocked. A live daemon gives the real state; otherwise
+    // we print the empty/locked default rather than starting one just to say so.
+    match daemon::send(&daemon::Request::Status) {
+        Ok(resp) => {
+            if let Some(msg) = daemon::response_error(&resp) {
+                return Err(DaemonClassified {
+                    message: msg,
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
             }
-            .into());
+            println!("Daemon:          running");
+            print_status(&resp);
+        }
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            println!("Daemon:          not running (nothing unlocked)");
+            println!("Vault:           no vault unlocked");
+            println!("SSH keys:        0 loaded");
+            println!("GPG keys:        0 loaded");
+            println!("Materialized:    0 files");
         }
         Err(e) => return Err(e),
-    };
-    if let Some(msg) = daemon::response_error(&resp) {
-        return Err(DaemonClassified {
-            message: msg,
-            exit: EXIT_USER_ERROR,
-        }
-        .into());
     }
-    print_status(&resp);
     Ok(())
 }
 

@@ -53,6 +53,7 @@ fn build_lock_callback(
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
     session: SessionStore,
+    shutdown: Arc<Notify>,
 ) -> LockCallback {
     Box::new(move || {
         let state = state.clone();
@@ -60,6 +61,7 @@ fn build_lock_callback(
         let gpg_store = gpg_store.clone();
         let mat_store = mat_store.clone();
         let session = session.clone();
+        let shutdown = shutdown.clone();
         let fut: LockFuture = Box::pin(async move {
             // Idempotency: if the vault is already locked (e.g. an explicit
             // `lock` RPC ran a fraction of a second before us), all of these
@@ -81,6 +83,16 @@ fn build_lock_callback(
             {
                 let mut sess = session.lock().await;
                 *sess = None;
+            }
+            // Idle-lock just emptied the open set and wiped materialized files.
+            // Mirror the explicit `Lock` RPC: with nothing left to serve, the
+            // daemon exits so the next `unlock` starts a fresh process. (Same
+            // invariant — stay alive only while a vault is open or materialized
+            // files still need cleanup.)
+            let vault_open = state.lock().await.is_some();
+            let has_materialized = !mat_store.read().await.is_empty();
+            if !vault_open && !has_materialized {
+                shutdown.notify_one();
             }
         });
         fut
@@ -196,6 +208,16 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Banner the build version + pid on every startup. The daemon boots rarely
+    // (it's usually autospawned and long-lived), so this is seldom seen — but
+    // when it matters it's decisive: it's how you catch a daemon still running
+    // stale code after a rebuild, and which pid to restart.
+    eprintln!(
+        "troved {} starting (pid {})",
+        env!("TROVE_BUILD_VERSION"),
+        std::process::id()
+    );
+
     let sock_path = resolve_socket_path();
 
     // Ensure parent dir exists (best-effort; XDG_RUNTIME_DIR usually does).
@@ -228,6 +250,7 @@ async fn main() -> Result<()> {
         gpg_store.clone(),
         mat_store.clone(),
         session.clone(),
+        shutdown.clone(),
     );
     let idle: Arc<IdleTracker> = IdleTracker::new(idle_timeout, lock_cb);
     eprintln!(
@@ -396,6 +419,7 @@ mod tests {
                 gpg_store.clone(),
                 mat_store.clone(),
                 session.clone(),
+                shutdown.clone(),
             );
             let idle: Arc<IdleTracker> = IdleTracker::new(Duration::from_secs(900), lock_cb);
 

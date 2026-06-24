@@ -316,8 +316,13 @@ async fn trove_status_round_trip_against_real_daemon() {
     shutdown.notify_one();
 }
 
+/// With no daemon running, `status` must NOT autospawn one just to answer —
+/// no daemon means nothing is unlocked, which is itself the answer. It reports
+/// the empty/locked default and exits 0. (Previously this errored with exit 1;
+/// the daemon-exits-when-idle lifecycle makes "no daemon" the normal locked
+/// state, so reporting it cleanly is correct.)
 #[tokio::test]
-async fn trove_status_against_no_daemon_exits_one() {
+async fn trove_status_against_no_daemon_reports_locked() {
     let Some(trove) = find_trove_binary() else {
         eprintln!("trove binary not found; skipping");
         return;
@@ -328,24 +333,25 @@ async fn trove_status_against_no_daemon_exits_one() {
     let out = tokio::process::Command::new(&trove)
         .arg("status")
         .env("TROVE_SOCK", &sock)
-        // Disable auto-spawn so we exercise the "not running" error path.
-        // Without this the CLI would launch a real `troved` bound to the
-        // tmpdir socket and the assertion below would fail for the wrong
-        // reason.
+        // status never autospawns, but pin it off so a stray daemon can't make
+        // this pass for the wrong reason.
         .env("TROVE_NO_AUTOSPAWN", "1")
         .output()
         .await
         .expect("run trove status");
-    assert!(!out.status.success(), "expected failure");
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "expected exit code 1; got {:?}",
-        out.status
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("troved is not running"),
-        "expected friendly message in stderr; got: {stderr}"
+        out.status.success(),
+        "status with no daemon should succeed (nothing unlocked); got {:?}, stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no vault unlocked"),
+        "expected 'no vault unlocked' in output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("not running"),
+        "expected 'not running' daemon line in output:\n{stdout}"
     );
 }

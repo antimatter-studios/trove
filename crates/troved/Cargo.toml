@@ -52,6 +52,10 @@ aes = { version = "0.8", default-features = false }
 # storage device may or may not actually rewrite in place — but using OsRng
 # costs nothing and makes the intent obvious in code review.
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+# `generate ssh` mints keys via `ssh_key::PrivateKey::random`, which takes a
+# `rand_core::CryptoRngCore`. `OsRng` (the OS CSPRNG) lives in rand_core with the
+# `getrandom` feature. ssh-key pins rand_core 0.6, so we match it.
+rand_core = { version = "0.6", features = ["getrandom"] }
 # v0.0.10.0: base64 for code-gated extraction (`Get`) — the daemon returns
 # attachment bytes base64-encoded on the JSON wire, and the session code itself
 # is URL-safe base64. See docs/provisioning-sessions.md.
@@ -63,7 +67,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"
-rand_core = { version = "0.6", features = ["getrandom"] }
 # `test-util` enables `tokio::test(start_paused = true)` for the IdleTracker
 # unit tests so simulated time advances without real wall-clock waits.
 tokio = { workspace = true, features = ["test-util"] }
