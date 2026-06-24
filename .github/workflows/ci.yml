@@ -39,6 +39,13 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   RUST_BACKTRACE: 1
+  # GitHub runners intermittently fail cargo downloads with
+  # "[16] Error in the HTTP2 framing layer" (a curl 8.x + crates.io CDN issue).
+  # Disable HTTP/2 multiplexing to dodge the framing bug, and retry transient
+  # network failures so one bad download doesn't fail the job. Applies to every
+  # job (Test/Clippy/Build/Audit all hit the network).
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
   test:
