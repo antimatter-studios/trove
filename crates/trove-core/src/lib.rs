@@ -27,6 +27,13 @@ pub use error::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Name of the database's single top-level group. KeePassXC names it "Root";
+/// keepass-rs leaves it empty, which surfaces as a nameless folder in other
+/// clients. trove names it on save and treats it as the implicit home for
+/// entries added without a group prefix — so a leading `Root/` segment in a
+/// path denotes this same group rather than a child of it.
+const DEFAULT_GROUP: &str = "Root";
+
 /// Stable identifier for an entry within a vault.
 ///
 /// Backed by the kdbx UUID, serialised as a string for wire/disk transport.
@@ -161,6 +168,18 @@ impl Vault {
         // trove vault behaves identically in any reader. Backfill-only — a value
         // already set (by KeePassXC, or a future trove setting) is left as-is.
         apply_default_meta_policy(&mut self.inner.db.meta);
+        // Give the top-level group a name if it has none, so other clients
+        // (KeePassXC et al.) show a proper "Root" folder instead of a blank
+        // one. Backfills freshly created vaults (create() calls save()) and
+        // any legacy vault on its next write. trove addresses entries by the
+        // group chain *below* the root (`build_group_path` excludes it
+        // structurally), so naming it is invisible to our own paths.
+        if self.inner.db.root().name.is_empty() {
+            self.inner
+                .db
+                .root_mut()
+                .edit(|g| g.name = DEFAULT_GROUP.to_string());
+        }
 
         let dir = self
             .inner
@@ -218,8 +237,11 @@ impl Vault {
     /// title. A title with no `/` lands at the root group, matching the
     /// previous behavior.
     ///
+    /// A leading `Root` segment (case-insensitive) names the root group
+    /// itself, so `add_entry("Root/github")` is identical to `add_entry("github")`.
+    ///
     /// Examples:
-    ///   * `add_entry("github")`            → root entry "github"
+    ///   * `add_entry("github")`            → "github" in the root group
     ///   * `add_entry("Work/SSH/github")`   → group "Work" > "SSH", entry "github"
     ///
     /// Empty segments (`//`, `/foo`, `foo/`) and the empty title are rejected
@@ -478,6 +500,11 @@ fn build_group_path(e: &keepass::db::EntryRef<'_>) -> Vec<String> {
 /// Split a `/`-separated entry path into `(group_segments, leaf_title)`.
 /// Returns `Err(Error::InvalidPath)` on any empty segment, empty leaf,
 /// or trailing slash. A path with no `/` returns `(vec![], path)`.
+///
+/// A leading [`DEFAULT_GROUP`] (`"Root"`, case-insensitive) segment is
+/// dropped: it names the database's top-level group, which is where group
+/// walks already start. So `Root/x` and bare `x` resolve to the same place
+/// and we never nest a `Root` inside the root.
 fn parse_entry_path(s: &str) -> Result<(Vec<String>, String)> {
     if s.is_empty() {
         return Err(Error::InvalidPath("title must not be empty".into()));
@@ -492,7 +519,13 @@ fn parse_entry_path(s: &str) -> Result<(Vec<String>, String)> {
     let last = iter
         .next_back()
         .expect("non-empty split always yields at least one element");
-    let groups: Vec<String> = iter.map(String::from).collect();
+    let mut groups: Vec<String> = iter.map(String::from).collect();
+    if groups
+        .first()
+        .is_some_and(|g| g.eq_ignore_ascii_case(DEFAULT_GROUP))
+    {
+        groups.remove(0);
+    }
     Ok((groups, last.to_string()))
 }
 
