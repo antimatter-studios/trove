@@ -402,8 +402,9 @@ enum GetResource {
         vault: PathBuf,
         /// Entry title to look up.
         title: String,
-        /// Attachment name to read. Defaults to the entry's
-        /// `Materialize.Source` field, or "blob" if neither is set.
+        /// Attachment name to read. Defaults to "blob". Pass `--name` for
+        /// entries that don't use the conventional `blob` attachment slot;
+        /// the daemon won't open the vault to resolve `Materialize.Source`.
         #[arg(long = "name")]
         name: Option<String>,
         /// Write the bytes to this path (chmod 0600 on Unix). Stdout if omitted.

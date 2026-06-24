@@ -146,7 +146,7 @@ trove get file [OPTIONS] <VAULT> <TITLE>
 | --- | --- |
 | `<VAULT>` | Path to the .kdbx vault. |
 | `<TITLE>` | Entry title to look up. |
-| `--name <NAME>` | Attachment name to read. Default: `Materialize.Source` field, or `"blob"`. |
+| `--name <NAME>` | Attachment name to read. Default: `"blob"`. The daemon does not resolve `Materialize.Source`; pass `--name` for entries using a non-`blob` slot. |
 | `--out <OUT>` | Write to this path. Stdout if omitted. |
 | `--password-stdin` | Global — see top. |
 
