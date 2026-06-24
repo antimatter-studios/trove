@@ -63,13 +63,14 @@ Subcommands: `ssh`, `gpg`, `file`, `help`.
 ### trove add ssh
 
 ```
-trove [--vault <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE>
+trove [--vault <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE> <COMMENT>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
 | `<ENTRY_PATH>` | Entry path, e.g. `"github.com"` or `"Work/SSH/github"`. Groups auto-created. |
 | `<KEY_FILE>` | Path to the SSH private key file (e.g. `~/.ssh/id_ed25519`). Validated before storing. |
+| `<COMMENT>` | Public-key comment, typically an email like `you@host`. Recorded in `id.pub` (and so in a server's authorized_keys). Required. |
 | `--user <USER>` | Optional `UserName` field. |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |

@@ -265,7 +265,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
     let keyfile = d._tmp.path().join("id_ed25519");
     std::fs::write(&keyfile, KEY).expect("write keyfile");
 
-    // add ssh <entry-path> <keyfile> --user git  (no vault path; via the agent)
+    // add ssh <entry-path> <keyfile> <comment> --user git  (no vault; via agent)
     let out = run_trove(
         &trove,
         &d.sock,
@@ -275,6 +275,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
             "ssh",
             "svc/github",
             keyfile.to_str().unwrap(),
+            "dev@trove.test",
             "--user",
             "git",
         ],
@@ -327,7 +328,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
     );
     assert_eq!(out.stdout, KEY, "get ssh must emit the exact private bytes");
 
-    // get ssh --public → authorized_keys line, commented with the entry path.
+    // get ssh --public → authorized_keys line, commented with the supplied comment.
     let out = run_trove(
         &trove,
         &d.sock,
@@ -343,7 +344,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
     );
     let pub_line = String::from_utf8_lossy(&out.stdout);
     assert!(
-        pub_line.starts_with("ssh-ed25519 ") && pub_line.trim_end().ends_with(" svc/github"),
+        pub_line.starts_with("ssh-ed25519 ") && pub_line.trim_end().ends_with(" dev@trove.test"),
         "unexpected public line: {pub_line:?}"
     );
 
@@ -392,6 +393,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
             "ssh",
             "svc/github",
             keyfile.to_str().unwrap(),
+            "dev@trove.test",
             "--user",
             "git2",
         ],
@@ -439,7 +441,7 @@ async fn add_ssh_is_refused_without_a_valid_session_code() {
         &trove,
         &d.sock,
         None,
-        &["add", "ssh", "x/y", keyfile.to_str().unwrap()],
+        &["add", "ssh", "x/y", keyfile.to_str().unwrap(), "x@y.test"],
         None,
     )
     .await;
@@ -455,7 +457,7 @@ async fn add_ssh_is_refused_without_a_valid_session_code() {
         &trove,
         &d.sock,
         Some("not-the-real-code"),
-        &["add", "ssh", "x/y", keyfile.to_str().unwrap()],
+        &["add", "ssh", "x/y", keyfile.to_str().unwrap(), "x@y.test"],
         None,
     )
     .await;
@@ -489,7 +491,13 @@ async fn add_ssh_validate_rejects_a_public_key_and_writes_nothing() {
         &trove,
         &d.sock,
         Some(&code),
-        &["add", "ssh", "bad/key", pubfile.to_str().unwrap()],
+        &[
+            "add",
+            "ssh",
+            "bad/key",
+            pubfile.to_str().unwrap(),
+            "x@y.test",
+        ],
         None,
     )
     .await;
@@ -529,6 +537,7 @@ async fn add_ssh_offline_vault_writes_file_without_a_daemon() {
             "ssh",
             "offline/key",
             keyfile.to_str().unwrap(),
+            "svc@trove.test",
             "--vault",
             vault.to_str().unwrap(),
             "--user",
