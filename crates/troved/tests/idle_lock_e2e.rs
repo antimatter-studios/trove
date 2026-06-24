@@ -30,13 +30,16 @@ use tokio::net::UnixStream;
 use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
 use troved::gpg_agent::GpgKeyStore;
-use troved::handler::{handle, SharedState};
+use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
 use troved::ssh_agent::{self, KeyStore};
 
 const PASSWORD: &str = "idle-lock-test-pw";
+
+/// Fixed peer uid for the harness — these tests don't vary the caller uid.
+const TEST_UID: u32 = 1000;
 
 /// Same shape as `main.rs`: every secret-bearing store, plus an
 /// `IdleTracker` whose lock callback wipes them all. We construct this
@@ -46,6 +49,7 @@ struct Harness {
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
+    session: SessionStore,
     idle: Arc<IdleTracker>,
 }
 
@@ -55,17 +59,20 @@ impl Harness {
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+        let session: SessionStore = Arc::new(Mutex::new(None));
 
         // Same callback the daemon installs.
         let cb_state = state.clone();
         let cb_keys = key_store.clone();
         let cb_gpg = gpg_store.clone();
         let cb_mat = mat_store.clone();
+        let cb_session = session.clone();
         let cb: LockCallback = Box::new(move || {
             let state = cb_state.clone();
             let keys = cb_keys.clone();
             let gpg = cb_gpg.clone();
             let mat = cb_mat.clone();
+            let session = cb_session.clone();
             let fut: LockFuture = Box::pin(async move {
                 troved::materialize::wipe_all(&mat).await;
                 {
@@ -80,6 +87,10 @@ impl Harness {
                     let mut g = gpg.write().await;
                     g.clear();
                 }
+                {
+                    let mut s = session.lock().await;
+                    *s = None;
+                }
             });
             fut
         });
@@ -90,6 +101,7 @@ impl Harness {
             key_store,
             gpg_store,
             mat_store,
+            session,
             idle,
         }
     }
@@ -101,7 +113,9 @@ impl Harness {
             &self.key_store,
             &self.gpg_store,
             &self.mat_store,
+            &self.session,
             &self.idle,
+            TEST_UID,
         )
         .await
         .response

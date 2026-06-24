@@ -17,6 +17,10 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub const MASTER_SEED: u64 = 0xdead_beef_cafe_f00d;
 pub const DEMO_PASSWORD: &str = "demopass";
 
+// (The keepassxc-cli locator that briefly lived here was superseded by
+// `matrix::keepassxc_party::discover()`, which finds every installed version and
+// hard-fails if none — see tests/matrix/keepassxc_party.rs.)
+
 #[derive(Debug, Clone)]
 pub struct Combo {
     pub label: &'static str,

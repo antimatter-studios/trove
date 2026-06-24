@@ -90,7 +90,7 @@ The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables
 ### 3. Wire up the SSH agent
 
 ```sh
-export SSH_AUTH_SOCK="$(trove agent socket)"
+export SSH_AUTH_SOCK="$(trove ssh-agent socket)"
 
 # Unlock the vault — keys move into daemon memory, no extra config needed.
 # Prompts for the master password; populates SSH keys, GPG keys, and the

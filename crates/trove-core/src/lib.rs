@@ -338,13 +338,12 @@ impl Vault {
             .db
             .entry(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        Ok(entry.attachment_by_name(name).map(|att| match &att.data {
-            Value::Unprotected(b) => b.clone(),
-            Value::Protected(s) => {
-                use secrecy::ExposeSecret as _;
-                s.expose_secret().clone()
-            }
-        }))
+        // `Value::get()` returns the inner bytes whether the value is stored
+        // unprotected or protected (it transparently exposes the secret), so we
+        // no longer need to match the variant or depend on `secrecy`.
+        Ok(entry
+            .attachment_by_name(name)
+            .map(|att| att.data.get().clone()))
     }
 
     /// Remove an attachment from an entry. No-op if the attachment is missing.

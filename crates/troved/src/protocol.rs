@@ -38,6 +38,17 @@ pub enum Request {
     /// v0.0.9.0: snapshot of daemon state — vault path (if unlocked), idle
     /// timer state, and counts of in-memory secret stores. Read-only.
     Status,
+    /// Code-gated extraction over the unlocked daemon. Reads `attachment` (e.g.
+    /// "id" for an SSH key) from the entry titled `title` and returns its bytes
+    /// base64-encoded. Requires a vault unlocked by the same uid as the caller
+    /// (SO_PEERCRED) and the session `code` minted by `Unlock`. Refused when
+    /// locked or when the code is absent/wrong. See docs/provisioning-sessions.md.
+    Get {
+        title: String,
+        attachment: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -61,6 +72,14 @@ impl std::fmt::Debug for Request {
                 .finish(),
             Request::GetIdleTimeout => f.write_str("GetIdleTimeout"),
             Request::Status => f.write_str("Status"),
+            Request::Get {
+                title, attachment, ..
+            } => f
+                .debug_struct("Get")
+                .field("title", title)
+                .field("attachment", attachment)
+                .field("code", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -120,6 +139,15 @@ pub enum OkBody {
         gpg_keys: usize,
         materialized: usize,
     },
+    /// Response to `Unlock`: the one-time session code for this unlock. The CLI
+    /// emits it as `export TROVE_SESSION=…`; subsequent `Get`s present it.
+    Unlocked {
+        code: String,
+    },
+    /// Response to `Get`: the requested secret's bytes, base64-encoded.
+    Secret {
+        data: String,
+    },
 }
 
 impl Response {
@@ -159,5 +187,11 @@ impl Response {
             gpg_keys,
             materialized,
         })
+    }
+    pub fn ok_unlocked(code: String) -> Self {
+        Response::Ok(OkBody::Unlocked { code })
+    }
+    pub fn ok_secret(data: String) -> Self {
+        Response::Ok(OkBody::Secret { data })
     }
 }

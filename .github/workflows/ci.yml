@@ -39,6 +39,13 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   RUST_BACKTRACE: 1
+  # GitHub runners intermittently fail cargo downloads with
+  # "[16] Error in the HTTP2 framing layer" (a curl 8.x + crates.io CDN issue).
+  # Disable HTTP/2 multiplexing to dodge the framing bug, and retry transient
+  # network failures so one bad download doesn't fail the job. Applies to every
+  # job (Test/Clippy/Build/Audit all hit the network).
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
   test:
@@ -62,8 +69,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gnupg \
             git \
-            openssh-client
+            openssh-client \
+            keepassxc
         # macOS GitHub runners ship with gpg, git, ssh-keygen, ssh-add already.
+
+      # keepassxc-cli is the mandatory third-party oracle for the cross-tool
+      # conformance + interop tests — they hard-fail (never skip) if it's
+      # absent. Ubuntu gets it from apt above; macOS from the cask (the CLI
+      # lives inside the .app bundle, which the test harness's discovery checks).
+      - name: Install keepassxc-cli (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install --cask keepassxc
 
       - name: Verify required system tools
         run: |
@@ -72,6 +88,11 @@ jobs:
           command -v git
           command -v ssh-keygen
           command -v ssh-add
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli" --version
+          else
+            keepassxc-cli --version
+          fi
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2.7.3

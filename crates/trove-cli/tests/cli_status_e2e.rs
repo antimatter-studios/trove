@@ -17,7 +17,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, RwLock};
 use trove_core::Vault;
 use troved::gpg_agent::GpgKeyStore;
-use troved::handler::{handle, SharedState};
+use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::ssh_agent::KeyStore;
@@ -41,12 +41,14 @@ fn find_trove_binary() -> Option<PathBuf> {
 
 /// Spin up a tokio listener bound to `sock_path` that loops `handle()` until
 /// `shutdown` is notified. Returns the JoinHandle so the test can drop it.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_daemon(
     sock_path: PathBuf,
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
+    session: SessionStore,
     idle: Arc<IdleTracker>,
     shutdown: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
@@ -61,8 +63,9 @@ async fn spawn_daemon(
                     let ks = key_store.clone();
                     let gks = gpg_store.clone();
                     let ms = mat_store.clone();
+                    let se = session.clone();
                     let id = idle.clone();
-                    tokio::spawn(handle_connection(stream, s, ks, gks, ms, id));
+                    tokio::spawn(handle_connection(stream, s, ks, gks, ms, se, id));
                 }
             }
         }
@@ -77,8 +80,10 @@ async fn handle_connection(
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
+    session: SessionStore,
     idle: Arc<IdleTracker>,
 ) {
+    let peer_uid = stream.peer_cred().map(|c| c.uid()).unwrap_or(u32::MAX);
     let (r, mut w) = stream.into_split();
     let mut lines = BufReader::new(r).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -87,9 +92,11 @@ async fn handle_connection(
         }
         let resp = match serde_json::from_str(&line) {
             Ok(req) => {
-                handle(req, &state, &key_store, &gpg_store, &mat_store, &idle)
-                    .await
-                    .response
+                handle(
+                    req, &state, &key_store, &gpg_store, &mat_store, &session, &idle, peer_uid,
+                )
+                .await
+                .response
             }
             Err(e) => troved::protocol::Response::err(format!("invalid request: {e}")),
         };
@@ -129,6 +136,7 @@ async fn trove_status_round_trip_against_real_daemon() {
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+    let session: SessionStore = Arc::new(Mutex::new(None));
     let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
     let idle = IdleTracker::new(Duration::from_secs(60), cb);
     let shutdown = Arc::new(Notify::new());
@@ -139,6 +147,7 @@ async fn trove_status_round_trip_against_real_daemon() {
         key_store.clone(),
         gpg_store.clone(),
         mat_store.clone(),
+        session.clone(),
         idle.clone(),
         shutdown.clone(),
     )
@@ -220,10 +229,17 @@ async fn trove_status_round_trip_against_real_daemon() {
         String::from_utf8_lossy(&unlock_out.stdout),
         String::from_utf8_lossy(&unlock_out.stderr)
     );
+    // stdout carries ONLY the shell-eval'able session-code export; the
+    // human-readable notice goes to stderr.
     let stdout = String::from_utf8_lossy(&unlock_out.stdout);
+    let stderr = String::from_utf8_lossy(&unlock_out.stderr);
     assert!(
-        stdout.contains("vault unlocked"),
-        "expected 'vault unlocked' in output:\n{stdout}"
+        stdout.contains("export TROVE_SESSION="),
+        "expected 'export TROVE_SESSION=' on stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("unlocked"),
+        "expected unlock notice on stderr:\n{stderr}"
     );
 
     // trove list (no vault path) — now succeeds, hits the daemon's unlocked

@@ -15,7 +15,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 trove-core = { path = "crates/trove-core" }
-keepass = "0.12"
+keepass = "0.13"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 thiserror = "1"
 anyhow = "1"
