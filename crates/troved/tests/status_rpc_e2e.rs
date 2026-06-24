@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
 use troved::gpg_agent::GpgKeyStore;
-use troved::handler::{handle, SharedState};
+use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
@@ -20,11 +20,15 @@ use troved::ssh_agent::KeyStore;
 
 const PASSWORD: &str = "status-rpc-test-pw";
 
+/// Fixed peer uid for the harness — these tests don't vary the caller uid.
+const TEST_UID: u32 = 1000;
+
 struct Harness {
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
+    session: SessionStore,
     idle: Arc<IdleTracker>,
 }
 
@@ -34,6 +38,7 @@ impl Harness {
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+        let session: SessionStore = Arc::new(Mutex::new(None));
         // No-op callback — these tests don't exercise the auto-lock path.
         let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
         let idle = IdleTracker::new(timeout, cb);
@@ -42,6 +47,7 @@ impl Harness {
             key_store,
             gpg_store,
             mat_store,
+            session,
             idle,
         }
     }
@@ -53,7 +59,9 @@ impl Harness {
             &self.key_store,
             &self.gpg_store,
             &self.mat_store,
+            &self.session,
             &self.idle,
+            TEST_UID,
         )
         .await
         .response
@@ -174,6 +182,7 @@ async fn status_request_does_not_bump_idle_timer() {
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+    let session: SessionStore = Arc::new(Mutex::new(None));
     let cb_state = state.clone();
     let cb: LockCallback = Box::new(move || {
         let s = cb_state.clone();
@@ -191,7 +200,7 @@ async fn status_request_does_not_bump_idle_timer() {
         timeout: None,
     };
     let _ = handle(
-        req_unlock, &state, &key_store, &gpg_store, &mat_store, &idle,
+        req_unlock, &state, &key_store, &gpg_store, &mat_store, &session, &idle, TEST_UID,
     )
     .await;
 
@@ -204,7 +213,9 @@ async fn status_request_does_not_bump_idle_timer() {
             &key_store,
             &gpg_store,
             &mat_store,
+            &session,
             &idle,
+            TEST_UID,
         )
         .await;
     }

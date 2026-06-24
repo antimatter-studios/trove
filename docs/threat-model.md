@@ -85,6 +85,15 @@ Tabulated form.
 | Forwarded SSH agent abuse | Standard SSH agent protocol — user opts in | Same as any agent; not specific to trove |
 | Password manager UI phishing | N/A — no GUI yet | Future GUI must address this |
 
+The same-UID **extraction** gap for the `get` surface (adversary #4) is now
+mitigated: per-unlock **session codes** + `SO_PEERCRED` move that adversary
+from "accepted" toward "mitigated for the unlock window" — extraction now requires
+*actively* stealing the one-time code from the unlocking shell's environment, not
+just passively benefiting from the unlock. See
+[provisioning-sessions.md](provisioning-sessions.md). (The agent sockets remain
+same-UID-openable by design — they never expose private bytes, only signatures, so
+unlock-once is already safe there.)
+
 ## Comparisons
 
 ### vs. status quo (plaintext on disk forever)

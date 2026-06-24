@@ -152,16 +152,16 @@ trove get file [OPTIONS] <VAULT> <TITLE>
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
-## trove agent
+## trove ssh-agent
 
 ```
-trove agent <COMMAND>
+trove ssh-agent <COMMAND>
 ```
 
-### trove agent socket
+### trove ssh-agent socket
 
 ```
-trove agent socket
+trove ssh-agent socket
 ```
 
 Print the path to the troved SSH agent socket, then exit. Resolution order:
@@ -170,7 +170,7 @@ Print the path to the troved SSH agent socket, then exit. Resolution order:
 2. `$XDG_RUNTIME_DIR/trove-ssh.sock`.
 3. `${TMPDIR:-/tmp}/trove-ssh-$UID.sock`.
 
-Typical use: `export SSH_AUTH_SOCK="$(trove agent socket)"`.
+Typical use: `export SSH_AUTH_SOCK="$(trove ssh-agent socket)"`.
 
 ## trove gpg-agent
 
@@ -206,6 +206,45 @@ Open the vault, run every entry's materialize plan **in-process** (not via the d
 
 Per-entry materialize errors are logged but don't abort the others.
 
+## trove completions
+
+```
+trove completions [SHELL] [--install | --check]
+```
+
+Manage shell completion for `trove`. `SHELL` is one of `bash`, `zsh`, `fish`,
+`powershell`, `elvish`; it is optional with `--install`/`--check` (defaults to
+`$SHELL`).
+
+- **no flags** — print the completion script to stdout (pipe it where you want).
+- **`--install`** — write the script to the standard location and wire it into
+  your shell rc. Idempotent: it manages a single marked block, so re-running
+  updates in place instead of appending. Targets: zsh → `$XDG_DATA_HOME/trove/completions/_trove`
+  sourced from `~/.zshrc`; bash → `$XDG_DATA_HOME/bash-completion/completions/trove`
+  sourced from `~/.bashrc`; fish → `$XDG_CONFIG_HOME/fish/completions/trove.fish`
+  (auto-loaded, no rc edit).
+- **`--check`** — read-only. Reports how your shell currently completes `trove`.
+
+### The zsh `_openstack` clash
+
+zsh ships a bundled `_openstack` completer whose `#compdef` line claims ~27
+command names — including `trove`, because OpenStack's database-as-a-service
+project is *also* called Trove. With no trove-specific completion installed,
+typing `trove <TAB>` dispatches to `_openstack`, which errors with
+`_values:compvalues: not enough arguments`. This happens even when nothing
+OpenStack is installed — the completer ships with zsh itself.
+
+`trove completions zsh --install` resolves it: the installed completion runs an
+explicit `compdef _trove trove` that wins over `_openstack`. `--check` detects
+and names the shadow:
+
+```
+$ trove completions zsh --check
+shadowed: `trove` completes via `_openstack`.
+...
+fix it with: trove completions zsh --install
+```
+
 ## troved — the daemon
 
 ```
@@ -231,7 +270,7 @@ All env vars are read at process start.
 | `UID` | `0` | Used in the `$TMPDIR` fallback path only. (`UID` is rarely set by login shells; the fallback path is essentially "/tmp/trove-0.sock" in practice — set `TROVE_SOCK` explicitly if running multi-user on a shared machine.) |
 | `HOME` | (system) | Used by the materialize path resolver to expand `~` / `$HOME` in `Materialize.Target`. |
 
-The CLI's `agent socket` / `gpg-agent socket` subcommands resolve the same way as the daemon, so they always agree (no need to pass `TROVE_*` to both).
+The CLI's `ssh-agent socket` / `gpg-agent socket` subcommands resolve the same way as the daemon, so they always agree (no need to pass `TROVE_*` to both).
 
 ### Control protocol (line-JSON)
 

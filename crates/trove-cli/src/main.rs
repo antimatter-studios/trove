@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use trove_core::{EntryId, Error as CoreError, Vault};
+use trove_core::{Error as CoreError, Vault};
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -33,7 +33,9 @@ const GPG_KEY_ATTACHMENT: &str = "gpg-priv";
 #[derive(Debug, Parser)]
 #[command(
     name = "trove",
-    version,
+    // Stamped by build.rs: `0.2.0` for release builds, `0.2.0-dev-YYYYMMDDHHMMSS`
+    // for dev builds so the running binary is easy to identify.
+    version = env!("TROVE_BUILD_VERSION"),
     about = "trove — KeePassXC-compatible CLI",
     propagate_version = true
 )]
@@ -80,12 +82,12 @@ enum Command {
     },
 
     /// SSH agent helper subcommands.
-    Agent {
+    SshAgent {
         #[command(subcommand)]
-        op: AgentOp,
+        op: SshAgentOp,
     },
 
-    /// GPG agent helper subcommands (v0.0.3.0).
+    /// GPG agent helper subcommands.
     GpgAgent {
         #[command(subcommand)]
         op: GpgAgentOp,
@@ -134,19 +136,27 @@ enum Command {
     /// remaining, and whether the file is still on disk.
     MaterializeStatus,
 
-    /// Print a shell completion script to stdout.
+    /// Print, install, or check a shell completion script.
     ///
-    /// Without this, your shell falls back to filename completion for `trove`
-    /// (or, on zsh, to whatever unrelated completion happens to claim the name
-    /// `trove`). Install the generated script so the shell can complete trove's
-    /// own subcommands and flags.
+    /// With no flags, prints the script to stdout for SHELL. Without an
+    /// installed completion, your shell falls back to filename completion for
+    /// `trove` — or, on zsh, to whatever unrelated completion happens to claim
+    /// the name `trove` (zsh ships an `_openstack` completer that claims it,
+    /// since OpenStack's database service is also called Trove).
     ///
-    /// zsh:  `trove completions zsh > "${fpath[1]}/_trove"` then restart the shell.
-    /// bash: `trove completions bash > ~/.local/share/bash-completion/completions/trove`.
-    /// fish: `trove completions fish > ~/.config/fish/completions/trove.fish`.
+    /// `--install` writes the script to the standard location and wires it into
+    /// your shell rc (idempotent; safe to re-run). `--check` reports how your
+    /// shell currently completes `trove`, flagging the `_openstack` shadow.
+    /// SHELL is optional with `--install`/`--check` (defaults to `$SHELL`).
     Completions {
         /// Shell dialect: bash, zsh, fish, powershell, or elvish.
-        shell: clap_complete::Shell,
+        shell: Option<clap_complete::Shell>,
+        /// Install the completion for SHELL and wire it into your shell rc.
+        #[arg(long)]
+        install: bool,
+        /// Report how SHELL currently completes `trove`, then exit (read-only).
+        #[arg(long, conflicts_with = "install")]
+        check: bool,
     },
 }
 
@@ -182,7 +192,7 @@ enum GpgAgentOp {
 }
 
 #[derive(Debug, Subcommand)]
-enum AgentOp {
+enum SshAgentOp {
     /// Print the path to the troved SSH agent socket.
     ///
     /// Resolution order matches `troved`:
@@ -190,7 +200,7 @@ enum AgentOp {
     /// 2. `$XDG_RUNTIME_DIR/trove-ssh.sock`.
     /// 3. `${TMPDIR:-/tmp}/trove-ssh-$UID.sock`.
     ///
-    /// Typical usage: `export SSH_AUTH_SOCK="$(trove agent socket)"`.
+    /// Typical usage: `export SSH_AUTH_SOCK="$(trove ssh-agent socket)"`.
     Socket,
 }
 
@@ -374,9 +384,9 @@ fn run(cli: Cli) -> Result<()> {
                     out,
                 },
         } => cmd_get_file(&vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
-        Command::Agent {
-            op: AgentOp::Socket,
-        } => cmd_agent_socket(),
+        Command::SshAgent {
+            op: SshAgentOp::Socket,
+        } => cmd_ssh_agent_socket(),
         Command::GpgAgent {
             op: GpgAgentOp::Socket,
         } => cmd_gpg_agent_socket(),
@@ -389,18 +399,268 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_idle_set(seconds),
         Command::Idle { op: IdleOp::Get } => cmd_idle_get(),
         Command::MaterializeStatus => cmd_materialize_status(),
-        Command::Completions { shell } => cmd_completions(shell),
+        Command::Completions {
+            shell,
+            install,
+            check,
+        } => cmd_completions(shell, install, check),
     }
 }
 
-/// `trove completions <shell>` — generate a completion script for `shell` from
-/// the clap command tree and write it to stdout. Pure local operation: no
+/// Markers delimiting the block `--install` manages in a shell rc file. Kept
+/// stable so re-running replaces the block in place instead of appending.
+const RC_BEGIN: &str =
+    "# >>> trove shell completions (managed by `trove completions --install`) >>>";
+const RC_END: &str = "# <<< trove shell completions (managed by `trove completions --install`) <<<";
+
+/// `trove completions [SHELL] [--install|--check]`. Pure local operation: no
 /// vault, no daemon, no password.
-fn cmd_completions(shell: clap_complete::Shell) -> Result<()> {
+///
+/// - no flags: print the completion script for SHELL to stdout.
+/// - `--install`: write the script to the standard location and wire it into
+///   the shell rc (idempotent).
+/// - `--check`: report how the shell currently completes `trove`.
+fn cmd_completions(shell: Option<clap_complete::Shell>, install: bool, check: bool) -> Result<()> {
+    if check {
+        return completions_check(shell.or_else(detect_shell));
+    }
+    if install {
+        let shell = shell
+            .or_else(detect_shell)
+            .context("could not detect shell from $SHELL; pass one explicitly, e.g. `trove completions zsh --install`")?;
+        return completions_install(shell);
+    }
+    let shell = shell
+        .context("specify a shell, e.g. `trove completions zsh` (or use --install / --check)")?;
+    print!("{}", render_completion(shell));
+    Ok(())
+}
+
+/// Generate the completion script for `shell` from the clap command tree.
+fn render_completion(shell: clap_complete::Shell) -> String {
     let mut cmd = <Cli as clap::CommandFactory>::command();
     let bin = cmd.get_name().to_string();
-    clap_complete::generate(shell, &mut cmd, bin, &mut std::io::stdout());
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut cmd, bin, &mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Best-effort shell detection from `$SHELL`. Returns `None` for shells we
+/// can't install for (the caller turns that into a helpful error).
+fn detect_shell() -> Option<clap_complete::Shell> {
+    use clap_complete::Shell;
+    let shell = std::env::var("SHELL").ok()?;
+    match Path::new(&shell).file_name()?.to_str()? {
+        "zsh" => Some(Shell::Zsh),
+        "bash" => Some(Shell::Bash),
+        "fish" => Some(Shell::Fish),
+        _ => None,
+    }
+}
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .context("$HOME is not set")
+}
+
+/// `$XDG_DATA_HOME` or `~/.local/share`.
+fn data_home() -> Result<PathBuf> {
+    if let Some(d) = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(d));
+    }
+    Ok(home_dir()?.join(".local/share"))
+}
+
+/// `$XDG_CONFIG_HOME` or `~/.config`.
+fn config_home() -> Result<PathBuf> {
+    if let Some(d) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(d));
+    }
+    Ok(home_dir()?.join(".config"))
+}
+
+fn write_completion_file(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Ensure `rc` contains exactly the managed block (between `RC_BEGIN`/`RC_END`).
+/// Replaces an existing block in place, otherwise appends one. Returns whether
+/// the file was changed.
+fn upsert_rc_block(rc: &Path, body: &str) -> Result<bool> {
+    let block = format!("{RC_BEGIN}\n{body}\n{RC_END}");
+    let existing = match std::fs::read_to_string(rc) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", rc.display())),
+    };
+
+    let updated = match (existing.find(RC_BEGIN), existing.find(RC_END)) {
+        (Some(start), Some(end_marker)) if end_marker >= start => {
+            let end = end_marker + RC_END.len();
+            let mut s = String::with_capacity(existing.len());
+            s.push_str(&existing[..start]);
+            s.push_str(&block);
+            s.push_str(&existing[end..]);
+            s
+        }
+        _ => {
+            let mut s = existing.clone();
+            if !s.is_empty() && !s.ends_with('\n') {
+                s.push('\n');
+            }
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&block);
+            s.push('\n');
+            s
+        }
+    };
+
+    if updated == existing {
+        return Ok(false);
+    }
+    if let Some(parent) = rc.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(rc, updated).with_context(|| format!("writing {}", rc.display()))?;
+    Ok(true)
+}
+
+fn completions_install(shell: clap_complete::Shell) -> Result<()> {
+    use clap_complete::Shell;
+    let script = render_completion(shell);
+    match shell {
+        Shell::Zsh => {
+            // Source the generated function file from the rc and let its
+            // self-registering footer run `compdef _trove trove`. The explicit
+            // compdef wins over zsh's bundled `_openstack`, which claims the
+            // `trove` name. The guard initializes compinit if the rc hasn't.
+            let file = data_home()?.join("trove/completions/_trove");
+            write_completion_file(&file, &script)?;
+            let rc = home_dir()?.join(".zshrc");
+            let body = format!(
+                "(( $+functions[compdef] )) || {{ autoload -Uz compinit && compinit }}\nsource {:?}",
+                file.display().to_string()
+            );
+            let changed = upsert_rc_block(&rc, &body)?;
+            println!("wrote {}", file.display());
+            println!(
+                "{} {}",
+                if changed {
+                    "updated"
+                } else {
+                    "already current:"
+                },
+                rc.display()
+            );
+            println!("restart your shell or run: exec zsh");
+        }
+        Shell::Bash => {
+            let file = data_home()?.join("bash-completion/completions/trove");
+            write_completion_file(&file, &script)?;
+            let rc = home_dir()?.join(".bashrc");
+            let body = format!("[[ -f {0:?} ]] && source {0:?}", file.display().to_string());
+            let changed = upsert_rc_block(&rc, &body)?;
+            println!("wrote {}", file.display());
+            println!(
+                "{} {}",
+                if changed {
+                    "updated"
+                } else {
+                    "already current:"
+                },
+                rc.display()
+            );
+            println!("restart your shell or run: exec bash");
+        }
+        Shell::Fish => {
+            // Fish auto-loads files in this directory; no rc edit needed.
+            let file = config_home()?.join("fish/completions/trove.fish");
+            write_completion_file(&file, &script)?;
+            println!("wrote {}", file.display());
+            println!("fish auto-loads it; start a new shell to use it");
+        }
+        other => {
+            anyhow::bail!(
+                "--install supports bash, zsh, and fish; for {other} run \
+                 `trove completions {other} > <path>` and source it per your shell's docs",
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Report how the shell currently completes `trove`. For zsh this runs a
+/// throwaway interactive shell to read the live completion binding, so it
+/// reflects the user's real config (fpath, rc, frameworks).
+fn completions_check(shell: Option<clap_complete::Shell>) -> Result<()> {
+    use clap_complete::Shell;
+    match shell {
+        Some(Shell::Zsh) | None => {
+            // `None` falls through here: the shadowing problem is zsh-specific,
+            // and zsh is the only shell we can introspect this way.
+            let binding =
+                zsh_completion_binding().context("could not query zsh; is `zsh` on PATH?")?;
+            match binding.as_str() {
+                "_trove" => {
+                    println!("ok: `trove` completes via its own `_trove` function.");
+                }
+                "" | "<none>" => {
+                    println!("no dedicated completion: `trove` falls back to filename completion.");
+                    println!("install it with: trove completions zsh --install");
+                }
+                b if b.contains("openstack") => {
+                    println!("shadowed: `trove` completes via `{b}`.");
+                    println!(
+                        "This is zsh's bundled OpenStack completer (OpenStack's database\n\
+                         service is also called Trove); it errors with `_values:compvalues`."
+                    );
+                    println!("fix it with: trove completions zsh --install");
+                }
+                b => {
+                    println!("`trove` completes via `{b}` (not trove's own `_trove`).");
+                    println!("install trove's own with: trove completions zsh --install");
+                }
+            }
+            Ok(())
+        }
+        Some(other) => {
+            println!("--check introspects zsh only (the `_openstack` name clash is zsh-specific).");
+            println!("for {other}, install with: trove completions {other} --install");
+            Ok(())
+        }
+    }
+}
+
+/// Spawn a throwaway interactive zsh and read which completion function is
+/// bound to `trove`. The value is wrapped in a marker so it can be picked out
+/// of any noise the user's rc prints. `<none>` means unbound.
+fn zsh_completion_binding() -> Result<String> {
+    use std::process::{Command, Stdio};
+    let out = Command::new("zsh")
+        .args([
+            "-ic",
+            "print -r -- \"TROVE_COMP_BINDING=${_comps[trove]:-<none>}\"",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .context("running zsh")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let value = stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("TROVE_COMP_BINDING="))
+        .context("zsh did not report a completion binding")?;
+    Ok(value.trim().to_string())
 }
 
 fn cmd_gpg_agent_socket() -> Result<()> {
@@ -426,7 +686,7 @@ fn gpg_socket_tmp_fallback() -> PathBuf {
     PathBuf::from(tmp).join(format!("trove-gpg-{uid}.sock"))
 }
 
-fn cmd_agent_socket() -> Result<()> {
+fn cmd_ssh_agent_socket() -> Result<()> {
     // Resolution must mirror `troved::ssh_agent::resolve_ssh_socket_path`.
     // Kept inline here to avoid pulling troved as a dependency of the CLI.
     let path = if let Ok(p) = std::env::var("TROVE_SSH_SOCK") {
@@ -617,56 +877,83 @@ fn cmd_add_gpg(vault_path: &Path, title: &str, key_path: &Path, pw_stdin: bool) 
     Ok(())
 }
 
-fn cmd_get_gpg(vault_path: &Path, title: &str, out: Option<&Path>, pw_stdin: bool) -> Result<()> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    let id: EntryId = vault
-        .find_by_title(title)
-        .ok_or_else(|| CoreError::EntryNotFound(title.to_string()))
-        .context("looking up entry by title")?;
+/// Pull an attachment out of the *unlocked daemon*, gated by the session code.
+///
+/// Extraction (`get`) no longer opens the vault one-shot — that would let any
+/// password holder bypass the session-code gate. Instead we read `TROVE_SESSION`
+/// (the one-time code `trove unlock` minted) and ask the daemon, which serves
+/// the bytes only if: the vault is unlocked, the code matches, and we are the
+/// uid that unlocked (SO_PEERCRED). The daemon returns the bytes base64-encoded
+/// on the JSON wire; we decode them here. See docs/provisioning-sessions.md.
+fn daemon_get_attachment(title: &str, attachment: &str) -> Result<Vec<u8>> {
+    let code = std::env::var("TROVE_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| DaemonClassified {
+            message: "session code required: run `eval \"$(trove unlock <vault>)\"` first, \
+                      then retry in the same shell"
+                .to_string(),
+            exit: EXIT_USER_ERROR,
+        })?;
 
-    let bytes = vault
-        .read_binary(&id, GPG_KEY_ATTACHMENT)
-        .context("reading gpg secret-key attachment")?
-        .ok_or_else(|| anyhow!("entry '{title}' has no '{GPG_KEY_ATTACHMENT}' attachment"))?;
-
-    match out {
-        Some(path) => write_private_file(path, &bytes)
-            .with_context(|| format!("writing key to {}", path.display()))?,
-        None => {
-            let stdout = std::io::stdout();
-            let mut handle = stdout.lock();
-            handle
-                .write_all(&bytes)
-                .context("writing gpg secret key to stdout")?;
+    let req = daemon::Request::Get {
+        title: title.to_string(),
+        attachment: attachment.to_string(),
+        code,
+    };
+    let resp = match daemon::send_autospawn(&req) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
         }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
     }
-    Ok(())
+
+    let b64 = resp
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("daemon returned ok but no secret data"))?;
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .context("decoding base64 secret from daemon")
 }
 
-fn cmd_get_ssh(vault_path: &Path, title: &str, out: Option<&Path>, pw_stdin: bool) -> Result<()> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    let id: EntryId = vault
-        .find_by_title(title)
-        .ok_or_else(|| CoreError::EntryNotFound(title.to_string()))
-        .context("looking up entry by title")?;
-
-    let bytes = vault
-        .read_binary(&id, SSH_KEY_ATTACHMENT)
-        .context("reading ssh key attachment")?
-        .ok_or_else(|| anyhow!("entry '{title}' has no '{SSH_KEY_ATTACHMENT}' attachment"))?;
-
+/// Write secret bytes to `out` (chmod 0600 on Unix) or stdout. `what` names the
+/// payload for error context.
+fn write_secret_out(out: Option<&Path>, bytes: &[u8], what: &str) -> Result<()> {
     match out {
-        Some(path) => write_private_file(path, &bytes)
-            .with_context(|| format!("writing key to {}", path.display()))?,
+        Some(path) => write_private_file(path, bytes)
+            .with_context(|| format!("writing {what} to {}", path.display())),
         None => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             handle
-                .write_all(&bytes)
-                .context("writing ssh key to stdout")?;
+                .write_all(bytes)
+                .with_context(|| format!("writing {what} to stdout"))
         }
     }
-    Ok(())
+}
+
+fn cmd_get_gpg(_vault_path: &Path, title: &str, out: Option<&Path>, _pw_stdin: bool) -> Result<()> {
+    let bytes = daemon_get_attachment(title, GPG_KEY_ATTACHMENT)?;
+    write_secret_out(out, &bytes, "gpg secret key")
+}
+
+fn cmd_get_ssh(_vault_path: &Path, title: &str, out: Option<&Path>, _pw_stdin: bool) -> Result<()> {
+    let bytes = daemon_get_attachment(title, SSH_KEY_ATTACHMENT)?;
+    write_secret_out(out, &bytes, "ssh key")
 }
 
 fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
@@ -808,47 +1095,23 @@ fn cmd_add_file(
 }
 
 /// `trove get file` — read an attachment to disk WITHOUT engaging
-/// materialization. One-shot, like `trove get ssh`.
+/// materialization. Daemon-routed and session-code-gated, like `trove get ssh`.
+///
+/// The attachment name comes from `--name`, defaulting to `"blob"`. (The old
+/// one-shot path resolved an absent `--name` from the entry's
+/// `Materialize.Source` field, but reading that field would mean opening the
+/// vault here — which defeats the session-code gate. Pass `--name` for
+/// entries that don't use the conventional `blob` attachment slot.)
 fn cmd_get_file(
-    vault_path: &Path,
+    _vault_path: &Path,
     title: &str,
     name: Option<&str>,
     out: Option<&Path>,
-    pw_stdin: bool,
+    _pw_stdin: bool,
 ) -> Result<()> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    let id: EntryId = vault
-        .find_by_title(title)
-        .ok_or_else(|| CoreError::EntryNotFound(title.to_string()))
-        .context("looking up entry by title")?;
-
-    // Resolve the attachment name. Priority:
-    //   1. --name flag (explicit)
-    //   2. Materialize.Source on the entry
-    //   3. literal "blob"
-    let resolved_name: String = match name {
-        Some(n) => n.to_string(),
-        None => match vault.get_field(&id, "Materialize.Source")? {
-            Some(s) => s,
-            None => "blob".to_string(),
-        },
-    };
-
-    let bytes = vault
-        .read_binary(&id, &resolved_name)
-        .context("reading file attachment")?
-        .ok_or_else(|| anyhow!("entry '{title}' has no attachment named '{resolved_name}'"))?;
-
-    match out {
-        Some(path) => write_private_file(path, &bytes)
-            .with_context(|| format!("writing file to {}", path.display()))?,
-        None => {
-            let stdout = std::io::stdout();
-            let mut handle = stdout.lock();
-            handle.write_all(&bytes).context("writing file to stdout")?;
-        }
-    }
-    Ok(())
+    let attachment = name.unwrap_or("blob");
+    let bytes = daemon_get_attachment(title, attachment)?;
+    write_secret_out(out, &bytes, "file")
 }
 
 /// `trove materialize` — open vault, run the materialize plan in-process,
@@ -965,7 +1228,14 @@ fn cmd_unlock(vault: &Path, timeout: Option<u64>, pw_stdin: bool) -> Result<()> 
         }
         .into());
     }
-    let vault_str = vault
+    // The daemon runs in its own working directory, so a relative path would be
+    // resolved against *its* cwd, not the user's — and fail to open. Resolve to
+    // an absolute path here, against the user's cwd (the existence check above
+    // guarantees canonicalize succeeds), so the daemon opens the file the user
+    // actually named.
+    let vault_abs = std::fs::canonicalize(vault)
+        .with_context(|| format!("resolving vault path: {}", vault.display()))?;
+    let vault_str = vault_abs
         .to_str()
         .ok_or_else(|| anyhow!("vault path is not valid utf-8"))?
         .to_string();
@@ -1004,7 +1274,20 @@ fn cmd_unlock(vault: &Path, timeout: Option<u64>, pw_stdin: bool) -> Result<()> 
         return Err(DaemonClassified { message: msg, exit }.into());
     }
 
-    println!("vault unlocked: {}", vault.display());
+    // The daemon minted a one-time session code for this unlock. We emit it as
+    // a shell-eval'able export on STDOUT so `eval "$(trove unlock …)"` lands it
+    // in the operator's environment — never printed to a terminal, never in
+    // `ps`. The human-readable notice goes to STDERR. Code-gated `get` reads
+    // it back from $TROVE_SESSION. See docs/provisioning-sessions.md.
+    let code = resp
+        .get("code")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("daemon unlocked but returned no session code"))?;
+    println!("export TROVE_SESSION={code}");
+    eprintln!(
+        "trove: unlocked {} · session code exported to $TROVE_SESSION",
+        vault.display()
+    );
     Ok(())
 }
 
@@ -1267,6 +1550,63 @@ mod format_tests {
         assert_eq!(format_seconds(3600), "3600s (1h 00m 00s)");
         assert_eq!(format_seconds(3725), "3725s (1h 02m 05s)");
         assert_eq!(format_seconds(46566), "46566s (12h 56m 06s)");
+    }
+}
+
+#[cfg(test)]
+mod completions_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Unique temp path per call; no `tempfile` dep, no clock/RNG.
+    fn temp_rc() -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "trove-rc-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn upsert_appends_then_replaces_in_place() {
+        let rc = temp_rc();
+        std::fs::write(&rc, "# existing config\nalias x=y\n").unwrap();
+
+        // First upsert appends a single managed block, preserving prior config.
+        assert!(upsert_rc_block(&rc, "source \"/a/_trove\"").unwrap());
+        let first = std::fs::read_to_string(&rc).unwrap();
+        assert!(first.contains("# existing config"));
+        assert_eq!(first.matches(RC_BEGIN).count(), 1);
+        assert_eq!(first.matches(RC_END).count(), 1);
+        assert!(first.contains("source \"/a/_trove\""));
+
+        // Identical re-run is a no-op (idempotent).
+        assert!(!upsert_rc_block(&rc, "source \"/a/_trove\"").unwrap());
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), first);
+
+        // A changed body replaces the block in place — no duplicate markers,
+        // old contents gone, surrounding config untouched.
+        assert!(upsert_rc_block(&rc, "source \"/b/_trove\"").unwrap());
+        let second = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(second.matches(RC_BEGIN).count(), 1);
+        assert!(second.contains("source \"/b/_trove\""));
+        assert!(!second.contains("/a/_trove"));
+        assert!(second.contains("# existing config"));
+
+        let _ = std::fs::remove_file(&rc);
+    }
+
+    #[test]
+    fn upsert_creates_file_when_missing() {
+        let rc = temp_rc();
+        assert!(upsert_rc_block(&rc, "source \"/x\"").unwrap());
+        let s = std::fs::read_to_string(&rc).unwrap();
+        assert!(s.starts_with(RC_BEGIN));
+        assert!(s.contains("source \"/x\""));
+        let _ = std::fs::remove_file(&rc);
     }
 }
 

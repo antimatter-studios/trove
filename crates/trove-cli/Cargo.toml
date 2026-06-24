@@ -29,6 +29,13 @@ tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }
 # `troved::protocol` and parse responses as untyped serde_json::Value (the
 # `OkBody` enum is `#[serde(untagged)]` and not safe to deserialize strictly).
 serde_json.workspace = true
+# v0.0.10.0: code-gated `get` routes extraction through the daemon, which
+# returns attachment bytes base64-encoded on the JSON wire. We decode here.
+base64 = "0.22"
+
+[build-dependencies]
+# Formats the dev-build timestamp (0.2.0-dev-YYYYMMDDHHMMSS) in build.rs.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"

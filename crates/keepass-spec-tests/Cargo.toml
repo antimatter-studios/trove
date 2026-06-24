@@ -13,7 +13,13 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-keepass = { workspace = true, features = ["save_kdbx4"] }
+# Pinned explicitly (NOT `workspace = true`) so the test crate's fixture-producer
+# version is independent of whatever `keepass` version trove itself ships. The
+# bare `keepass` name is the 0.12.5 producer in the conformance matrix and what
+# the existing clean-room spec tests already use. trove-as-a-participant is
+# exercised via its CLI binary (subprocess), not by linking trove-core, so these
+# aliases never have to agree with trove's production dependency.
+keepass = { package = "keepass", version = "=0.12.5", features = ["save_kdbx4"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -21,5 +27,15 @@ rand = "0.8"
 hex = "0.4"
 base64 = "0.22"
 chrono = "0.4"
+csv = "1"
 uuid = { version = "1", features = ["v4"] }
 rust-argon2 = "3"
+
+# Additional keepass-crate versions, linked side by side under distinct names so
+# one test binary can MINT fixture vaults with each version and feed them to every
+# consumer in the matrix. Cargo permits this because 0.12 and 0.13 are
+# semver-incompatible (0.x minor = breaking), so they coexist as separate
+# packages — but it forbids two *names* for the same version, so the bare
+# `keepass` above (0.12.5) is NOT also aliased here. Pinned exactly (`=`) for a
+# reproducible version axis. Extend the axis by adding another `keepass_0XY` line.
+keepass_013 = { package = "keepass", version = "=0.13.10", features = ["save_kdbx4"] }

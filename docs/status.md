@@ -65,13 +65,10 @@ The biggest gaps blocking daily-driver use against a real KeePassXC vault are: *
 trove init <vault.kdbx>
 trove list <vault.kdbx>
 trove add ssh <vault> <title> --key <id_ed25519> [--user <name>]
-trove get ssh <vault> <title> [--out <path>]
 trove add gpg <vault> <title> --key <secret-key.gpg>
-trove get gpg <vault> <title> [--out <path>]
 trove add file <vault> <title> --src <local> --target <materialize-path> [--mode 0600] [--ttl 600] [--allow-disk-backed]
-trove get file <vault> <title> [--out <path>]
 trove materialize <vault>            # in-process; SIGINT-wipes
-trove agent socket                   # prints SSH-agent socket path
+trove ssh-agent socket                   # prints SSH-agent socket path
 trove gpg-agent socket               # prints GPG-agent socket path
 ```
 
@@ -80,13 +77,21 @@ All prompt for the master password unless `--password-stdin` is set.
 ### CLI daemon-aware mode — `trove` talking to `troved`
 
 ```sh
-trove unlock <vault.kdbx>      # populates SSH/GPG agents + materialize plan
-trove lock                     # wipes everything (idempotent)
+eval "$(trove unlock <vault.kdbx>)"  # unlock + mint session code → $TROVE_SESSION
+trove lock                     # wipes everything + invalidates the code (idempotent)
 trove status                   # vault path, idle remaining, key counts
 trove idle set <seconds>       # 0 disables auto-lock
 trove idle get
 trove materialize-status       # one line per active materialization
+trove get ssh  <vault> <title> [--out <path>]            # code-gated extraction
+trove get gpg  <vault> <title> [--out <path>]            # via the unlocked daemon
+trove get file <vault> <title> [--name <att>] [--out <path>]
 ```
+
+`get` routes extraction through the *unlocked daemon*: it requires
+`$TROVE_SESSION` (from `eval "$(trove unlock …)"`) and is served only to the
+unlocking uid (`SO_PEERCRED`). The `<vault>` positional is vestigial — the daemon
+serves whatever's unlocked. See [provisioning-sessions.md](provisioning-sessions.md).
 
 ### SSH agent — `troved` Unix socket
 
@@ -152,6 +157,8 @@ trove materialize-status       # one line per active materialization
 | RPC | State |
 |---|---|
 | `ping`, `unlock`, `lock`, `shutdown` | ✅ |
+| `unlock` mints a per-unlock session code (`$TROVE_SESSION`) + `SO_PEERCRED` uid-bind | ✅ |
+| `get` (code-gated extraction of an attachment from the unlocked vault) | ✅ |
 | `list` (entries) | ✅ |
 | `status` | ✅ |
 | `materialize-status` | ✅ |
@@ -180,7 +187,7 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"
 troved &
 trove unlock ~/Documents/Passwords.kdbx           # prompts for master password
-export SSH_AUTH_SOCK="$(trove agent socket)"
+export SSH_AUTH_SOCK="$(trove ssh-agent socket)"
 ssh-add -L                                       # should list every supported key
 ssh github.com                                   # signs against the daemon
 ```
@@ -207,12 +214,12 @@ git commit -S -m "signed with troved"
 
 ### Short-term (next 1-2 months) — daily-use polish
 
-7. **CLI through daemon for `list` / `add` / `get`** (v0.0.14.x). Today these open the kdbx file directly each time and require the password. After this, an unlocked vault is reused; no password reprompt. Requires expanding the control protocol with mutating RPCs (`add-entry`, `set-field`, `attach-binary`, `save-vault`) and a way to address an unlocked vault.
+7. **CLI through daemon for `list` / `add`** (v0.0.14.x). `get` already routes through the daemon (code-gated; see [provisioning-sessions.md](provisioning-sessions.md)) — `list` accepts an unlocked daemon too. Remaining: `add`, which opens the kdbx file directly each time and requires the password. Requires expanding the control protocol with mutating RPCs (`add-entry`, `set-field`, `attach-binary`, `save-vault`) and a way to address an unlocked vault.
 8. **`trove exec -- cmd`** (v0.0.15.0). Run a child process with selected entries' fields exported as env vars (à la `op run`). Per-entry `Exec.{Var,Field}` opt-in fields, similar shape to `Materialize.*`.
 9. **Per-shell env injection** (`eval "$(trove env <profile>)"`). Builds on #8.
 10. **Materialize templates** (v0.0.16.0). Entry holds a template + variable refs to other entries; renders a fully-populated config file on unlock. Useful for kubeconfig fragments, `~/.aws/credentials` profiles, etc.
 11. **TOTP storage and read-through** (v0.0.17.0). Read existing KeePassXC TOTP fields; `trove totp <title>` prints the current code. No new schema.
-12. **`trove agent identities --filter <glob>`** (later). Per-shell narrowing of which keys are exposed via SSH agent for the current session.
+12. **`trove ssh-agent identities --filter <glob>`** (later). Per-shell narrowing of which keys are exposed via SSH agent for the current session.
 
 ### Medium-term (next quarter) — features that change what the project is
 

@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use troved::gpg_agent::{self, GpgKeyStore};
-use troved::handler::{handle, SharedState};
+use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::ipc;
 use troved::materialize::{self, MaterializedStore};
@@ -52,12 +52,14 @@ fn build_lock_callback(
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
+    session: SessionStore,
 ) -> LockCallback {
     Box::new(move || {
         let state = state.clone();
         let key_store = key_store.clone();
         let gpg_store = gpg_store.clone();
         let mat_store = mat_store.clone();
+        let session = session.clone();
         let fut: LockFuture = Box::pin(async move {
             // Idempotency: if the vault is already locked (e.g. an explicit
             // `lock` RPC ran a fraction of a second before us), all of these
@@ -75,6 +77,10 @@ fn build_lock_callback(
             {
                 let mut gkeys = gpg_store.write().await;
                 gkeys.clear();
+            }
+            {
+                let mut sess = session.lock().await;
+                *sess = None;
             }
         });
         fut
@@ -111,15 +117,27 @@ fn resolve_socket_path() -> PathBuf {
     PathBuf::from(tmp).join(format!("trove-{uid}.sock"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     stream: ipc::Stream,
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
     mat_store: MaterializedStore,
+    session: SessionStore,
     idle: Arc<IdleTracker>,
     shutdown: Arc<Notify>,
 ) {
+    // SO_PEERCRED: the uid on the other end. Code-gated extraction (`Get`) is
+    // served only to the uid that unlocked. Unix sockets carry peer creds;
+    // Windows named pipes don't, so the uid check is Unix-only — Windows uses a
+    // sentinel that never matches a real uid (extraction stays Unix-gated). The
+    // stream is split cross-platform via `tokio::io::split` (an `ipc::Stream` is
+    // a `UnixStream` on Unix, a `NamedPipeServer` on Windows).
+    #[cfg(unix)]
+    let peer_uid = stream.peer_cred().map(|c| c.uid()).unwrap_or(u32::MAX);
+    #[cfg(windows)]
+    let peer_uid = u32::MAX;
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
 
@@ -135,7 +153,10 @@ async fn handle_connection(
 
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
-                let handled = handle(req, &state, &key_store, &gpg_store, &mat_store, &idle).await;
+                let handled = handle(
+                    req, &state, &key_store, &gpg_store, &mat_store, &session, &idle, peer_uid,
+                )
+                .await;
                 if handled.shutdown {
                     // Best-effort: write the ack, then signal the main loop.
                     let _ = write_response(&mut write_half, &handled.response).await;
@@ -165,6 +186,16 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `troved --version` / `-V` prints the build version and exits, without
+    // starting the daemon. Stamped by build.rs (see trove-cli for the format).
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("troved {}", env!("TROVE_BUILD_VERSION"));
+        return Ok(());
+    }
+
     let sock_path = resolve_socket_path();
 
     // Ensure parent dir exists (best-effort; XDG_RUNTIME_DIR usually does).
@@ -183,6 +214,7 @@ async fn main() -> Result<()> {
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+    let session: SessionStore = Arc::new(Mutex::new(None));
     let shutdown = Arc::new(Notify::new());
 
     // Construct the idle tracker. Its background task is spawned at `new()`
@@ -195,6 +227,7 @@ async fn main() -> Result<()> {
         key_store.clone(),
         gpg_store.clone(),
         mat_store.clone(),
+        session.clone(),
     );
     let idle: Arc<IdleTracker> = IdleTracker::new(idle_timeout, lock_cb);
     eprintln!(
@@ -276,10 +309,11 @@ async fn main() -> Result<()> {
                     let key_store = key_store.clone();
                     let gpg_store = gpg_store.clone();
                     let mat_store = mat_store.clone();
+                    let session = session.clone();
                     let idle = idle.clone();
                     let shutdown = shutdown.clone();
                     tokio::spawn(handle_connection(
-                        stream, state, key_store, gpg_store, mat_store, idle, shutdown,
+                        stream, state, key_store, gpg_store, mat_store, session, idle, shutdown,
                     ));
                 }
                 Err(_) => {
@@ -319,6 +353,10 @@ async fn main() -> Result<()> {
         let mut gkeys = gpg_store.write().await;
         gkeys.clear();
     }
+    {
+        let mut sess = session.lock().await;
+        *sess = None;
+    }
     let _ = std::fs::remove_file(&sock_path);
     let _ = std::fs::remove_file(&ssh_sock_for_cleanup);
     let _ = std::fs::remove_file(&gpg_sock_for_cleanup);
@@ -350,12 +388,14 @@ mod tests {
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
             let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
             let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
+            let session: SessionStore = Arc::new(Mutex::new(None));
             let shutdown = Arc::new(Notify::new());
             let lock_cb = build_lock_callback(
                 state.clone(),
                 key_store.clone(),
                 gpg_store.clone(),
                 mat_store.clone(),
+                session.clone(),
             );
             let idle: Arc<IdleTracker> = IdleTracker::new(Duration::from_secs(900), lock_cb);
 
@@ -363,6 +403,7 @@ mod tests {
             let accept_keys = key_store.clone();
             let accept_gpg = gpg_store.clone();
             let accept_mat = mat_store.clone();
+            let accept_session = session.clone();
             let accept_idle = idle.clone();
             let accept_shutdown = shutdown.clone();
             let accept = async move {
@@ -372,9 +413,10 @@ mod tests {
                         let ks = accept_keys.clone();
                         let gks = accept_gpg.clone();
                         let ms = accept_mat.clone();
+                        let se = accept_session.clone();
                         let id = accept_idle.clone();
                         let sh = accept_shutdown.clone();
-                        tokio::spawn(handle_connection(stream, s, ks, gks, ms, id, sh));
+                        tokio::spawn(handle_connection(stream, s, ks, gks, ms, se, id, sh));
                     }
                 }
             };
