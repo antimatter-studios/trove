@@ -51,28 +51,43 @@ struct Cli {
     #[arg(long = "password-stdin", global = true)]
     password_stdin: bool,
 
+    /// Operate directly on this .kdbx file (offline mode), bypassing the daemon.
+    ///
+    /// trove has two modes, selected by the presence of this flag:
+    ///
+    /// * `--vault <PATH>` present — offline. The command opens the file at PATH
+    ///   directly; the password comes from `--password-stdin` or a prompt (never
+    ///   the command line). No daemon, no `TROVE_SESSION` needed. `init`, `add`,
+    ///   and `materialize` always work this way; with this flag `generate`,
+    ///   `get`, and `list` do too.
+    /// * `--vault` absent — daemon. `add ssh`/`generate ssh`, `get`, and `list`
+    ///   act on the vault unlocked in the running `troved`, gated by the
+    ///   `TROVE_SESSION` code `trove unlock` minted. `init`, `add gpg/file`, and
+    ///   `materialize` have no daemon mode and error without `--vault`.
+    ///
+    /// `unlock` is the exception: it is inherently daemon-directed, so it takes
+    /// its target as a positional `<VAULT>` and ignores this flag.
+    ///
+    /// Works before or after the subcommand: `trove --vault V list` and
+    /// `trove list --vault V` are equivalent.
+    #[arg(long = "vault", global = true, value_name = "PATH")]
+    vault: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new empty vault.
-    Init {
-        /// Path to the new .kdbx file. Must not exist.
-        vault: PathBuf,
-    },
+    /// Create a new empty vault at `--vault <PATH>` (required; must not exist).
+    Init,
 
-    /// List entries in a vault, one per line.
+    /// List entries, one per line.
     ///
-    /// If `<VAULT>` is omitted, list the entries of the vault currently
-    /// unlocked in the running daemon (auto-spawning if needed) — no
-    /// password prompt. Passing a path always reopens the file directly.
-    List {
-        /// Path to an existing .kdbx file. Optional: omit to list from the
-        /// daemon's currently unlocked vault.
-        vault: Option<PathBuf>,
-    },
+    /// With `--vault <PATH>`: open that file directly (offline). Without it:
+    /// list the vault currently unlocked in the running daemon (auto-spawning
+    /// if needed) — no password prompt.
+    List,
 
     /// Add a resource (SSH key, password, ...) to a vault.
     Add {
@@ -107,13 +122,14 @@ enum Command {
     /// Materialize all opted-in entries in the vault to disk in-process,
     /// without going through the daemon. Useful for testing and for
     /// disconnected workflows. Wipes everything on Ctrl-C / SIGINT.
-    Materialize {
-        /// Path to the .kdbx vault.
-        vault: PathBuf,
-    },
+    Materialize,
 
     /// Unlock a vault and start a session. The keys + materialize plan land in
     /// daemon memory; the SSH and GPG agents serve them.
+    ///
+    /// `unlock` is inherently daemon-directed, so it takes its target as a
+    /// positional `<VAULT>` and ignores the global `--vault` selector (which
+    /// means "operate offline" everywhere else).
     ///
     /// Prompts for the master password unless `--password-stdin` is set; the
     /// password never lands on the command line.
@@ -124,7 +140,7 @@ enum Command {
     /// it instead prints `export TROVE_SESSION=…` for the calling shell.
     /// `--export` / `--shell` force a mode.
     Unlock {
-        /// Path to the .kdbx vault.
+        /// Path to the .kdbx vault to unlock.
         vault: PathBuf,
         /// Idle-lock timeout in seconds. Resets on every daemon request
         /// (control RPC, ssh-agent op, gpg-agent op). `0` disables auto-lock.
@@ -262,8 +278,8 @@ enum GenerateResource {
     /// derived `id.pub`, and `KeeAgent.settings`, exactly like `add ssh`.
     ///
     /// Like `add ssh`, this targets the vault unlocked in the running daemon by
-    /// default (using `TROVE_SESSION` from `trove unlock`); pass `--vault
-    /// <path>` to write a kdbx file directly (offline).
+    /// default (using `TROVE_SESSION` from `trove unlock`); pass the global
+    /// `--vault <path>` to write a kdbx file directly (offline).
     Ssh {
         /// Entry path, e.g. "github.com" or "Work/SSH/github".
         entry_path: String,
@@ -272,9 +288,6 @@ enum GenerateResource {
         /// Key algorithm. Defaults to ed25519.
         #[arg(long = "type", value_enum, default_value_t = SshKeyType::Ed25519)]
         key_type: SshKeyType,
-        /// Operate on this kdbx file directly instead of the unlocked daemon.
-        #[arg(long = "vault")]
-        vault: Option<PathBuf>,
         /// Optional UserName field to record on the entry (e.g. git user).
         #[arg(long = "user")]
         user: Option<String>,
@@ -293,17 +306,14 @@ enum AddResource {
     ///
     /// By default the key is added to the vault currently unlocked in the
     /// running daemon — no vault path needed — using the `TROVE_SESSION` code
-    /// from `trove unlock`. Pass `--vault <path>` to operate on a kdbx file
-    /// directly (offline), prompting for the master password.
+    /// from `trove unlock`. Pass the global `--vault <path>` to operate on a
+    /// kdbx file directly (offline), prompting for the master password.
     Ssh {
         /// Entry path, e.g. "github.com" or "Work/SSH/github".
         entry_path: String,
         /// Path to the SSH private key file (e.g. ~/.ssh/id_ed25519).
         #[arg(value_name = "KEY_FILE")]
         key: PathBuf,
-        /// Operate on this kdbx file directly instead of the unlocked daemon.
-        #[arg(long = "vault")]
-        vault: Option<PathBuf>,
         /// Optional UserName field to record on the entry (e.g. git user).
         #[arg(long = "user")]
         user: Option<String>,
@@ -319,9 +329,7 @@ enum AddResource {
     /// vault unlock, troved parses each `gpg-priv` attachment and registers
     /// every ed25519 secret key it finds with the GPG agent listener.
     Gpg {
-        /// Path to the .kdbx vault.
-        vault: PathBuf,
-        /// Entry title (e.g. "git-signing").
+        /// Entry path or title (e.g. "git-signing").
         title: String,
         /// Path to the binary GPG secret-key export.
         #[arg(long = "key")]
@@ -333,9 +341,7 @@ enum AddResource {
     /// land in a real KDBX `<Binary>` attachment; the `Materialize.*` custom
     /// fields tell troved where to write it on unlock.
     File {
-        /// Path to the .kdbx vault.
-        vault: PathBuf,
-        /// Entry title (e.g. "kubeconfig-prod").
+        /// Entry path or title (e.g. "kubeconfig-prod").
         title: String,
         /// Path to the file to read bytes from.
         #[arg(long = "src")]
@@ -363,10 +369,11 @@ enum AddResource {
 
 #[derive(Debug, Subcommand)]
 enum GetResource {
-    /// Retrieve a stored SSH key from the unlocked daemon, by entry path.
+    /// Retrieve a stored SSH key by entry path.
     ///
-    /// Served by the running daemon and gated by the `TROVE_SESSION` code from
-    /// `trove unlock` — there is no vault path. By default the PRIVATE key is
+    /// With the global `--vault <PATH>`: read it from the file directly
+    /// (offline). Without it: served by the running daemon, gated by the
+    /// `TROVE_SESSION` code from `trove unlock`. By default the PRIVATE key is
     /// written to stdout. `--public` emits the public key (an authorized_keys
     /// line) instead. `--out <path>` writes the private key to <path> (0600)
     /// and the public key to <path>.pub (0644); with `--public` it writes only
@@ -382,29 +389,30 @@ enum GetResource {
         out: Option<PathBuf>,
     },
 
-    /// Retrieve a previously stored GPG secret-key export by entry title.
+    /// Retrieve a stored GPG secret-key export (the `gpg-priv` attachment).
+    ///
+    /// With the global `--vault <PATH>`: read it from the file (offline).
+    /// Without it: read from the daemon's unlocked vault (`TROVE_SESSION`).
     Gpg {
-        /// Path to the .kdbx vault.
-        vault: PathBuf,
-        /// Entry title to look up.
+        /// Entry path or title to look up.
         title: String,
         /// Write the export to this path (chmod 0600 on Unix). Stdout if omitted.
         #[arg(long = "out")]
         out: Option<PathBuf>,
     },
 
-    /// Read a file attachment to disk WITHOUT going through materialization.
-    /// One-shot equivalent of `trove get ssh`. The materialization config
-    /// (Materialize.Target, Mode, ...) is ignored — `--out` controls where
-    /// the bytes land.
+    /// Read a named attachment to disk WITHOUT going through materialization.
+    /// The materialization config (Materialize.Target, Mode, ...) is ignored —
+    /// `--out` controls where the bytes land.
+    ///
+    /// With the global `--vault <PATH>`: read it from the file (offline).
+    /// Without it: read from the daemon's unlocked vault (`TROVE_SESSION`).
     File {
-        /// Path to the .kdbx vault.
-        vault: PathBuf,
-        /// Entry title to look up.
+        /// Entry path or title to look up.
         title: String,
-        /// Attachment name to read. Defaults to "blob". Pass `--name` for
-        /// entries that don't use the conventional `blob` attachment slot;
-        /// the daemon won't open the vault to resolve `Materialize.Source`.
+        /// Attachment name to read (e.g. `id.pub`). Defaults to "blob". Pass
+        /// `--name` for entries that don't use the conventional `blob` slot;
+        /// in daemon mode the vault is not opened to resolve `Materialize.Source`.
         #[arg(long = "name")]
         name: Option<String>,
         /// Write the bytes to this path (chmod 0600 on Unix). Stdout if omitted.
@@ -424,33 +432,38 @@ fn main() -> ExitCode {
     }
 }
 
+/// Unwrap the global `--vault` for commands that cannot run without a vault
+/// path (no daemon mode): `init`, `add gpg`, `add file`, `materialize`.
+fn require_vault(vault: Option<&Path>) -> Result<&Path> {
+    vault.ok_or_else(|| {
+        anyhow!("this command needs a vault file; pass --vault <PATH> (the password comes from --password-stdin or a prompt)")
+    })
+}
+
 fn run(cli: Cli) -> Result<()> {
     let pw_stdin = cli.password_stdin;
+    // The global offline selector. `Some` → operate on this file directly;
+    // `None` → use the daemon (for commands that have a daemon mode). Commands
+    // with no daemon mode (init/add gpg/add file/materialize) require it via
+    // `require_vault`. `unlock` ignores it and uses its own positional.
+    let vault = cli.vault.as_deref();
     match cli.command {
-        Command::Init { vault } => cmd_init(&vault, pw_stdin),
-        Command::List { vault } => cmd_list(vault.as_deref(), pw_stdin),
+        Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
+        Command::List => cmd_list(vault, pw_stdin),
         Command::Add {
             resource:
                 AddResource::Ssh {
                     entry_path,
                     key,
-                    vault,
                     user,
                 },
-        } => cmd_add_ssh(
-            &entry_path,
-            &key,
-            vault.as_deref(),
-            user.as_deref(),
-            pw_stdin,
-        ),
+        } => cmd_add_ssh(&entry_path, &key, vault, user.as_deref(), pw_stdin),
         Command::Add {
-            resource: AddResource::Gpg { vault, title, key },
-        } => cmd_add_gpg(&vault, &title, &key, pw_stdin),
+            resource: AddResource::Gpg { title, key },
+        } => cmd_add_gpg(require_vault(vault)?, &title, &key, pw_stdin),
         Command::Add {
             resource:
                 AddResource::File {
-                    vault,
                     title,
                     src,
                     target,
@@ -460,7 +473,7 @@ fn run(cli: Cli) -> Result<()> {
                     allow_disk_backed,
                 },
         } => cmd_add_file(
-            &vault,
+            require_vault(vault)?,
             &title,
             &src,
             &target,
@@ -476,14 +489,13 @@ fn run(cli: Cli) -> Result<()> {
                     entry_path,
                     comment,
                     key_type,
-                    vault,
                     user,
                 },
         } => cmd_generate_ssh(
             &entry_path,
             comment.as_deref(),
             key_type,
-            vault.as_deref(),
+            vault,
             user.as_deref(),
             pw_stdin,
         ),
@@ -494,19 +506,13 @@ fn run(cli: Cli) -> Result<()> {
                     public,
                     out,
                 },
-        } => cmd_get_ssh(&entry_path, public, out.as_deref()),
+        } => cmd_get_ssh(&entry_path, public, out.as_deref(), vault, pw_stdin),
         Command::Get {
-            resource: GetResource::Gpg { vault, title, out },
-        } => cmd_get_gpg(&vault, &title, out.as_deref(), pw_stdin),
+            resource: GetResource::Gpg { title, out },
+        } => cmd_get_gpg(vault, &title, out.as_deref(), pw_stdin),
         Command::Get {
-            resource:
-                GetResource::File {
-                    vault,
-                    title,
-                    name,
-                    out,
-                },
-        } => cmd_get_file(&vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
+            resource: GetResource::File { title, name, out },
+        } => cmd_get_file(vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
         Command::SshAgent {
             op: SshAgentOp::Socket,
         } => cmd_ssh_agent_socket(),
@@ -519,7 +525,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::GpgAgent {
             op: GpgAgentOp::List,
         } => cmd_gpg_agent_list(),
-        Command::Materialize { vault } => cmd_materialize(&vault, pw_stdin),
+        Command::Materialize => cmd_materialize(require_vault(vault)?, pw_stdin),
+        // `unlock` is daemon-directed: it uses its own positional vault and
+        // deliberately ignores the global `--vault` offline selector.
         Command::Unlock {
             vault,
             timeout,
@@ -1219,8 +1227,35 @@ fn write_secret_out(out: Option<&Path>, bytes: &[u8], what: &str) -> Result<()> 
     }
 }
 
-fn cmd_get_gpg(_vault_path: &Path, title: &str, out: Option<&Path>, _pw_stdin: bool) -> Result<()> {
-    let bytes = daemon_get_attachment(title, GPG_KEY_ATTACHMENT)?;
+/// Read an attachment by entry path directly from a kdbx file (offline mode).
+/// Opens the vault (password via `--password-stdin` or prompt), resolves the
+/// entry path, and returns the named attachment's bytes.
+fn offline_get_attachment(
+    vault_path: &Path,
+    entry_path: &str,
+    attachment: &str,
+    pw_stdin: bool,
+) -> Result<Vec<u8>> {
+    let vault = open_vault(vault_path, pw_stdin)?;
+    let id = vault
+        .find_by_title(entry_path)
+        .ok_or_else(|| anyhow!("no entry at '{entry_path}' in {}", vault_path.display()))?;
+    vault
+        .read_binary(&id, attachment)
+        .with_context(|| format!("reading attachment '{attachment}' from '{entry_path}'"))?
+        .ok_or_else(|| anyhow!("entry '{entry_path}' has no attachment '{attachment}'"))
+}
+
+fn cmd_get_gpg(
+    vault: Option<&Path>,
+    title: &str,
+    out: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let bytes = match vault {
+        Some(path) => offline_get_attachment(path, title, GPG_KEY_ATTACHMENT, pw_stdin)?,
+        None => daemon_get_attachment(title, GPG_KEY_ATTACHMENT)?,
+    };
     write_secret_out(out, &bytes, "gpg secret key")
 }
 
@@ -1237,7 +1272,22 @@ fn fetch_ssh_public(entry_path: &str) -> Result<Vec<u8>> {
     Ok(ssh_public_line(&priv_bytes, entry_path)?.into_bytes())
 }
 
-fn cmd_get_ssh(entry_path: &str, public: bool, out: Option<&Path>) -> Result<()> {
+fn cmd_get_ssh(
+    entry_path: &str,
+    public: bool,
+    out: Option<&Path>,
+    vault: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    match vault {
+        Some(vault_path) => cmd_get_ssh_offline(vault_path, entry_path, public, out, pw_stdin),
+        None => cmd_get_ssh_daemon(entry_path, public, out),
+    }
+}
+
+/// Daemon path for `get ssh`: served by the running `troved`, gated by
+/// `TROVE_SESSION`.
+fn cmd_get_ssh_daemon(entry_path: &str, public: bool, out: Option<&Path>) -> Result<()> {
     // Public-key request: hand back the persisted id.pub (deriving only as a
     // fallback for legacy entries).
     if public {
@@ -1262,6 +1312,72 @@ fn cmd_get_ssh(entry_path: &str, public: bool, out: Option<&Path>) -> Result<()>
             write_private_file(p, &priv_bytes)
                 .with_context(|| format!("writing ssh key to {}", p.display()))?;
             let pub_bytes = fetch_ssh_public(entry_path)?;
+            let pub_path = {
+                let mut s = p.as_os_str().to_os_string();
+                s.push(".pub");
+                PathBuf::from(s)
+            };
+            write_public_file(&pub_path, &pub_bytes)
+                .with_context(|| format!("writing public key to {}", pub_path.display()))
+        }
+    }
+}
+
+/// Offline path for `get ssh`: open the kdbx file directly and read the `id` /
+/// `id.pub` attachments. The vault is opened once (one password prompt) and the
+/// public key falls back to deriving it from the private key for legacy entries
+/// that predate the persisted `id.pub`.
+fn cmd_get_ssh_offline(
+    vault_path: &Path,
+    entry_path: &str,
+    public: bool,
+    out: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let vault = open_vault(vault_path, pw_stdin)?;
+    let id = vault
+        .find_by_title(entry_path)
+        .ok_or_else(|| anyhow!("no entry at '{entry_path}' in {}", vault_path.display()))?;
+
+    let read = |name: &str| -> Result<Option<Vec<u8>>> {
+        vault
+            .read_binary(&id, name)
+            .with_context(|| format!("reading attachment '{name}' from '{entry_path}'"))
+    };
+    let read_priv = || -> Result<Vec<u8>> {
+        read(SSH_KEY_ATTACHMENT)?.ok_or_else(|| {
+            anyhow!(
+                "entry '{entry_path}' has no '{}' attachment",
+                SSH_KEY_ATTACHMENT
+            )
+        })
+    };
+
+    if public {
+        let pub_bytes = match read(SSH_PUBKEY_ATTACHMENT)? {
+            Some(b) => b,
+            None => ssh_public_line(&read_priv()?, entry_path)?.into_bytes(),
+        };
+        return match out {
+            None => {
+                print!("{}", String::from_utf8_lossy(&pub_bytes));
+                Ok(())
+            }
+            Some(p) => write_public_file(p, &pub_bytes)
+                .with_context(|| format!("writing public key to {}", p.display())),
+        };
+    }
+
+    let priv_bytes = read_priv()?;
+    match out {
+        None => write_secret_out(None, &priv_bytes, "ssh key"),
+        Some(p) => {
+            write_private_file(p, &priv_bytes)
+                .with_context(|| format!("writing ssh key to {}", p.display()))?;
+            let pub_bytes = match read(SSH_PUBKEY_ATTACHMENT)? {
+                Some(b) => b,
+                None => ssh_public_line(&priv_bytes, entry_path)?.into_bytes(),
+            };
             let pub_path = {
                 let mut s = p.as_os_str().to_os_string();
                 s.push(".pub");
@@ -1523,23 +1639,26 @@ fn cmd_add_file(
     Ok(())
 }
 
-/// `trove get file` — read an attachment to disk WITHOUT engaging
-/// materialization. Daemon-routed and session-code-gated, like `trove get ssh`.
+/// `trove get file` — read a named attachment to disk WITHOUT engaging
+/// materialization. Offline with `--vault`, otherwise daemon-routed and
+/// session-code-gated like `trove get ssh`.
 ///
-/// The attachment name comes from `--name`, defaulting to `"blob"`. (The old
-/// one-shot path resolved an absent `--name` from the entry's
-/// `Materialize.Source` field, but reading that field would mean opening the
-/// vault here — which defeats the session-code gate. Pass `--name` for
-/// entries that don't use the conventional `blob` attachment slot.)
+/// The attachment name comes from `--name`, defaulting to `"blob"`. (In daemon
+/// mode we cannot resolve a default from the entry's `Materialize.Source` field
+/// without opening the vault, which would defeat the session-code gate — so
+/// pass `--name` for entries that don't use the conventional `blob` slot.)
 fn cmd_get_file(
-    _vault_path: &Path,
+    vault: Option<&Path>,
     title: &str,
     name: Option<&str>,
     out: Option<&Path>,
-    _pw_stdin: bool,
+    pw_stdin: bool,
 ) -> Result<()> {
     let attachment = name.unwrap_or("blob");
-    let bytes = daemon_get_attachment(title, attachment)?;
+    let bytes = match vault {
+        Some(path) => offline_get_attachment(path, title, attachment, pw_stdin)?,
+        None => daemon_get_attachment(title, attachment)?,
+    };
     write_secret_out(out, &bytes, "file")
 }
 

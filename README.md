@@ -50,28 +50,39 @@ Linux + macOS. The daemon (`troved`) is the long-running process; `trove` is a t
 
 ### 1. Create a vault and stash some secrets
 
+The global `--vault <PATH>` flag selects **offline mode**: the command opens
+that kdbx file directly, no daemon and no session — what scripts and agents
+want. It works before or after the subcommand. Omit it and `get`/`list` instead
+talk to the running daemon (see step 2).
+
 ```sh
 # Create a fresh kdbx file. Prompts twice for the master password.
-trove init my-vault.kdbx
+trove --vault my-vault.kdbx init
 
-# Store an SSH private key. Title is freeform; the key bytes go into a real
-# KDBX <Binary> attachment named `id` so KeePassXC can read it too.
-trove add ssh my-vault.kdbx github.com --key ~/.ssh/id_ed25519
+# Store an SSH private key, addressed by entry path (`group/sub/title`; groups
+# auto-created). The key goes into a real KDBX <Binary> attachment named `id`
+# and the derived public key into `id.pub`, so KeePassXC can read it too.
+trove --vault my-vault.kdbx add ssh github.com ~/.ssh/id_ed25519
+# …or mint one in-tool, no ssh-keygen needed:
+trove --vault my-vault.kdbx generate ssh github.com
 
 # Store a GPG secret-key export (binary, NOT armored).
 gpg --batch --pinentry-mode loopback --passphrase '' \
     --export-secret-keys --output /tmp/sec.gpg <KEYID>
-trove add gpg my-vault.kdbx git-signing --key /tmp/sec.gpg
+trove --vault my-vault.kdbx add gpg git-signing --key /tmp/sec.gpg
 shred -u /tmp/sec.gpg
 
 # Stash a config file and tag it for materialization on unlock. The default
 # AllowDiskBacked=false means troved will refuse to write to a non-tmpfs path
 # (Linux) / non-ephemeral path (macOS soft-allowlist).
-trove add file my-vault.kdbx kubeconfig-prod \
+trove --vault my-vault.kdbx add file kubeconfig-prod \
     --src ./kubeconfig --target /tmp/kubeconfig --mode 0600
 
-# Inspect what's in the vault.
-trove list my-vault.kdbx
+# Inspect what's in the vault (offline — reads the file directly).
+trove --vault my-vault.kdbx list
+
+# Read a secret back without a daemon (password via stdin for scripts):
+trove --vault my-vault.kdbx --password-stdin get ssh github.com --out ./id
 ```
 
 ### 2. Run the daemon
@@ -130,7 +141,7 @@ trove materialize-status
 # kubeconfig-prod  /tmp/kubeconfig  ttl=- exists=true
 ```
 
-`trove status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `trove materialize my-vault.kdbx` runs the same plan in-process and wipes everything on Ctrl-C.
+`trove status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `trove --vault my-vault.kdbx materialize` runs the same plan in-process and wipes everything on Ctrl-C.
 
 ### 6. Lock
 
