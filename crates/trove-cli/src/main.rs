@@ -57,13 +57,13 @@ struct Cli {
     ///
     /// * `--vault <PATH>` present — offline. The command opens the file at PATH
     ///   directly; the password comes from `--password-stdin` or a prompt (never
-    ///   the command line). No daemon, no `TROVE_SESSION` needed. `init`, `add`,
-    ///   and `materialize` always work this way; with this flag `generate`,
+    ///   the command line). No daemon, no `TROVE_SESSION` needed. `init` and
+    ///   `materialize` always work this way; with this flag `add`, `generate`,
     ///   `get`, and `list` do too.
-    /// * `--vault` absent — daemon. `add ssh`/`generate ssh`, `get`, and `list`
-    ///   act on the vault unlocked in the running `troved`, gated by the
-    ///   `TROVE_SESSION` code `trove unlock` minted. `init`, `add gpg/file`, and
-    ///   `materialize` have no daemon mode and error without `--vault`.
+    /// * `--vault` absent — daemon. `add` (ssh/gpg/file), `generate ssh`, `get`,
+    ///   and `list` act on the vault unlocked in the running `troved`, gated by
+    ///   the `TROVE_SESSION` code `trove unlock` minted. `init` and `materialize`
+    ///   have no daemon mode and error without `--vault`.
     ///
     /// `unlock` is the exception: it is inherently daemon-directed, so it takes
     /// its target as a positional `<VAULT>` and ignores this flag.
@@ -333,6 +333,11 @@ enum AddResource {
     /// The blob must be the binary OpenPGP packet stream (NOT armored). On
     /// vault unlock, troved parses each `gpg-priv` attachment and registers
     /// every ed25519 secret key it finds with the GPG agent listener.
+    ///
+    /// By default the key is added to the vault currently unlocked in the
+    /// running daemon — no vault path needed — using the `TROVE_SESSION` code
+    /// from `trove unlock`. Pass the global `--vault <path>` to operate on a
+    /// kdbx file directly (offline), prompting for the master password.
     Gpg {
         /// Entry path or title (e.g. "git-signing").
         title: String,
@@ -345,6 +350,11 @@ enum AddResource {
     /// and configure it to materialize to disk on unlock. The file's bytes
     /// land in a real KDBX `<Binary>` attachment; the `Materialize.*` custom
     /// fields tell troved where to write it on unlock.
+    ///
+    /// By default the file is added to the vault currently unlocked in the
+    /// running daemon — no vault path needed — using the `TROVE_SESSION` code
+    /// from `trove unlock`. Pass the global `--vault <path>` to operate on a
+    /// kdbx file directly (offline), prompting for the master password.
     File {
         /// Entry path or title (e.g. "kubeconfig-prod").
         title: String,
@@ -438,7 +448,7 @@ fn main() -> ExitCode {
 }
 
 /// Unwrap the global `--vault` for commands that cannot run without a vault
-/// path (no daemon mode): `init`, `add gpg`, `add file`, `materialize`.
+/// path (no daemon mode): `init`, `materialize`.
 fn require_vault(vault: Option<&Path>) -> Result<&Path> {
     vault.ok_or_else(|| {
         anyhow!("this command needs a vault file; pass --vault <PATH> (the password comes from --password-stdin or a prompt)")
@@ -449,8 +459,8 @@ fn run(cli: Cli) -> Result<()> {
     let pw_stdin = cli.password_stdin;
     // The global offline selector. `Some` → operate on this file directly;
     // `None` → use the daemon (for commands that have a daemon mode). Commands
-    // with no daemon mode (init/add gpg/add file/materialize) require it via
-    // `require_vault`. `unlock` ignores it and uses its own positional.
+    // with no daemon mode (init/materialize) require it via `require_vault`.
+    // `unlock` ignores it and uses its own positional.
     let vault = cli.vault.as_deref();
     match cli.command {
         Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
@@ -473,7 +483,7 @@ fn run(cli: Cli) -> Result<()> {
         ),
         Command::Add {
             resource: AddResource::Gpg { title, key },
-        } => cmd_add_gpg(require_vault(vault)?, &title, &key, pw_stdin),
+        } => cmd_add_gpg(vault, &title, &key, pw_stdin),
         Command::Add {
             resource:
                 AddResource::File {
@@ -486,7 +496,7 @@ fn run(cli: Cli) -> Result<()> {
                     allow_disk_backed,
                 },
         } => cmd_add_file(
-            require_vault(vault)?,
+            vault,
             &title,
             &src,
             &target,
@@ -1170,26 +1180,62 @@ fn store_ssh_key(
     }
 }
 
-fn cmd_add_gpg(vault_path: &Path, title: &str, key_path: &Path, pw_stdin: bool) -> Result<()> {
+fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: bool) -> Result<()> {
     let key_bytes = std::fs::read(key_path)
         .with_context(|| format!("reading gpg secret-key export from {}", key_path.display()))?;
 
-    let mut vault = open_vault(vault_path, pw_stdin)?;
+    match vault {
+        // Offline: open the kdbx file directly and write to it.
+        Some(vault_path) => {
+            let mut vault = open_vault(vault_path, pw_stdin)?;
 
-    let id = match vault.find_by_title(title) {
-        Some(existing) => existing,
-        None => vault
-            .add_entry(title)
-            .with_context(|| format!("creating entry '{title}'"))?,
-    };
+            let id = match vault.find_by_title(title) {
+                Some(existing) => existing,
+                None => vault
+                    .add_entry(title)
+                    .with_context(|| format!("creating entry '{title}'"))?,
+            };
 
-    vault
-        .attach_binary(&id, GPG_KEY_ATTACHMENT, &key_bytes)
-        .context("attaching gpg secret key")?;
+            vault
+                .attach_binary(&id, GPG_KEY_ATTACHMENT, &key_bytes)
+                .context("attaching gpg secret key")?;
 
-    vault.save().context("saving vault")?;
-    println!("stored gpg secret key on entry {id} ({title})");
-    Ok(())
+            vault.save().context("saving vault")?;
+            println!("stored gpg secret key on entry {id} ({title})");
+            Ok(())
+        }
+        // Default: store into the daemon's currently unlocked vault.
+        None => {
+            let code = require_session_code()?;
+            use base64::Engine;
+            let key = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
+            let req = daemon::Request::AddGpg {
+                title: title.to_string(),
+                key,
+                code,
+            };
+            let resp = match daemon::send_autospawn(&req) {
+                Ok(v) => v,
+                Err(e) if daemon::is_daemon_not_running(&e) => {
+                    return Err(DaemonClassified {
+                        message: e.to_string(),
+                        exit: EXIT_USER_ERROR,
+                    }
+                    .into());
+                }
+                Err(e) => return Err(e),
+            };
+            if let Some(msg) = daemon::response_error(&resp) {
+                return Err(DaemonClassified {
+                    message: msg,
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
+            }
+            println!("stored gpg secret key for {title}");
+            Ok(())
+        }
+    }
 }
 
 /// Pull an attachment out of the *unlocked daemon*, gated by the session code.
@@ -1586,7 +1632,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 /// the default attachment name; `--name` overrides.
 #[allow(clippy::too_many_arguments)]
 fn cmd_add_file(
-    vault_path: &Path,
+    vault: Option<&Path>,
     title: &str,
     src: &Path,
     target: &Path,
@@ -1611,58 +1657,106 @@ fn cmd_add_file(
             })?,
     };
 
-    let mut vault = open_vault(vault_path, pw_stdin)?;
-    let id = match vault.find_by_title(title) {
-        Some(existing) => existing,
-        None => vault
-            .add_entry(title)
-            .with_context(|| format!("creating entry '{title}'"))?,
-    };
+    match vault {
+        // Offline: open the kdbx file directly and write to it.
+        Some(vault_path) => {
+            let mut vault = open_vault(vault_path, pw_stdin)?;
+            let id = match vault.find_by_title(title) {
+                Some(existing) => existing,
+                None => vault
+                    .add_entry(title)
+                    .with_context(|| format!("creating entry '{title}'"))?,
+            };
 
-    vault
-        .attach_binary(&id, &attachment_name, &bytes)
-        .context("attaching file bytes")?;
-    vault
-        .set_field(&id, "Materialize.Source", &attachment_name)
-        .context("setting Materialize.Source")?;
-    let target_str = target
-        .to_str()
-        .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
-    vault
-        .set_field(&id, "Materialize.Target", target_str)
-        .context("setting Materialize.Target")?;
-    vault
-        .set_field(&id, "Materialize.Mode", mode)
-        .context("setting Materialize.Mode")?;
-    if let Some(ttl) = ttl {
-        vault
-            .set_field(&id, "Materialize.TTL", &ttl.to_string())
-            .context("setting Materialize.TTL")?;
-    }
-    vault
-        .set_field(
-            &id,
-            "Materialize.AllowDiskBacked",
-            if allow_disk_backed { "true" } else { "false" },
-        )
-        .context("setting Materialize.AllowDiskBacked")?;
+            vault
+                .attach_binary(&id, &attachment_name, &bytes)
+                .context("attaching file bytes")?;
+            vault
+                .set_field(&id, "Materialize.Source", &attachment_name)
+                .context("setting Materialize.Source")?;
+            let target_str = target
+                .to_str()
+                .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
+            vault
+                .set_field(&id, "Materialize.Target", target_str)
+                .context("setting Materialize.Target")?;
+            vault
+                .set_field(&id, "Materialize.Mode", mode)
+                .context("setting Materialize.Mode")?;
+            if let Some(ttl) = ttl {
+                vault
+                    .set_field(&id, "Materialize.TTL", &ttl.to_string())
+                    .context("setting Materialize.TTL")?;
+            }
+            vault
+                .set_field(
+                    &id,
+                    "Materialize.AllowDiskBacked",
+                    if allow_disk_backed { "true" } else { "false" },
+                )
+                .context("setting Materialize.AllowDiskBacked")?;
 
-    vault.save().context("saving vault")?;
-    println!(
-        "stored '{}' as attachment '{attachment_name}' on entry {id} ({title}); \
-         materializes to {} on unlock",
-        src.display(),
-        target.display()
-    );
-    if !allow_disk_backed {
-        eprintln!(
-            "note: AllowDiskBacked=false. The daemon will refuse to materialize \
-             unless the target is on a tmpfs/memory-backed filesystem (Linux). \
-             On macOS this maps to a soft allowlist (/tmp, /private/tmp, \
-             $XDG_RUNTIME_DIR) — APFS does not provide a real tmpfs."
-        );
+            vault.save().context("saving vault")?;
+            println!(
+                "stored '{}' as attachment '{attachment_name}' on entry {id} ({title}); \
+                 materializes to {} on unlock",
+                src.display(),
+                target.display()
+            );
+            if !allow_disk_backed {
+                eprintln!(
+                    "note: AllowDiskBacked=false. The daemon will refuse to materialize \
+                     unless the target is on a tmpfs/memory-backed filesystem (Linux). \
+                     On macOS this maps to a soft allowlist (/tmp, /private/tmp, \
+                     $XDG_RUNTIME_DIR) — APFS does not provide a real tmpfs."
+                );
+            }
+            Ok(())
+        }
+        // Default: store into the daemon's currently unlocked vault. The file
+        // lands on disk on the next unlock, not in the current session.
+        None => {
+            let target_str = target
+                .to_str()
+                .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
+            let code = require_session_code()?;
+            use base64::Engine;
+            let src_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let req = daemon::Request::AddFile {
+                title: title.to_string(),
+                src: src_b64,
+                name: attachment_name.clone(),
+                target: target_str.to_string(),
+                mode: mode.to_string(),
+                ttl,
+                allow_disk_backed,
+                code,
+            };
+            let resp = match daemon::send_autospawn(&req) {
+                Ok(v) => v,
+                Err(e) if daemon::is_daemon_not_running(&e) => {
+                    return Err(DaemonClassified {
+                        message: e.to_string(),
+                        exit: EXIT_USER_ERROR,
+                    }
+                    .into());
+                }
+                Err(e) => return Err(e),
+            };
+            if let Some(msg) = daemon::response_error(&resp) {
+                return Err(DaemonClassified {
+                    message: msg,
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
+            }
+            println!(
+                "stored '{}' as attachment '{attachment_name}' for entry {title}",
+                src.display()
+            );
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// `trove get file` — read a named attachment to disk WITHOUT engaging

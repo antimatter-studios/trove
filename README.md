@@ -52,8 +52,10 @@ Linux + macOS. The daemon (`troved`) is the long-running process; `trove` is a t
 
 The global `--vault <PATH>` flag selects **offline mode**: the command opens
 that kdbx file directly, no daemon and no session — what scripts and agents
-want. It works before or after the subcommand. Omit it and `get`/`list` instead
-talk to the running daemon (see step 2).
+want. It works before or after the subcommand. Omit it and `add ssh/gpg/file`,
+`generate ssh`, `get`, and `list` instead talk to the running daemon, gated by
+the `TROVE_SESSION` code (see step 2). Only `init` and `materialize` are
+offline-only.
 
 ```sh
 # Create a fresh kdbx file. Prompts twice for the master password.

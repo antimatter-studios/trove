@@ -75,6 +75,41 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
+    /// Code-gated write: store a GPG secret-key export (binary OpenPGP packet
+    /// stream) on the unlocked daemon's vault under the `gpg-priv` attachment of
+    /// the entry titled `title` (created mkdir-p if absent). `key` is the export
+    /// bytes, base64-encoded. Same session gate as `AddSsh` (vault unlocked by
+    /// the same uid + matching `code`). On success the daemon persists with
+    /// `save()` and reloads the GPG key store so any ed25519 secret keys are
+    /// served by the agent without a re-unlock.
+    AddGpg {
+        title: String,
+        // NOTE: sensitive — base64 of the GPG secret-key export. Never Debug-print.
+        key: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: store an arbitrary file as a real `<Binary>` attachment
+    /// named `name` on the entry titled `title` (created mkdir-p if absent),
+    /// plus the `Materialize.*` custom fields describing where it should land on
+    /// a future unlock. `src` is the file bytes, base64-encoded; the CLI
+    /// resolves `name` (defaulting to the source basename) before sending. Same
+    /// session gate as `AddSsh`. Persists with `save()` only — it does NOT
+    /// materialize into the current session (the file lands on disk on the next
+    /// unlock).
+    AddFile {
+        title: String,
+        // NOTE: sensitive — base64 of the file bytes. Never Debug-print.
+        src: String,
+        name: String,
+        target: String,
+        mode: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl: Option<u64>,
+        allow_disk_backed: bool,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -119,6 +154,31 @@ impl std::fmt::Debug for Request {
                 .field("key", &"<redacted>")
                 .field("comment", comment)
                 .field("user", user)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::AddGpg { title, .. } => f
+                .debug_struct("AddGpg")
+                .field("title", title)
+                .field("key", &"<redacted>")
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::AddFile {
+                title,
+                name,
+                target,
+                mode,
+                ttl,
+                allow_disk_backed,
+                ..
+            } => f
+                .debug_struct("AddFile")
+                .field("title", title)
+                .field("src", &"<redacted>")
+                .field("name", name)
+                .field("target", target)
+                .field("mode", mode)
+                .field("ttl", ttl)
+                .field("allow_disk_backed", allow_disk_backed)
                 .field("code", &"<redacted>")
                 .finish(),
         }
