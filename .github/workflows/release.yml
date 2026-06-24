@@ -1,13 +1,14 @@
 # trove release pipeline
 #
 # Fires when a `vX.Y.Z` tag is pushed (or via manual dispatch against an
-# existing tag). It builds the `trove` + `troved` binaries on native runners,
-# attaches them to a GitHub Release on THIS repo, then renders the Homebrew
-# formula and pushes it to antimatter-studios/homebrew-tap.
+# existing tag). It builds the `trove` + `troved` binaries on native runners
+# and attaches them — tarballs plus SHA256SUMS — to a GitHub Release on THIS
+# repo. That Release is the only thing this pipeline produces.
 #
-# This is the "source repo owns build + packaging" model: the tap is a thin
-# consumer that only references the artifacts produced here. (Contrast the
-# older pattern where the tap cloned source and built it itself.)
+# Homebrew is NOT published from here. The antimatter-studios/homebrew-tap repo
+# PULLS a tagged version (rendering its own formula from this Release's
+# artifacts + checksums) on its own trigger, so this repo never pushes to the
+# tap and needs no cross-repo token.
 #
 # Targets — all built on NATIVE runners, so there's no cross-compilation:
 #   * darwin-arm64    (macos-15)        aarch64-apple-darwin
@@ -20,11 +21,6 @@
 # kernel — so the linux-* artifacts cover them. There is no native Windows
 # target here (Homebrew doesn't run on Windows anyway). See docs and the
 # README "Windows (WSL)" note.
-#
-# Prerequisite secret: HOMEBREW_TAP_TOKEN — a fine-grained PAT with
-# contents:write on antimatter-studios/homebrew-tap. GITHUB_TOKEN cannot write
-# to a different repo. If the secret is absent the GitHub Release still
-# succeeds; only the tap publish is skipped (with a warning).
 
 name: Release
 
@@ -125,8 +121,8 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }} -p trove-cli -p troved
 
-      # Checksums are computed centrally on Ubuntu (release + bump-tap jobs)
-      # where `shasum` is reliable, so packaging here is archive-only.
+      # Checksums are computed centrally on Ubuntu (the release job) where
+      # `shasum` is reliable, so packaging here is archive-only.
       - name: Package tarball (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -190,64 +186,3 @@ jobs:
             dist/trove-*.tar.gz
             dist/trove-*.zip
             dist/SHA256SUMS
-
-  bump-tap:
-    name: Publish to Homebrew tap
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts (for checksums)
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Checkout trove (formula template)
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-          path: src
-
-      - name: Render formula and push to tap
-        shell: bash
-        env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          set -eux
-          if [ -z "${TAP_TOKEN}" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping Homebrew tap publish. \
-          The GitHub Release was created; add the secret and re-run to publish the formula."
-            exit 0
-          fi
-
-          RAW="${{ github.event.inputs.tag || github.ref_name }}"
-          VERSION="${RAW#v}"
-
-          # Compute the per-target checksums the formula needs (Unix only —
-          # Windows ships via the GitHub Release, not Homebrew).
-          sha() { shasum -a 256 "dist/trove-${VERSION}-$1.tar.gz" | cut -d' ' -f1; }
-          SHA_DARWIN_ARM64="$(sha darwin-arm64)"
-          SHA_DARWIN_X86_64="$(sha darwin-x86_64)"
-          SHA_LINUX_ARM64="$(sha linux-arm64)"
-          SHA_LINUX_X86_64="$(sha linux-x86_64)"
-
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/antimatter-studios/homebrew-tap.git" tap
-
-          sed \
-            -e "s|@VERSION@|${VERSION}|g" \
-            -e "s|@SHA_DARWIN_ARM64@|${SHA_DARWIN_ARM64}|g" \
-            -e "s|@SHA_DARWIN_X86_64@|${SHA_DARWIN_X86_64}|g" \
-            -e "s|@SHA_LINUX_ARM64@|${SHA_LINUX_ARM64}|g" \
-            -e "s|@SHA_LINUX_X86_64@|${SHA_LINUX_X86_64}|g" \
-            src/packaging/homebrew/trove.rb.tmpl > tap/Formula/trove.rb
-
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/trove.rb
-          if git diff --cached --quiet; then
-            echo "Formula already up to date for ${VERSION}; nothing to push."
-            exit 0
-          fi
-          git commit -m "trove ${VERSION}: prebuilt binaries (darwin/linux, arm64/x86_64)"
-          git push
