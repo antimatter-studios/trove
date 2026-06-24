@@ -56,7 +56,8 @@ pub fn locate() -> Option<Trove> {
 
 /// A resource trove can add via its subcommands.
 pub enum TroveAdd {
-    /// `trove add ssh <title> <keyfile> --vault <vault> --user <user>`.
+    /// `trove add ssh <title> <keyfile> <comment> --vault <vault> --user <user>`.
+    /// The comment is set to the title here, matching trove's prior default.
     Ssh {
         title: String,
         user: String,
@@ -108,6 +109,7 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
                         "ssh".as_ref(),
                         title.as_ref(),
                         keyfile.as_os_str(),
+                        title.as_ref(),
                         "--vault".as_ref(),
                         vault.as_os_str(),
                         "--user".as_ref(),
@@ -179,6 +181,7 @@ pub fn resave_with_added_ssh(
             "ssh".as_ref(),
             title.as_ref(),
             keyfile.as_os_str(),
+            title.as_ref(),
             "--vault".as_ref(),
             vault.as_os_str(),
         ],

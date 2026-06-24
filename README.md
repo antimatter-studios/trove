@@ -61,8 +61,9 @@ trove --vault my-vault.kdbx init
 
 # Store an SSH private key, addressed by entry path (`group/sub/title`; groups
 # auto-created). The key goes into a real KDBX <Binary> attachment named `id`
-# and the derived public key into `id.pub`, so KeePassXC can read it too.
-trove --vault my-vault.kdbx add ssh github.com ~/.ssh/id_ed25519
+# and the derived public key into `id.pub`, so KeePassXC can read it too. The
+# trailing comment (usually an email) is the label recorded in `id.pub`.
+trove --vault my-vault.kdbx add ssh github.com ~/.ssh/id_ed25519 you@example.com
 # …or mint one in-tool, no ssh-keygen needed:
 trove --vault my-vault.kdbx generate ssh github.com
 
