@@ -62,8 +62,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gnupg \
             git \
-            openssh-client
+            openssh-client \
+            keepassxc
         # macOS GitHub runners ship with gpg, git, ssh-keygen, ssh-add already.
+
+      # keepassxc-cli is the mandatory third-party oracle for the cross-tool
+      # conformance + interop tests — they hard-fail (never skip) if it's
+      # absent. Ubuntu gets it from apt above; macOS from the cask (the CLI
+      # lives inside the .app bundle, which the test harness's discovery checks).
+      - name: Install keepassxc-cli (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install --cask keepassxc
 
       - name: Verify required system tools
         run: |
@@ -72,6 +81,11 @@ jobs:
           command -v git
           command -v ssh-keygen
           command -v ssh-add
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli" --version
+          else
+            keepassxc-cli --version
+          fi
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2.7.3
