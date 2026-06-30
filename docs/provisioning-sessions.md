@@ -42,10 +42,14 @@ bytes to the caller. That's what the **session code** gates.
    unlock.
 2. **`get` / `materialize` require `unlock` + the code.** Refused when the vault
    is locked; refused when the code is absent or wrong.
-3. **The code is handed off invisibly**, never shown or typed: `unlock` prints
-   `export TROVE_SESSION=…` to **stdout** (captured by `eval`), and a
-   human-readable notice to **stderr**. So the code lands in the operator's shell
-   env — not on screen, not in `ps`, not in a stdout log.
+3. **The code is handed off invisibly**, never shown or typed. On an interactive
+   terminal `unlock` launches the operator's own `$SHELL` with `TROVE_SESSION`
+   already set, so they land in a session subshell where `get`/`add` just work —
+   no `eval`, and the code touches only that subshell's environment, never disk
+   (`exit` ends the session). When stdout is piped (`eval "$(trove unlock …)"` or
+   a script) it instead prints `export TROVE_SESSION=…` on **stdout** with a
+   human-readable notice on **stderr**. Either way the code lands in a shell env
+   — not on screen, not in `ps`, not on disk.
 
 ### Three barriers, three adversaries
 
@@ -64,12 +68,15 @@ the gap a bare ssh-agent leaves open.
 ## Operator workflow
 
 ```console
-# ── start a provisioning session ───────────────────────────────────
-$ eval "$(trove unlock ~/vault/semdatex.kdbx)"
+# ── start a provisioning session (interactive: drops you into a session shell) ──
+$ trove unlock ~/vault/semdatex.kdbx
 Enter vault password: ********
-trove: unlocked · agent serving 2 keys · idle-lock 15m          # ← stderr (you read this)
-#  swallowed from stdout by `eval`, never printed:  export TROVE_SESSION=7f3a9c…
-#  → the code is now in THIS shell's env. Not on screen, not in `ps`.
+trove: unlocked · session active in this shell — run add/get here, `exit` to end
+#  → you are now in your own $SHELL with TROVE_SESSION set. Not on screen, not in
+#    `ps`, never on disk. `exit` leaves the session.
+#
+#  Non-interactive / scripted use instead captures the export:
+#     eval "$(trove unlock ~/vault/semdatex.kdbx)"
 
 # ── the consumer tool runs normally; it uses the agent + the code for you ──
 $ inpace config hub network 192.168.0.182 inPACE1 ~/clinics/00001.henrik-clinic.json
