@@ -103,11 +103,11 @@ pub fn is_daemon_not_running(err: &anyhow::Error) -> bool {
 /// Opt out by setting `TROVE_NO_AUTOSPAWN=1` (used by tests that assert the
 /// "not running" error path).
 ///
-/// Race note: two concurrent `send_autospawn` calls may both see "not running"
-/// and both spawn — and `troved` unconditionally unlinks the existing socket
-/// on startup, so the second spawn wins and the first daemon is orphaned.
-/// Humans don't run `trove` commands in parallel; if you script around this,
-/// serialize externally.
+/// Concurrency: two `trove` invocations racing to autospawn are serialized via
+/// the daemon singleton flock (see [`spawn_daemon_serialized`]), so they don't
+/// both fork a daemon. Even if a redundant spawn slipped through, `troved`
+/// itself is now a singleton (it takes the same lock before binding), so the
+/// loser exits without binding — a startup race can no longer orphan a daemon.
 pub fn send_autospawn(req: &Request) -> Result<Value> {
     send_autospawn_reporting(req).map(|(v, _)| v)
 }
@@ -119,9 +119,9 @@ pub fn send_autospawn_reporting(req: &Request) -> Result<(Value, bool)> {
     match send(req) {
         Ok(v) => Ok((v, false)),
         Err(e) if is_daemon_not_running(&e) && !autospawn_disabled() => {
-            spawn_daemon()?;
+            let spawned = spawn_daemon_serialized()?;
             wait_for_socket(Duration::from_secs(5))?;
-            send(req).map(|v| (v, true))
+            send(req).map(|v| (v, spawned))
         }
         Err(e) => Err(e),
     }
@@ -182,6 +182,55 @@ fn spawn_daemon() -> Result<()> {
     cmd.spawn()
         .with_context(|| format!("spawning daemon binary {}", bin.display()))?;
     Ok(())
+}
+
+/// Decide whether to spawn a daemon, serialized so two concurrent `trove`
+/// invocations don't both fork one. Returns whether THIS call spawned it.
+///
+/// We take the SAME exclusive flock `troved` holds for its lifetime (see
+/// [`troved::singleton`]). Holding it, we re-check reachability and spawn only
+/// if the daemon still isn't up, then release immediately so the freshly
+/// spawned daemon can take the lock for its own lifetime. If the lock is
+/// already held, a daemon is up (or another `trove` is mid-spawn) — we don't
+/// pile on and let [`wait_for_socket`] connect once it's listening. The
+/// daemon-side singleton is the real guarantee; this just avoids wasteful
+/// double-spawns in the common race.
+#[cfg(unix)]
+fn spawn_daemon_serialized() -> Result<bool> {
+    use troved::singleton;
+    let sock = control_socket_path();
+    match singleton::try_acquire(&sock) {
+        Ok(Some(lock)) => {
+            // Won the spawn lock. Did a daemon bind while we were taking it?
+            if ipc::connect(&sock).is_ok() {
+                drop(lock);
+                return Ok(false);
+            }
+            spawn_daemon()?;
+            // Release at once so the just-spawned daemon can take the lock for
+            // its own lifetime (it acquires the SAME lock before binding).
+            drop(lock);
+            Ok(true)
+        }
+        // Lock held → a daemon is up or another `trove` is spawning one. Don't
+        // spawn; `wait_for_socket` will connect once it's listening.
+        Ok(None) => Ok(false),
+        // Locking failed unexpectedly (e.g. a permission error on the lock
+        // file): fall back to spawning. The daemon-side singleton still
+        // prevents an orphan.
+        Err(_) => {
+            spawn_daemon()?;
+            Ok(true)
+        }
+    }
+}
+
+/// Windows has no `flock`; the daemon's `first_pipe_instance(true)` rejects a
+/// second binder, so a redundant spawn fails to bind rather than orphaning.
+#[cfg(not(unix))]
+fn spawn_daemon_serialized() -> Result<bool> {
+    spawn_daemon()?;
+    Ok(true)
 }
 
 /// Poll the control socket until a connect succeeds, or `total` elapses.

@@ -38,9 +38,44 @@ mod unix_imp {
 
     /// Bind the endpoint, removing a stale socket left by a dead daemon, and
     /// lock it to the owner.
+    ///
+    /// Defense in depth against orphaning a live daemon: if a socket already
+    /// exists at `path`, probe it with `connect()` BEFORE removing it. A
+    /// successful connect means another process is serving here — refuse with
+    /// `AddrInUse` rather than unlinking a live socket (which would strand the
+    /// owner's listening fd, the very bug this guards). Only a genuinely stale
+    /// socket (connect refused, or already gone) is removed and rebound. The
+    /// daemon singleton lock (see [`crate::singleton`]) should make a live
+    /// collision impossible in the first place; this is the second line.
     pub async fn bind(path: &Path) -> io::Result<Listener> {
         if path.exists() {
-            std::fs::remove_file(path)?;
+            match UnixStream::connect(path).await {
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        format!(
+                            "{} is a live socket; another daemon is already serving it",
+                            path.display()
+                        ),
+                    ));
+                }
+                // Stale: the file is there but nothing is listening (dead
+                // daemon), or it vanished between the check and the connect.
+                Err(e)
+                    if e.kind() == io::ErrorKind::ConnectionRefused
+                        || e.kind() == io::ErrorKind::NotFound =>
+                {
+                    if let Err(e) = std::fs::remove_file(path) {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            return Err(e);
+                        }
+                    }
+                }
+                // Anything else (e.g. a non-socket file at the path, or a
+                // permission error) is not safely classifiable as stale — don't
+                // unlink it; surface the error.
+                Err(e) => return Err(e),
+            }
         }
         let listener = UnixListener::bind(path)?;
         set_owner_only(path)?;
@@ -125,5 +160,60 @@ mod windows_imp {
 
     pub async fn connect(path: &Path) -> io::Result<ClientStream> {
         ClientOptions::new().open(pipe_name(path))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    /// A second bind on a path a live listener already owns must be refused
+    /// (`AddrInUse`) WITHOUT unlinking the socket — and the original listener
+    /// must remain connectable afterwards.
+    #[tokio::test]
+    async fn bind_refuses_to_clobber_a_live_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("live.sock");
+
+        let _first = bind(&path).await.expect("first bind succeeds");
+
+        // Listener has no `Debug`, so match rather than `expect_err`.
+        let err = match bind(&path).await {
+            Ok(_) => panic!("second bind on a live socket must be refused"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::AddrInUse,
+            "expected AddrInUse, got {err:?}"
+        );
+
+        // The live socket file must still exist and still be connectable.
+        assert!(path.exists(), "the live socket file must not be unlinked");
+        connect(&path)
+            .await
+            .expect("original listener must remain connectable");
+    }
+
+    /// A socket file left behind by a dead daemon (file present, nobody
+    /// listening) is genuinely stale: bind must remove it and rebind cleanly.
+    #[tokio::test]
+    async fn bind_replaces_a_stale_socket_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stale.sock");
+
+        // Bind then drop the listener: the file stays on disk but nothing is
+        // listening — exactly the post-crash state. connect() will get
+        // ConnectionRefused.
+        let first = bind(&path).await.expect("first bind succeeds");
+        drop(first);
+        assert!(path.exists(), "dropping a listener leaves the socket file");
+
+        let _second = bind(&path)
+            .await
+            .expect("stale socket must be removed and rebound");
+        connect(&path)
+            .await
+            .expect("rebound listener must be connectable");
     }
 }
