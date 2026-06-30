@@ -12,4 +12,8 @@ pub mod idle;
 pub mod ipc;
 pub mod materialize;
 pub mod protocol;
+/// Single-instance daemon lock (Unix only; Windows uses named-pipe
+/// `first_pipe_instance`). See the module docs.
+#[cfg(unix)]
+pub mod singleton;
 pub mod ssh_agent;

@@ -61,6 +61,13 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # is URL-safe base64. See docs/provisioning-sessions.md.
 base64 = "0.22"
 
+# Single-instance daemon lock (see `singleton`): a safe `flock` wrapper. rustix
+# is already in the build graph (via tempfile) with the `fs` feature, so this
+# pulls in nothing new. Unix-only — Windows uses named-pipe `first_pipe_instance`
+# instead and never references this crate.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [build-dependencies]
 # Formats the dev-build timestamp (0.2.0-dev-YYYYMMDDHHMMSS) in build.rs.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

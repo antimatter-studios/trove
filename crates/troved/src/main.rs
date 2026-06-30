@@ -24,6 +24,8 @@ use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::ipc;
 use troved::materialize::{self, MaterializedStore};
 use troved::protocol::{Request, Response};
+#[cfg(unix)]
+use troved::singleton;
 use troved::ssh_agent::{self, KeyStore};
 
 /// Default idle-lock timeout when no `TROVE_IDLE_TIMEOUT` env var is set.
@@ -224,6 +226,33 @@ async fn main() -> Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
+
+    // Single-instance guard (Unix): take an exclusive flock beside the control
+    // socket and hold it for the WHOLE process, BEFORE binding anything. If
+    // another daemon already holds it, exit(0) without binding or removing any
+    // socket file — so a racing second start can never unlink the winner's live
+    // sockets and orphan its listening fds. The lock auto-releases on death
+    // (including SIGKILL), so a crashed daemon self-heals: the next start takes
+    // the freed lock and `ipc::bind` clears the stale socket file. Windows has
+    // no equivalent — `first_pipe_instance` in `ipc` rejects a second binder.
+    #[cfg(unix)]
+    let _singleton = match singleton::try_acquire(&sock_path) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            eprintln!(
+                "troved: another instance already holds {}; exiting",
+                singleton::lock_path(&sock_path).display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "acquiring singleton lock {}",
+                singleton::lock_path(&sock_path).display()
+            )));
+        }
+    };
+
     // Bind the control endpoint via the platform IPC transport (removes a
     // stale Unix socket + locks it 0600; stands up a named pipe on Windows).
     let mut listener = ipc::bind(&sock_path)
@@ -380,6 +409,10 @@ async fn main() -> Result<()> {
         let mut sess = session.lock().await;
         *sess = None;
     }
+    // Removing the socket files by path is safe here: we still hold the
+    // singleton flock (`_singleton` drops only when `main` returns, AFTER these
+    // removals), so no other daemon can have rebound these paths underneath us.
+    // A start that lost the singleton race exited long before reaching cleanup.
     let _ = std::fs::remove_file(&sock_path);
     let _ = std::fs::remove_file(&ssh_sock_for_cleanup);
     let _ = std::fs::remove_file(&gpg_sock_for_cleanup);

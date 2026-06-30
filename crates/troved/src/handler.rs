@@ -397,6 +397,36 @@ pub async fn handle(
             )
             .await
         }
+
+        Request::AddGpg { title, key, code } => {
+            add_gpg(state, session, gpg_store, peer_uid, &title, &key, &code).await
+        }
+
+        Request::AddFile {
+            title,
+            src,
+            name,
+            target,
+            mode,
+            ttl,
+            allow_disk_backed,
+            code,
+        } => {
+            add_file(
+                state,
+                session,
+                peer_uid,
+                &title,
+                &src,
+                &name,
+                &target,
+                &mode,
+                ttl,
+                allow_disk_backed,
+                &code,
+            )
+            .await
+        }
     }
 }
 
@@ -586,6 +616,225 @@ async fn add_ssh(
     {
         let mut keys = key_store.write().await;
         *keys = reloaded;
+    }
+    Handled {
+        response: Response::ok_empty(),
+        shutdown: false,
+    }
+}
+
+/// Code-gated write. Same session gate as `get_secret`/`add_ssh` (vault
+/// unlocked + code matches + same uid as the unlocker), decodes the base64 key
+/// bytes, then stores them on the entry at `title` as the `gpg-priv`
+/// attachment — creating the entry mkdir-p if absent, or replacing in place if
+/// it exists — and persists with `save()`. Finally reloads the GPG agent key
+/// store from the updated vault so the new key is served without a re-unlock.
+#[allow(clippy::too_many_arguments)]
+async fn add_gpg(
+    state: &SharedState,
+    session: &SessionStore,
+    gpg_store: &GpgKeyStore,
+    peer_uid: u32,
+    title: &str,
+    key_b64: &str,
+    code: &str,
+) -> Handled {
+    {
+        let sess = session.lock().await;
+        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+        if !ok {
+            return Handled {
+                response: Response::err(
+                    "refused: vault locked, or session code missing/invalid for this uid",
+                ),
+                shutdown: false,
+            };
+        }
+    }
+
+    let key_bytes = {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(key_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                return Handled {
+                    response: Response::err(format!("decoding key bytes: {e}")),
+                    shutdown: false,
+                }
+            }
+        }
+    };
+
+    // Mutate the held vault and persist, then reload the agent key set off the
+    // now-updated vault — all under the state lock, moving the reloaded Vec out
+    // so we never hold the state lock across the gpg_store write below.
+    let reloaded_gpg = {
+        let mut guard = state.lock().await;
+        let vault = match guard.as_mut() {
+            Some(v) => v,
+            None => {
+                return Handled {
+                    response: Response::err("no vault unlocked"),
+                    shutdown: false,
+                }
+            }
+        };
+        let id = match vault.find_by_title(title) {
+            Some(existing) => existing,
+            None => match vault.add_entry(title) {
+                Ok(id) => id,
+                Err(e) => {
+                    return Handled {
+                        response: Response::err(format!("creating entry '{title}': {e}")),
+                        shutdown: false,
+                    }
+                }
+            },
+        };
+        if let Err(e) = vault.attach_binary(&id, "gpg-priv", &key_bytes) {
+            return Handled {
+                response: Response::err(format!("attaching gpg key: {e}")),
+                shutdown: false,
+            };
+        }
+        if let Err(e) = vault.save() {
+            return Handled {
+                response: Response::err(format!("saving vault: {e}")),
+                shutdown: false,
+            };
+        }
+        load_gpg_keys_from_vault(vault)
+    };
+    {
+        let mut g = gpg_store.write().await;
+        *g = reloaded_gpg;
+    }
+    Handled {
+        response: Response::ok_empty(),
+        shutdown: false,
+    }
+}
+
+/// Code-gated write. Same session gate as `get_secret`/`add_ssh` (vault
+/// unlocked + code matches + same uid as the unlocker), decodes the base64
+/// source bytes, then stores them on the entry at `title` as the `name`
+/// attachment — creating the entry mkdir-p if absent, or replacing in place if
+/// it exists — sets the `Materialize.*` fields (Source/Target/Mode, optional
+/// TTL, AllowDiskBacked) exactly as the offline `add file` CLI does, and
+/// persists with `save()`. Unlike `add_gpg` this only persists: the file is
+/// NOT materialized into the live session here — it materializes on the next
+/// unlock.
+#[allow(clippy::too_many_arguments)]
+async fn add_file(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    title: &str,
+    src_b64: &str,
+    name: &str,
+    target: &str,
+    mode: &str,
+    ttl: Option<u64>,
+    allow_disk_backed: bool,
+    code: &str,
+) -> Handled {
+    {
+        let sess = session.lock().await;
+        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+        if !ok {
+            return Handled {
+                response: Response::err(
+                    "refused: vault locked, or session code missing/invalid for this uid",
+                ),
+                shutdown: false,
+            };
+        }
+    }
+
+    let src_bytes = {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(src_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                return Handled {
+                    response: Response::err(format!("decoding src bytes: {e}")),
+                    shutdown: false,
+                }
+            }
+        }
+    };
+
+    {
+        let mut guard = state.lock().await;
+        let vault = match guard.as_mut() {
+            Some(v) => v,
+            None => {
+                return Handled {
+                    response: Response::err("no vault unlocked"),
+                    shutdown: false,
+                }
+            }
+        };
+        let id = match vault.find_by_title(title) {
+            Some(existing) => existing,
+            None => match vault.add_entry(title) {
+                Ok(id) => id,
+                Err(e) => {
+                    return Handled {
+                        response: Response::err(format!("creating entry '{title}': {e}")),
+                        shutdown: false,
+                    }
+                }
+            },
+        };
+        if let Err(e) = vault.attach_binary(&id, name, &src_bytes) {
+            return Handled {
+                response: Response::err(format!("attaching file bytes: {e}")),
+                shutdown: false,
+            };
+        }
+        if let Err(e) = vault.set_field(&id, "Materialize.Source", name) {
+            return Handled {
+                response: Response::err(format!("setting Materialize.Source: {e}")),
+                shutdown: false,
+            };
+        }
+        if let Err(e) = vault.set_field(&id, "Materialize.Target", target) {
+            return Handled {
+                response: Response::err(format!("setting Materialize.Target: {e}")),
+                shutdown: false,
+            };
+        }
+        if let Err(e) = vault.set_field(&id, "Materialize.Mode", mode) {
+            return Handled {
+                response: Response::err(format!("setting Materialize.Mode: {e}")),
+                shutdown: false,
+            };
+        }
+        if let Some(ttl) = ttl {
+            if let Err(e) = vault.set_field(&id, "Materialize.TTL", &ttl.to_string()) {
+                return Handled {
+                    response: Response::err(format!("setting Materialize.TTL: {e}")),
+                    shutdown: false,
+                };
+            }
+        }
+        if let Err(e) = vault.set_field(
+            &id,
+            "Materialize.AllowDiskBacked",
+            if allow_disk_backed { "true" } else { "false" },
+        ) {
+            return Handled {
+                response: Response::err(format!("setting Materialize.AllowDiskBacked: {e}")),
+                shutdown: false,
+            };
+        }
+        if let Err(e) = vault.save() {
+            return Handled {
+                response: Response::err(format!("saving vault: {e}")),
+                shutdown: false,
+            };
+        }
     }
     Handled {
         response: Response::ok_empty(),

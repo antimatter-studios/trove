@@ -19,8 +19,8 @@ trove [OPTIONS] <COMMAND>
 
 `trove` has two modes, selected by the global `--vault` flag (both placements are equivalent: `trove --vault V list` == `trove list --vault V`):
 
-- **Offline (`--vault <PATH>`)** — the command opens the kdbx file directly. The password comes from `--password-stdin` or a prompt (never the command line). No daemon, no `TROVE_SESSION`. This is the stateless path automation should use. `init`, `add gpg/file`, and `materialize` always operate this way; with `--vault`, so do `add ssh`, `generate ssh`, `get`, and `list`.
-- **Daemon (no `--vault`)** — `add ssh`/`generate ssh`, `get`, and `list` act on the vault unlocked in the running `troved`, gated by the `TROVE_SESSION` code `trove unlock` minted. `init`, `add gpg/file`, and `materialize` have no daemon mode and error without `--vault`.
+- **Offline (`--vault <PATH>`)** — the command opens the kdbx file directly. The password comes from `--password-stdin` or a prompt (never the command line). No daemon, no `TROVE_SESSION`. This is the stateless path automation should use. `init` and `materialize` always operate this way; with `--vault`, so do `add ssh/gpg/file`, `generate ssh`, `get`, and `list`.
+- **Daemon (no `--vault`)** — `add ssh/gpg/file`, `generate ssh`, `get`, and `list` act on the vault unlocked in the running `troved`, gated by the `TROVE_SESSION` code `trove unlock` minted. `init` and `materialize` have no daemon mode and error without `--vault`.
 
 `unlock` is the exception: it is inherently daemon-directed, so it keeps its own positional `<VAULT>` and ignores `--vault`.
 
@@ -80,27 +80,26 @@ Stores the private key in the `id` attachment, the derived public key in `id.pub
 ### trove add gpg
 
 ```
-trove --vault <PATH> add gpg [OPTIONS] --key <KEY> <TITLE>
+trove [--vault <PATH>] add gpg [OPTIONS] --key <KEY> <TITLE>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
-| `--vault <PATH>` | Global. Required for `add gpg` (offline only). |
 | `<TITLE>` | Entry path or title (e.g. `"git-signing"`). |
 | `--key <KEY>` | Path to the binary GPG secret-key export. Required. **Binary, not armored.** |
-| `--password-stdin` | Global — see top. |
+| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--password-stdin` | Global — see top (offline mode only). |
 
 The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produces (without `--armor`). Stored under the `gpg-priv` attachment. On vault unlock, troved parses each `gpg-priv` attachment and registers every ed25519 secret key it finds.
 
 ### trove add file
 
 ```
-trove --vault <PATH> add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
+trove [--vault <PATH>] add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
-| `--vault <PATH>` | Global. Required for `add file` (offline only). |
 | `<TITLE>` | Entry path or title (e.g. `"kubeconfig-prod"`). |
 | `--src <SRC>` | File to read bytes from. Required. |
 | `--target <TARGET>` | Path to materialize the file to on unlock. Required. |
@@ -108,7 +107,8 @@ trove --vault <PATH> add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
 | `--mode <MODE>` | File mode (octal, 3 or 4 digits). Default `0600`. |
 | `--ttl <TTL>` | Materialization lifetime in seconds. Default: lifetime of the vault unlock. |
 | `--allow-disk-backed` | Allow non-tmpfs target. Off by default. Sets `Materialize.AllowDiskBacked=true`. |
-| `--password-stdin` | Global — see top. |
+| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--password-stdin` | Global — see top (offline mode only). |
 
 Stores file bytes as a real KDBX `<Binary>` attachment and sets the following entry custom fields (read by troved's [materialize](../crates/troved/src/materialize/mod.rs) module):
 
