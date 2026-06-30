@@ -6,11 +6,12 @@ members = ["crates/trove-core", "crates/trove-cli", "crates/troved", "crates/kee
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-# trove is a binary application, not a published library, so the
-# `rust-version` field below is a hint for contributors rather than an
-# enforced floor. CI does not run an MSRV job (transitive deps adopting
-# Edition 2024 made that an arms race with no real benefit). Build with
-# current stable Rust.
+repository = "https://github.com/antimatter-studios/trove"
+# `trove-core` is published to crates.io; the binaries (trove-cli, troved) are
+# not. We still don't enforce an MSRV floor: CI runs no MSRV job (transitive
+# deps adopting Edition 2024 made that an arms race with no real benefit), so
+# the `rust-version` below is a hint for contributors. Build with current
+# stable Rust.
 rust-version = "1.85"
 
 [workspace.dependencies]
