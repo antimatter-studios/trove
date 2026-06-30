@@ -62,13 +62,13 @@ The biggest gaps blocking daily-driver use against a real KeePassXC vault are: *
 ### CLI direct-file mode — `trove` (no daemon needed)
 
 ```sh
-trove init <vault.kdbx>
-trove list <vault.kdbx>
-trove add ssh <entry-path> <id_ed25519> [--user <name>]   # daemon's unlocked vault; add --vault <kdbx> for direct-file
-trove get ssh <entry-path> [--public] [--out <path>]      # from the daemon; --public emits the authorized_keys line
-trove add gpg <vault> <title> --key <secret-key.gpg>
-trove add file <vault> <title> --src <local> --target <materialize-path> [--mode 0600] [--ttl 600] [--allow-disk-backed]
-trove materialize <vault>            # in-process; SIGINT-wipes
+trove --vault <vault.kdbx> init
+trove --vault <vault.kdbx> list
+trove --vault <vault.kdbx> add ssh <entry-path> <id_ed25519> <comment> [--user <name>]
+trove --vault <vault.kdbx> get ssh <entry-path> [--public] [--out <path>]   # --public emits the authorized_keys line
+trove --vault <vault.kdbx> add gpg <title> --key <secret-key.gpg>
+trove --vault <vault.kdbx> add file <title> --src <local> --target <materialize-path> [--mode 0600] [--ttl 600] [--allow-disk-backed]
+trove --vault <vault.kdbx> materialize   # in-process; SIGINT-wipes
 trove ssh-agent socket                   # prints SSH-agent socket path
 trove gpg-agent socket               # prints GPG-agent socket path
 ```
@@ -86,15 +86,15 @@ trove idle set <seconds>       # 0 disables auto-lock
 trove idle get
 trove materialize-status       # one line per active materialization
 trove get ssh  <entry-path> [--public] [--out <path>]    # code-gated extraction
-trove get gpg  <vault> <title> [--out <path>]            # via the unlocked daemon
-trove get file <vault> <title> [--name <att>] [--out <path>]
+trove get gpg  <title> [--out <path>]                    # via the unlocked daemon
+trove get file <title> [--name <att>] [--out <path>]
 ```
 
 `get` routes extraction through the *unlocked daemon*: it requires
 `$TROVE_SESSION` (set by `trove unlock` — in your session subshell, or via
 `eval "$(trove unlock …)"` in scripts) and is served only to the
-unlocking uid (`SO_PEERCRED`). The `<vault>` positional is vestigial — the daemon
-serves whatever's unlocked. See [provisioning-sessions.md](provisioning-sessions.md).
+unlocking uid (`SO_PEERCRED`). No vault path is passed — the daemon serves
+whatever's unlocked. See [provisioning-sessions.md](provisioning-sessions.md).
 
 ### SSH agent — `troved` Unix socket
 
