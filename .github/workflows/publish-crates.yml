@@ -1,0 +1,98 @@
+# Publish the `trove-core` library to crates.io on every version tag.
+#
+# Authentication is crates.io Trusted Publishing via GitHub OIDC — there is NO
+# long-lived CARGO_REGISTRY_TOKEN secret. Before this can work, the crate must
+# be registered as a trusted publisher on crates.io (one-time, done by an owner
+# after the first manual publish). See docs/publishing.md for the full setup.
+#
+# Only the library crate is published here. The binaries (trove-cli, troved)
+# ship as GitHub Release artifacts via release.yml; they are not on crates.io.
+#
+# Idempotent: re-running a tag (or pushing a tag whose version is already on
+# crates.io) skips the upload instead of failing.
+
+name: Publish crates
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish from, e.g. v0.3.0"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # required for crates.io OIDC trusted publishing
+
+jobs:
+  publish:
+    name: Publish trove-core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0 # full history so the on-main ancestry check below works
+
+      # A tag can point at any commit — a feature branch, an arbitrary SHA.
+      # Only publish tags whose commit is actually contained in main, so
+      # crates.io never receives code that wasn't reviewed and merged.
+      - name: Refuse to publish a tag that is not on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "::error::refusing to publish — this tag's commit is not contained in main"
+            exit 1
+          fi
+          echo "tag commit is on main; proceeding"
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve and verify version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="${{ github.event.inputs.tag || github.ref_name }}"
+          tag_version="${raw#v}"
+          crate_version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "trove-core") | .version')"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::tag $raw (version $tag_version) does not match trove-core crate version $crate_version"
+            exit 1
+          fi
+          echo "version=$crate_version" >> "$GITHUB_OUTPUT"
+          echo "Publishing trove-core $crate_version"
+
+      - name: Skip if version already on crates.io
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${{ steps.version.outputs.version }}"
+          code="$(curl -sSL -o resp.json -w '%{http_code}' https://crates.io/api/v1/crates/trove-core || echo 000)"
+          if [ "$code" = "404" ]; then
+            echo "trove-core not yet on crates.io — first publish."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [ "$code" = "200" ] && jq -e --arg v "$v" 'any(.versions[]; .num == $v)' resp.json >/dev/null; then
+            echo "trove-core $v already published — skipping upload."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trove-core $v not found on crates.io (HTTP $code) — will publish."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to crates.io (OIDC)
+        if: steps.check.outputs.skip != 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        if: steps.check.outputs.skip != 'true'
+        run: cargo publish -p trove-core --token "${{ steps.auth.outputs.token }}"
