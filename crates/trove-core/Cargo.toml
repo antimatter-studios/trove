@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "kdbx-compatible vault library: I/O, crypto, sidecars"
+repository.workspace = true
+readme = "README.md"
+keywords = ["keepass", "kdbx", "password", "vault", "crypto"]
+categories = ["cryptography", "parser-implementations"]
 
 [dependencies]
 keepass = { workspace = true, features = ["save_kdbx4"] }
