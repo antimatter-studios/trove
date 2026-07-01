@@ -209,6 +209,9 @@ jobs:
     # the publish step.
     if: ${{ always() && !cancelled() && (inputs.crate_only || needs.release.result == 'success') }}
     runs-on: ubuntu-latest
+    # The crates.io Trusted Publishing config requires this environment name —
+    # the OIDC JWT must carry it, so the job must declare it.
+    environment: release
     permissions:
       contents: read
       id-token: write # required for crates.io OIDC trusted publishing
