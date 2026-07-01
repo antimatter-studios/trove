@@ -1,0 +1,58 @@
+# Changelog
+
+All notable changes, per released version. trove is pre-1.0, so minor versions
+may carry behavior changes. The most recent releases are also summarized in the
+README; the full history and the pre-1.0 development milestones live here.
+
+## v0.4.0 — 2026-07-01
+
+- `add file` / `add gpg` now target the vault unlocked in the running daemon by
+  default (gated by `TROVE_SESSION`), consistent with `add ssh`. Pass
+  `--vault <PATH>` to operate on a kdbx file directly (offline).
+- `troved` takes a singleton `flock`, making orphaned/stale SSH- and GPG-agent
+  sockets impossible.
+
+## v0.3.0 — 2026-06-24
+
+- `--vault <PATH>` is now a global offline selector (works before or after the
+  subcommand); positional vault arguments dropped.
+- `add ssh` requires a `<comment>` argument, recorded in `id.pub`.
+- The vault's top-level group is named `Root` and treated as the default group.
+- KDBX 4.0 → 4.1 heal on save, daemon lifecycle management, and `ssh`/`gpg` CLI
+  wrappers.
+- Upgraded to `keepass 0.13.10` (KeePassXC-readable vaults) with a cross-tool
+  conformance suite and session-code provisioning.
+- Windows support (named-pipe IPC) and the cross-platform release pipeline.
+- Installed the github-guard git hooks.
+
+## v0.2.0 — 2026-06-22
+
+- `KeeAgent.settings` export, nested group support, daemon auto-spawn, RSA PEM
+  import, and an idle-lock fix.
+- Added the Install section (Homebrew + cargo) to the README.
+
+## v0.1.0 — 2026-05-08
+
+Initial tagged release: kdbx-compatible vault (`trove-core`), the `trove` CLI
+and `troved` headless daemon with a line-JSON control socket, in-memory SSH and
+GPG agents, real KDBX `<Binary>` attachments, file materialization (the founding
+feature), idle-lock, and the daemon-aware CLI. The granular history is below.
+
+## Pre-1.0 development milestones
+
+Fine-grained feature log from before the tagged-release cadence (oldest first):
+
+- **v0.0.1** — kdbx vault read/write ([crates/trove-core/src/lib.rs](crates/trove-core/src/lib.rs)), `trove` CLI scaffold (`init`, `list`, `add ssh`, `get ssh`), `troved` headless daemon with the line-JSON control socket, end-to-end SSH-key roundtrip.
+- **v0.0.2** — SSH agent listener serving ed25519 keys over `SSH_AUTH_SOCK`. Keys live only in daemon memory; cleared on lock.
+- **v0.0.3** — SSH agent algorithm coverage extended: RSA (>= 2048 bits, signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332), ECDSA P-256, ECDSA P-384.
+- **v0.0.4** — GPG agent listener speaking the Assuan protocol; ed25519 OpenPGP signing works against `git commit -S`. Hand-rolled OpenPGP packet parser ([crates/troved/src/gpg_agent/keys.rs](crates/troved/src/gpg_agent/keys.rs)) avoids pulling in `rpgp`.
+- **v0.0.5** — GPG `PKDECRYPT` for ECDH-on-Curve25519: AES-128/192/256 KW unwrap of the wrapped session key against gpg 2.5.x. RSA / NIST-curve / Ed448 still out of scope.
+- **v0.0.6** — Real KDBX `<Binary>` attachments via a vendored fork of `keepass` 0.7.33 (since retired in v0.0.14); legacy `_SDPM_BIN_*` string-field fallback kept for read-compat with v0.0.1–v0.0.5 vaults (also retired in v0.0.14).
+- **v0.0.7** — File materialization (the founding feature): `trove add file`, `Materialize.{Source,Target,Mode,TTL,AllowDiskBacked}` custom-field schema, in-process `trove materialize`, daemon-driven materialize-on-unlock + wipe-on-lock with optional TTL. Linux: refuses non-tmpfs targets unless `AllowDiskBacked=true`. macOS: soft allowlist (`/tmp`, `/private/tmp`, `$XDG_RUNTIME_DIR`) — APFS provides no real tmpfs, so this is a hint, not a guarantee.
+- **v0.0.8** — Idle-lock. `IdleTracker` with a tokio driver task ([crates/troved/src/idle.rs](crates/troved/src/idle.rs)); auto-locks after configurable inactivity (default 900s). Activity = any control RPC except `ping`, any SSH agent message, any GPG Assuan command. New `set-idle-timeout` / `get-idle-timeout` RPCs and `TROVE_IDLE_TIMEOUT` env var.
+- **v0.0.9** — GitHub Actions CI (`.github/workflows/ci.yml`): test matrix on Linux + macOS, clippy with `-D warnings`, fmt check, cargo-audit, MSRV check at Rust 1.75. Repo run through `cargo fmt --all`.
+- **v0.0.10** — Documentation: README quickstart + [docs/architecture.md](docs/architecture.md) + [docs/threat-model.md](docs/threat-model.md) + [docs/cli-reference.md](docs/cli-reference.md).
+- **v0.0.11** — Fuzz harnesses for the SSH agent wire decoder and Assuan line parser ([crates/troved/fuzz/](crates/troved/fuzz/), nightly-only) plus proptest property tests on stable. ~4.3M libfuzzer iterations on this machine, 0 crashes.
+- **v0.0.12** — Clean-room kdbx spec test suite: round-trip matrix, malformed-input rejection, keyfile formats, binary pool, cross-tool (`keepassxc-cli`) interop. Programmatically generated fixtures from a seeded RNG; no GPL imports. Originally lived under `vendor/keepass/tests/`; relocated to [crates/keepass-spec-tests](crates/keepass-spec-tests/) in v0.0.14.
+- **v0.0.13** — Daemon-aware CLI: `trove unlock`, `trove lock`, `trove status`, `trove idle set/get`, `trove materialize-status`. Replaces the `printf '{...}' | nc -U` incantations from v0.0.8 with proper subcommands.
+- **v0.0.14** — Migrated off the vendored `keepass` 0.7.33 fork to the published `keepass = "0.12.5"`. Upstream's PR #294 already restructured attachments as first-class Database-owned objects with `EntryMut::add_attachment(name, Value::Unprotected(bytes))`, which is what our 3 patches were trying to enable. Local fork retired; legacy `_SDPM_BIN_*` migration code retired (no production v0.0.1–v0.0.5 vaults exist).
