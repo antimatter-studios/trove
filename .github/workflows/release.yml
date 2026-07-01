@@ -30,8 +30,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)release, e.g. v0.2.0"
+        description: "Existing tag to (re)release, e.g. v0.4.0"
         required: true
+      crate_only:
+        description: "Only (re)publish trove-core to crates.io — skip the binary rebuild + GitHub Release (targeted retry)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -46,6 +50,7 @@ jobs:
   test:
     name: Test before release
     runs-on: ubuntu-latest
+    if: ${{ !inputs.crate_only }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,6 +83,7 @@ jobs:
   build:
     name: Build ${{ matrix.label }}
     needs: test
+    if: ${{ !inputs.crate_only }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -160,6 +166,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
+    if: ${{ !inputs.crate_only }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -196,6 +203,11 @@ jobs:
   publish-crate:
     name: Publish trove-core to crates.io
     needs: release
+    # Runs after the GitHub Release on a tag push / full dispatch, OR standalone
+    # on a `crate_only` dispatch (targeted re-publish without rebuilding or
+    # overwriting the Release). Guarded so a failed/absent build never reaches
+    # the publish step.
+    if: ${{ always() && !cancelled() && (inputs.crate_only || needs.release.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
