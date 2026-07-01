@@ -355,6 +355,6 @@ Global `--vault` offline selector, required `<comment>` for `add ssh`, `Root` de
 ### v0.1.0
 Initial tagged release: kdbx vault, `trove` CLI + `troved` daemon, in-memory SSH/GPG agents, real binary attachments, file materialization, idle-lock, and the daemon-aware CLI.
 
-Linux + macOS only; Windows not supported. Vault unlock currently takes a password only — no keyfiles, no hardware tokens, no KDBX 3.
+Linux, macOS, and Windows (named-pipe IPC). Vault unlock currently takes a password only — no keyfiles, no hardware tokens, no KDBX 3.
 
 Still on the menu: per-user-key sidecar, sync engine, browser native messaging, plugin host, mobile sidecar protocol, GUI. Open to scope cuts — the feature exploration above is intentionally broader than what we'll build.
