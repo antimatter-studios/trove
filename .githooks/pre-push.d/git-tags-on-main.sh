@@ -59,8 +59,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     printf 'github-guard: BLOCKED — tag %s points at %s, which is not on %s.\n' \
       "$tag" "$(git rev-parse --short "$commit")" "$default" >&2
     printf '  Release tags must mark a commit that landed on %s. Re-point it:\n' "$default" >&2
-    printf '    git tag -f %s <commit-on-%s>   # e.g. the squash-merge commit\n' "$tag" "$default" >&2
-    printf '    git push --force %s %s\n' "$remote" "$tag" >&2
+    printf "    git tag -f '%s' <commit-on-%s>   # e.g. the squash-merge commit\n" "$tag" "$default" >&2
+    printf "    git push --force '%s' '%s'\n" "$remote" "$tag" >&2
     status=1
   fi
 done

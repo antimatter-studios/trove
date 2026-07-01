@@ -44,7 +44,9 @@ if command -v jq >/dev/null 2>&1; then
         --jq '.check_runs[] | select(.app.slug=="github-actions") | .name' 2>/dev/null
     done | jq -sRc 'split("\n") | map(select(length > 0)) | map({context: .}) | unique'
   )
-  [ -n "$desired" ] || desired='[]'
+  # Empty stdin yields "[]" here, but guard against a stray "null" too so a
+  # malformed value can never reach the protection PUT payload.
+  case "$desired" in '' | null) desired='[]' ;; esac
 fi
 
 # Current protection facts in one call: PR reviews present? admins enforced?
