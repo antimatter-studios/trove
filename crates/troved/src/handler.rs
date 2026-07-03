@@ -90,12 +90,31 @@ pub async fn handle(
             path,
             password,
             timeout,
+            keyfile,
         } => {
             let path_buf = PathBuf::from(path);
+            // Decode composite-key material (if any) before the blocking open.
+            let keyfile_bytes = match keyfile {
+                Some(b64) => {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                        Ok(bytes) => Some(bytes),
+                        Err(e) => {
+                            return Handled {
+                                response: Response::err(format!("invalid keyfile encoding: {e}")),
+                                shutdown: false,
+                            }
+                        }
+                    }
+                }
+                None => None,
+            };
             // trove-core's Vault::open is sync (and may do blocking file I/O +
             // KDF work). Wrap it in spawn_blocking to keep the runtime healthy.
-            let result =
-                tokio::task::spawn_blocking(move || Vault::open(&path_buf, &password)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                Vault::open_with_key(&path_buf, &password, keyfile_bytes.as_deref())
+            })
+            .await;
             match result {
                 Ok(Ok(vault)) => {
                     // Pull SSH and GPG keys out of the vault before stashing

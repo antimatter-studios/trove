@@ -92,6 +92,7 @@ fn unlock(path: &Path) -> Request {
         path: path.to_string_lossy().into_owned(),
         password: PASSWORD.to_string(),
         timeout: None,
+        keyfile: None,
     }
 }
 
