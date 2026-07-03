@@ -21,6 +21,13 @@ pub enum Request {
         /// prior `set-idle-timeout` left behind). Wire-optional for back-compat.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout: Option<u64>,
+        /// Optional keyfile bytes (base64) for a composite-key vault. The
+        /// daemon holds the decoded bytes in Vault memory so its own
+        /// re-saves derive the same composite key. Wire-optional for
+        /// back-compat.
+        // NOTE: sensitive — key material. Never Debug-print.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keyfile: Option<String>,
     },
     List,
     Lock,
@@ -206,6 +213,7 @@ impl std::fmt::Debug for Request {
                 .field("path", path)
                 .field("password", &"<redacted>")
                 .field("timeout", timeout)
+                .field("keyfile", &"<redacted>")
                 .finish(),
             Request::List => f.write_str("List"),
             Request::Lock => f.write_str("Lock"),
