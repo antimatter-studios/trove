@@ -32,6 +32,9 @@ serde_json.workspace = true
 # v0.0.10.0: code-gated `get` routes extraction through the daemon, which
 # returns attachment bytes base64-encoded on the JSON wire. We decode here.
 base64 = "0.22"
+# `add password --generate` mints entry passwords with the OS CSPRNG. Same
+# pinning as troved's.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
 [build-dependencies]
 # Formats the dev-build timestamp (0.2.0-dev-YYYYMMDDHHMMSS) in build.rs.
