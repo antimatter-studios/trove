@@ -110,6 +110,90 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
+    /// Read one entry's non-secret surface: standard unprotected fields plus
+    /// the NAMES of custom fields and attachments. Never returns Password or
+    /// other protected values (use `GetField` for those — it is code-gated).
+    /// Ungated beyond "a vault is unlocked", exactly like `List`.
+    ShowEntry {
+        path: String,
+    },
+    /// Case-insensitive substring search over unprotected fields and group
+    /// paths. Returns `List`-shaped summaries; never matches secret values.
+    /// Ungated beyond "a vault is unlocked", exactly like `List`.
+    Search {
+        term: String,
+    },
+    /// Code-gated single-field read (this is how Password values leave the
+    /// daemon). Same session gate as `Get`.
+    GetField {
+        path: String,
+        field: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: create a password entry at `path` (groups mkdir-p).
+    AddPassword {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
+        // NOTE: sensitive — the secret value itself. Never Debug-print.
+        password: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: field-level edits on an existing entry. `sets` may
+    /// carry ANY field including Password (values are sensitive); `unsets`
+    /// removes custom fields; `title` renames.
+    EditEntry {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        // NOTE: sensitive — may contain Password or other secrets. Never Debug-print values.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        sets: std::collections::BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unsets: Vec<String>,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: recycle (default) or permanently delete an entry.
+    RemoveEntry {
+        path: String,
+        #[serde(default)]
+        permanent: bool,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: move an entry to an EXISTING group.
+    MoveEntry {
+        path: String,
+        group: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: create a group hierarchy (mkdir -p; errors if the
+    /// leaf already exists).
+    Mkdir {
+        path: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: recycle (default) or permanently delete a group.
+    /// `recursive` is only consulted for permanent deletion of a non-empty
+    /// group, mirroring `trove-core`'s `remove_group`.
+    Rmdir {
+        path: String,
+        #[serde(default)]
+        permanent: bool,
+        #[serde(default)]
+        recursive: bool,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -181,6 +265,73 @@ impl std::fmt::Debug for Request {
                 .field("allow_disk_backed", allow_disk_backed)
                 .field("code", &"<redacted>")
                 .finish(),
+            Request::ShowEntry { path } => f.debug_struct("ShowEntry").field("path", path).finish(),
+            Request::Search { term } => f.debug_struct("Search").field("term", term).finish(),
+            Request::GetField { path, field, .. } => f
+                .debug_struct("GetField")
+                .field("path", path)
+                .field("field", field)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::AddPassword {
+                path,
+                username,
+                url,
+                ..
+            } => f
+                .debug_struct("AddPassword")
+                .field("path", path)
+                .field("username", username)
+                .field("url", url)
+                .field("password", &"<redacted>")
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::EditEntry {
+                path,
+                title,
+                sets,
+                unsets,
+                ..
+            } => f
+                .debug_struct("EditEntry")
+                .field("path", path)
+                .field("title", title)
+                // Field NAMES are safe to log; values may be secrets.
+                .field("sets", &sets.keys().collect::<Vec<_>>())
+                .field("unsets", unsets)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::RemoveEntry {
+                path, permanent, ..
+            } => f
+                .debug_struct("RemoveEntry")
+                .field("path", path)
+                .field("permanent", permanent)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::MoveEntry { path, group, .. } => f
+                .debug_struct("MoveEntry")
+                .field("path", path)
+                .field("group", group)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::Mkdir { path, .. } => f
+                .debug_struct("Mkdir")
+                .field("path", path)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::Rmdir {
+                path,
+                permanent,
+                recursive,
+                ..
+            } => f
+                .debug_struct("Rmdir")
+                .field("path", path)
+                .field("permanent", permanent)
+                .field("recursive", recursive)
+                .field("code", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -197,6 +348,22 @@ pub struct EntryDto {
     /// `group_path`. Older clients that ignore this field still get a
     /// usable `title`.
     #[serde(default)]
+    pub group_path: Vec<String>,
+}
+
+/// Full non-secret view of one entry, for `ShowEntry`. Everything here is
+/// safe to print without a session code: protected values (Password et al.)
+/// are represented only by their *names* in `custom_fields`, never by value.
+#[derive(Debug, Serialize)]
+pub struct ShowDto {
+    pub id: String,
+    pub title: String,
+    pub username: Option<String>,
+    pub url: Option<String>,
+    pub notes: Option<String>,
+    /// Names (not values) of custom string fields beyond the standard five.
+    pub custom_fields: Vec<String>,
+    pub attachments: Vec<String>,
     pub group_path: Vec<String>,
 }
 
@@ -272,6 +439,20 @@ pub enum OkBody {
     Secret {
         data: String,
     },
+    /// Response to `ShowEntry`.
+    Show {
+        entry: ShowDto,
+    },
+    /// Response to `GetField`: the field's string value (may be a secret —
+    /// the request was code-gated).
+    Value {
+        value: String,
+    },
+    /// Response to `RemoveEntry` / `Rmdir`: whether the target was moved to
+    /// the recycle bin (`true`) or destroyed (`false`).
+    Recycled {
+        recycled: bool,
+    },
     /// Response to `SshAgentList`: the public keys the agent serves.
     SshAgentList {
         ssh_keys: Vec<SshKeyDto>,
@@ -334,5 +515,14 @@ impl Response {
     }
     pub fn ok_secret(data: String) -> Self {
         Response::Ok(OkBody::Secret { data })
+    }
+    pub fn ok_show(entry: ShowDto) -> Self {
+        Response::Ok(OkBody::Show { entry })
+    }
+    pub fn ok_value(value: String) -> Self {
+        Response::Ok(OkBody::Value { value })
+    }
+    pub fn ok_recycled(recycled: bool) -> Self {
+        Response::Ok(OkBody::Recycled { recycled })
     }
 }

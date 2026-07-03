@@ -427,6 +427,87 @@ pub async fn handle(
             )
             .await
         }
+
+        Request::ShowEntry { path } => show_entry(state, &path).await,
+
+        Request::Search { term } => search(state, &term).await,
+
+        Request::GetField { path, field, code } => {
+            get_field(state, session, peer_uid, &path, &field, &code).await
+        }
+
+        Request::AddPassword {
+            path,
+            username,
+            url,
+            notes,
+            password,
+            code,
+        } => {
+            add_password(
+                state,
+                session,
+                peer_uid,
+                &path,
+                username.as_deref(),
+                url.as_deref(),
+                notes.as_deref(),
+                &password,
+                &code,
+            )
+            .await
+        }
+
+        Request::EditEntry {
+            path,
+            title,
+            sets,
+            unsets,
+            code,
+        } => {
+            edit_entry(
+                state,
+                session,
+                key_store,
+                gpg_store,
+                peer_uid,
+                &path,
+                title.as_deref(),
+                &sets,
+                &unsets,
+                &code,
+            )
+            .await
+        }
+
+        Request::RemoveEntry {
+            path,
+            permanent,
+            code,
+        } => {
+            remove_entry(
+                state, session, key_store, gpg_store, peer_uid, &path, permanent, &code,
+            )
+            .await
+        }
+
+        Request::MoveEntry { path, group, code } => {
+            move_entry(state, session, peer_uid, &path, &group, &code).await
+        }
+
+        Request::Mkdir { path, code } => mkdir(state, session, peer_uid, &path, &code).await,
+
+        Request::Rmdir {
+            path,
+            permanent,
+            recursive,
+            code,
+        } => {
+            rmdir(
+                state, session, key_store, gpg_store, peer_uid, &path, permanent, recursive, &code,
+            )
+            .await
+        }
     }
 }
 
@@ -869,6 +950,356 @@ async fn materialize_from_vault(vault: &Vault, store: &MaterializedStore) -> Vec
         }
     }
     materialized
+}
+
+/// Validate the provisioning session for a code-gated request: vault unlocked
+/// by this uid + matching code. Returns the standard deliberately-generic
+/// refusal (`Some(Handled)`) on failure so callers can `return` it — the
+/// message must not be an oracle for "locked" vs "wrong code".
+async fn session_gate(session: &SessionStore, peer_uid: u32, code: &str) -> Option<Handled> {
+    let sess = session.lock().await;
+    let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+    if ok {
+        None
+    } else {
+        Some(Handled {
+            response: Response::err(
+                "refused: vault locked, or session code missing/invalid for this uid",
+            ),
+            shutdown: false,
+        })
+    }
+}
+
+fn entry_dto(s: EntrySummary) -> EntryDto {
+    EntryDto {
+        id: s.id.to_string(),
+        title: s.title,
+        username: s.username,
+        url: s.url,
+        attachments: s.attachment_names,
+        group_path: s.group_path,
+    }
+}
+
+fn err_handled(msg: impl Into<String>) -> Handled {
+    Handled {
+        response: Response::err(msg),
+        shutdown: false,
+    }
+}
+
+fn ok_handled(response: Response) -> Handled {
+    Handled {
+        response,
+        shutdown: false,
+    }
+}
+
+/// Ungated (like `List`): one entry's non-secret surface. Field *names* only
+/// for anything custom; values require the code-gated `GetField`.
+async fn show_entry(state: &SharedState, path: &str) -> Handled {
+    let guard = state.lock().await;
+    let vault = match guard.as_ref() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let id = match vault.find_by_title(path) {
+        Some(id) => id,
+        None => return err_handled(format!("entry not found: {path}")),
+    };
+    let summary = vault.get_entry(&id).expect("entry just resolved");
+    let notes = vault.get_field(&id, "Notes").ok().flatten();
+    let custom_fields = vault.custom_field_names(&id).unwrap_or_default();
+    ok_handled(Response::ok_show(crate::protocol::ShowDto {
+        id: summary.id.to_string(),
+        title: summary.title,
+        username: summary.username,
+        url: summary.url,
+        notes,
+        custom_fields,
+        attachments: summary.attachment_names,
+        group_path: summary.group_path,
+    }))
+}
+
+/// Ungated (like `List`): substring search over non-secret surfaces.
+async fn search(state: &SharedState, term: &str) -> Handled {
+    let guard = state.lock().await;
+    let vault = match guard.as_ref() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let entries: Vec<EntryDto> = vault
+        .search_entries(term)
+        .into_iter()
+        .map(entry_dto)
+        .collect();
+    ok_handled(Response::ok_list(entries))
+}
+
+/// Code-gated single-field read — the only way a protected value (Password)
+/// leaves the daemon.
+async fn get_field(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    field: &str,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let guard = state.lock().await;
+    let vault = match guard.as_ref() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let id = match vault.find_by_title(path) {
+        Some(id) => id,
+        None => return err_handled(format!("entry not found: {path}")),
+    };
+    match vault.get_field(&id, field) {
+        Ok(Some(value)) => ok_handled(Response::ok_value(value)),
+        Ok(None) => err_handled(format!("entry '{path}' has no field '{field}'")),
+        Err(e) => err_handled(format!("reading field: {e}")),
+    }
+}
+
+/// Code-gated write: create a password entry (groups mkdir-p) and persist.
+#[allow(clippy::too_many_arguments)]
+async fn add_password(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    username: Option<&str>,
+    url: Option<&str>,
+    notes: Option<&str>,
+    password: &str,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let vault = match guard.as_mut() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    if vault.find_by_title(path).is_some() {
+        return err_handled(format!(
+            "entry already exists: {path} (use `trove edit` to change it)"
+        ));
+    }
+    let id = match vault.add_entry(path) {
+        Ok(id) => id,
+        Err(e) => return err_handled(format!("creating entry '{path}': {e}")),
+    };
+    let fields = [
+        ("Password", Some(password)),
+        ("UserName", username),
+        ("URL", url),
+        ("Notes", notes),
+    ];
+    for (name, value) in fields {
+        if let Some(value) = value {
+            if let Err(e) = vault.set_field(&id, name, value) {
+                return err_handled(format!("setting {name}: {e}"));
+            }
+        }
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    ok_handled(Response::ok_empty())
+}
+
+/// After a structural write (edit/remove/move/rmdir) the affected entries may
+/// have carried agent-served key material — reload both agent stores from the
+/// saved vault so they never serve stale keys.
+async fn reload_agent_stores(vault: &Vault, key_store: &KeyStore, gpg_store: &GpgKeyStore) {
+    let ssh = load_ssh_keys_from_vault(vault);
+    let gpg = load_gpg_keys_from_vault(vault);
+    {
+        let mut keys = key_store.write().await;
+        *keys = ssh;
+    }
+    {
+        let mut keys = gpg_store.write().await;
+        *keys = gpg;
+    }
+}
+
+/// Code-gated write: field-level edits (set/unset/rename) on one entry.
+#[allow(clippy::too_many_arguments)]
+async fn edit_entry(
+    state: &SharedState,
+    session: &SessionStore,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    peer_uid: u32,
+    path: &str,
+    title: Option<&str>,
+    sets: &std::collections::BTreeMap<String, String>,
+    unsets: &[String],
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let vault = match guard.as_mut() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let id = match vault.find_by_title(path) {
+        Some(id) => id,
+        None => return err_handled(format!("entry not found: {path}")),
+    };
+    for (field, value) in sets {
+        if let Err(e) = vault.set_field(&id, field, value) {
+            return err_handled(format!("setting {field}: {e}"));
+        }
+    }
+    for field in unsets {
+        if let Err(e) = vault.remove_field(&id, field) {
+            return err_handled(format!("unsetting {field}: {e}"));
+        }
+    }
+    if let Some(new_title) = title {
+        if let Err(e) = vault.set_field(&id, "Title", new_title) {
+            return err_handled(format!("renaming: {e}"));
+        }
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    reload_agent_stores(vault, key_store, gpg_store).await;
+    ok_handled(Response::ok_empty())
+}
+
+/// Code-gated write: recycle (default) or destroy an entry.
+#[allow(clippy::too_many_arguments)]
+async fn remove_entry(
+    state: &SharedState,
+    session: &SessionStore,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    peer_uid: u32,
+    path: &str,
+    permanent: bool,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let vault = match guard.as_mut() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let id = match vault.find_by_title(path) {
+        Some(id) => id,
+        None => return err_handled(format!("entry not found: {path}")),
+    };
+    let recycled = match vault.recycle_entry(&id, permanent) {
+        Ok(r) => r,
+        Err(e) => return err_handled(format!("removing entry: {e}")),
+    };
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    reload_agent_stores(vault, key_store, gpg_store).await;
+    ok_handled(Response::ok_recycled(recycled))
+}
+
+/// Code-gated write: move an entry to an existing group.
+async fn move_entry(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    group: &str,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let vault = match guard.as_mut() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let id = match vault.find_by_title(path) {
+        Some(id) => id,
+        None => return err_handled(format!("entry not found: {path}")),
+    };
+    if let Err(e) = vault.move_entry(&id, group) {
+        return err_handled(format!("moving entry: {e}"));
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    ok_handled(Response::ok_empty())
+}
+
+/// Code-gated write: create a group hierarchy.
+async fn mkdir(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let vault = match guard.as_mut() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    if let Err(e) = vault.add_group(path) {
+        return err_handled(format!("creating group: {e}"));
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    ok_handled(Response::ok_empty())
+}
+
+/// Code-gated write: recycle (default) or destroy a group.
+#[allow(clippy::too_many_arguments)]
+async fn rmdir(
+    state: &SharedState,
+    session: &SessionStore,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    peer_uid: u32,
+    path: &str,
+    permanent: bool,
+    recursive: bool,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let vault = match guard.as_mut() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let recycled = match vault.remove_group(path, permanent, recursive) {
+        Ok(r) => r,
+        Err(e) => return err_handled(format!("removing group: {e}")),
+    };
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    reload_agent_stores(vault, key_store, gpg_store).await;
+    ok_handled(Response::ok_recycled(recycled))
 }
 
 /// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to
