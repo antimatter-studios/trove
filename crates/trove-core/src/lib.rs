@@ -1,8 +1,9 @@
 //! `trove-core` — kdbx I/O and vault primitives.
 //!
 //! Format compatibility with KeePassXC is non-negotiable: this crate must
-//! round-trip any valid `.kdbx` file. v0.0.1 scope is KDBX 4 with a password
-//! master key only; keyfiles, hardware tokens, and KDBX 3 land later.
+//! round-trip any valid `.kdbx` file. Scope is KDBX 4 with a password master
+//! key, optionally composited with a keyfile (`*_with_key`; any format
+//! KeePassXC accepts). Hardware tokens and KDBX 3 land later.
 //!
 //! As of v0.0.10, trove-core depends on the published `keepass = "0.12"` crate
 //! directly — no more vendored fork. The earlier vendored 0.7.33 + three
@@ -108,22 +109,49 @@ pub struct Vault {
 pub(crate) struct VaultInner {
     pub(crate) path: PathBuf,
     pub(crate) password: String,
+    /// Raw keyfile bytes when the vault uses a composite key (password +
+    /// keyfile). Kept verbatim so `save()` derives the same composite key;
+    /// format interpretation (XML v1/v2, raw-32, hex-64, arbitrary-file
+    /// SHA-256) is the `keepass` crate's, matching KeePassXC.
+    pub(crate) keyfile: Option<Vec<u8>>,
     pub(crate) db: keepass::Database,
 }
 
 impl Drop for VaultInner {
     fn drop(&mut self) {
-        // Best-effort: wipe the password material we kept in memory.
+        // Best-effort: wipe the key material we kept in memory.
         // The `keepass::Database` carries its own SecretBox-backed protected
         // values; we don't reach into it.
         self.password.zeroize();
+        if let Some(k) = self.keyfile.as_mut() {
+            k.zeroize();
+        }
     }
+}
+
+/// Build the composite `DatabaseKey` from a password and optional keyfile
+/// bytes — the one place the two are combined, shared by open/create/save.
+fn database_key(password: &str, keyfile: Option<&[u8]>) -> Result<keepass::DatabaseKey> {
+    let mut key = keepass::DatabaseKey::new().with_password(password);
+    if let Some(bytes) = keyfile {
+        key = key
+            .with_keyfile(&mut &bytes[..])
+            .map_err(|e| Error::Kdbx(format!("reading keyfile: {e}")))?;
+    }
+    Ok(key)
 }
 
 impl Vault {
     /// Create a new kdbx file at `path`, encrypted with `password`.
     /// Errors if the file already exists.
     pub fn create(path: &Path, password: &str) -> Result<Self> {
+        Self::create_with_key(path, password, None)
+    }
+
+    /// Create a new kdbx file locked by a composite key: `password` plus the
+    /// given keyfile bytes (any format KeePassXC accepts — XML v1/v2, raw
+    /// 32-byte, hex-64, or an arbitrary file hashed with SHA-256).
+    pub fn create_with_key(path: &Path, password: &str, keyfile: Option<&[u8]>) -> Result<Self> {
         if path.exists() {
             return Err(Error::AlreadyExists(path.to_path_buf()));
         }
@@ -136,6 +164,7 @@ impl Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
                 password: password.to_string(),
+                keyfile: keyfile.map(<[u8]>::to_vec),
                 db,
             },
         };
@@ -145,16 +174,25 @@ impl Vault {
 
     /// Open an existing kdbx file with a password.
     pub fn open(path: &Path, password: &str) -> Result<Self> {
+        Self::open_with_key(path, password, None)
+    }
+
+    /// Open an existing kdbx file with a composite key: `password` plus the
+    /// given keyfile bytes. A wrong or missing keyfile surfaces as
+    /// [`Error::BadPassword`], same as a wrong password — the kdbx format
+    /// cannot distinguish which credential was wrong.
+    pub fn open_with_key(path: &Path, password: &str, keyfile: Option<&[u8]>) -> Result<Self> {
         if !path.exists() {
             return Err(Error::NotFound(path.to_path_buf()));
         }
         let mut file = std::fs::File::open(path)?;
-        let key = keepass::DatabaseKey::new().with_password(password);
+        let key = database_key(password, keyfile)?;
         let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
         Ok(Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
                 password: password.to_string(),
+                keyfile: keyfile.map(<[u8]>::to_vec),
                 db,
             },
         })
@@ -215,7 +253,7 @@ impl Vault {
         // crash-safety on POSIX.
         {
             let mut tmp = std::fs::File::create(&tmp_path)?;
-            let key = keepass::DatabaseKey::new().with_password(&self.inner.password);
+            let key = database_key(&self.inner.password, self.inner.keyfile.as_deref())?;
             self.inner
                 .db
                 .save(&mut tmp, key)
