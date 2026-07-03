@@ -6,6 +6,12 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- Keyfile unlock (keepassxc-cli parity G2): global `--key-file <PATH>`
+  composites the keyfile with the password wherever a vault is opened —
+  offline commands, `init` (new vault locked with the pair), and `unlock`
+  (the daemon holds the bytes so its re-saves keep the composite key; the
+  wire `Unlock` RPC grew an optional base64 `keyfile` field). Every format
+  KeePassXC accepts. Interop proven both directions against keepassxc-cli.
 - Generic entry CRUD, closing the first keepassxc-cli parity gap
   (docs/parity-plan.md): `add password` (prompt / `--secret-stdin` /
   `--generate`), `get password`, `show` (`--attr`, `--show-protected`),
