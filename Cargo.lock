@@ -1774,6 +1774,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "rand 0.8.6",
  "rpassword",
  "serde_json",
  "tempfile",

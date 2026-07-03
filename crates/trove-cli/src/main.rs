@@ -176,6 +176,106 @@ enum Command {
     /// remaining, and whether the file is still on disk.
     MaterializeStatus,
 
+    /// Print an entry's details: title, username, URL, notes, custom-field
+    /// names and attachment names. The password (and any other protected
+    /// value) is shown only with `--show-protected`.
+    ///
+    /// With `--vault <PATH>`: read the file directly (offline). Without it:
+    /// served by the running daemon; the summary view needs no session code,
+    /// but protected values (`--attr Password --show-protected`) present the
+    /// `TROVE_SESSION` code from `trove unlock`.
+    Show {
+        /// Entry path, e.g. "github.com" or "Work/github".
+        entry_path: String,
+        /// Print only this attribute's raw value (repeatable, order kept).
+        /// Standard names: Title, UserName, Password, URL, Notes — plus any
+        /// custom field. Password additionally requires --show-protected.
+        #[arg(long = "attr", value_name = "NAME")]
+        attrs: Vec<String>,
+        /// Reveal protected values (Password) instead of refusing.
+        #[arg(long = "show-protected")]
+        show_protected: bool,
+    },
+
+    /// Search entries: case-insensitive substring match over title, username,
+    /// URL, notes and group path. Protected values are never searched. Output
+    /// is `list`-shaped (id, path, attachments), one hit per line.
+    Search {
+        /// The term to look for.
+        term: String,
+    },
+
+    /// Edit an existing entry: standard fields via flags, custom fields via
+    /// `--set NAME=VALUE` / `--unset NAME`, rename via `--title`. To change
+    /// the password interactively pass `--password-prompt`.
+    Edit {
+        /// Entry path, e.g. "github.com" or "Work/github".
+        entry_path: String,
+        /// Rename the entry (its leaf title; the group stays — use `mv` to
+        /// relocate).
+        #[arg(long)]
+        title: Option<String>,
+        /// Set the UserName field.
+        #[arg(long)]
+        username: Option<String>,
+        /// Set the URL field.
+        #[arg(long)]
+        url: Option<String>,
+        /// Set the Notes field.
+        #[arg(long)]
+        notes: Option<String>,
+        /// Prompt (hidden, with confirmation) for a new password.
+        #[arg(long = "password-prompt")]
+        password_prompt: bool,
+        /// Set a custom field (repeatable): --set API-Token=abc123
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        sets: Vec<String>,
+        /// Remove a custom field (repeatable).
+        #[arg(long = "unset", value_name = "NAME")]
+        unsets: Vec<String>,
+    },
+
+    /// Remove an entry. Default is the KeePassXC behavior: move it to the
+    /// recycle bin (created on demand, shared with KeePassXC); an entry
+    /// already in the bin is destroyed. `--permanent` destroys immediately.
+    Rm {
+        /// Entry path, e.g. "github.com" or "Work/github".
+        entry_path: String,
+        /// Destroy outright instead of recycling.
+        #[arg(long)]
+        permanent: bool,
+    },
+
+    /// Move an entry to an EXISTING group. Destinations are never created
+    /// implicitly (a typo should fail) — create one first with `trove mkdir`.
+    Mv {
+        /// Entry path to move, e.g. "github.com" or "Old/github".
+        entry_path: String,
+        /// Destination group path, e.g. "Work/SSH" (or "Root" for top level).
+        group_path: String,
+    },
+
+    /// Create a group hierarchy. Intermediate groups are created as needed
+    /// (`mkdir -p`); errors if the leaf group already exists.
+    Mkdir {
+        /// Group path, e.g. "Work/SSH".
+        group_path: String,
+    },
+
+    /// Remove a group and everything in it. Default: move it to the recycle
+    /// bin (KeePassXC behavior). `--permanent` destroys instead, and then a
+    /// non-empty group additionally requires `--recursive`.
+    Rmdir {
+        /// Group path, e.g. "Old/Project".
+        group_path: String,
+        /// Destroy outright instead of recycling.
+        #[arg(long)]
+        permanent: bool,
+        /// With --permanent: allow destroying a non-empty group.
+        #[arg(long)]
+        recursive: bool,
+    },
+
     /// Print, install, or check a shell completion script.
     ///
     /// With no flags, prints the script to stdout for SHELL. Without an
@@ -296,6 +396,40 @@ enum GenerateResource {
 
 #[derive(Debug, Subcommand)]
 enum AddResource {
+    /// Store a username/password entry, addressed by entry path
+    /// (`group/sub/title`; groups auto-created). The password is prompted for
+    /// (hidden, confirmed) unless `--generate` mints one or `--secret-stdin`
+    /// reads it from stdin.
+    ///
+    /// By default targets the vault unlocked in the running daemon (using the
+    /// `TROVE_SESSION` code from `trove unlock`); pass the global
+    /// `--vault <path>` to write a kdbx file directly (offline).
+    Password {
+        /// Entry path, e.g. "github.com" or "Work/github".
+        entry_path: String,
+        /// UserName field.
+        #[arg(long)]
+        username: Option<String>,
+        /// URL field.
+        #[arg(long)]
+        url: Option<String>,
+        /// Notes field.
+        #[arg(long)]
+        notes: Option<String>,
+        /// Generate the password (OS CSPRNG, letters+digits) and print it
+        /// once to stdout instead of prompting.
+        #[arg(long, conflicts_with = "secret_stdin")]
+        generate: bool,
+        /// Length of the generated password (with --generate; default 20).
+        #[arg(long, requires = "generate")]
+        length: Option<usize>,
+        /// Read the password from stdin instead of prompting. When the global
+        /// `--password-stdin` is also set, the VAULT password is line 1 and
+        /// this secret is line 2.
+        #[arg(long = "secret-stdin")]
+        secret_stdin: bool,
+    },
+
     /// Store an SSH private key on the unlocked vault, addressed by entry path.
     ///
     /// `<ENTRY_PATH>` is a `/`-separated path (`group/sub/title`); groups are
@@ -384,6 +518,18 @@ enum AddResource {
 
 #[derive(Debug, Subcommand)]
 enum GetResource {
+    /// Print an entry's password to stdout — the script-friendly primitive
+    /// (`trove get password api/stripe | …`). For a human-readable view of
+    /// the whole entry use `trove show`.
+    ///
+    /// With the global `--vault <PATH>`: read the file directly (offline).
+    /// Without it: served by the running daemon, gated by the `TROVE_SESSION`
+    /// code from `trove unlock`.
+    Password {
+        /// Entry path to look up, e.g. "github.com" or "Work/github".
+        entry_path: String,
+    },
+
     /// Retrieve a stored SSH key by entry path.
     ///
     /// With the global `--vault <PATH>`: read it from the file directly
@@ -564,6 +710,72 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_idle_set(seconds),
         Command::Idle { op: IdleOp::Get } => cmd_idle_get(),
         Command::MaterializeStatus => cmd_materialize_status(),
+        Command::Show {
+            entry_path,
+            attrs,
+            show_protected,
+        } => cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin),
+        Command::Search { term } => cmd_search(vault, &term, pw_stdin),
+        Command::Edit {
+            entry_path,
+            title,
+            username,
+            url,
+            notes,
+            password_prompt,
+            sets,
+            unsets,
+        } => cmd_edit(
+            vault,
+            &entry_path,
+            title.as_deref(),
+            username.as_deref(),
+            url.as_deref(),
+            notes.as_deref(),
+            password_prompt,
+            &sets,
+            &unsets,
+            pw_stdin,
+        ),
+        Command::Rm {
+            entry_path,
+            permanent,
+        } => cmd_rm(vault, &entry_path, permanent, pw_stdin),
+        Command::Mv {
+            entry_path,
+            group_path,
+        } => cmd_mv(vault, &entry_path, &group_path, pw_stdin),
+        Command::Mkdir { group_path } => cmd_mkdir(vault, &group_path, pw_stdin),
+        Command::Rmdir {
+            group_path,
+            permanent,
+            recursive,
+        } => cmd_rmdir(vault, &group_path, permanent, recursive, pw_stdin),
+        Command::Add {
+            resource:
+                AddResource::Password {
+                    entry_path,
+                    username,
+                    url,
+                    notes,
+                    generate,
+                    length,
+                    secret_stdin,
+                },
+        } => cmd_add_password(
+            vault,
+            &entry_path,
+            username.as_deref(),
+            url.as_deref(),
+            notes.as_deref(),
+            generate,
+            length,
+            secret_stdin,
+            pw_stdin,
+        ),
+        Command::Get {
+            resource: GetResource::Password { entry_path },
+        } => cmd_get_password(vault, &entry_path, pw_stdin),
         Command::Completions {
             shell,
             install,
@@ -1003,6 +1215,13 @@ fn cmd_list_via_daemon() -> Result<()> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    print_entry_rows_from_json(&entries);
+    Ok(())
+}
+
+/// Render daemon `List`/`Search`-shaped entry summaries with
+/// [`print_list_row`], reconstructing each `Group/Sub/Title` display path.
+fn print_entry_rows_from_json(entries: &[Value]) {
     for entry in entries {
         let id = entry.get("id").and_then(Value::as_str).unwrap_or("?");
         let title = entry.get("title").and_then(Value::as_str).unwrap_or("?");
@@ -1027,7 +1246,6 @@ fn cmd_list_via_daemon() -> Result<()> {
             .unwrap_or_default();
         print_list_row(id, &display, &attachments);
     }
-    Ok(())
 }
 
 fn print_list_row(id: &str, title: &str, attachments: &[String]) {
@@ -1782,6 +2000,536 @@ fn cmd_get_file(
     write_secret_out(out, &bytes, "file")
 }
 
+// --- generic entry CRUD (G1) -------------------------------------------------
+
+/// One daemon round-trip with the standard error plumbing shared by the CRUD
+/// commands: autospawn, map "daemon not running" and protocol-level errors to
+/// user errors (exit 1), append the unlock hint when no vault is open.
+fn daemon_call(req: &daemon::Request) -> Result<Value> {
+    let resp = match daemon::send_autospawn(req) {
+        Ok(v) => v,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: e.to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        let hint = if msg.contains("no vault") {
+            "; pass a vault path or run `trove unlock <vault>` first"
+        } else {
+            ""
+        };
+        return Err(DaemonClassified {
+            message: format!("{msg}{hint}"),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    Ok(resp)
+}
+
+/// Only `Password` is protected among the standard kdbx fields (trove-core
+/// stores exactly that one with the Protected flag; see `Vault::set_field`).
+fn is_protected_field(name: &str) -> bool {
+    name.eq_ignore_ascii_case("password")
+}
+
+/// Prompt (hidden) for an entry password, twice, requiring a non-empty match.
+fn prompt_entry_password() -> Result<String> {
+    let first = rpassword::prompt_password("Entry password: ")?;
+    let second = rpassword::prompt_password("Confirm password: ")?;
+    if first != second {
+        return Err(anyhow!("passwords do not match"));
+    }
+    if first.is_empty() {
+        return Err(anyhow!("password must not be empty"));
+    }
+    Ok(first)
+}
+
+/// Mint a password from the OS CSPRNG: uniform over [A-Za-z0-9], no modulo
+/// bias (rejection sampling via `Uniform`). The full charset-policy generator
+/// arrives with `trove generate password`; this is the `--generate` baseline.
+fn generate_entry_password(len: usize) -> String {
+    use rand::distributions::{Distribution, Uniform};
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let dist = Uniform::from(0..CHARSET.len());
+    let mut rng = rand::rngs::OsRng;
+    (0..len)
+        .map(|_| CHARSET[dist.sample(&mut rng)] as char)
+        .collect()
+}
+
+/// Parse a `--set NAME=VALUE` argument.
+fn parse_set_kv(s: &str) -> Result<(String, String)> {
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| anyhow!("--set expects NAME=VALUE, got '{s}'"))?;
+    if k.is_empty() {
+        return Err(anyhow!("--set expects a non-empty NAME, got '{s}'"));
+    }
+    Ok((k.to_string(), v.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_add_password(
+    vault: Option<&Path>,
+    entry_path: &str,
+    username: Option<&str>,
+    url: Option<&str>,
+    notes: Option<&str>,
+    generate: bool,
+    length: Option<usize>,
+    secret_stdin: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    // Offline mode opens the vault FIRST so that with `--password-stdin
+    // --secret-stdin` the vault password is line 1 and the secret line 2.
+    let mut offline_vault = match vault {
+        Some(path) => Some(open_vault(path, pw_stdin)?),
+        None => None,
+    };
+    let password = if generate {
+        generate_entry_password(length.unwrap_or(20))
+    } else if secret_stdin {
+        read_password_from_stdin().context("reading entry password from stdin")?
+    } else {
+        prompt_entry_password().context("reading entry password")?
+    };
+
+    match offline_vault.as_mut() {
+        Some(v) => {
+            if v.find_by_title(entry_path).is_some() {
+                return Err(anyhow!(
+                    "entry already exists: {entry_path} (use `trove edit` to change it)"
+                ));
+            }
+            let id = v.add_entry(entry_path).context("creating entry")?;
+            v.set_field(&id, "Password", &password)
+                .context("setting Password")?;
+            for (name, value) in [("UserName", username), ("URL", url), ("Notes", notes)] {
+                if let Some(value) = value {
+                    v.set_field(&id, name, value)
+                        .with_context(|| format!("setting {name}"))?;
+                }
+            }
+            v.save().context("saving vault")?;
+        }
+        None => {
+            let code = require_session_code()?;
+            daemon_call(&daemon::Request::AddPassword {
+                path: entry_path.to_string(),
+                username: username.map(str::to_string),
+                url: url.map(str::to_string),
+                notes: notes.map(str::to_string),
+                password: password.clone(),
+                code,
+            })?;
+        }
+    }
+    if generate {
+        // The only time the secret is echoed: the user asked us to mint it
+        // and has no other way to learn it. Stdout, so it pipes.
+        println!("{password}");
+    } else {
+        println!("stored password entry at '{entry_path}'");
+    }
+    Ok(())
+}
+
+fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
+    match vault {
+        Some(path) => {
+            let v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            let pw = v
+                .get_field(&id, "Password")
+                .context("reading Password")?
+                .ok_or_else(|| anyhow!("entry '{entry_path}' has no password"))?;
+            println!("{pw}");
+        }
+        None => {
+            let code = require_session_code()?;
+            let resp = daemon_call(&daemon::Request::GetField {
+                path: entry_path.to_string(),
+                field: "Password".to_string(),
+                code,
+            })?;
+            let pw = resp
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
+            println!("{pw}");
+        }
+    }
+    Ok(())
+}
+
+/// Shared renderer for `show`'s summary view. `password` is `Some` only when
+/// `--show-protected` resolved it; `None` prints the masked placeholder.
+#[allow(clippy::too_many_arguments)]
+fn print_show_summary(
+    display_path: &str,
+    title: &str,
+    username: Option<&str>,
+    url: Option<&str>,
+    notes: Option<&str>,
+    password: Option<&str>,
+    custom_fields: &[String],
+    attachments: &[String],
+) {
+    println!("Path: {display_path}");
+    println!("Title: {title}");
+    println!("UserName: {}", username.unwrap_or(""));
+    match password {
+        Some(pw) => println!("Password: {pw}"),
+        None => println!("Password: [PROTECTED — pass --show-protected to reveal]"),
+    }
+    println!("URL: {}", url.unwrap_or(""));
+    println!("Notes: {}", notes.unwrap_or(""));
+    if !custom_fields.is_empty() {
+        println!("Custom fields: {}", custom_fields.join(", "));
+    }
+    if !attachments.is_empty() {
+        println!("Attachments: {}", attachments.join(", "));
+    }
+}
+
+fn cmd_show(
+    vault: Option<&Path>,
+    entry_path: &str,
+    attrs: &[String],
+    show_protected: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    // Refuse protected --attr without --show-protected up front, in both modes.
+    if let Some(p) = attrs.iter().find(|a| is_protected_field(a)) {
+        if !show_protected {
+            return Err(anyhow!(
+                "attribute '{p}' is protected; pass --show-protected to print it"
+            ));
+        }
+    }
+    match vault {
+        Some(path) => {
+            let v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            if !attrs.is_empty() {
+                for attr in attrs {
+                    let value = v
+                        .get_field(&id, attr)
+                        .context("reading field")?
+                        .ok_or_else(|| anyhow!("entry '{entry_path}' has no field '{attr}'"))?;
+                    println!("{value}");
+                }
+                return Ok(());
+            }
+            let summary = v.get_entry(&id).expect("entry just resolved");
+            let notes = v.get_field(&id, "Notes").ok().flatten();
+            let password = if show_protected {
+                v.get_field(&id, "Password").ok().flatten()
+            } else {
+                None
+            };
+            let custom = v.custom_field_names(&id).unwrap_or_default();
+            print_show_summary(
+                &summary.display_path(),
+                &summary.title,
+                summary.username.as_deref(),
+                summary.url.as_deref(),
+                notes.as_deref(),
+                password.as_deref(),
+                &custom,
+                &summary.attachment_names,
+            );
+        }
+        None => {
+            if !attrs.is_empty() {
+                // Raw values (possibly protected) — always code-gated.
+                let code = require_session_code()?;
+                for attr in attrs {
+                    let resp = daemon_call(&daemon::Request::GetField {
+                        path: entry_path.to_string(),
+                        field: attr.clone(),
+                        code: code.clone(),
+                    })?;
+                    let value = resp
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
+                    println!("{value}");
+                }
+                return Ok(());
+            }
+            let resp = daemon_call(&daemon::Request::ShowEntry {
+                path: entry_path.to_string(),
+            })?;
+            let entry = resp
+                .get("entry")
+                .ok_or_else(|| anyhow!("malformed daemon response: missing 'entry'"))?;
+            let s = |k: &str| entry.get(k).and_then(Value::as_str).map(str::to_string);
+            let list = |k: &str| -> Vec<String> {
+                entry
+                    .get(k)
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let title = s("title").unwrap_or_default();
+            let group_path = list("group_path");
+            let display = if group_path.is_empty() {
+                title.clone()
+            } else {
+                format!("{}/{title}", group_path.join("/"))
+            };
+            // The summary RPC never carries protected values; fetch Password
+            // separately (code-gated) only when asked to reveal it.
+            let password = if show_protected {
+                let code = require_session_code()?;
+                let resp = daemon_call(&daemon::Request::GetField {
+                    path: entry_path.to_string(),
+                    field: "Password".to_string(),
+                    code,
+                })?;
+                resp.get("value")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            } else {
+                None
+            };
+            print_show_summary(
+                &display,
+                &title,
+                s("username").as_deref(),
+                s("url").as_deref(),
+                s("notes").as_deref(),
+                password.as_deref(),
+                &list("custom_fields"),
+                &list("attachments"),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_search(vault: Option<&Path>, term: &str, pw_stdin: bool) -> Result<()> {
+    match vault {
+        Some(path) => {
+            let v = open_vault(path, pw_stdin)?;
+            for entry in v.search_entries(term) {
+                print_list_row(
+                    &entry.id.to_string(),
+                    &entry.display_path(),
+                    &entry.attachment_names,
+                );
+            }
+        }
+        None => {
+            let resp = daemon_call(&daemon::Request::Search {
+                term: term.to_string(),
+            })?;
+            let entries = resp
+                .get("entries")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            print_entry_rows_from_json(&entries);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_edit(
+    vault: Option<&Path>,
+    entry_path: &str,
+    title: Option<&str>,
+    username: Option<&str>,
+    url: Option<&str>,
+    notes: Option<&str>,
+    password_prompt: bool,
+    set_args: &[String],
+    unsets: &[String],
+    pw_stdin: bool,
+) -> Result<()> {
+    let mut sets = std::collections::BTreeMap::new();
+    for (flag, field) in [(username, "UserName"), (url, "URL"), (notes, "Notes")] {
+        if let Some(value) = flag {
+            sets.insert(field.to_string(), value.to_string());
+        }
+    }
+    for kv in set_args {
+        let (k, v) = parse_set_kv(kv)?;
+        sets.insert(k, v);
+    }
+    if password_prompt {
+        sets.insert(
+            "Password".to_string(),
+            prompt_entry_password().context("reading new password")?,
+        );
+    }
+    if sets.is_empty() && unsets.is_empty() && title.is_none() {
+        return Err(anyhow!(
+            "nothing to change: pass --title/--username/--url/--notes, \
+             --password-prompt, --set or --unset"
+        ));
+    }
+    match vault {
+        Some(path) => {
+            let mut v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            for (field, value) in &sets {
+                v.set_field(&id, field, value)
+                    .with_context(|| format!("setting {field}"))?;
+            }
+            for field in unsets {
+                v.remove_field(&id, field)
+                    .with_context(|| format!("unsetting {field}"))?;
+            }
+            if let Some(new_title) = title {
+                v.set_field(&id, "Title", new_title).context("renaming")?;
+            }
+            v.save().context("saving vault")?;
+        }
+        None => {
+            let code = require_session_code()?;
+            daemon_call(&daemon::Request::EditEntry {
+                path: entry_path.to_string(),
+                title: title.map(str::to_string),
+                sets,
+                unsets: unsets.to_vec(),
+                code,
+            })?;
+        }
+    }
+    println!("updated '{entry_path}'");
+    Ok(())
+}
+
+fn report_removal(what: &str, recycled: bool) {
+    if recycled {
+        println!("moved '{what}' to the recycle bin");
+    } else {
+        println!("permanently deleted '{what}'");
+    }
+}
+
+fn cmd_rm(vault: Option<&Path>, entry_path: &str, permanent: bool, pw_stdin: bool) -> Result<()> {
+    let recycled = match vault {
+        Some(path) => {
+            let mut v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            let recycled = v.recycle_entry(&id, permanent).context("removing entry")?;
+            v.save().context("saving vault")?;
+            recycled
+        }
+        None => {
+            let code = require_session_code()?;
+            let resp = daemon_call(&daemon::Request::RemoveEntry {
+                path: entry_path.to_string(),
+                permanent,
+                code,
+            })?;
+            resp.get("recycled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        }
+    };
+    report_removal(entry_path, recycled);
+    Ok(())
+}
+
+fn cmd_mv(vault: Option<&Path>, entry_path: &str, group_path: &str, pw_stdin: bool) -> Result<()> {
+    match vault {
+        Some(path) => {
+            let mut v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            v.move_entry(&id, group_path).context("moving entry")?;
+            v.save().context("saving vault")?;
+        }
+        None => {
+            let code = require_session_code()?;
+            daemon_call(&daemon::Request::MoveEntry {
+                path: entry_path.to_string(),
+                group: group_path.to_string(),
+                code,
+            })?;
+        }
+    }
+    println!("moved '{entry_path}' to '{group_path}'");
+    Ok(())
+}
+
+fn cmd_mkdir(vault: Option<&Path>, group_path: &str, pw_stdin: bool) -> Result<()> {
+    match vault {
+        Some(path) => {
+            let mut v = open_vault(path, pw_stdin)?;
+            v.add_group(group_path).context("creating group")?;
+            v.save().context("saving vault")?;
+        }
+        None => {
+            let code = require_session_code()?;
+            daemon_call(&daemon::Request::Mkdir {
+                path: group_path.to_string(),
+                code,
+            })?;
+        }
+    }
+    println!("created group '{group_path}'");
+    Ok(())
+}
+
+fn cmd_rmdir(
+    vault: Option<&Path>,
+    group_path: &str,
+    permanent: bool,
+    recursive: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    let recycled = match vault {
+        Some(path) => {
+            let mut v = open_vault(path, pw_stdin)?;
+            let recycled = v
+                .remove_group(group_path, permanent, recursive)
+                .context("removing group")?;
+            v.save().context("saving vault")?;
+            recycled
+        }
+        None => {
+            let code = require_session_code()?;
+            let resp = daemon_call(&daemon::Request::Rmdir {
+                path: group_path.to_string(),
+                permanent,
+                recursive,
+                code,
+            })?;
+            resp.get("recycled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        }
+    };
+    report_removal(group_path, recycled);
+    Ok(())
+}
+
 /// `trove materialize` — open vault, run the materialize plan in-process,
 /// hold open until SIGINT, then wipe.
 ///
@@ -2281,6 +3029,9 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
                 | CoreError::NotFound(_)
                 | CoreError::EntryNotFound(_)
                 | CoreError::InvalidPath(_)
+                | CoreError::GroupNotFound(_)
+                | CoreError::GroupExists(_)
+                | CoreError::GroupNotEmpty(_)
                 | CoreError::Io(_) => EXIT_USER_ERROR,
             };
         }

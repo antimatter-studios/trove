@@ -4,6 +4,23 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## Unreleased
+
+- Generic entry CRUD, closing the first keepassxc-cli parity gap
+  (docs/parity-plan.md): `add password` (prompt / `--secret-stdin` /
+  `--generate`), `get password`, `show` (`--attr`, `--show-protected`),
+  `edit` (`--set`/`--unset`/`--password-prompt`), `search`, `mkdir`, `mv`,
+  `rm`, `rmdir`. All work offline (`--vault`) and daemon-routed (new
+  `ShowEntry`/`Search`/`GetField`/`AddPassword`/`EditEntry`/`RemoveEntry`/
+  `MoveEntry`/`Mkdir`/`Rmdir` RPCs, session-gated like `add ssh`).
+- `rm`/`rmdir` follow KeePassXC recycle-bin semantics: entries and groups move
+  to a shared "Recycle Bin" (created on demand, `Meta/RecycleBinUUID`
+  convention); a repeat remove — or `--permanent` — destroys.
+- CRUD interop is proven against real `keepassxc-cli` in the conformance
+  suite: trove-authored vaults read back field-for-field, keepassxc-authored
+  vaults round-trip through every trove command, and trove-recycled entries
+  appear in keepassxc's own Recycle Bin view.
+
 ## v0.4.0 — 2026-07-01
 
 - `add file` / `add gpg` now target the vault unlocked in the running daemon by
