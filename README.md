@@ -52,9 +52,10 @@ Linux + macOS. The daemon (`troved`) is the long-running process; `trove` is a t
 
 The global `--vault <PATH>` flag selects **offline mode**: the command opens
 that kdbx file directly, no daemon and no session — what scripts and agents
-want. It works before or after the subcommand. Omit it and `add ssh/gpg/file`,
-`generate ssh`, `get`, and `list` instead talk to the running daemon, gated by
-the `TROVE_SESSION` code (see step 2). Only `init` and `materialize` are
+want. It works before or after the subcommand. Omit it and the vault commands
+(`add`, `get`, `show`, `edit`, `search`, `rm`, `mv`, `mkdir`, `rmdir`,
+`generate ssh`, `list`) instead talk to the running daemon, gated by the
+`TROVE_SESSION` code (see step 2). Only `init` and `materialize` are
 offline-only.
 
 ```sh
@@ -80,6 +81,14 @@ shred -u /tmp/sec.gpg
 # (Linux) / non-ephemeral path (macOS soft-allowlist).
 trove --vault my-vault.kdbx add file kubeconfig-prod \
     --src ./kubeconfig --target /tmp/kubeconfig --mode 0600
+
+# Plain password entries — full KeePassXC-style CRUD:
+trove --vault my-vault.kdbx add password Web/github --username alice --generate
+trove --vault my-vault.kdbx show Web/github          # password stays masked
+trove --vault my-vault.kdbx get password Web/github  # script primitive
+trove --vault my-vault.kdbx edit Web/github --set Env=prod
+trove --vault my-vault.kdbx search github
+trove --vault my-vault.kdbx rm Web/github            # → shared Recycle Bin
 
 # Inspect what's in the vault (offline — reads the file directly).
 trove --vault my-vault.kdbx list

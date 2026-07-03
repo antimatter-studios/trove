@@ -52,13 +52,113 @@ trove [--vault <PATH>] list
 
 Print one line per entry: `<uuid>  <path>  [attachments: ...]`. Recursively walks all groups. With `--vault` it reads the file directly (offline); without it, it lists the daemon's currently unlocked vault.
 
+## trove show
+
+```
+trove [--vault <PATH>] show [OPTIONS] <ENTRY_PATH>
+```
+
+Print an entry's details: path, title, username, URL, notes, custom-field
+*names* and attachment names. The password is masked unless `--show-protected`.
+
+| Flag | Description |
+| --- | --- |
+| `--attr <NAME>` | Print only this attribute's raw value (repeatable, order kept). Any standard or custom field name. `Password` (protected) additionally requires `--show-protected`. |
+| `--show-protected` | Reveal protected values instead of masking/refusing. |
+
+Daemon mode: the summary view uses the ungated `ShowEntry` RPC (which never
+carries protected values); `--attr` values and the revealed password go
+through the code-gated `GetField` RPC (`TROVE_SESSION`).
+
+## trove search
+
+```
+trove [--vault <PATH>] search <TERM>
+```
+
+Case-insensitive substring match over title, username, URL, notes and group
+path. Protected values are **never** searched. Output is `list`-shaped.
+
+## trove edit
+
+```
+trove [--vault <PATH>] edit [OPTIONS] <ENTRY_PATH>
+```
+
+Field-level edits on an existing entry. At least one change flag is required.
+
+| Flag | Description |
+| --- | --- |
+| `--title <T>` | Rename the entry (leaf title only; use `mv` to relocate). |
+| `--username <U>` / `--url <U>` / `--notes <N>` | Set the standard fields. |
+| `--password-prompt` | Prompt (hidden, confirmed) for a new password. |
+| `--set NAME=VALUE` | Set a custom field (repeatable). |
+| `--unset NAME` | Remove a custom field (repeatable). |
+
+## trove rm
+
+```
+trove [--vault <PATH>] rm [--permanent] <ENTRY_PATH>
+```
+
+Remove an entry the KeePassXC way: move it to the recycle bin (created on
+demand with the `Meta/RecycleBinUUID` convention, so KeePassXC sees the same
+bin). An entry already inside the bin — or any entry with `--permanent` — is
+destroyed outright. Reports which of the two happened.
+
+## trove mv
+
+```
+trove [--vault <PATH>] mv <ENTRY_PATH> <GROUP_PATH>
+```
+
+Move an entry to an **existing** group (`Root` for the top level).
+Destinations are never created implicitly — `trove mkdir` first.
+
+## trove mkdir
+
+```
+trove [--vault <PATH>] mkdir <GROUP_PATH>
+```
+
+Create a group hierarchy (`mkdir -p` semantics for intermediate segments).
+Errors if the leaf group already exists.
+
+## trove rmdir
+
+```
+trove [--vault <PATH>] rmdir [--permanent [--recursive]] <GROUP_PATH>
+```
+
+Remove a group and everything in it — to the recycle bin by default.
+`--permanent` destroys instead, and then a non-empty group additionally
+requires `--recursive`.
+
 ## trove add
 
 ```
 trove add <COMMAND>
 ```
 
-Subcommands: `ssh`, `gpg`, `file`, `help`.
+Subcommands: `password`, `ssh`, `gpg`, `file`, `help`.
+
+### trove add password
+
+```
+trove [--vault <PATH>] add password [OPTIONS] <ENTRY_PATH>
+```
+
+| Argument / flag | Description |
+| --- | --- |
+| `<ENTRY_PATH>` | Entry path, e.g. `"github.com"` or `"Work/github"`. Groups auto-created. |
+| `--username <U>` / `--url <U>` / `--notes <N>` | Optional standard fields. |
+| `--generate` | Mint the password (OS CSPRNG, letters+digits) and print it once to stdout — the only echo, so it pipes. |
+| `--length <N>` | Length for `--generate` (default 20). |
+| `--secret-stdin` | Read the password from stdin. With the global `--password-stdin`, the vault password is line 1 and this secret line 2. |
+| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+
+Without `--generate`/`--secret-stdin` the secret is prompted for (hidden,
+confirmed). Adding to an existing entry path is refused — use `trove edit`.
 
 ### trove add ssh
 
@@ -124,7 +224,17 @@ Stores file bytes as a real KDBX `<Binary>` attachment and sets the following en
 trove get <COMMAND>
 ```
 
-Subcommands: `ssh`, `gpg`, `file`, `help`. Each resolves the entry by path/title and writes to `--out` (or stdout). With `--vault` they read the file directly (offline); without it, they ask the daemon, gated by `TROVE_SESSION`. On Unix, private `--out` files are created `0600` via `O_CREAT|O_EXCL`.
+Subcommands: `password`, `ssh`, `gpg`, `file`, `help`. Each resolves the entry by path/title and writes to `--out` (or stdout). With `--vault` they read the file directly (offline); without it, they ask the daemon, gated by `TROVE_SESSION`. On Unix, private `--out` files are created `0600` via `O_CREAT|O_EXCL`.
+
+### trove get password
+
+```
+trove [--vault <PATH>] get password <ENTRY_PATH>
+```
+
+Print the entry's password to stdout — the script primitive
+(`trove get password api/stripe | …`). For a whole-entry view use `trove
+show`. Daemon mode routes through the code-gated `GetField` RPC.
 
 ### trove get ssh
 
