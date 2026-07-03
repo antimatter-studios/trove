@@ -34,6 +34,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// path denotes this same group rather than a child of it.
 const DEFAULT_GROUP: &str = "Root";
 
+/// Name of the recycle-bin group we create on demand, matching KeePassXC's
+/// default so both tools resolve the same bin. The authoritative pointer is
+/// `Meta/RecycleBinUUID`; the name is only cosmetic.
+pub const RECYCLE_BIN_GROUP: &str = "Recycle Bin";
+
 /// Stable identifier for an entry within a vault.
 ///
 /// Backed by the kdbx UUID, serialised as a string for wire/disk transport.
@@ -452,6 +457,226 @@ impl Vault {
             .map(|e| e.id())
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))
     }
+
+    /// Remove a string field from an entry. No-op if the field is absent.
+    pub fn remove_field(&mut self, id: &EntryId, field: &str) -> Result<()> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let mut entry = self
+            .inner
+            .db
+            .entry_mut(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        entry.fields.remove(field);
+        Ok(())
+    }
+
+    /// Resolve a `/`-separated group path to its `GroupId`. The empty string
+    /// or a bare/leading `Root` (case-insensitive) names the root group,
+    /// mirroring [`Vault::add_entry`] path semantics. Group navigation is
+    /// case-insensitive.
+    fn resolve_group(&self, path: &str) -> Result<keepass::db::GroupId> {
+        let segs = parse_group_path(path)?;
+        if segs.is_empty() {
+            return Ok(self.inner.db.root().id());
+        }
+        let refs: Vec<&str> = segs.iter().map(String::as_str).collect();
+        self.inner
+            .db
+            .root()
+            .group_by_path(&refs)
+            .map(|g| g.id())
+            .ok_or_else(|| Error::GroupNotFound(path.to_string()))
+    }
+
+    /// Move an entry to an existing group. The target must already exist —
+    /// a typo'd destination should error, not silently grow a new hierarchy
+    /// (use [`Vault::add_group`] first to create one).
+    pub fn move_entry(&mut self, id: &EntryId, group_path: &str) -> Result<()> {
+        let target = self.resolve_group(group_path)?;
+        let entry_id = self.lookup_entry_id(id)?;
+        let mut entry = self
+            .inner
+            .db
+            .entry_mut(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        entry
+            .move_to(target)
+            .map_err(|_| Error::GroupNotFound(group_path.to_string()))?;
+        Ok(())
+    }
+
+    /// Create a group hierarchy with `mkdir -p` semantics for intermediate
+    /// segments. Errors with [`Error::GroupExists`] if the leaf group already
+    /// exists (matching `keepassxc-cli mkdir`).
+    pub fn add_group(&mut self, path: &str) -> Result<()> {
+        let segs = parse_group_path(path)?;
+        if segs.is_empty() {
+            return Err(Error::GroupExists(DEFAULT_GROUP.to_string()));
+        }
+        let mut current_id = self.inner.db.root().id();
+        for (i, segment) in segs.iter().enumerate() {
+            let is_leaf = i == segs.len() - 1;
+            let mut current = self
+                .inner
+                .db
+                .group_mut(current_id)
+                .expect("walked GroupId always resolves");
+            let existing = current.group_by_name_mut(segment).map(|g| g.id());
+            current_id = match existing {
+                Some(_) if is_leaf => return Err(Error::GroupExists(path.to_string())),
+                Some(id) => id,
+                None => current.add_group().edit(|g| g.name = segment.clone()).id(),
+            };
+        }
+        Ok(())
+    }
+
+    /// Ensure the recycle-bin group exists, creating it and pointing
+    /// `Meta/RecycleBinUUID` at it (KeePassXC's own convention) if missing.
+    fn ensure_recycle_bin(&mut self) -> keepass::db::GroupId {
+        if let Some(bin) = self.inner.db.recycle_bin() {
+            return bin.id();
+        }
+        let id = self
+            .inner
+            .db
+            .root_mut()
+            .add_group()
+            .edit(|g| g.name = RECYCLE_BIN_GROUP.to_string())
+            .id();
+        self.inner.db.meta.recyclebin_uuid = Some(id.uuid());
+        self.inner.db.meta.recyclebin_enabled = Some(true);
+        self.inner.db.meta.recyclebin_changed = Some(keepass::db::Times::now());
+        id
+    }
+
+    /// Is this group inside the recycle-bin subtree (including the bin itself)?
+    fn is_in_recycle_bin(&self, group_id: keepass::db::GroupId) -> bool {
+        let Some(bin) = self.inner.db.recycle_bin() else {
+            return false;
+        };
+        let bin_id = bin.id();
+        let mut cur = Some(group_id);
+        while let Some(gid) = cur {
+            if gid == bin_id {
+                return true;
+            }
+            cur = self
+                .inner
+                .db
+                .group(gid)
+                .and_then(|g| g.parent().map(|p| p.id()));
+        }
+        false
+    }
+
+    /// Delete an entry the KeePassXC way: move it to the recycle bin, unless
+    /// it is already inside the bin or the bin is disabled in Meta — then it
+    /// is destroyed. `permanent` forces outright destruction.
+    ///
+    /// Returns `true` if the entry was recycled, `false` if destroyed.
+    pub fn recycle_entry(&mut self, id: &EntryId, permanent: bool) -> Result<bool> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let parent_id = {
+            let entry = self
+                .inner
+                .db
+                .entry(entry_id)
+                .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+            entry.parent().id()
+        };
+        let bin_enabled = self.inner.db.meta.recyclebin_enabled.unwrap_or(true);
+        if permanent || !bin_enabled || self.is_in_recycle_bin(parent_id) {
+            self.delete_entry(id)?;
+            return Ok(false);
+        }
+        let bin = self.ensure_recycle_bin();
+        let mut entry = self
+            .inner
+            .db
+            .entry_mut(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        entry
+            .move_to(bin)
+            .expect("recycle bin group id always resolves");
+        Ok(true)
+    }
+
+    /// Remove a group. Default: move it (contents and all) to the recycle
+    /// bin, mirroring KeePassXC. With `permanent` (or the bin disabled, or
+    /// the group already inside the bin) it is destroyed instead — and a
+    /// non-empty group is only destroyed when `recursive` is also set.
+    ///
+    /// Returns `true` if recycled, `false` if destroyed.
+    pub fn remove_group(&mut self, path: &str, permanent: bool, recursive: bool) -> Result<bool> {
+        let gid = self.resolve_group(path)?;
+        if gid == self.inner.db.root().id() {
+            return Err(Error::InvalidPath("cannot remove the root group".into()));
+        }
+        let (empty, in_bin) = {
+            let g = self.inner.db.group(gid).expect("resolved id");
+            let empty = g.entries().next().is_none() && g.groups().next().is_none();
+            (empty, self.is_in_recycle_bin(gid))
+        };
+        let bin_enabled = self.inner.db.meta.recyclebin_enabled.unwrap_or(true);
+        if permanent || !bin_enabled || in_bin {
+            if !empty && !recursive {
+                return Err(Error::GroupNotEmpty(path.to_string()));
+            }
+            self.inner.db.group_mut(gid).expect("resolved id").remove();
+            return Ok(false);
+        }
+        let bin = self.ensure_recycle_bin();
+        self.inner
+            .db
+            .group_mut(gid)
+            .expect("resolved id")
+            .move_to(bin)
+            .map_err(|e| Error::Kdbx(format!("moving group to recycle bin: {e:?}")))?;
+        Ok(true)
+    }
+
+    /// Case-insensitive substring search over title, username, URL, notes
+    /// and the group path. Protected values are never searched.
+    pub fn search_entries(&self, term: &str) -> Vec<EntrySummary> {
+        let needle = term.to_lowercase();
+        self.inner
+            .db
+            .iter_all_entries()
+            .filter(|e| {
+                let hay = |s: Option<&str>| s.is_some_and(|v| v.to_lowercase().contains(&needle));
+                hay(e.get_title())
+                    || hay(e.get_username())
+                    || hay(e.get_url())
+                    || hay(e.get("Notes"))
+                    || build_group_path(e)
+                        .join("/")
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .map(|e| summarise(&e))
+            .collect()
+    }
+
+    /// Names of an entry's custom string fields (everything beyond the five
+    /// standard kdbx fields), sorted. For `show`-style listings.
+    pub fn custom_field_names(&self, id: &EntryId) -> Result<Vec<String>> {
+        const STANDARD: [&str; 5] = ["Title", "UserName", "Password", "URL", "Notes"];
+        let entry_id = self.lookup_entry_id(id)?;
+        let entry = self
+            .inner
+            .db
+            .entry(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        let mut names: Vec<String> = entry
+            .fields
+            .keys()
+            .filter(|k| !STANDARD.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        names.sort();
+        Ok(names)
+    }
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -527,6 +752,30 @@ fn parse_entry_path(s: &str) -> Result<(Vec<String>, String)> {
         groups.remove(0);
     }
     Ok((groups, last.to_string()))
+}
+
+/// Like [`parse_entry_path`] but for a pure group path: every segment names a
+/// group, there is no entry leaf. The empty string or a bare `Root`
+/// (case-insensitive) resolves to the root group → empty vec; a leading
+/// `Root/` segment is dropped the same way `parse_entry_path` drops it.
+fn parse_group_path(s: &str) -> Result<Vec<String>> {
+    if s.is_empty() || s.eq_ignore_ascii_case(DEFAULT_GROUP) {
+        return Ok(Vec::new());
+    }
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return Err(Error::InvalidPath(format!(
+            "path '{s}' has empty segment; leading/trailing/double '/' is not allowed"
+        )));
+    }
+    let mut segs: Vec<String> = parts.into_iter().map(String::from).collect();
+    if segs
+        .first()
+        .is_some_and(|g| g.eq_ignore_ascii_case(DEFAULT_GROUP))
+    {
+        segs.remove(0);
+    }
+    Ok(segs)
 }
 
 fn open_err_to_error(e: keepass::error::DatabaseOpenError) -> Error {

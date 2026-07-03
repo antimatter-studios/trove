@@ -22,4 +22,13 @@ pub enum Error {
 
     #[error("invalid entry path: {0}")]
     InvalidPath(String),
+
+    #[error("group not found: {0}")]
+    GroupNotFound(String),
+
+    #[error("group already exists: {0}")]
+    GroupExists(String),
+
+    #[error("group not empty: {0} (pass --recursive to delete it and its contents)")]
+    GroupNotEmpty(String),
 }
