@@ -73,6 +73,15 @@ struct Cli {
     #[arg(long = "vault", global = true, value_name = "PATH")]
     vault: Option<PathBuf>,
 
+    /// Unlock with a composite key: this keyfile PLUS the password. Applies
+    /// wherever a vault is opened — offline `--vault` commands, `init`
+    /// (locks the new vault with the composite key), and `unlock` (the
+    /// daemon holds the keyfile bytes in memory for re-saves). Accepts any
+    /// format KeePassXC does: XML v1/v2, raw 32-byte, hex-64, or an
+    /// arbitrary file (hashed with SHA-256).
+    #[arg(long = "key-file", global = true, value_name = "PATH")]
+    key_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -601,8 +610,26 @@ fn require_vault(vault: Option<&Path>) -> Result<&Path> {
     })
 }
 
+/// The `--key-file` bytes, read once in `run()` before any command executes.
+/// A read-only global mirroring the flag's global scope (same trust model as
+/// the `TROVE_SOCK` env override) — every vault-opening path consults it via
+/// [`global_keyfile`] without threading a parameter through each command.
+static KEY_FILE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+
+fn global_keyfile() -> Option<&'static [u8]> {
+    KEY_FILE.get().and_then(|o| o.as_deref())
+}
+
 fn run(cli: Cli) -> Result<()> {
     let pw_stdin = cli.password_stdin;
+    // Fail fast on an unreadable keyfile, before any password prompt.
+    let keyfile_bytes = match cli.key_file.as_deref() {
+        Some(p) => {
+            Some(std::fs::read(p).with_context(|| format!("reading key file {}", p.display()))?)
+        }
+        None => None,
+    };
+    KEY_FILE.set(keyfile_bytes).expect("run() is called once");
     // The global offline selector. `Some` → operate on this file directly;
     // `None` → use the daemon (for commands that have a daemon mode). Commands
     // with no daemon mode (init/materialize) require it via `require_vault`.
@@ -1158,8 +1185,15 @@ fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
     } else {
         prompt_new_password().context("reading new vault password")?
     };
-    let _vault = Vault::create(vault_path, &password).context("creating vault")?;
-    println!("created vault at {}", vault_path.display());
+    let _vault = Vault::create_with_key(vault_path, &password, global_keyfile())
+        .context("creating vault")?;
+    match global_keyfile() {
+        Some(_) => println!(
+            "created vault at {} (composite key: password + key file)",
+            vault_path.display()
+        ),
+        None => println!("created vault at {}", vault_path.display()),
+    }
     Ok(())
 }
 
@@ -1800,7 +1834,8 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     } else {
         rpassword::prompt_password("Vault password: ").context("reading vault password")?
     };
-    Vault::open(path, &password).with_context(|| format!("opening vault {}", path.display()))
+    Vault::open_with_key(path, &password, global_keyfile())
+        .with_context(|| format!("opening vault {}", path.display()))
 }
 
 fn prompt_new_password() -> Result<String> {
@@ -2671,6 +2706,10 @@ fn cmd_unlock(
         path: vault_str,
         password,
         timeout,
+        keyfile: global_keyfile().map(|bytes| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        }),
     };
     let (resp, autospawned) = match daemon::send_autospawn_reporting(&req) {
         Ok(v) => v,
