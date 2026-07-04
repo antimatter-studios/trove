@@ -4,7 +4,45 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
-## Unreleased
+## v0.5.0 — 2026-07-04
+
+Full `keepassxc-cli` command parity (the seven gaps in
+`docs/parity-plan.md`, all proven against the real `keepassxc-cli` binary in
+CI), plus beyond-parity features `keepassxc-cli` has no equivalent for. The
+individual entries below are grouped by theme.
+
+**Generic entry management (parity G1):** `add password`, `get password`,
+`show` (`--attr`, `--show-protected`), `edit` (`--set`/`--unset`/
+`--password-prompt`), `search`, `mkdir`, `mv`, `rm`, `rmdir` — offline and
+daemon-routed, with KeePassXC recycle-bin semantics.
+
+**Composite keys (parity G2, G7):** global `--key-file` (every KeePassXC
+keyfile format) and `--yubikey <SLOT>[:SERIAL]` HMAC-SHA1 challenge-response
+(behind `--features yubikey`, Linux-only for now).
+
+**TOTP (parity G3):** `add totp` + `show --totp`, stored as KeePassXC's
+`otpauth://` `otp` field; codes match keepassxc-cli in both directions.
+
+**Generation + audit (parity G4):** `generate password`/`diceware`,
+`estimate` (zxcvbn), `analyze --hibp` (offline breach check, exits 1 to gate
+CI).
+
+**Clipboard (parity G5):** `clip` with a hash-guarded detached auto-clear.
+
+**Vault ops (parity G6):** `merge` (proven equivalent to keepassxc-cli's
+merge), `export xml|csv` (re-importable), `db-edit` (rekey + Argon2 retune),
+`db-info`. Fixed a latent bug: entry mutations now stamp
+`LastModificationTime`/`LocationChanged`, so trove edits no longer silently
+lose KDBX merges in any tool.
+
+**Beyond parity:** `exec <scope> -- cmd` (secrets scoped to one process tree,
+wiped on exit — the `op run` of kdbx); `--json` on `list`/`search`/`db-info`;
+`git-credential` helper; `resolve trove://…` secret references.
+
+**Also:** `TROVE_SPAWN_TIMEOUT_SECS` knob for the daemon auto-spawn wait;
+`docs/security-review-2026-07-04.md`; unpredictable `exec` temp-dir names.
+
+### Detailed entries
 
 - `trove git-credential <get|store|erase>` (beyond parity): a git credential
   helper backed by the vault. `git config credential.helper "trove --vault
