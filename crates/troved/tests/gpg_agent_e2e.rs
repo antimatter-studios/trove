@@ -79,6 +79,18 @@ async fn spawn_agent_with_keys(
     handle
 }
 
+/// Connect with retries: `bind()` creates the socket file a moment before
+/// `listen()` accepts, so an eager connect can hit ECONNREFUSED under load.
+async fn connect_retry(sock: &Path) -> UnixStream {
+    for _ in 0..100 {
+        match UnixStream::connect(sock).await {
+            Ok(s) => return s,
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    UnixStream::connect(sock).await.expect("connect")
+}
+
 /// Read the greeting (single OK line). Panics if the agent doesn't speak
 /// proper Assuan.
 async fn expect_greeting(
@@ -127,7 +139,7 @@ async fn assuan_basic_handshake() {
             .expect("at least one key");
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
 
-    let stream = UnixStream::connect(&sock).await.expect("connect");
+    let stream = connect_retry(&sock).await;
     let (rh, mut wh) = stream.into_split();
     let mut reader = BufReader::new(rh).lines();
 
@@ -176,7 +188,7 @@ async fn keyinfo_and_havekey() {
     let grip = key.keygrip_hex();
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
 
-    let stream = UnixStream::connect(&sock).await.expect("connect");
+    let stream = connect_retry(&sock).await;
     let (rh, mut wh) = stream.into_split();
     let mut reader = BufReader::new(rh).lines();
     expect_greeting(&mut reader).await;
@@ -225,7 +237,7 @@ async fn pksign_full_round_trip_signs_and_verifies() {
     let public_q = *key.public_q();
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
 
-    let stream = UnixStream::connect(&sock).await.expect("connect");
+    let stream = connect_retry(&sock).await;
     let (rh, mut wh) = stream.into_split();
     let mut reader = BufReader::new(rh).lines();
     expect_greeting(&mut reader).await;
@@ -306,7 +318,7 @@ async fn unknown_command_returns_err() {
     let sock = tmp.path().join("gpg.sock");
     let _agent = spawn_agent_with_keys(&sock, vec![]).await;
 
-    let stream = UnixStream::connect(&sock).await.expect("connect");
+    let stream = connect_retry(&sock).await;
     let (rh, mut wh) = stream.into_split();
     let mut reader = BufReader::new(rh).lines();
     expect_greeting(&mut reader).await;
@@ -327,7 +339,7 @@ async fn scd_returns_no_smartcard_daemon() {
     let sock = tmp.path().join("gpg.sock");
     let _agent = spawn_agent_with_keys(&sock, vec![]).await;
 
-    let stream = UnixStream::connect(&sock).await.expect("connect");
+    let stream = connect_retry(&sock).await;
     let (rh, mut wh) = stream.into_split();
     let mut reader = BufReader::new(rh).lines();
     expect_greeting(&mut reader).await;
