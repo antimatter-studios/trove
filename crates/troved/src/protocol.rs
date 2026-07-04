@@ -201,6 +201,23 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
+    /// Code-gated read: the entry's CURRENT TOTP code. The daemon computes it
+    /// from the protected `otp` field; only the ephemeral code (plus validity
+    /// window) crosses the wire — never the shared secret.
+    GetTotp {
+        path: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: set an entry's `otp` field from an `otpauth://` URI
+    /// (validated server-side; entry created mkdir-p if absent).
+    AddTotp {
+        path: String,
+        // NOTE: sensitive — carries the TOTP shared secret. Never Debug-print.
+        uri: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -340,6 +357,17 @@ impl std::fmt::Debug for Request {
                 .field("recursive", recursive)
                 .field("code", &"<redacted>")
                 .finish(),
+            Request::GetTotp { path, .. } => f
+                .debug_struct("GetTotp")
+                .field("path", path)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::AddTotp { path, .. } => f
+                .debug_struct("AddTotp")
+                .field("path", path)
+                .field("uri", &"<redacted>")
+                .field("code", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -461,6 +489,12 @@ pub enum OkBody {
     Recycled {
         recycled: bool,
     },
+    /// Response to `GetTotp`: the ephemeral code and its validity window.
+    Totp {
+        totp_code: String,
+        valid_for_secs: u64,
+        period_secs: u64,
+    },
     /// Response to `SshAgentList`: the public keys the agent serves.
     SshAgentList {
         ssh_keys: Vec<SshKeyDto>,
@@ -532,5 +566,12 @@ impl Response {
     }
     pub fn ok_recycled(recycled: bool) -> Self {
         Response::Ok(OkBody::Recycled { recycled })
+    }
+    pub fn ok_totp(code: trove_core::TotpCode) -> Self {
+        Response::Ok(OkBody::Totp {
+            totp_code: code.code,
+            valid_for_secs: code.valid_for_secs,
+            period_secs: code.period_secs,
+        })
     }
 }

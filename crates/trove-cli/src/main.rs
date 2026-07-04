@@ -198,12 +198,18 @@ enum Command {
         entry_path: String,
         /// Print only this attribute's raw value (repeatable, order kept).
         /// Standard names: Title, UserName, Password, URL, Notes — plus any
-        /// custom field. Password additionally requires --show-protected.
+        /// custom field. Protected attributes (Password, otp) additionally
+        /// require --show-protected.
         #[arg(long = "attr", value_name = "NAME")]
         attrs: Vec<String>,
-        /// Reveal protected values (Password) instead of refusing.
+        /// Reveal protected values (Password, otp) instead of refusing.
         #[arg(long = "show-protected")]
         show_protected: bool,
+        /// Print the entry's CURRENT TOTP code (computed from its `otp`
+        /// otpauth URI, KeePassXC-compatible). In daemon mode only the
+        /// ephemeral code crosses the wire — never the shared secret.
+        #[arg(long, conflicts_with = "attrs")]
+        totp: bool,
     },
 
     /// Search entries: case-insensitive substring match over title, username,
@@ -437,6 +443,34 @@ enum AddResource {
         /// this secret is line 2.
         #[arg(long = "secret-stdin")]
         secret_stdin: bool,
+    },
+
+    /// Attach a TOTP (2FA) generator to an entry, stored as the `otp` field
+    /// in KeePassXC's otpauth-URI format — codes render identically in both
+    /// tools. The entry is created if missing (groups mkdir -p). Read codes
+    /// with `trove show <entry> --totp`.
+    ///
+    /// Provide either a full `--uri otpauth://totp/...` (from the site's QR
+    /// code) or a bare `--secret` (the base32 "manual entry" code) plus
+    /// optional `--digits/--period/--algorithm`.
+    Totp {
+        /// Entry path, e.g. "github.com" or "Work/github".
+        entry_path: String,
+        /// Full otpauth:// URI.
+        #[arg(long, conflicts_with_all = ["secret", "digits", "period", "algorithm"], required_unless_present = "secret")]
+        uri: Option<String>,
+        /// Base32 shared secret (as sites display it for manual entry).
+        #[arg(long)]
+        secret: Option<String>,
+        /// Code length (default 6).
+        #[arg(long, default_value_t = 6)]
+        digits: u32,
+        /// Code period in seconds (default 30).
+        #[arg(long, default_value_t = 30)]
+        period: u32,
+        /// HMAC algorithm: SHA1 (default, near-universal), SHA256 or SHA512.
+        #[arg(long, default_value = "SHA1")]
+        algorithm: String,
     },
 
     /// Store an SSH private key on the unlocked vault, addressed by entry path.
@@ -741,7 +775,14 @@ fn run(cli: Cli) -> Result<()> {
             entry_path,
             attrs,
             show_protected,
-        } => cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin),
+            totp,
+        } => {
+            if totp {
+                cmd_show_totp(vault, &entry_path, pw_stdin)
+            } else {
+                cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin)
+            }
+        }
         Command::Search { term } => cmd_search(vault, &term, pw_stdin),
         Command::Edit {
             entry_path,
@@ -778,6 +819,26 @@ fn run(cli: Cli) -> Result<()> {
             permanent,
             recursive,
         } => cmd_rmdir(vault, &group_path, permanent, recursive, pw_stdin),
+        Command::Add {
+            resource:
+                AddResource::Totp {
+                    entry_path,
+                    uri,
+                    secret,
+                    digits,
+                    period,
+                    algorithm,
+                },
+        } => cmd_add_totp(
+            vault,
+            &entry_path,
+            uri.as_deref(),
+            secret.as_deref(),
+            digits,
+            period,
+            &algorithm,
+            pw_stdin,
+        ),
         Command::Add {
             resource:
                 AddResource::Password {
@@ -2067,10 +2128,11 @@ fn daemon_call(req: &daemon::Request) -> Result<Value> {
     Ok(resp)
 }
 
-/// Only `Password` is protected among the standard kdbx fields (trove-core
-/// stores exactly that one with the Protected flag; see `Vault::set_field`).
+/// The fields trove-core stores with the kdbx Protected flag (see
+/// `Vault::set_field`): `Password` and `otp` — the same pair KeePassXC
+/// memory-protects by default.
 fn is_protected_field(name: &str) -> bool {
-    name.eq_ignore_ascii_case("password")
+    name.eq_ignore_ascii_case("password") || name.eq_ignore_ascii_case("otp")
 }
 
 /// Prompt (hidden) for an entry password, twice, requiring a non-empty match.
@@ -2562,6 +2624,106 @@ fn cmd_rmdir(
         }
     };
     report_removal(group_path, recycled);
+    Ok(())
+}
+
+/// `trove show <entry> --totp`: print the current code. Offline computes
+/// in-process; daemon mode uses the code-gated `GetTotp` RPC, which returns
+/// only the ephemeral code — the shared secret stays in the daemon.
+fn cmd_show_totp(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
+    match vault {
+        Some(path) => {
+            let v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            let totp = v.totp_now(&id).context("computing totp")?;
+            println!("{}", totp.code);
+            report_totp_window(totp.valid_for_secs);
+        }
+        None => {
+            let code = require_session_code()?;
+            let resp = daemon_call(&daemon::Request::GetTotp {
+                path: entry_path.to_string(),
+                code,
+            })?;
+            let totp_code = resp
+                .get("totp_code")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("malformed daemon response: missing 'totp_code'"))?;
+            println!("{totp_code}");
+            if let Some(secs) = resp.get("valid_for_secs").and_then(Value::as_u64) {
+                report_totp_window(secs);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// On a TTY, note the remaining validity on stderr (stdout stays exactly the
+/// code, so `trove show x --totp | pbcopy` works).
+fn report_totp_window(valid_for_secs: u64) {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        eprintln!("(valid for {valid_for_secs}s)");
+    }
+}
+
+/// `trove add totp`: build/validate the otpauth URI and store it.
+#[allow(clippy::too_many_arguments)]
+fn cmd_add_totp(
+    vault: Option<&Path>,
+    entry_path: &str,
+    uri: Option<&str>,
+    secret: Option<&str>,
+    digits: u32,
+    period: u32,
+    algorithm: &str,
+    pw_stdin: bool,
+) -> Result<()> {
+    let uri = match (uri, secret) {
+        (Some(u), _) => u.to_string(),
+        (None, Some(s)) => {
+            let algo = algorithm.to_uppercase();
+            if !["SHA1", "SHA256", "SHA512"].contains(&algo.as_str()) {
+                return Err(anyhow!(
+                    "unsupported --algorithm '{algorithm}' (SHA1, SHA256 or SHA512)"
+                ));
+            }
+            // Base32 secrets are [A-Z2-7=]; strip the spaces sites add for
+            // readability and normalize case before building the URI.
+            let s: String = s
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_uppercase();
+            let label = entry_path.rsplit('/').next().unwrap_or(entry_path);
+            format!(
+                "otpauth://totp/{label}?secret={s}&period={period}&digits={digits}&algorithm={algo}"
+            )
+        }
+        (None, None) => unreachable!("clap requires --uri or --secret"),
+    };
+    match vault {
+        Some(path) => {
+            let mut v = open_vault(path, pw_stdin)?;
+            let id = match v.find_by_title(entry_path) {
+                Some(id) => id,
+                None => v.add_entry(entry_path).context("creating entry")?,
+            };
+            v.set_totp_uri(&id, &uri).context("setting otp")?;
+            v.save().context("saving vault")?;
+        }
+        None => {
+            let code = require_session_code()?;
+            daemon_call(&daemon::Request::AddTotp {
+                path: entry_path.to_string(),
+                uri,
+                code,
+            })?;
+        }
+    }
+    println!("stored TOTP on '{entry_path}' — read codes with `trove show {entry_path} --totp`");
     Ok(())
 }
 
@@ -3071,6 +3233,8 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
                 | CoreError::GroupNotFound(_)
                 | CoreError::GroupExists(_)
                 | CoreError::GroupNotEmpty(_)
+                | CoreError::NoTotp(_)
+                | CoreError::Totp(_)
                 | CoreError::Io(_) => EXIT_USER_ERROR,
             };
         }
