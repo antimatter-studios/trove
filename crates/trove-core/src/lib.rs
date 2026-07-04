@@ -98,6 +98,27 @@ impl EntrySummary {
     }
 }
 
+/// Counts from a [`Vault::merge_from`], by merge-event kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergeSummary {
+    pub created: usize,
+    pub updated: usize,
+    pub relocated: usize,
+    pub deleted: usize,
+}
+
+/// Non-secret database facts for `db-info`.
+#[derive(Debug, Clone)]
+pub struct DbInfo {
+    pub version: String,
+    pub cipher: String,
+    pub compression: String,
+    pub kdf: String,
+    pub entries: usize,
+    pub groups: usize,
+    pub recycle_bin: bool,
+}
+
 /// One generated TOTP code plus its validity window, for display.
 #[derive(Debug, Clone)]
 pub struct TotpCode {
@@ -138,6 +159,19 @@ impl Drop for VaultInner {
             k.zeroize();
         }
     }
+}
+
+/// Stamp an entry's `LastModificationTime` — every content mutation calls
+/// this, matching KeePassXC (KDBX merge resolves conflicts by this time, so
+/// stale stamps make trove edits silently lose merges).
+fn touch_modified(entry: &mut keepass::db::EntryMut<'_>) {
+    entry.times.last_modification = Some(keepass::db::Times::now());
+}
+
+/// Stamp an entry's `LocationChanged` — every relocation calls this (the
+/// KDBX merge algorithm uses it to resolve concurrent moves).
+fn touch_location(entry: &mut keepass::db::EntryMut<'_>) {
+    entry.times.location_changed = Some(keepass::db::Times::now());
 }
 
 /// Build the composite `DatabaseKey` from a password and optional keyfile
@@ -397,6 +431,7 @@ impl Vault {
         } else {
             entry.set_unprotected(field, value);
         }
+        touch_modified(&mut entry);
         Ok(())
     }
 
@@ -419,6 +454,7 @@ impl Vault {
         // we'd accumulate orphans on rewrites.
         entry.remove_attachment_by_name(name);
         entry.add_attachment(name, Value::Unprotected(bytes.to_vec()));
+        touch_modified(&mut entry);
         Ok(())
     }
 
@@ -448,6 +484,7 @@ impl Vault {
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
         entry.remove_attachment_by_name(name);
+        touch_modified(&mut entry);
         Ok(())
     }
 
@@ -555,6 +592,7 @@ impl Vault {
         entry
             .move_to(target)
             .map_err(|_| Error::GroupNotFound(group_path.to_string()))?;
+        touch_location(&mut entry);
         Ok(())
     }
 
@@ -652,6 +690,7 @@ impl Vault {
         entry
             .move_to(bin)
             .expect("recycle bin group id always resolves");
+        touch_location(&mut entry);
         Ok(true)
     }
 
@@ -749,6 +788,146 @@ impl Vault {
         uri.parse::<keepass::db::TOTP>()
             .map_err(|e| Error::Totp(format!("invalid otpauth URI: {e}")))?;
         self.set_field(id, "otp", uri)
+    }
+
+    /// Merge another vault into this one (KDBX-standard three-way semantics:
+    /// last-write-wins by modification time, histories preserved — the same
+    /// algorithm KeePassXC applies). The source is opened with its own
+    /// credentials; this vault is saved afterwards.
+    pub fn merge_from(
+        &mut self,
+        source: &Path,
+        source_password: &str,
+        source_keyfile: Option<&[u8]>,
+    ) -> Result<MergeSummary> {
+        if !source.exists() {
+            return Err(Error::NotFound(source.to_path_buf()));
+        }
+        let mut file = std::fs::File::open(source)?;
+        let key = database_key(source_password, source_keyfile)?;
+        let other = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
+        // The KDBX merge algorithm reconciles DIVERGED COPIES of one vault
+        // (shared UUIDs). Two unrelated vaults have different root UUIDs and
+        // the upstream merge panics on them — refuse cleanly instead.
+        if other.root().id() != self.inner.db.root().id() {
+            return Err(Error::Kdbx(
+                "source is not a copy of this vault (different root UUID); merge \
+                 reconciles diverged copies — to combine unrelated vaults, import \
+                 entries explicitly"
+                    .to_string(),
+            ));
+        }
+        let log = self
+            .inner
+            .db
+            .merge(&other)
+            .map_err(|e| Error::Kdbx(format!("merge: {e}")))?;
+        let mut summary = MergeSummary::default();
+        for event in &log.events {
+            use keepass::db::merge::MergeEventType;
+            match event.event_type {
+                MergeEventType::Created => summary.created += 1,
+                MergeEventType::Updated => summary.updated += 1,
+                MergeEventType::LocationUpdated => summary.relocated += 1,
+                MergeEventType::Deleted => summary.deleted += 1,
+                // MergeEventType is #[non_exhaustive]; count anything the
+                // crate adds later as an update rather than dropping it.
+                _ => summary.updated += 1,
+            }
+        }
+        self.save()?;
+        Ok(summary)
+    }
+
+    /// The password this vault was opened/created with. For rekey flows that
+    /// change only one credential (e.g. adding a keyfile, keeping the
+    /// password) — the caller already presented it to open the vault.
+    pub fn current_password(&self) -> &str {
+        &self.inner.password
+    }
+
+    /// The keyfile bytes this vault was opened/created with, if any.
+    pub fn current_keyfile(&self) -> Option<&[u8]> {
+        self.inner.keyfile.as_deref()
+    }
+
+    /// Change the vault's credentials: a new password and/or keyfile. Takes
+    /// effect immediately (the vault is re-saved under the new composite key).
+    pub fn rekey(&mut self, new_password: &str, new_keyfile: Option<&[u8]>) -> Result<()> {
+        let old_password = std::mem::replace(&mut self.inner.password, new_password.to_string());
+        let old_keyfile =
+            std::mem::replace(&mut self.inner.keyfile, new_keyfile.map(<[u8]>::to_vec));
+        if let Err(e) = self.save() {
+            // Roll back so a failed save leaves a consistent in-memory state.
+            self.inner.password = old_password;
+            self.inner.keyfile = old_keyfile;
+            return Err(e);
+        }
+        let mut old_password = old_password;
+        old_password.zeroize();
+        if let Some(mut k) = old_keyfile {
+            k.zeroize();
+        }
+        Ok(())
+    }
+
+    /// Tune the Argon2 KDF (memory in KiB, iterations, parallelism). Applies
+    /// on save. Errors if the vault uses a non-Argon2 KDF (retune those by
+    /// opening in KeePassXC — trove only writes Argon2 vaults itself).
+    pub fn set_argon2_params(
+        &mut self,
+        memory_kib: Option<u64>,
+        iterations: Option<u64>,
+        parallelism: Option<u32>,
+    ) -> Result<()> {
+        match &mut self.inner.db.config.kdf_config {
+            keepass::config::KdfConfig::Argon2 {
+                iterations: it,
+                memory,
+                parallelism: par,
+                ..
+            } => {
+                if let Some(m) = memory_kib {
+                    *memory = m;
+                }
+                if let Some(i) = iterations {
+                    *it = i;
+                }
+                if let Some(p) = parallelism {
+                    *par = p;
+                }
+                self.save()
+            }
+            other => Err(Error::Kdbx(format!(
+                "vault uses a non-Argon2 KDF ({other:?}); retune it in KeePassXC"
+            ))),
+        }
+    }
+
+    /// Non-secret database facts for `db-info`.
+    pub fn db_info(&self) -> DbInfo {
+        let cfg = &self.inner.db.config;
+        let entries = self.inner.db.iter_all_entries().count();
+        let mut groups = 0usize;
+        // Count groups by walking ids from the root (excludes the root itself).
+        let mut stack = vec![self.inner.db.root().id()];
+        while let Some(gid) = stack.pop() {
+            if let Some(g) = self.inner.db.group(gid) {
+                for child in g.groups() {
+                    groups += 1;
+                    stack.push(child.id());
+                }
+            }
+        }
+        DbInfo {
+            version: format!("{}", cfg.version),
+            cipher: format!("{:?}", cfg.outer_cipher_config),
+            compression: format!("{:?}", cfg.compression_config),
+            kdf: format!("{:?}", cfg.kdf_config),
+            entries,
+            groups,
+            recycle_bin: self.inner.db.recycle_bin().is_some(),
+        }
     }
 
     /// Names of an entry's custom string fields (everything beyond the five
