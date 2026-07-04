@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 
 mod daemon;
+mod hibp;
 mod ipc;
+mod pwgen;
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, IsTerminal, Write};
@@ -291,6 +293,26 @@ enum Command {
         recursive: bool,
     },
 
+    /// Estimate a password's strength with zxcvbn (the estimator KeePassXC's
+    /// `estimate` is modeled on). Purely local — nothing leaves the machine.
+    /// Reads the password from stdin when the argument is omitted (preferred:
+    /// keeps secrets out of shell history).
+    Estimate {
+        /// The password to rate. PREFER stdin (omit this) — argv is visible
+        /// in `ps` and shell history.
+        password: Option<String>,
+    },
+
+    /// Check every password in the vault against an OFFLINE Have-I-Been-Pwned
+    /// dump (the sorted `pwned-passwords` file: `SHA1:count` per line).
+    /// Nothing is sent anywhere; the multi-GB file is binary-searched on
+    /// disk, never loaded. Offline-only: requires `--vault`.
+    Analyze {
+        /// Path to the sorted pwned-passwords dump.
+        #[arg(long, value_name = "FILE", required = true)]
+        hibp: PathBuf,
+    },
+
     /// Print, install, or check a shell completion script.
     ///
     /// With no flags, prints the script to stdout for SHELL. Without an
@@ -388,6 +410,44 @@ enum SshKeyType {
 
 #[derive(Debug, Subcommand)]
 enum GenerateResource {
+    /// Generate a random password and print it to stdout. Purely local: no
+    /// vault, no daemon. Default pool is lower+upper+digits; add `--special`
+    /// or subtract classes with `--no-lower/--no-upper/--no-numeric`.
+    Password {
+        /// Password length.
+        #[arg(long, default_value_t = 20)]
+        length: usize,
+        /// Include special characters (printable ASCII punctuation).
+        #[arg(long)]
+        special: bool,
+        /// Exclude lowercase letters.
+        #[arg(long = "no-lower")]
+        no_lower: bool,
+        /// Exclude uppercase letters.
+        #[arg(long = "no-upper")]
+        no_upper: bool,
+        /// Exclude digits.
+        #[arg(long = "no-numeric")]
+        no_numeric: bool,
+        /// Drop these characters from the pool (e.g. ambiguous "l1O0").
+        #[arg(long, default_value = "")]
+        exclude: String,
+        /// How many passwords to print (one per line).
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+
+    /// Generate a diceware passphrase from the EFF large wordlist
+    /// (7776 words ≈ 12.9 bits/word), hyphen-separated. Purely local.
+    Diceware {
+        /// Number of words (default 7 ≈ 90 bits).
+        #[arg(long, default_value_t = 7)]
+        words: usize,
+        /// How many passphrases to print (one per line).
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+
     /// Generate a new SSH keypair and store it on the vault, addressed by entry
     /// path — no need to run `ssh-keygen` yourself. Stores the private key, the
     /// derived `id.pub`, and `KeeAgent.settings`, exactly like `add ssh`.
@@ -771,6 +831,41 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_idle_set(seconds),
         Command::Idle { op: IdleOp::Get } => cmd_idle_get(),
         Command::MaterializeStatus => cmd_materialize_status(),
+        Command::Estimate { password } => cmd_estimate(password.as_deref()),
+        Command::Analyze { hibp } => cmd_analyze(require_vault(vault)?, &hibp, pw_stdin),
+        Command::Generate {
+            resource:
+                GenerateResource::Password {
+                    length,
+                    special,
+                    no_lower,
+                    no_upper,
+                    no_numeric,
+                    exclude,
+                    count,
+                },
+        } => {
+            let opts = pwgen::GenerateOpts {
+                length,
+                lower: !no_lower,
+                upper: !no_upper,
+                numeric: !no_numeric,
+                special,
+                exclude,
+            };
+            for _ in 0..count.max(1) {
+                println!("{}", pwgen::generate(&opts)?);
+            }
+            Ok(())
+        }
+        Command::Generate {
+            resource: GenerateResource::Diceware { words, count },
+        } => {
+            for _ in 0..count.max(1) {
+                println!("{}", pwgen::diceware(words)?);
+            }
+            Ok(())
+        }
         Command::Show {
             entry_path,
             attrs,
@@ -2148,17 +2243,15 @@ fn prompt_entry_password() -> Result<String> {
     Ok(first)
 }
 
-/// Mint a password from the OS CSPRNG: uniform over [A-Za-z0-9], no modulo
-/// bias (rejection sampling via `Uniform`). The full charset-policy generator
-/// arrives with `trove generate password`; this is the `--generate` baseline.
+/// Mint an entry password with `add password --generate` defaults
+/// (alphanumeric pool — see [`pwgen::GenerateOpts`] for the full policy
+/// surface exposed by `trove generate password`).
 fn generate_entry_password(len: usize) -> String {
-    use rand::distributions::{Distribution, Uniform};
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let dist = Uniform::from(0..CHARSET.len());
-    let mut rng = rand::rngs::OsRng;
-    (0..len)
-        .map(|_| CHARSET[dist.sample(&mut rng)] as char)
-        .collect()
+    pwgen::generate(&pwgen::GenerateOpts {
+        length: len,
+        ..pwgen::GenerateOpts::default()
+    })
+    .expect("default charset pool is never empty")
 }
 
 /// Parse a `--set NAME=VALUE` argument.
@@ -2724,6 +2817,72 @@ fn cmd_add_totp(
         }
     }
     println!("stored TOTP on '{entry_path}' — read codes with `trove show {entry_path} --totp`");
+    Ok(())
+}
+
+/// `trove estimate` — zxcvbn strength rating. Stdin (one line) when no
+/// argument; the report goes to stdout, never echoing the password back.
+fn cmd_estimate(password: Option<&str>) -> Result<()> {
+    let owned;
+    let password = match password {
+        Some(p) => p,
+        None => {
+            owned = read_password_from_stdin().context("reading password from stdin")?;
+            &owned
+        }
+    };
+    let e = zxcvbn::zxcvbn(password, &[]);
+    let guesses = e.guesses();
+    println!("Length:      {}", password.chars().count());
+    println!("Entropy:     {:.1} bits", (guesses as f64).log2());
+    println!("Score:       {}/4", u8::from(e.score()));
+    if let Some(fb) = e.feedback() {
+        if let Some(w) = fb.warning() {
+            println!("Warning:     {w}");
+        }
+        for s in fb.suggestions() {
+            println!("Suggestion:  {s}");
+        }
+    }
+    Ok(())
+}
+
+/// `trove analyze --hibp <FILE>` — offline breach check of every password in
+/// the vault. Prints one line per breached entry (path + count); exits 0 with
+/// "no breached passwords" when clean. Exit 1 when breaches were found, so
+/// scripts and CI can gate on it.
+fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()> {
+    if !hibp_file.exists() {
+        return Err(anyhow!("HIBP file not found: {}", hibp_file.display()));
+    }
+    let v = open_vault(vault_path, pw_stdin)?;
+    let mut breached = 0usize;
+    let mut checked = 0usize;
+    for entry in v.list_entries() {
+        let Some(pw) = v.get_field(&entry.id, "Password").ok().flatten() else {
+            continue;
+        };
+        if pw.is_empty() {
+            continue;
+        }
+        checked += 1;
+        let hash = hibp::sha1_hex_upper(&pw);
+        if let Some(count) = hibp::lookup(hibp_file, &hash)? {
+            breached += 1;
+            println!("{}  seen {count} times in breaches", entry.display_path());
+        }
+    }
+    eprintln!("checked {checked} passwords, {breached} breached");
+    if breached > 0 {
+        // Same DaemonClassified channel the daemon paths use: user-level
+        // failure, exit 1 — CI can gate on `trove analyze`.
+        return Err(DaemonClassified {
+            message: format!("{breached} breached password(s) found"),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    println!("no breached passwords");
     Ok(())
 }
 
