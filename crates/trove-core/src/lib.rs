@@ -827,6 +827,42 @@ impl Vault {
             .collect()
     }
 
+    /// Resolve a `trove://` secret reference to a field value.
+    ///
+    /// Format: `trove://<entry-path>` (defaults to the `Password` field) or
+    /// `trove://<entry-path>/<Field>` (the last `/`-segment is the field name
+    /// when the whole path doesn't itself resolve to an entry). So
+    /// `trove://Infra/prod/postgres` yields that entry's password, and
+    /// `trove://Infra/prod/postgres/UserName` its username. Modeled on
+    /// 1Password's `op://` references.
+    ///
+    /// Errors: [`Error::InvalidPath`] if the string isn't a `trove://` ref,
+    /// [`Error::EntryNotFound`] if no entry matches, and [`Error::InvalidPath`]
+    /// again if the entry exists but the named field is absent.
+    pub fn resolve_ref(&self, reference: &str) -> Result<String> {
+        let body = reference
+            .strip_prefix("trove://")
+            .ok_or_else(|| Error::InvalidPath(format!("not a trove:// reference: {reference}")))?;
+        if body.is_empty() {
+            return Err(Error::InvalidPath("empty trove:// reference".into()));
+        }
+        // Prefer treating the whole body as an entry path (field = Password).
+        if let Some(id) = self.find_by_title(body) {
+            return self
+                .get_field(&id, "Password")?
+                .ok_or_else(|| Error::InvalidPath(format!("{reference}: entry has no Password")));
+        }
+        // Otherwise the last segment is the field name.
+        let (entry_path, field) = body
+            .rsplit_once('/')
+            .ok_or_else(|| Error::EntryNotFound(body.to_string()))?;
+        let id = self
+            .find_by_title(entry_path)
+            .ok_or_else(|| Error::EntryNotFound(entry_path.to_string()))?;
+        self.get_field(&id, field)?
+            .ok_or_else(|| Error::InvalidPath(format!("{reference}: entry has no field '{field}'")))
+    }
+
     /// Current TOTP code for an entry, computed from its `otp` field (an
     /// `otpauth://` URI — KeePassXC's native storage format).
     pub fn totp_now(&self, id: &EntryId) -> Result<TotpCode> {
