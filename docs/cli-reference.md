@@ -295,6 +295,25 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
+## trove exec
+
+```
+trove --vault <PATH> exec <SCOPE> -- <cmd> [args…]
+```
+
+Run `<cmd>` with secrets injected for exactly its lifetime (the `op run` of
+kdbx). `<SCOPE>` is an entry path or a group path (all entries at or under
+it). String secrets become environment variables; file attachments
+materialize into a private per-run directory (0700, files 0600) that is
+wiped — overwritten, then removed — the moment the command exits, including
+on Ctrl-C. The child's exit code becomes trove's.
+
+Variable naming: an entry's `Exec.Env` custom field names the variable
+exactly (`Exec.Env=KUBECONFIG` on an attachment entry → `KUBECONFIG=<temp
+path>`; on a password entry → that variable carries the password). Without
+`Exec.Env`: `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE` (title
+uppercased, non-alphanumerics → `_`). Offline-only: requires `--vault`.
+
 ## trove merge
 
 ```
