@@ -9,6 +9,12 @@ readme = "README.md"
 keywords = ["keepass", "kdbx", "password", "vault", "crypto"]
 categories = ["cryptography", "parser-implementations"]
 
+[features]
+# Challenge-response unlock (YubiKey HMAC-SHA1, KeePassXC's scheme). Off by
+# default: the hardware path pulls USB/HID system dependencies. The software
+# `LocalChallenge` provider (same derivation) rides along for tests.
+yubikey = ["keepass/challenge_response"]
+
 [dependencies]
 # `totp` unlocks keepass's RFC 6238 implementation + otpauth-URI parsing
 # (Entry::get_otp), the engine behind `trove show --totp`. `_merge` unlocks
