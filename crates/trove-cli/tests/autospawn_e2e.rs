@@ -117,6 +117,10 @@ fn unlock_autospawns_troved_when_none_running() {
             .env("TROVE_SOCK", &sock)
             .env("TROVE_SSH_SOCK", tmp.path().join("ssh.sock"))
             .env("TROVE_GPG_SOCK", tmp.path().join("gpg.sock"))
+            // The default 5s socket-wait is tight when the whole workspace
+            // suite runs in parallel on a slow disk; give the spawn room so
+            // this stays a correctness test, not a timing race.
+            .env("TROVE_SPAWN_TIMEOUT_SECS", "30")
             .env("TROVE_DAEMON_BIN", &troved),
         PASSWORD,
     );

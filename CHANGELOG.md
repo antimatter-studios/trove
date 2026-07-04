@@ -6,6 +6,14 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- `trove git-credential <get|store|erase>` (beyond parity): a git credential
+  helper backed by the vault. `git config credential.helper "trove --vault
+  ~/v.kdbx git-credential"` — `git push` authenticates against an entry
+  matched by URL host (and username when git sends one), with no plaintext
+  `~/.git-credentials`. store/erase are accepted and ignored.
+- `trove resolve trove://<entry>[/<field>]` (beyond parity): print one
+  referenced secret (field defaults to Password), à la 1Password's `op://` —
+  the primitive for config templating (`export DB=$(trove resolve …)`).
 - `trove exec <SCOPE> -- cmd…` (beyond parity): run any command with secrets
   injected for exactly its lifetime — string secrets as env vars, file
   attachments materialized into a private 0700 per-run dir, everything wiped

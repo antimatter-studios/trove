@@ -295,6 +295,33 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
+## trove git-credential
+
+```
+git config credential.helper "trove --vault ~/v.kdbx git-credential"
+```
+
+A git credential helper. git appends the operation and speaks its
+`key=value` protocol on stdin/stdout. `get` matches an entry by `URL` host
+(scheme/port/path ignored; also filtered by username when git provides one)
+and replies with that entry's `username`/`password`; no match yields an empty
+reply so git falls back to its next helper or prompt. `store`/`erase` are
+accepted and ignored — trove is a deliberate vault, not an autofilled cache.
+Offline-only. With `--password-stdin`, the vault password is stdin line 1 and
+git's request block follows.
+
+## trove resolve
+
+```
+trove --vault <PATH> resolve trove://<entry-path>[/<field>]
+```
+
+Print one referenced secret to stdout. The field defaults to `Password`;
+`trove://Infra/prod/postgres/UserName` names it explicitly (last `/`-segment
+when the whole path isn't itself an entry). The scripting primitive for
+config templating: `export PGPASSWORD=$(trove --vault v resolve
+trove://Infra/prod/postgres)`. Offline-only.
+
 ## trove exec
 
 ```
@@ -520,6 +547,7 @@ All env vars are read at process start.
 | `TROVE_SSH_SOCK` | `$XDG_RUNTIME_DIR/trove-ssh.sock` or `${TMPDIR:-/tmp}/trove-ssh-$UID.sock` | Path of the SSH agent socket. |
 | `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |
 | `TROVE_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. |
+| `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
 | `TMPDIR` | `/tmp` | Used as fallback when `XDG_RUNTIME_DIR` is unset/empty. |
 | `UID` | `0` | Used in the `$TMPDIR` fallback path only. (`UID` is rarely set by login shells; the fallback path is essentially "/tmp/trove-0.sock" in practice — set `TROVE_SOCK` explicitly if running multi-user on a shared machine.) |

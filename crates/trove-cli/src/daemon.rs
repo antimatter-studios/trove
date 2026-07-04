@@ -120,7 +120,7 @@ pub fn send_autospawn_reporting(req: &Request) -> Result<(Value, bool)> {
         Ok(v) => Ok((v, false)),
         Err(e) if is_daemon_not_running(&e) && !autospawn_disabled() => {
             let spawned = spawn_daemon_serialized()?;
-            wait_for_socket(Duration::from_secs(5))?;
+            wait_for_socket(spawn_wait_timeout())?;
             send(req).map(|v| (v, spawned))
         }
         Err(e) => Err(e),
@@ -129,6 +129,18 @@ pub fn send_autospawn_reporting(req: &Request) -> Result<(Value, bool)> {
 
 fn autospawn_disabled() -> bool {
     matches!(std::env::var("TROVE_NO_AUTOSPAWN").as_deref(), Ok("1"))
+}
+
+/// How long to wait for a freshly-spawned daemon's socket to become
+/// reachable. Defaults to 5s — enough on any real machine. `TROVE_SPAWN_
+/// TIMEOUT_SECS` raises it for slow/loaded CI runners without changing the
+/// default UX (a genuinely-failed spawn still errors promptly for users).
+fn spawn_wait_timeout() -> Duration {
+    std::env::var("TROVE_SPAWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(5))
 }
 
 /// Resolve which `troved` binary to spawn. Order:
