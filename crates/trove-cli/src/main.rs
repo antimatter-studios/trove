@@ -86,6 +86,25 @@ struct Cli {
     #[arg(long = "key-file", global = true, value_name = "PATH")]
     key_file: Option<PathBuf>,
 
+    /// Unlock with a YubiKey HMAC-SHA1 challenge-response (KeePassXC's
+    /// scheme): `--yubikey <SLOT>[:SERIAL]`, e.g. `--yubikey 2`. Applies to
+    /// offline `--vault` commands and `init`. The device must stay connected
+    /// while writing — every save answers a fresh challenge.
+    #[cfg(feature = "yubikey")]
+    #[arg(long = "yubikey", global = true, value_name = "SLOT[:SERIAL]")]
+    yubikey: Option<String>,
+
+    /// Internal (tests): software challenge-response secret, hex — the same
+    /// HMAC-SHA1 derivation a YubiKey performs, without hardware.
+    #[cfg(feature = "yubikey")]
+    #[arg(
+        long = "cr-secret-hex",
+        global = true,
+        hide = true,
+        conflicts_with = "yubikey"
+    )]
+    cr_secret_hex: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -803,6 +822,40 @@ fn global_keyfile() -> Option<&'static [u8]> {
     KEY_FILE.get().and_then(|o| o.as_deref())
 }
 
+/// The `--yubikey`/`--cr-secret-hex` challenge-response provider, resolved
+/// once in `run()` (device lookup happens there, so a missing YubiKey fails
+/// fast before any password prompt). Same read-once model as [`KEY_FILE`].
+#[cfg(feature = "yubikey")]
+static CHALLENGE_RESPONSE: std::sync::OnceLock<Option<trove_core::ChallengeResponseKey>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "yubikey")]
+fn global_challenge_response() -> Option<&'static trove_core::ChallengeResponseKey> {
+    CHALLENGE_RESPONSE.get().and_then(|o| o.as_ref())
+}
+
+/// Resolve `--yubikey SLOT[:SERIAL]` to a device-backed provider.
+#[cfg(feature = "yubikey")]
+fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponseKey> {
+    use trove_core::ChallengeResponseKey;
+    let (slot, serial) = match spec.split_once(':') {
+        Some((s, ser)) => (
+            s,
+            Some(ser.parse::<u32>().context("parsing yubikey serial")?),
+        ),
+        None => (spec, None),
+    };
+    if !["1", "2"].contains(&slot) {
+        return Err(anyhow!("--yubikey slot must be 1 or 2, got '{slot}'"));
+    }
+    let yubikey = ChallengeResponseKey::get_yubikey(serial)
+        .map_err(|e| anyhow!("locating YubiKey: {e:?}"))?;
+    Ok(ChallengeResponseKey::YubikeyChallenge(
+        yubikey,
+        slot.to_string(),
+    ))
+}
+
 fn run(cli: Cli) -> Result<()> {
     let pw_stdin = cli.password_stdin;
     // Fail fast on an unreadable keyfile, before any password prompt.
@@ -813,6 +866,19 @@ fn run(cli: Cli) -> Result<()> {
         None => None,
     };
     KEY_FILE.set(keyfile_bytes).expect("run() is called once");
+    #[cfg(feature = "yubikey")]
+    {
+        // Fail fast: a missing/ambiguous device or bad hex should surface
+        // before any password prompt.
+        let cr = match (&cli.yubikey, &cli.cr_secret_hex) {
+            (Some(spec), _) => Some(resolve_yubikey(spec)?),
+            (None, Some(hex)) => Some(trove_core::ChallengeResponseKey::LocalChallenge(
+                hex.clone(),
+            )),
+            (None, None) => None,
+        };
+        CHALLENGE_RESPONSE.set(cr).expect("run() is called once");
+    }
     // The global offline selector. `Some` → operate on this file directly;
     // `None` → use the daemon (for commands that have a daemon mode). Commands
     // with no daemon mode (init/materialize) require it via `require_vault`.
@@ -1468,6 +1534,21 @@ fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
     } else {
         prompt_new_password().context("reading new vault password")?
     };
+    #[cfg(feature = "yubikey")]
+    if let Some(cr) = global_challenge_response() {
+        let _vault = Vault::create_with_challenge_response(
+            vault_path,
+            &password,
+            global_keyfile(),
+            cr.clone(),
+        )
+        .context("creating vault")?;
+        println!(
+            "created vault at {} (composite key incl. challenge-response)",
+            vault_path.display()
+        );
+        return Ok(());
+    }
     let _vault = Vault::create_with_key(vault_path, &password, global_keyfile())
         .context("creating vault")?;
     match global_keyfile() {
@@ -2117,6 +2198,11 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     } else {
         rpassword::prompt_password("Vault password: ").context("reading vault password")?
     };
+    #[cfg(feature = "yubikey")]
+    if let Some(cr) = global_challenge_response() {
+        return Vault::open_with_challenge_response(path, &password, global_keyfile(), cr.clone())
+            .with_context(|| format!("opening vault {}", path.display()));
+    }
     Vault::open_with_key(path, &password, global_keyfile())
         .with_context(|| format!("opening vault {}", path.display()))
 }

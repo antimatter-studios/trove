@@ -9,6 +9,12 @@ description = "Command-line client for trove"
 name = "trove"
 path = "src/main.rs"
 
+[features]
+# Challenge-response unlock (--yubikey). Linux-only for now: keepass pins
+# challenge_response's nusb backend, whose device enumeration doesn't compile
+# on macOS (nusb's busnum is Linux-only). CI builds+tests this on ubuntu.
+yubikey = ["trove-core/yubikey"]
+
 [dependencies]
 trove-core.workspace = true
 clap.workspace = true
