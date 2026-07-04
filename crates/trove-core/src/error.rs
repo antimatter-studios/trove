@@ -31,4 +31,10 @@ pub enum Error {
 
     #[error("group not empty: {0} (pass --recursive to delete it and its contents)")]
     GroupNotEmpty(String),
+
+    #[error("entry has no otp field: {0} (set one with `trove add totp`)")]
+    NoTotp(String),
+
+    #[error("totp error: {0}")]
+    Totp(String),
 }
