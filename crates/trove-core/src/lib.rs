@@ -98,6 +98,17 @@ impl EntrySummary {
     }
 }
 
+/// One generated TOTP code plus its validity window, for display.
+#[derive(Debug, Clone)]
+pub struct TotpCode {
+    /// The code digits (6–8 chars, or whatever the URI specifies).
+    pub code: String,
+    /// Seconds this code remains valid.
+    pub valid_for_secs: u64,
+    /// The TOTP period (usually 30s).
+    pub period_secs: u64,
+}
+
 /// An open, in-memory vault.
 ///
 /// Dropping the value drops the underlying decrypted material. Best-effort
@@ -370,14 +381,18 @@ impl Vault {
 
     /// Set or replace a string field on an entry. Standard fields:
     /// `"Title"`, `"UserName"`, `"Password"`, `"URL"`, `"Notes"`. Custom fields permitted.
+    ///
+    /// `Password` and `otp` are stored with the kdbx Protected flag —
+    /// matching KeePassXC, which memory-protects both by default.
     pub fn set_field(&mut self, id: &EntryId, field: &str, value: &str) -> Result<()> {
+        const PROTECTED_FIELDS: [&str; 2] = ["Password", "otp"];
         let entry_id = self.lookup_entry_id(id)?;
         let mut entry = self
             .inner
             .db
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        if field == "Password" {
+        if PROTECTED_FIELDS.contains(&field) {
             entry.set_protected(field, value);
         } else {
             entry.set_unprotected(field, value);
@@ -694,6 +709,46 @@ impl Vault {
             })
             .map(|e| summarise(&e))
             .collect()
+    }
+
+    /// Current TOTP code for an entry, computed from its `otp` field (an
+    /// `otpauth://` URI — KeePassXC's native storage format).
+    pub fn totp_now(&self, id: &EntryId) -> Result<TotpCode> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::Totp(e.to_string()))?
+            .as_secs();
+        self.totp_at(id, now)
+    }
+
+    /// TOTP code for an entry at a specific unix time. Deterministic — used
+    /// by tests (RFC 6238 vectors) and future countdown displays.
+    pub fn totp_at(&self, id: &EntryId, unix_secs: u64) -> Result<TotpCode> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let entry = self
+            .inner
+            .db
+            .entry(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        if entry.get("otp").is_none() {
+            return Err(Error::NoTotp(id.0.clone()));
+        }
+        let totp = entry.get_otp().map_err(|e| Error::Totp(e.to_string()))?;
+        let code = totp.value_at(unix_secs);
+        Ok(TotpCode {
+            code: code.code,
+            valid_for_secs: code.valid_for.as_secs(),
+            period_secs: code.period.as_secs(),
+        })
+    }
+
+    /// Set an entry's `otp` field from an `otpauth://` URI, validating it
+    /// parses as a TOTP spec first so garbage never lands in the vault. The
+    /// field is stored Protected (KeePassXC's own treatment).
+    pub fn set_totp_uri(&mut self, id: &EntryId, uri: &str) -> Result<()> {
+        uri.parse::<keepass::db::TOTP>()
+            .map_err(|e| Error::Totp(format!("invalid otpauth URI: {e}")))?;
+        self.set_field(id, "otp", uri)
     }
 
     /// Names of an entry's custom string fields (everything beyond the five
