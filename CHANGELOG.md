@@ -6,6 +6,14 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- TOTP (keepassxc-cli parity G3): `trove add totp` stores an `otpauth://` URI
+  in the Protected `otp` field (KeePassXC's own format — validated before
+  storing, whitespace-tolerant base32 `--secret` form included);
+  `trove show <entry> --totp` prints the current code (RFC 6238,
+  SHA1/256/512, 6–8 digits, custom period). Daemon mode adds code-gated
+  `GetTotp`/`AddTotp` RPCs — only the ephemeral code ever crosses the wire.
+  Interop proven against keepassxc-cli: identical codes both directions.
+  (Steam's non-standard 5-char variant is out of scope.)
 - Keyfile unlock (keepassxc-cli parity G2): global `--key-file <PATH>`
   composites the keyfile with the password wherever a vault is opened —
   offline commands, `init` (new vault locked with the pair), and `unlock`
