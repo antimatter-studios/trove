@@ -41,6 +41,13 @@ zxcvbn = "3"
 # `trove analyze --hibp` hashes vault passwords for offline lookups in the
 # sorted pwned-passwords dump. SHA-1 is HIBP's key format, not a trust choice.
 sha1 = "0.10"
+# `trove clip` — cross-platform clipboard (macOS pasteboard, Windows, X11;
+# wayland-data-control adds Wayland). The detached clearer re-reads the
+# clipboard and clears only if it still holds our value.
+arboard = { version = "3", features = ["wayland-data-control"] }
+# The clearer child receives a SHA-256 of the copied value on argv (never the
+# value itself — argv is world-readable) to decide whether clearing is safe.
+sha2 = "0.10"
 
 [build-dependencies]
 # Formats the dev-build timestamp (0.2.0-dev-YYYYMMDDHHMMSS) in build.rs.
