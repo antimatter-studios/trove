@@ -294,6 +294,21 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
+## trove clip
+
+```
+trove [--vault <PATH>] clip <ENTRY_PATH> [--attr NAME | --totp] [--timeout SECS]
+```
+
+Copy the entry's password (default), another attribute, or its current TOTP
+code to the system clipboard, then auto-clear after `--timeout` seconds
+(default 10; `0` disables). The clear is guarded: a detached child re-reads
+the clipboard and wipes it only if it still holds what trove put there —
+something you copied in the meantime is left alone. The child receives a
+SHA-256 of the value on argv, never the value. Offline with `--vault`;
+daemon-routed (code-gated `GetField`/`GetTotp`) without. Requires a
+clipboard: headless sessions get a clean error.
+
 ## trove generate password / diceware
 
 ```
