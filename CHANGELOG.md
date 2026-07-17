@@ -6,6 +6,12 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- Clipboard (keepassxc-cli parity G5): `trove clip <entry>` copies the
+  password (or `--attr NAME`, or `--totp` for the current code) and
+  auto-clears after `--timeout` seconds (default 10, 0 disables) via a
+  detached clearer that wipes ONLY if the clipboard still holds our value —
+  the comparison travels as a SHA-256 on argv, never the secret. Works
+  offline and daemon-routed; macOS/Windows/X11/Wayland via arboard.
 - Generation + audit (keepassxc-cli parity G4), all purely local:
   `trove generate password` (charset policy flags, `--exclude`, `--count`),
   `trove generate diceware` (EFF large wordlist, vendored, CC BY 3.0),

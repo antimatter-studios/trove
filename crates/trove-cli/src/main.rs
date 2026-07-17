@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod clip;
 mod daemon;
 mod hibp;
 mod ipc;
@@ -291,6 +292,32 @@ enum Command {
         /// With --permanent: allow destroying a non-empty group.
         #[arg(long)]
         recursive: bool,
+    },
+
+    /// Copy an entry's password (default), another attribute, or its current
+    /// TOTP code to the clipboard, then auto-clear after `--timeout` seconds
+    /// — but only if the clipboard still holds what we put there (someone
+    /// copying something else meanwhile is left alone).
+    Clip {
+        /// Entry path, e.g. "github.com" or "Work/github".
+        entry_path: String,
+        /// Copy this attribute instead of Password.
+        #[arg(long = "attr", value_name = "NAME", conflicts_with = "totp")]
+        attr: Option<String>,
+        /// Copy the entry's current TOTP code.
+        #[arg(long)]
+        totp: bool,
+        /// Seconds until the guarded auto-clear. 0 disables clearing.
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
+
+    /// Internal: the detached clipboard clearer (spawned by `clip`).
+    #[command(hide = true, name = "__clear-clipboard")]
+    ClearClipboard {
+        secs: u64,
+        /// SHA-256 of the copied value — clears only on a match.
+        hash: String,
     },
 
     /// Estimate a password's strength with zxcvbn (the estimator KeePassXC's
@@ -831,6 +858,16 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_idle_set(seconds),
         Command::Idle { op: IdleOp::Get } => cmd_idle_get(),
         Command::MaterializeStatus => cmd_materialize_status(),
+        Command::Clip {
+            entry_path,
+            attr,
+            totp,
+            timeout,
+        } => cmd_clip(vault, &entry_path, attr.as_deref(), totp, timeout, pw_stdin),
+        Command::ClearClipboard { secs, hash } => {
+            clip::run_clearer(secs, &hash)?;
+            Ok(())
+        }
         Command::Estimate { password } => cmd_estimate(password.as_deref()),
         Command::Analyze { hibp } => cmd_analyze(require_vault(vault)?, &hibp, pw_stdin),
         Command::Generate {
@@ -2817,6 +2854,86 @@ fn cmd_add_totp(
         }
     }
     println!("stored TOTP on '{entry_path}' — read codes with `trove show {entry_path} --totp`");
+    Ok(())
+}
+
+/// `trove clip` — resolve the value (Password by default, `--attr`, or the
+/// current TOTP code), copy it, and hand the guarded auto-clear to a
+/// detached child so this process can exit immediately.
+fn cmd_clip(
+    vault: Option<&Path>,
+    entry_path: &str,
+    attr: Option<&str>,
+    totp: bool,
+    timeout: u64,
+    pw_stdin: bool,
+) -> Result<()> {
+    let (value, label) = match vault {
+        Some(path) => {
+            let v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            if totp {
+                (v.totp_now(&id).context("computing totp")?.code, "TOTP code")
+            } else {
+                let name = attr.unwrap_or("Password");
+                let value = v
+                    .get_field(&id, name)
+                    .context("reading field")?
+                    .ok_or_else(|| anyhow!("entry '{entry_path}' has no field '{name}'"))?;
+                (
+                    value,
+                    if attr.is_none() {
+                        "password"
+                    } else {
+                        "attribute"
+                    },
+                )
+            }
+        }
+        None => {
+            let code = require_session_code()?;
+            if totp {
+                let resp = daemon_call(&daemon::Request::GetTotp {
+                    path: entry_path.to_string(),
+                    code,
+                })?;
+                let c = resp
+                    .get("totp_code")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("malformed daemon response: missing 'totp_code'"))?;
+                (c.to_string(), "TOTP code")
+            } else {
+                let name = attr.unwrap_or("Password");
+                let resp = daemon_call(&daemon::Request::GetField {
+                    path: entry_path.to_string(),
+                    field: name.to_string(),
+                    code,
+                })?;
+                let v = resp
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
+                (
+                    v.to_string(),
+                    if attr.is_none() {
+                        "password"
+                    } else {
+                        "attribute"
+                    },
+                )
+            }
+        }
+    };
+
+    clip::copy(&value)?;
+    if timeout > 0 {
+        clip::spawn_clearer(timeout, &clip::value_hash(&value))?;
+        println!("copied {label} from '{entry_path}' — clipboard clears in {timeout}s");
+    } else {
+        println!("copied {label} from '{entry_path}' (auto-clear disabled)");
+    }
     Ok(())
 }
 
