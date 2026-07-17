@@ -1,7 +1,7 @@
 //! Conformance-matrix harness: mint a logical vault spec with one *producer*,
 //! read it back with one *consumer*, and assert the recovered content matches —
 //! across every (producer × consumer × fixture) cell. Producers/consumers are
-//! "participants": linked `keepass` crate versions (0.12.5, 0.13.10) and the
+//! "participants": linked `keepass` crate versions (0.12.5, 0.13.13) and the
 //! external `keepassxc-cli` oracle (every version discovered on the box).
 //!
 //! Each cell has a *version-tagged expectation* (`expect()`), so a known
@@ -130,8 +130,8 @@ pub enum Compression {
 pub struct Config {
     /// KDBX4 minor version to *force* (0 → 4.0, 1 → 4.1), or `None` to use the
     /// producer's own native default. Native defaults differ by crate version
-    /// (0.12.5 → 4.0, 0.13.10 → 4.1), and a producer may be unable to *save* a
-    /// forced minor — keepass 0.13.10 dumps 4.1 only and rejects forced 4.0.
+    /// (0.12.5 → 4.0, 0.13.13 → 4.1), and a producer may be unable to *save* a
+    /// forced minor — keepass 0.13.13 dumps 4.1 only and rejects forced 4.0.
     /// Such cases are recorded in `expect_produce`.
     pub kdbx4_minor: Option<u32>,
     pub kdf: Kdf,
@@ -208,12 +208,18 @@ pub fn expected_repr(spec: &VaultSpec) -> VaultRepr {
 
 // ─────────────────────────── participants ──────────────────────────────────
 
+/// The exact `keepass_013` version this harness links, kept in lockstep with
+/// the `=0.13.13` pin in Cargo.toml. Single source for the participant label
+/// below so a version bump touches only the pin and this constant — not a
+/// scatter of hardcoded strings that silently go stale.
+const KEEPASS_013: &str = "0.13.13";
+
 /// A tool that can produce and/or consume a `.kdbx`.
 #[derive(Clone)]
 pub enum Participant {
     /// keepass crate 0.12.5 (linked under the bare `keepass` name).
     Crate012,
-    /// keepass crate 0.13.10 (linked as `keepass_013`).
+    /// keepass crate 0.13.13 (linked as `keepass_013`).
     Crate013,
     /// An external `keepassxc-cli` binary (one per discovered version).
     Keepassxc(keepassxc_party::Oracle),
@@ -233,7 +239,7 @@ impl Participant {
     pub fn label(&self) -> String {
         match self {
             Participant::Crate012 => "keepass-crate@0.12.5".to_string(),
-            Participant::Crate013 => "keepass-crate@0.13.10".to_string(),
+            Participant::Crate013 => format!("keepass-crate@{KEEPASS_013}"),
             Participant::Keepassxc(o) => format!("keepassxc-cli@{}", o.version),
         }
     }
@@ -323,13 +329,13 @@ pub enum ProduceExpectation {
 /// a producer cannot even mint a fixture. Keyed off the *config*, so it holds
 /// for every combinatorial fixture, not a hardcoded name.
 pub fn expect_produce(producer: &Participant, spec: &VaultSpec) -> ProduceExpectation {
-    // keepass 0.13.10's KDBX4 dumper writes minor 1 (4.1) only; any fixture
+    // keepass 0.13.13's KDBX4 dumper writes minor 1 (4.1) only; any fixture
     // forcing minor 0 (4.0) is rejected at save with "Unsupported database
     // version". keepass 0.12.5 saves 4.0 fine — so this is expected, not a
     // regression.
     if matches!(producer, Participant::Crate013) && spec.config.kdbx4_minor == Some(0) {
         return ProduceExpectation::CannotProduce(
-            "keepass 0.13.10 dumps KDBX 4.1 only; forced minor=0 (4.0) is rejected at save",
+            "keepass 0.13.13 dumps KDBX 4.1 only; forced minor=0 (4.0) is rejected at save",
         );
     }
     ProduceExpectation::CanProduce
@@ -346,7 +352,7 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &VaultSpec) 
     // Finding #1: keepass 0.12.5 serializes unset numeric <Meta> elements as
     // empty tags (`<MaintenanceHistoryDays/>`); keepassxc's strict reader does
     // toInt("") and bails with "Invalid number value". Config-independent, so it
-    // holds for every fixture. keepass 0.13.10 fixes this (omits unset
+    // holds for every fixture. keepass 0.13.13 fixes this (omits unset
     // numerics), so Crate013 → keepassxc is Pass.
     if matches!(producer, Crate012) && matches!(consumer, Keepassxc(_)) {
         return Expectation::Xfail(
@@ -354,16 +360,16 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &VaultSpec) 
         );
     }
 
-    // Finding #3: keepass 0.13.10 serializes entry <Tags> joined with ';', which
+    // Finding #3: keepass 0.13.13 serializes entry <Tags> joined with ';', which
     // keepass 0.12.5 does NOT split on read (it stores the whole string as a
-    // single tag). keepassxc and 0.13.10 split it fine; only 0.13.10 → 0.12.5
+    // single tag). keepassxc and 0.13.13 split it fine; only 0.13.13 → 0.12.5
     // breaks, and only when an entry actually has tags.
     if matches!(producer, Crate013)
         && matches!(consumer, Crate012)
         && spec.entries.iter().any(|e| !e.tags.is_empty())
     {
         return Expectation::Xfail(
-            "keepass 0.13.10 joins entry Tags with ';'; keepass 0.12.5 doesn't split on ';' (reads them as one tag)",
+            "keepass 0.13.13 joins entry Tags with ';'; keepass 0.12.5 doesn't split on ';' (reads them as one tag)",
         );
     }
 
