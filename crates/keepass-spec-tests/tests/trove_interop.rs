@@ -98,7 +98,7 @@ fn trove_output_is_readable_by_keepass_crate() {
     let bytes =
         trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a vault");
 
-    // The keepass crate (0.13.10) reads everything back with full fidelity.
+    // The keepass crate (0.13.13) reads everything back with full fidelity.
     let repr = crate_party::kp013::consume(&bytes, &pw_spec())
         .expect("keepass crate should open trove's output");
 
@@ -183,9 +183,9 @@ fn trove_can_read_crate_produced_vault() {
 
 /// 3. trove's output is READABLE by keepassxc, and trove's extension fields
 ///    survive a keepassxc open-and-save. This is the product-level proof that
-///    finding F1 is fixed: before the keepass 0.12.5 → 0.13.10 upgrade, keepassxc
+///    finding F1 is fixed: before the keepass 0.12.5 → 0.13.13 upgrade, keepassxc
 ///    rejected every trove vault with "Invalid number value" (empty numeric
-///    `<Meta>` elements); 0.13.10 omits unset numerics and trove now writes
+///    `<Meta>` elements); 0.13.13 omits unset numerics and trove now writes
 ///    KDBX 4.1, which keepassxc opens. We then have keepassxc OPEN AND SAVE the
 ///    vault and confirm trove's `Materialize.*` instructions, `KeeAgent.settings`
 ///    and `id` attachments come back byte-for-byte — mirroring
@@ -251,12 +251,12 @@ fn kdbx4_minor(bytes: &[u8]) -> u16 {
 
 /// 4. trove HEALS a legacy KDBX 4.0 vault on re-save. A vault written by keepass
 ///    0.12.5 (KDBX 4.0, with empty numeric `<Meta>` elements) is rejected by
-///    keepassxc with "Invalid number value". Current trove (keepass 0.13.10)
+///    keepassxc with "Invalid number value". Current trove (keepass 0.13.13)
 ///    opens it, and on save (a) bumps the version to KDBX 4.1 and (b) re-emits
 ///    `<Meta>` without the empty numerics — so keepassxc then opens it cleanly.
 ///
 ///    This guards the `Vault::save()` fix: the version bump (otherwise the
-///    0.13.10 writer rejects KDB4(0) with "Unsupported database version") and
+///    0.13.13 writer rejects KDB4(0) with "Unsupported database version") and
 ///    the Meta default-policy backfill.
 ///
 ///    REGRESSION WATCH: a failure at the `resave_with_added_ssh` step means

@@ -123,7 +123,7 @@ fn probe_version(path: &Path) -> Option<String> {
 ///
 /// # Downstream: the keepass CRATE can't read keepassxc's KDBX-3.1 attachments
 /// These are **consumer-side** bugs in the `keepass` crate (BOTH 0.12.5 and
-/// 0.13.10), not defects in this producer — keepassxc round-trips its own output
+/// 0.13.13), not defects in this producer — keepassxc round-trips its own output
 /// perfectly, and the XML we feed `import` is correct. The matrix records them as
 /// `Xfail` in `expect()` for the `Keepassxc → Crate0xx` cells whose fixture has
 /// attachments. Confirmed by reading produced vaults directly with each crate:

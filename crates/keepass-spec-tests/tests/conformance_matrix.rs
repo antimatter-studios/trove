@@ -45,7 +45,7 @@ fn conformance_matrix() {
 /// hand-author expected values; we assert that what the keepass crate reads is
 /// *byte-for-byte identical* before and after keepassxc's rewrite.
 ///
-/// Uses keepass 0.13.10 as producer/introspector (the version trove targets, and
+/// Uses keepass 0.13.13 as producer/introspector (the version trove targets, and
 /// the one keepassxc can read — 0.12.5 output trips the <Meta> bug).
 #[test]
 fn keepassxc_preserves_extensions_across_open_and_save() {

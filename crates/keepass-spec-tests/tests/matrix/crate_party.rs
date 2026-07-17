@@ -2,7 +2,7 @@
 //!
 //! Two `keepass` crates are linked under distinct names in `Cargo.toml`:
 //!   - `keepass`     = 0.12.5  -> module `kp012`
-//!   - `keepass_013` = 0.13.10 -> module `kp013`
+//!   - `keepass_013` = 0.13.13 -> module `kp013`
 //!
 //! Their public APIs are identical for everything we touch, so a single
 //! `macro_rules!` generates the per-version module; we invoke it twice. Each
@@ -58,7 +58,7 @@ macro_rules! crate_impl {
                 let mut cfg = DatabaseConfig::default();
                 // Only force the KDBX4 minor when the fixture asks for a specific
                 // one; otherwise keep this crate version's native default (0.12.5
-                // → 4.0, 0.13.10 → 4.1) since 0.13.10 can only *save* 4.1.
+                // → 4.0, 0.13.13 → 4.1) since 0.13.13 can only *save* 4.1.
                 if let Some(minor) = config.kdbx4_minor {
                     cfg.version = DatabaseVersion::KDB4(minor as u16);
                 }
