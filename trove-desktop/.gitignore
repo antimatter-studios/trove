@@ -1,0 +1,29 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Demo vaults bundled as manual-test fixtures (not real secrets). The monorepo
+# root .gitignore ignores *.kdbx to prevent committing real vaults; re-include
+# these known-password demo vaults so the app's vault-open flow stays testable.
+!fixtures/*.kdbx

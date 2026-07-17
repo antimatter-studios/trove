@@ -1,0 +1,95 @@
+# trove-desktop CI (monorepo)
+#
+# The Tauri GUI lives in `trove-desktop/` and is EXCLUDED from the Cargo
+# workspace (see root Cargo.toml), so the core CI (ci.yml) never builds it.
+# This workflow covers the desktop app on its own: the React/Vite frontend
+# (vitest) and the Tauri Rust backend (fmt / clippy / test), built by its own
+# manifest against the workspace `trove-core` (path dep).
+#
+# Path-filtered to `trove-desktop/**` and NOT a required status check, so a
+# core-only PR simply skips it (no merge deadlock), while a desktop-only PR
+# still gets the core required checks (which pass trivially — the app is
+# excluded from the workspace, so `cargo … --workspace` never touches it).
+
+name: Desktop CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["trove-desktop/**", ".github/workflows/desktop-ci.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["trove-desktop/**", ".github/workflows/desktop-ci.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: trove-desktop
+
+jobs:
+  frontend:
+    name: Frontend (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: trove-desktop/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test
+
+  backend:
+    name: Backend (rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: trove-desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: trove-desktop/package-lock.json
+
+      - name: Install Linux dependencies (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential \
+            file
+
+      # `tauri::generate_context!` embeds the built frontend at compile time, so
+      # the Rust crate won't compile (clippy/test included) until `dist/` exists.
+      - name: Build frontend (required to compile the Rust crate)
+        run: npm ci && npm run build
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: cargo clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked

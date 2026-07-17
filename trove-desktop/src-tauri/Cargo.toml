@@ -1,0 +1,28 @@
+[package]
+name = "trove-desktop"
+version = "2026.6.30-0"
+description = "Trove — a desktop vault manager"
+authors = ["Chris Thomas"]
+license = "MIT"
+edition = "2021"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name; without it
+# the two collide on Windows (rust-lang/cargo#8519).
+name = "trove_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# In the monorepo the GUI links trove-core directly from the workspace source,
+# so a core change is picked up without a crates.io publish + version bump. The
+# crate is still published to crates.io for external consumers; only the app,
+# the CLI and the daemon consume it by path.
+trove-core = { path = "../../crates/trove-core" }

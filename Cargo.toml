@@ -8,7 +8,13 @@ members = ["crates/trove-core", "crates/trove-cli", "crates/troved"]
 # it OUT of the workspace gives it its own Cargo.lock so the app's audited
 # dependency graph stays free of those advisories while the harness still tests
 # every version. It's built/tested via its own manifest (see CI).
-exclude = ["crates/keepass-spec-tests"]
+# `trove-desktop/src-tauri` is the Tauri GUI backend. Like keepass-spec-tests it
+# stays OUT of the workspace: Tauri drags in a large native dep tree (webkit,
+# gtk, …) with its own advisory surface, so excluding it keeps the CLI/library's
+# audited graph lean and gives the app its own Cargo.lock. It still links
+# `trove-core` by path (see trove-desktop/src-tauri/Cargo.toml) and is built via
+# its own manifest in the desktop CI/release workflows.
+exclude = ["crates/keepass-spec-tests", "trove-desktop/src-tauri"]
 
 [workspace.package]
 version = "0.5.0"
