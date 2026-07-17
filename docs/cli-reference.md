@@ -12,6 +12,7 @@ trove [OPTIONS] <COMMAND>
 | --- | --- |
 | `--vault <PATH>` | Operate **offline** on this kdbx file, bypassing the daemon. Global — works before or after the subcommand. See "Operating modes" below. |
 | `--password-stdin` | Read the vault password from stdin (one line) instead of prompting. For `init`, the single line becomes the password without a confirm step. Global — works on every subcommand. |
+| `--key-file <PATH>` | Composite key: this keyfile PLUS the password, wherever a vault is opened — offline `--vault` commands, `init` (locks the new vault with the pair), and `unlock` (the daemon holds the bytes in memory so its re-saves keep the composite key). Any format KeePassXC accepts: XML v1/v2, raw 32-byte, hex-64, or an arbitrary file (SHA-256). A wrong/missing keyfile fails like a wrong password (exit 2). |
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
 
@@ -63,8 +64,9 @@ Print an entry's details: path, title, username, URL, notes, custom-field
 
 | Flag | Description |
 | --- | --- |
-| `--attr <NAME>` | Print only this attribute's raw value (repeatable, order kept). Any standard or custom field name. `Password` (protected) additionally requires `--show-protected`. |
+| `--attr <NAME>` | Print only this attribute's raw value (repeatable, order kept). Any standard or custom field name. Protected attributes (`Password`, `otp`) additionally require `--show-protected`. |
 | `--show-protected` | Reveal protected values instead of masking/refusing. |
+| `--totp` | Print the entry's CURRENT TOTP code (from its `otp` otpauth URI, KeePassXC's format). Stdout is exactly the code (pipes cleanly); a TTY gets the remaining validity on stderr. Daemon mode uses the code-gated `GetTotp` RPC — only the ephemeral code crosses the wire, never the shared secret. |
 
 Daemon mode: the summary view uses the ungated `ShowEntry` RPC (which never
 carries protected values); `--attr` values and the revealed password go
@@ -159,6 +161,22 @@ trove [--vault <PATH>] add password [OPTIONS] <ENTRY_PATH>
 
 Without `--generate`/`--secret-stdin` the secret is prompted for (hidden,
 confirmed). Adding to an existing entry path is refused — use `trove edit`.
+
+### trove add totp
+
+```
+trove [--vault <PATH>] add totp <ENTRY_PATH> (--uri <URI> | --secret <BASE32> [--digits N] [--period N] [--algorithm A])
+```
+
+Attach a TOTP (2FA) generator: stored as the `otp` string field carrying an
+`otpauth://` URI — KeePassXC's native format, so codes render identically in
+both tools. The field is Protected (never searchable, `--attr otp` needs
+`--show-protected`). The entry is created if missing; an existing generator is
+replaced. `--secret` takes the base32 "manual entry" code sites display
+(whitespace tolerated), with `--digits` (default 6), `--period` (default 30s)
+and `--algorithm` (SHA1 default, SHA256, SHA512). The URI is validated before
+anything lands in the vault. Steam's 5-character variant is not supported.
+Read codes with `trove show <entry> --totp`.
 
 ### trove add ssh
 

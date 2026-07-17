@@ -90,12 +90,31 @@ pub async fn handle(
             path,
             password,
             timeout,
+            keyfile,
         } => {
             let path_buf = PathBuf::from(path);
+            // Decode composite-key material (if any) before the blocking open.
+            let keyfile_bytes = match keyfile {
+                Some(b64) => {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                        Ok(bytes) => Some(bytes),
+                        Err(e) => {
+                            return Handled {
+                                response: Response::err(format!("invalid keyfile encoding: {e}")),
+                                shutdown: false,
+                            }
+                        }
+                    }
+                }
+                None => None,
+            };
             // trove-core's Vault::open is sync (and may do blocking file I/O +
             // KDF work). Wrap it in spawn_blocking to keep the runtime healthy.
-            let result =
-                tokio::task::spawn_blocking(move || Vault::open(&path_buf, &password)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                Vault::open_with_key(&path_buf, &password, keyfile_bytes.as_deref())
+            })
+            .await;
             match result {
                 Ok(Ok(vault)) => {
                     // Pull SSH and GPG keys out of the vault before stashing
@@ -507,6 +526,12 @@ pub async fn handle(
                 state, session, key_store, gpg_store, peer_uid, &path, permanent, recursive, &code,
             )
             .await
+        }
+
+        Request::GetTotp { path, code } => get_totp(state, session, peer_uid, &path, &code).await,
+
+        Request::AddTotp { path, uri, code } => {
+            add_totp(state, session, peer_uid, &path, &uri, &code).await
         }
     }
 }
@@ -1300,6 +1325,67 @@ async fn rmdir(
     }
     reload_agent_stores(vault, key_store, gpg_store).await;
     ok_handled(Response::ok_recycled(recycled))
+}
+
+/// Code-gated read: compute the entry's current TOTP code from its protected
+/// `otp` field. Only the ephemeral code leaves the daemon, never the secret.
+async fn get_totp(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let guard = state.lock().await;
+    let vault = match guard.as_ref() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let id = match vault.find_by_title(path) {
+        Some(id) => id,
+        None => return err_handled(format!("entry not found: {path}")),
+    };
+    match vault.totp_now(&id) {
+        Ok(totp) => ok_handled(Response::ok_totp(totp)),
+        Err(e) => err_handled(format!("totp: {e}")),
+    }
+}
+
+/// Code-gated write: set the `otp` field from an otpauth URI (validated in
+/// trove-core before storing; entry created mkdir-p if absent).
+async fn add_totp(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    uri: &str,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let vault = match guard.as_mut() {
+        Some(v) => v,
+        None => return err_handled("no vault unlocked"),
+    };
+    let id = match vault.find_by_title(path) {
+        Some(id) => id,
+        None => match vault.add_entry(path) {
+            Ok(id) => id,
+            Err(e) => return err_handled(format!("creating entry '{path}': {e}")),
+        },
+    };
+    if let Err(e) = vault.set_totp_uri(&id, uri) {
+        return err_handled(format!("setting otp: {e}"));
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    ok_handled(Response::ok_empty())
 }
 
 /// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to

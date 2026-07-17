@@ -121,6 +121,7 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
+            keyfile: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -156,6 +157,7 @@ async fn status_with_disabled_idle_reports_zero_timeout() {
             path: vault_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
+            keyfile: None,
         })
         .await;
 
@@ -198,6 +200,7 @@ async fn status_request_does_not_bump_idle_timer() {
         path: vault_path.to_string_lossy().into_owned(),
         password: PASSWORD.to_string(),
         timeout: None,
+        keyfile: None,
     };
     let _ = handle(
         req_unlock, &state, &key_store, &gpg_store, &mat_store, &session, &idle, TEST_UID,
@@ -245,6 +248,7 @@ async fn lock_signals_daemon_shutdown_when_open_set_empties() {
             path: vault.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
+            keyfile: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -298,6 +302,7 @@ async fn ssh_agent_list_returns_served_keys() {
             path: vault.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
+            keyfile: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");

@@ -33,8 +33,9 @@ pub struct VaultSpec {
     pub name: String,
     pub password: &'static str,
     /// How the vault is locked beyond the password. The credential axis —
-    /// keepassxc and the crate must derive the same composite key, and trove is
-    /// password-only (a documented gap).
+    /// keepassxc, the crate, and trove (`--key-file`, since parity G2) must
+    /// all derive the same composite key; see `interop_keyfile.rs` for the
+    /// trove↔keepassxc directions.
     pub key: KeyMaterial,
     /// Crypto/format knobs honored by crate producers (subprocess tools that
     /// can't set these mint with their own defaults).

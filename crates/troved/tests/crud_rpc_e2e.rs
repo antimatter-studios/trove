@@ -85,6 +85,7 @@ impl Harness {
                     path: vault_path.to_str().expect("utf8").to_string(),
                     password: PASSWORD.to_string(),
                     timeout: None,
+                    keyfile: None,
                 },
                 OWNER,
             )
