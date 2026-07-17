@@ -10,6 +10,7 @@ mod daemon;
 mod hibp;
 mod ipc;
 mod pwgen;
+mod xml_export;
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, IsTerminal, Write};
@@ -340,6 +341,58 @@ enum Command {
         hibp: PathBuf,
     },
 
+    /// Merge another kdbx vault into `--vault` (KDBX-standard semantics:
+    /// last-write-wins by modification time, histories preserved — the same
+    /// algorithm KeePassXC uses, so either tool can merge the same pair).
+    /// Offline-only. The SOURCE vault's password is prompted separately
+    /// (with `--password-stdin` it is stdin line 2; target password line 1).
+    Merge {
+        /// Path to the source .kdbx to merge from (left unchanged).
+        source: PathBuf,
+        /// Keyfile for the SOURCE vault, when it uses a composite key.
+        /// (The global --key-file applies to the TARGET vault.)
+        #[arg(long = "source-key-file", value_name = "PATH")]
+        source_key_file: Option<PathBuf>,
+    },
+
+    /// Export the vault: `xml` (the decrypted KeePass XML, importable by any
+    /// KeePass tool) or `csv` (KeePassXC's column convention). Offline-only,
+    /// stdout. THE OUTPUT CONTAINS EVERY SECRET IN PLAINTEXT.
+    Export {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = ExportFormat::Xml)]
+        format: ExportFormat,
+    },
+
+    /// Change database-level settings: credentials and Argon2 KDF cost.
+    /// Offline-only. With `--set-password`, the new password is prompted
+    /// (with `--password-stdin`: current password line 1, new password
+    /// line 2).
+    DbEdit {
+        /// Set a new master password (prompted / stdin line 2).
+        #[arg(long = "set-password")]
+        set_password: bool,
+        /// Lock with a (new) keyfile in addition to the password.
+        #[arg(long = "set-key-file", value_name = "PATH")]
+        set_key_file: Option<PathBuf>,
+        /// Remove the keyfile requirement (password-only afterwards).
+        #[arg(long = "unset-key-file", conflicts_with = "set_key_file")]
+        unset_key_file: bool,
+        /// Argon2 memory in MiB.
+        #[arg(long = "kdf-memory", value_name = "MIB")]
+        kdf_memory: Option<u64>,
+        /// Argon2 iterations.
+        #[arg(long = "kdf-iterations")]
+        kdf_iterations: Option<u64>,
+        /// Argon2 parallelism (lanes).
+        #[arg(long = "kdf-parallelism")]
+        kdf_parallelism: Option<u32>,
+    },
+
+    /// Print non-secret database facts: format version, cipher, compression,
+    /// KDF parameters, entry/group counts, recycle-bin presence. Offline-only.
+    DbInfo,
+
     /// Print, install, or check a shell completion script.
     ///
     /// With no flags, prints the script to stdout for SHELL. Without an
@@ -362,6 +415,15 @@ enum Command {
         #[arg(long, conflicts_with = "install")]
         check: bool,
     },
+}
+
+/// Output format for `trove export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ExportFormat {
+    /// Decrypted KeePass XML (importable by keepassxc-cli and KeePass2).
+    Xml,
+    /// KeePassXC's CSV column convention.
+    Csv,
 }
 
 #[derive(Debug, Subcommand)]
@@ -870,6 +932,34 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Estimate { password } => cmd_estimate(password.as_deref()),
         Command::Analyze { hibp } => cmd_analyze(require_vault(vault)?, &hibp, pw_stdin),
+        Command::Merge {
+            source,
+            source_key_file,
+        } => cmd_merge(
+            require_vault(vault)?,
+            &source,
+            source_key_file.as_deref(),
+            pw_stdin,
+        ),
+        Command::Export { format } => cmd_export(require_vault(vault)?, format, pw_stdin),
+        Command::DbEdit {
+            set_password,
+            set_key_file,
+            unset_key_file,
+            kdf_memory,
+            kdf_iterations,
+            kdf_parallelism,
+        } => cmd_db_edit(
+            require_vault(vault)?,
+            set_password,
+            set_key_file.as_deref(),
+            unset_key_file,
+            kdf_memory,
+            kdf_iterations,
+            kdf_parallelism,
+            pw_stdin,
+        ),
+        Command::DbInfo => cmd_db_info(require_vault(vault)?, pw_stdin),
         Command::Generate {
             resource:
                 GenerateResource::Password {
@@ -2934,6 +3024,157 @@ fn cmd_clip(
     } else {
         println!("copied {label} from '{entry_path}' (auto-clear disabled)");
     }
+    Ok(())
+}
+
+/// `trove merge <SOURCE>` — KDBX-standard merge into `--vault`. Two secrets
+/// arrive in order: target vault password, then source vault password.
+fn cmd_merge(
+    vault_path: &Path,
+    source: &Path,
+    source_key_file: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let mut v = open_vault(vault_path, pw_stdin)?;
+    let source_password = if pw_stdin {
+        read_password_from_stdin().context("reading SOURCE vault password from stdin (line 2)")?
+    } else {
+        rpassword::prompt_password("Source vault password: ")
+            .context("reading source vault password")?
+    };
+    let source_keyfile = match source_key_file {
+        Some(p) => Some(
+            std::fs::read(p).with_context(|| format!("reading source key file {}", p.display()))?,
+        ),
+        None => None,
+    };
+    let s = v
+        .merge_from(source, &source_password, source_keyfile.as_deref())
+        .context("merging")?;
+    println!(
+        "merged {}: {} created, {} updated, {} relocated, {} deleted",
+        source.display(),
+        s.created,
+        s.updated,
+        s.relocated,
+        s.deleted
+    );
+    Ok(())
+}
+
+/// `trove export` — decrypted XML or KeePassXC-convention CSV on stdout.
+fn cmd_export(vault_path: &Path, format: ExportFormat, pw_stdin: bool) -> Result<()> {
+    let v = open_vault(vault_path, pw_stdin)?;
+    match format {
+        ExportFormat::Xml => {
+            let xml = xml_export::export_xml(&v).context("exporting xml")?;
+            print!("{xml}");
+        }
+        ExportFormat::Csv => {
+            // KeePassXC's `export -f csv` column set, quoted the same way.
+            println!(
+                "\"Group\",\"Title\",\"Username\",\"Password\",\"URL\",\"Notes\",\"TOTP\",\"Icon\",\"Last Modified\",\"Created\""
+            );
+            let q = |s: &str| s.replace('"', "\"\"");
+            for e in v.list_entries() {
+                let field =
+                    |name: &str| v.get_field(&e.id, name).ok().flatten().unwrap_or_default();
+                // KeePassXC prefixes the root group name; ours is "Root".
+                let group = if e.group_path.is_empty() {
+                    "Root".to_string()
+                } else {
+                    format!("Root/{}", e.group_path.join("/"))
+                };
+                // Icon, Last Modified and Created are constant columns here
+                // (trove doesn't map icons; timestamps stay internal).
+                println!(
+                    "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"0\",\"\",\"\"",
+                    q(&group),
+                    q(&e.title),
+                    q(&field("UserName")),
+                    q(&field("Password")),
+                    q(&field("URL")),
+                    q(&field("Notes")),
+                    q(&field("otp")),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `trove db-edit` — rekey and/or retune the KDF. At least one change is
+/// required. Password changes read the NEW password as stdin line 2 (or a
+/// confirmed prompt).
+#[allow(clippy::too_many_arguments)]
+fn cmd_db_edit(
+    vault_path: &Path,
+    set_password: bool,
+    set_key_file: Option<&Path>,
+    unset_key_file: bool,
+    kdf_memory: Option<u64>,
+    kdf_iterations: Option<u64>,
+    kdf_parallelism: Option<u32>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let any_kdf = kdf_memory.is_some() || kdf_iterations.is_some() || kdf_parallelism.is_some();
+    let any_key = set_password || set_key_file.is_some() || unset_key_file;
+    if !any_kdf && !any_key {
+        return Err(anyhow!(
+            "nothing to change: pass --set-password, --set-key-file, --unset-key-file, \
+             or a --kdf-* option"
+        ));
+    }
+    let mut v = open_vault(vault_path, pw_stdin)?;
+
+    if any_key {
+        let new_password = if set_password {
+            if pw_stdin {
+                read_password_from_stdin().context("reading NEW password from stdin (line 2)")?
+            } else {
+                prompt_new_password().context("reading new password")?
+            }
+        } else {
+            // Keeping the password: reuse the one that just opened the vault.
+            // rekey() needs it verbatim; prompting again would be hostile.
+            v.current_password().to_string()
+        };
+        let new_keyfile = if unset_key_file {
+            None
+        } else if let Some(p) = set_key_file {
+            Some(std::fs::read(p).with_context(|| format!("reading key file {}", p.display()))?)
+        } else {
+            v.current_keyfile().map(<[u8]>::to_vec)
+        };
+        v.rekey(&new_password, new_keyfile.as_deref())
+            .context("rekeying")?;
+        println!("credentials updated");
+    }
+
+    if any_kdf {
+        v.set_argon2_params(
+            kdf_memory.map(|m| m * 1024),
+            kdf_iterations,
+            kdf_parallelism,
+        )
+        .context("retuning KDF")?;
+        println!("KDF updated");
+    }
+    Ok(())
+}
+
+/// `trove db-info` — non-secret database facts.
+fn cmd_db_info(vault_path: &Path, pw_stdin: bool) -> Result<()> {
+    let v = open_vault(vault_path, pw_stdin)?;
+    let i = v.db_info();
+    println!("Path:        {}", vault_path.display());
+    println!("Version:     {}", i.version);
+    println!("Cipher:      {}", i.cipher);
+    println!("Compression: {}", i.compression);
+    println!("KDF:         {}", i.kdf);
+    println!("Entries:     {}", i.entries);
+    println!("Groups:      {}", i.groups);
+    println!("Recycle bin: {}", if i.recycle_bin { "yes" } else { "no" });
     Ok(())
 }
 

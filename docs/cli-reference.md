@@ -294,6 +294,49 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
+## trove merge
+
+```
+trove --vault <TARGET> merge <SOURCE> [--source-key-file <PATH>]
+```
+
+KDBX-standard merge of diverged copies of one vault (last-write-wins by
+modification time, histories preserved — the same algorithm KeePassXC runs,
+proven equivalent in the interop suite). The source is unchanged. Two secrets
+arrive in order: target password (line 1 with `--password-stdin`), then source
+password (line 2). The global `--key-file` applies to the target;
+`--source-key-file` to the source. Unrelated vaults (different root UUID) are
+refused with a clean error — merge reconciles copies, it doesn't import.
+Offline-only.
+
+## trove export
+
+```
+trove --vault <PATH> export [--format xml|csv]
+```
+
+**The output contains every secret in plaintext** on stdout. `xml` is
+decrypted KeePass XML (re-importable by `keepassxc-cli import`, proven in the
+interop suite); `csv` uses KeePassXC's exact column header. Offline-only.
+
+## trove db-edit
+
+```
+trove --vault <PATH> db-edit [--set-password] [--set-key-file <PATH> | --unset-key-file] [--kdf-memory MIB] [--kdf-iterations N] [--kdf-parallelism N]
+```
+
+Rekey (new password prompted, or stdin line 2 after the current password) and
+retune the Argon2 KDF. At least one change required. Offline-only.
+
+## trove db-info
+
+```
+trove --vault <PATH> db-info
+```
+
+Non-secret facts: format version, cipher, compression, KDF parameters,
+entry/group counts, recycle-bin presence. Offline-only.
+
 ## trove clip
 
 ```

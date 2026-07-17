@@ -6,6 +6,17 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- Vault ops (keepassxc-cli parity G6), all offline-only: `trove merge`
+  (KDBX-standard reconciliation of diverged copies — proven equivalent to
+  keepassxc-cli's merge on the same pair; unrelated vaults refuse cleanly),
+  `trove export --format xml|csv` (decrypted KeePass XML that keepassxc
+  imports back, CSV with KeePassXC's exact header), `trove db-edit`
+  (rekey password/keyfile, Argon2 retuning), `trove db-info`. XML *import*
+  stays out of scope (no public parser in the keepass crate).
+- Compatibility fix surfaced by the merge work: trove edits now stamp
+  `LastModificationTime` (and moves stamp `LocationChanged`) like KeePassXC
+  does. Previously trove-side changes could silently lose KDBX merges in
+  any tool because their timestamps never advanced.
 - Clipboard (keepassxc-cli parity G5): `trove clip <entry>` copies the
   password (or `--attr NAME`, or `--totp` for the current code) and
   auto-clears after `--timeout` seconds (default 10, 0 disables) via a

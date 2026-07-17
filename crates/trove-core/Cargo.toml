@@ -11,8 +11,9 @@ categories = ["cryptography", "parser-implementations"]
 
 [dependencies]
 # `totp` unlocks keepass's RFC 6238 implementation + otpauth-URI parsing
-# (Entry::get_otp), the engine behind `trove show --totp`.
-keepass = { workspace = true, features = ["save_kdbx4", "totp"] }
+# (Entry::get_otp), the engine behind `trove show --totp`. `_merge` unlocks
+# Database::merge, the KDBX-standard merge behind `trove merge`.
+keepass = { workspace = true, features = ["save_kdbx4", "totp", "_merge"] }
 zeroize.workspace = true
 thiserror.workspace = true
 
