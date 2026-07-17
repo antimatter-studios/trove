@@ -108,14 +108,22 @@ fn generate_password_and_diceware_shapes() {
     );
     assert!(!out.status.success(), "empty pool must error");
 
-    // Diceware: 7 hyphen-separated lowercase words by default.
+    // Diceware: 7 hyphen-separated lowercase words by default. A few EFF words
+    // contain '-' (e.g. "t-shirt"), so the token count is >= 7, not exactly 7 —
+    // asserting equality here flakes ~0.3% of runs. Check the lower bound and
+    // that every token is a nonempty lowercase word.
     let out = ok(
         &run_trove(&trove, &["generate", "diceware"], ""),
         "diceware",
     );
     let words: Vec<&str> = out.trim_end().split('-').collect();
-    assert_eq!(words.len(), 7);
-    assert!(words.iter().all(|w| !w.is_empty()));
+    assert!(words.len() >= 7, "{out}");
+    assert!(
+        words
+            .iter()
+            .all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase())),
+        "{out}"
+    );
 }
 
 #[test]

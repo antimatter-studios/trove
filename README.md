@@ -170,9 +170,37 @@ trove lock
 
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is a workspace member so `cargo test --workspace` runs it.
 
+## Shipped (v0.5.0)
+
+Full `keepassxc-cli` command parity landed in v0.5.0 — every gap in the
+comparison that started this project is closed, and each is proven against the
+real `keepassxc-cli` binary in CI. See [docs/parity-plan.md](docs/parity-plan.md)
+for the gap-by-gap plan and [docs/cli-reference.md](docs/cli-reference.md) for
+the commands.
+
+- **Generic entry CRUD** — `add password`, `get password`, `show`, `edit`,
+  `search`, `mkdir`, `mv`, `rm`, `rmdir` (recycle-bin aware).
+- **Composite keys** — `--key-file` (all KeePassXC formats) and
+  `--yubikey` HMAC-SHA1 challenge-response (`--features yubikey`).
+- **TOTP** — `add totp` / `show --totp`, KeePassXC's `otpauth://` field.
+- **Generation + audit** — `generate password`/`diceware`, `estimate`
+  (zxcvbn), `analyze --hibp` (offline breach check).
+- **Clipboard** — `clip` with a hash-guarded detached auto-clear.
+- **Vault ops** — `merge`, `export xml|csv`, `db-edit`, `db-info`.
+
+Beyond what `keepassxc-cli` offers:
+
+- **`exec <scope> -- cmd`** — secrets scoped to one process tree, wiped on
+  exit (the `op run` of kdbx). `trove exec kube-prod -- bash` gives that shell
+  a kubeconfig that vanishes when it closes.
+- **`--json`** on read commands, **`git-credential`** helper, and
+  **`resolve trove://…`** secret references.
+
 ## Feature exploration
 
-Grouped by theme. Not a roadmap — a menu.
+The menu below is the original design space; the shipped list above marks
+what's done. The rest — sync, sharing, plugins, mobile — remains a menu, not a
+roadmap.
 
 Annotations:
 - *(upstream refused)* — explicit upstream rejection on record (quoted below).
