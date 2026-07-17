@@ -8,6 +8,7 @@
 mod clip;
 mod daemon;
 mod exec;
+mod gitcred;
 mod hibp;
 mod ipc;
 mod pwgen;
@@ -366,6 +367,26 @@ enum Command {
         /// Path to the sorted pwned-passwords dump.
         #[arg(long, value_name = "FILE", required = true)]
         hibp: PathBuf,
+    },
+
+    /// Act as a git credential helper (`git config credential.helper "trove
+    /// --vault ~/v.kdbx git-credential"`). git appends the operation
+    /// (get/store/erase) and speaks its key=value protocol on stdin/stdout.
+    /// `get` matches an entry by URL host (and username if git sends one) and
+    /// replies with its username/password; store/erase are accepted and
+    /// ignored. Offline-only.
+    GitCredential {
+        /// The git operation: get, store, or erase.
+        operation: String,
+    },
+
+    /// Resolve a `trove://<entry-path>[/<field>]` secret reference and print
+    /// the value to stdout (the field defaults to Password). The primitive
+    /// behind config templating — `export DB=$(trove --vault v resolve
+    /// trove://Infra/prod/postgres)`. Offline-only.
+    Resolve {
+        /// The trove:// reference to resolve.
+        reference: String,
     },
 
     /// Run a command with secrets injected for exactly its lifetime — no
@@ -1034,6 +1055,10 @@ fn run(cli: Cli) -> Result<()> {
         Command::Exec { scope, command } => {
             cmd_exec(require_vault(vault)?, &scope, &command, pw_stdin)
         }
+        Command::GitCredential { operation } => {
+            cmd_git_credential(require_vault(vault)?, &operation, pw_stdin)
+        }
+        Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
         Command::Merge {
             source,
             source_key_file,
@@ -3186,6 +3211,27 @@ fn cmd_clip(
     } else {
         println!("copied {label} from '{entry_path}' (auto-clear disabled)");
     }
+    Ok(())
+}
+
+/// `trove git-credential <op>` — a git credential helper over stdin/stdout.
+fn cmd_git_credential(vault_path: &Path, operation: &str, pw_stdin: bool) -> Result<()> {
+    let v = open_vault(vault_path, pw_stdin)?;
+    // git's request block arrives AFTER the vault password when
+    // --password-stdin is used; read_password_from_stdin already consumed
+    // exactly one line, so the rest of stdin is git's protocol.
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    gitcred::run(&v, operation, &mut reader, &mut writer)
+}
+
+/// `trove resolve trove://…` — print one referenced secret to stdout.
+fn cmd_resolve(vault_path: &Path, reference: &str, pw_stdin: bool) -> Result<()> {
+    let v = open_vault(vault_path, pw_stdin)?;
+    let value = v.resolve_ref(reference).context("resolving reference")?;
+    println!("{value}");
     Ok(())
 }
 
