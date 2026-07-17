@@ -1,8 +1,14 @@
+# Standalone workspace (excluded from the parent workspace in the repo-root
+# Cargo.toml). This gives the harness its own Cargo.lock so the EOL `keepass`
+# producers it pins for compatibility testing (and their old transitive deps,
+# e.g. quick-xml 0.39) never enter the app's audited dependency graph.
+[workspace]
+
 [package]
 name = "keepass-spec-tests"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.4.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Clean-room kdbx spec test suite for the keepass crate (programmatic, MIT-licensable, intended for upstream contribution)"
 publish = false
 
@@ -38,4 +44,4 @@ rust-argon2 = "3"
 # packages — but it forbids two *names* for the same version, so the bare
 # `keepass` above (0.12.5) is NOT also aliased here. Pinned exactly (`=`) for a
 # reproducible version axis. Extend the axis by adding another `keepass_0XY` line.
-keepass_013 = { package = "keepass", version = "=0.13.10", features = ["save_kdbx4"] }
+keepass_013 = { package = "keepass", version = "=0.13.13", features = ["save_kdbx4"] }
