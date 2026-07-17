@@ -1,4 +1,7 @@
 /target
+# keepass-spec-tests is its own workspace (excluded from the root workspace), so
+# its build output lands in a nested target dir the root `/target` rule misses.
+/crates/keepass-spec-tests/target/
 .history/
 .secrets
 .DS_Store

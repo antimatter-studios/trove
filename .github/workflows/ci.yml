@@ -104,6 +104,16 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      - name: Conformance matrix (keepass-spec-tests)
+        # This harness is a SEPARATE workspace (own Cargo.lock, kept out of the
+        # app's audited graph). `--workspace` above doesn't reach it, so run it
+        # by manifest. It drives the trove CLI as a subprocess, so build that
+        # binary into the repo-root target dir and point TROVE_BIN at it.
+        run: |
+          cargo build --locked -p trove-cli
+          TROVE_BIN="$PWD/target/debug/trove" \
+            cargo test --manifest-path crates/keepass-spec-tests/Cargo.toml --locked
+
   # Windows is supported by compiling to native named-pipe IPC. We build the
   # shipping binaries (not the test suite — some integration-test helpers are
   # Unix-socket specific) so a regression in the cross-platform `ipc` layer
@@ -200,4 +210,10 @@ jobs:
         # (different code path) and key parsing — not decryption. The threat
         # model also requires same-UID adversary, who can already ptrace the
         # daemon. Re-evaluate when an `rsa` 0.9.x patch ships.
+        #
+        # The `quick-xml` <0.41 DoS advisories (RUSTSEC-2026-0194/-0195) do NOT
+        # appear here: the only crate pulling old quick-xml is the legacy
+        # `keepass` producer in `keepass-spec-tests`, which is a separate
+        # workspace (own Cargo.lock) and never enters this audited graph. Shipped
+        # code is on `keepass` 0.13 / quick-xml 0.41.
         run: cargo audit --ignore RUSTSEC-2023-0071

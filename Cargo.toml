@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/trove-core", "crates/trove-cli", "crates/troved", "crates/keepass-spec-tests"]
+members = ["crates/trove-core", "crates/trove-cli", "crates/troved"]
+# `keepass-spec-tests` is a dev-only conformance harness that ships nothing and
+# exercises trove via its CLI (subprocess), never linking trove-core. It pins
+# EOL `keepass` producers (e.g. 0.12.5) on purpose to test cross-version
+# compatibility, and those drag in old transitive deps (quick-xml 0.39). Keeping
+# it OUT of the workspace gives it its own Cargo.lock so the app's audited
+# dependency graph stays free of those advisories while the harness still tests
+# every version. It's built/tested via its own manifest (see CI).
+exclude = ["crates/keepass-spec-tests"]
 
 [workspace.package]
 version = "0.4.0"

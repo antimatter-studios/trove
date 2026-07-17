@@ -80,6 +80,14 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      - name: Conformance matrix (keepass-spec-tests)
+        # Separate workspace (own Cargo.lock), so `--workspace` above skips it.
+        # It drives the trove CLI as a subprocess — build it and point TROVE_BIN.
+        run: |
+          cargo build --locked -p trove-cli
+          TROVE_BIN="$PWD/target/debug/trove" \
+            cargo test --manifest-path crates/keepass-spec-tests/Cargo.toml --locked
+
   build:
     name: Build ${{ matrix.label }}
     needs: test
