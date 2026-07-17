@@ -161,9 +161,18 @@ pub fn wipe_dir(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-/// Create the private per-run directory for materialized files.
+/// Create the private per-run directory for materialized files. The name
+/// carries CSPRNG bytes (not just the pid) so it is unpredictable: an
+/// attacker cannot pre-create/symlink-squat the path to cause a fail-closed
+/// DoS or redirect writes. `DirBuilder::create` (not `create_dir_all`) errors
+/// if the path already exists, so even on a collision we never adopt an
+/// attacker-owned directory.
 pub fn private_tmp_dir() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("trove-exec-{}", std::process::id()));
+    use rand::RngCore;
+    let mut rand = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut rand);
+    let suffix: String = rand.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = std::env::temp_dir().join(format!("trove-exec-{}-{suffix}", std::process::id()));
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
