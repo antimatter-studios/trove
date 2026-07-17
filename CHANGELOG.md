@@ -6,6 +6,13 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- Generation + audit (keepassxc-cli parity G4), all purely local:
+  `trove generate password` (charset policy flags, `--exclude`, `--count`),
+  `trove generate diceware` (EFF large wordlist, vendored, CC BY 3.0),
+  `trove estimate` (zxcvbn; reads stdin so secrets stay out of history), and
+  `trove analyze --hibp <FILE>` — offline breach check that binary-searches
+  the sorted pwned-passwords dump on disk (never loaded, never on the wire)
+  and exits 1 when breaches are found so CI can gate on it.
 - TOTP (keepassxc-cli parity G3): `trove add totp` stores an `otpauth://` URI
   in the Protected `otp` field (KeePassXC's own format — validated before
   storing, whitespace-tolerant base32 `--secret` form included);

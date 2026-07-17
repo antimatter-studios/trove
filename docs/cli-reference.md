@@ -294,6 +294,41 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 
 Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
+## trove generate password / diceware
+
+```
+trove generate password [--length N] [--special] [--no-lower] [--no-upper] [--no-numeric] [--exclude CHARS] [--count N]
+trove generate diceware [--words N] [--count N]
+```
+
+Purely local (no vault, no daemon), OS CSPRNG, uniform selection. `password`
+defaults to 20 chars over lower+upper+digits; `--special` adds printable
+punctuation, `--exclude` drops ambiguous characters. `diceware` draws from the
+vendored EFF large wordlist (7776 words ≈ 12.9 bits/word; default 7 words
+≈ 90 bits), hyphen-separated.
+
+## trove estimate
+
+```
+trove estimate [PASSWORD]
+```
+
+zxcvbn strength rating: length, entropy bits, 0–4 score, and the estimator's
+warning/suggestions. Omit the argument to read one line from stdin — the
+preferred form, since argv is visible in `ps` and shell history.
+
+## trove analyze
+
+```
+trove --vault <PATH> analyze --hibp <FILE>
+```
+
+Offline Have-I-Been-Pwned audit: every vault password is SHA-1-hashed and
+binary-searched in the sorted `pwned-passwords` dump at `<FILE>` (the multi-GB
+file is seeked, never loaded; nothing is ever sent anywhere). Breached entries
+print as `<path>  seen N times in breaches`. Exits 1 when anything is
+breached — scriptable as a CI gate. Offline-only: requires `--vault`.
+
 ## trove ssh-agent
 
 ```

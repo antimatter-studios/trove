@@ -32,9 +32,15 @@ serde_json.workspace = true
 # v0.0.10.0: code-gated `get` routes extraction through the daemon, which
 # returns attachment bytes base64-encoded on the JSON wire. We decode here.
 base64 = "0.22"
-# `add password --generate` mints entry passwords with the OS CSPRNG. Same
-# pinning as troved's.
+# `add password --generate` / `generate password|diceware` mint secrets with
+# the OS CSPRNG. Same pinning as troved's.
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+# `trove estimate` — Dropbox's zxcvbn strength estimator (the same engine
+# KeePassXC's estimate is modeled on).
+zxcvbn = "3"
+# `trove analyze --hibp` hashes vault passwords for offline lookups in the
+# sorted pwned-passwords dump. SHA-1 is HIBP's key format, not a trust choice.
+sha1 = "0.10"
 
 [build-dependencies]
 # Formats the dev-build timestamp (0.2.0-dev-YYYYMMDDHHMMSS) in build.rs.
