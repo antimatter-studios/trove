@@ -7,6 +7,7 @@
 
 mod clip;
 mod daemon;
+mod exec;
 mod hibp;
 mod ipc;
 mod pwgen;
@@ -119,7 +120,11 @@ enum Command {
     /// With `--vault <PATH>`: open that file directly (offline). Without it:
     /// list the vault currently unlocked in the running daemon (auto-spawning
     /// if needed) — no password prompt.
-    List,
+    List {
+        /// Machine-readable output: a JSON array of entry summaries.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Add a resource (SSH key, password, ...) to a vault.
     Add {
@@ -241,6 +246,9 @@ enum Command {
     Search {
         /// The term to look for.
         term: String,
+        /// Machine-readable output: a JSON array of entry summaries.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Edit an existing entry: standard fields via flags, custom fields via
@@ -360,6 +368,27 @@ enum Command {
         hibp: PathBuf,
     },
 
+    /// Run a command with secrets injected for exactly its lifetime — no
+    /// on-disk residue, nothing outlives the process tree. `<SCOPE>` is an
+    /// entry or a group: string secrets become env vars, file attachments
+    /// materialize into a private per-run directory (0700) whose contents
+    /// are wiped when the command exits.
+    ///
+    /// Naming: an entry's `Exec.Env` custom field names the variable
+    /// (`Exec.Env=KUBECONFIG` on a kubeconfig attachment →
+    /// `KUBECONFIG=/tmp/.../kubeconfig` in the child). Without it:
+    /// `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`. The child's exit
+    /// code becomes trove's. Offline-only: requires `--vault`.
+    ///
+    /// Example: `trove --vault v.kdbx exec Infra/kubeconfig-prod -- bash`
+    Exec {
+        /// Entry path or group path whose secrets to inject.
+        scope: String,
+        /// The command to run (everything after `--`).
+        #[arg(last = true, required = true)]
+        command: Vec<std::ffi::OsString>,
+    },
+
     /// Merge another kdbx vault into `--vault` (KDBX-standard semantics:
     /// last-write-wins by modification time, histories preserved — the same
     /// algorithm KeePassXC uses, so either tool can merge the same pair).
@@ -410,7 +439,11 @@ enum Command {
 
     /// Print non-secret database facts: format version, cipher, compression,
     /// KDF parameters, entry/group counts, recycle-bin presence. Offline-only.
-    DbInfo,
+    DbInfo {
+        /// Machine-readable output: a JSON object.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Print, install, or check a shell completion script.
     ///
@@ -886,7 +919,7 @@ fn run(cli: Cli) -> Result<()> {
     let vault = cli.vault.as_deref();
     match cli.command {
         Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
-        Command::List => cmd_list(vault, pw_stdin),
+        Command::List { json } => cmd_list(vault, pw_stdin, json),
         Command::Add {
             resource:
                 AddResource::Ssh {
@@ -998,6 +1031,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Estimate { password } => cmd_estimate(password.as_deref()),
         Command::Analyze { hibp } => cmd_analyze(require_vault(vault)?, &hibp, pw_stdin),
+        Command::Exec { scope, command } => {
+            cmd_exec(require_vault(vault)?, &scope, &command, pw_stdin)
+        }
         Command::Merge {
             source,
             source_key_file,
@@ -1025,7 +1061,7 @@ fn run(cli: Cli) -> Result<()> {
             kdf_parallelism,
             pw_stdin,
         ),
-        Command::DbInfo => cmd_db_info(require_vault(vault)?, pw_stdin),
+        Command::DbInfo { json } => cmd_db_info(require_vault(vault)?, pw_stdin, json),
         Command::Generate {
             resource:
                 GenerateResource::Password {
@@ -1071,7 +1107,7 @@ fn run(cli: Cli) -> Result<()> {
                 cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin)
             }
         }
-        Command::Search { term } => cmd_search(vault, &term, pw_stdin),
+        Command::Search { term, json } => cmd_search(vault, &term, pw_stdin, json),
         Command::Edit {
             entry_path,
             title,
@@ -1561,10 +1597,33 @@ fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool) -> Result<()> {
+/// One entry summary as the stable JSON shape shared by `list --json` and
+/// `search --json` (and matching the daemon's wire summaries).
+fn entry_summary_json(e: &trove_core::EntrySummary) -> Value {
+    serde_json::json!({
+        "id": e.id.to_string(),
+        "title": e.title,
+        "path": e.display_path(),
+        "username": e.username,
+        "url": e.url,
+        "attachments": e.attachment_names,
+        "group_path": e.group_path,
+    })
+}
+
+fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool) -> Result<()> {
     match vault_path {
         Some(path) => {
             let vault = open_vault(path, pw_stdin)?;
+            if json {
+                let arr: Vec<Value> = vault
+                    .list_entries()
+                    .iter()
+                    .map(entry_summary_json)
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
+                return Ok(());
+            }
             for entry in vault.list_entries() {
                 print_list_row(
                     &entry.id.to_string(),
@@ -1574,7 +1633,7 @@ fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool) -> Result<()> {
             }
             Ok(())
         }
-        None => cmd_list_via_daemon(),
+        None => cmd_list_via_daemon(json),
     }
 }
 
@@ -1584,7 +1643,7 @@ fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool) -> Result<()> {
 /// `daemon::send_autospawn` — if no daemon is running we spawn one, but it
 /// will come up with no vault unlocked, so the user gets the same friendly
 /// "no vault unlocked" message and a hint to run `trove unlock`.
-fn cmd_list_via_daemon() -> Result<()> {
+fn cmd_list_via_daemon(json: bool) -> Result<()> {
     let resp = match daemon::send_autospawn(&daemon::Request::List) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
@@ -1613,6 +1672,10 @@ fn cmd_list_via_daemon() -> Result<()> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
     print_entry_rows_from_json(&entries);
     Ok(())
 }
@@ -2727,10 +2790,19 @@ fn cmd_show(
     Ok(())
 }
 
-fn cmd_search(vault: Option<&Path>, term: &str, pw_stdin: bool) -> Result<()> {
+fn cmd_search(vault: Option<&Path>, term: &str, pw_stdin: bool, json: bool) -> Result<()> {
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
+            if json {
+                let arr: Vec<Value> = v
+                    .search_entries(term)
+                    .iter()
+                    .map(entry_summary_json)
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
+                return Ok(());
+            }
             for entry in v.search_entries(term) {
                 print_list_row(
                     &entry.id.to_string(),
@@ -2748,6 +2820,10 @@ fn cmd_search(vault: Option<&Path>, term: &str, pw_stdin: bool) -> Result<()> {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+                return Ok(());
+            }
             print_entry_rows_from_json(&entries);
         }
     }
@@ -3113,6 +3189,60 @@ fn cmd_clip(
     Ok(())
 }
 
+/// `trove exec <SCOPE> -- cmd…` — inject, run, wipe. The child's exit code
+/// becomes ours (after cleanup), so pipelines and CI see the real result.
+fn cmd_exec(
+    vault_path: &Path,
+    scope: &str,
+    command: &[std::ffi::OsString],
+    pw_stdin: bool,
+) -> Result<()> {
+    let v = open_vault(vault_path, pw_stdin)?;
+    let tmp = exec::private_tmp_dir()?;
+    // Resolve + run inside a closure so EVERY exit path below funnels
+    // through the wipe. (SIGKILL can't be caught; SIGINT is handled by the
+    // tokio ctrl_c guard which keeps us alive until the child dies.)
+    let result = (|| -> Result<i32> {
+        let injections = exec::resolve(&v, scope, &tmp)?;
+        drop(v); // decrypted vault not needed while the child runs
+
+        let (program, args) = command.split_first().expect("clap requires the command");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building tokio runtime")?;
+        rt.block_on(async {
+            let mut cmd = tokio::process::Command::new(program);
+            cmd.args(args);
+            for inj in &injections {
+                cmd.env(&inj.name, &inj.value);
+            }
+            let mut child = cmd
+                .spawn()
+                .with_context(|| format!("spawning {}", std::path::Path::new(program).display()))?;
+            loop {
+                tokio::select! {
+                    status = child.wait() => {
+                        let status = status.context("waiting for child")?;
+                        return Ok(status.code().unwrap_or(1));
+                    }
+                    // Ctrl-C reaches the child via the foreground process
+                    // group; we just keep living until it exits so the wipe
+                    // below still runs.
+                    _ = tokio::signal::ctrl_c() => continue,
+                }
+            }
+        })
+    })();
+    exec::wipe_dir(&tmp);
+    let code = result?;
+    if code != 0 {
+        // Propagate the child's exit code faithfully (cleanup already done).
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
 /// `trove merge <SOURCE>` — KDBX-standard merge into `--vault`. Two secrets
 /// arrive in order: target vault password, then source vault password.
 fn cmd_merge(
@@ -3250,9 +3380,23 @@ fn cmd_db_edit(
 }
 
 /// `trove db-info` — non-secret database facts.
-fn cmd_db_info(vault_path: &Path, pw_stdin: bool) -> Result<()> {
+fn cmd_db_info(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
     let v = open_vault(vault_path, pw_stdin)?;
     let i = v.db_info();
+    if json {
+        let obj = serde_json::json!({
+            "path": vault_path.display().to_string(),
+            "version": i.version,
+            "cipher": i.cipher,
+            "compression": i.compression,
+            "kdf": i.kdf,
+            "entries": i.entries,
+            "groups": i.groups,
+            "recycle_bin": i.recycle_bin,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+        return Ok(());
+    }
     println!("Path:        {}", vault_path.display());
     println!("Version:     {}", i.version);
     println!("Cipher:      {}", i.cipher);

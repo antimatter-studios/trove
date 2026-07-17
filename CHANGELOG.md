@@ -6,6 +6,16 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- `trove exec <SCOPE> -- cmd…` (beyond parity): run any command with secrets
+  injected for exactly its lifetime — string secrets as env vars, file
+  attachments materialized into a private 0700 per-run dir, everything wiped
+  when the child exits, child exit code propagated. An entry's `Exec.Env`
+  custom field names the variable (`Exec.Env=KUBECONFIG` on a kubeconfig
+  attachment → `trove exec Infra -- bash` gives that shell a scoped,
+  self-destructing kubeconfig); fallback `TROVE_<TITLE>_PASSWORD`/`_FILE`.
+- `--json` on `list`, `search` and `db-info`: stable machine-readable output
+  (summaries never carry secrets), making trove scriptable without text
+  scraping — something keepassxc-cli has no equivalent for.
 - YubiKey challenge-response unlock (keepassxc-cli parity G7), behind
   `--features yubikey`: global `--yubikey <SLOT>[:SERIAL]` composites an
   HMAC-SHA1 challenge-response with the password (and optional keyfile) —
