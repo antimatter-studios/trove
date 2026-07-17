@@ -114,6 +114,17 @@ jobs:
           TROVE_BIN="$PWD/target/debug/trove" \
             cargo test --manifest-path crates/keepass-spec-tests/Cargo.toml --locked
 
+      # Challenge-response (--features yubikey) is Linux-only for now: the
+      # keepass crate pins challenge_response's nusb backend, whose device
+      # enumeration doesn't compile on macOS (nusb busnum is Linux-only).
+      # The software LocalChallenge provider exercises the full derivation
+      # without hardware; the real-device test stays #[ignore]d.
+      - name: cargo test (yubikey feature, software provider)
+        if: runner.os == 'Linux'
+        run: |
+          cargo test -p trove-core --features yubikey --locked
+          cargo check -p trove-cli --features yubikey --locked
+
   # Windows is supported by compiling to native named-pipe IPC. We build the
   # shipping binaries (not the test suite — some integration-test helpers are
   # Unix-socket specific) so a regression in the cross-platform `ipc` layer

@@ -6,6 +6,15 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+- YubiKey challenge-response unlock (keepassxc-cli parity G7), behind
+  `--features yubikey`: global `--yubikey <SLOT>[:SERIAL]` composites an
+  HMAC-SHA1 challenge-response with the password (and optional keyfile) —
+  KeePassXC's scheme, same vault unlocks there with the same device. The
+  device answers a fresh challenge on every save. Validated in CI (Linux)
+  through the keepass crate's software `LocalChallenge` provider — the
+  identical derivation minus USB; the hardware test ships `#[ignore]`d for
+  manual runs. Linux-only for now: upstream keepass pins the nusb USB
+  backend, which doesn't compile on macOS.
 - Vault ops (keepassxc-cli parity G6), all offline-only: `trove merge`
   (KDBX-standard reconciliation of diverged copies — proven equivalent to
   keepassxc-cli's merge on the same pair; unrelated vaults refuse cleanly),

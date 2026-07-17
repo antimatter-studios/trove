@@ -138,6 +138,12 @@ pub struct Vault {
     pub(crate) inner: VaultInner,
 }
 
+/// Re-export of the keepass crate's challenge-response key: either a real
+/// YubiKey (serial + slot) or the software `LocalChallenge` provider using
+/// the identical HMAC-SHA1 derivation (KeePassXC's scheme).
+#[cfg(feature = "yubikey")]
+pub use keepass::ChallengeResponseKey;
+
 pub(crate) struct VaultInner {
     pub(crate) path: PathBuf,
     pub(crate) password: String,
@@ -146,6 +152,12 @@ pub(crate) struct VaultInner {
     /// format interpretation (XML v1/v2, raw-32, hex-64, arbitrary-file
     /// SHA-256) is the `keepass` crate's, matching KeePassXC.
     pub(crate) keyfile: Option<Vec<u8>>,
+    /// Challenge-response provider for composite keys (YubiKey or software).
+    /// Held so every `save()` can re-answer the fresh challenge — kdbx
+    /// rotates the master seed per save, so the device/secret is consulted
+    /// again on each write.
+    #[cfg(feature = "yubikey")]
+    pub(crate) challenge_response: Option<ChallengeResponseKey>,
     pub(crate) db: keepass::Database,
 }
 
@@ -210,11 +222,69 @@ impl Vault {
                 path: path.to_path_buf(),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
+                #[cfg(feature = "yubikey")]
+                challenge_response: None,
                 db,
             },
         };
         vault.save()?;
         Ok(vault)
+    }
+
+    /// Create a new kdbx file additionally locked by a challenge-response
+    /// key (YubiKey HMAC-SHA1 or the software `LocalChallenge` provider),
+    /// composited with the password and optional keyfile — KeePassXC's
+    /// scheme, so the same vault unlocks there with the same device.
+    #[cfg(feature = "yubikey")]
+    pub fn create_with_challenge_response(
+        path: &Path,
+        password: &str,
+        keyfile: Option<&[u8]>,
+        challenge_response: ChallengeResponseKey,
+    ) -> Result<Self> {
+        if path.exists() {
+            return Err(Error::AlreadyExists(path.to_path_buf()));
+        }
+        let mut vault = Vault {
+            inner: VaultInner {
+                path: path.to_path_buf(),
+                password: password.to_string(),
+                keyfile: keyfile.map(<[u8]>::to_vec),
+                challenge_response: Some(challenge_response),
+                db: keepass::Database::new(),
+            },
+        };
+        vault.save()?;
+        Ok(vault)
+    }
+
+    /// Open a challenge-response-locked vault. The provider is held for the
+    /// vault's lifetime: every later save re-answers the fresh challenge
+    /// (kdbx rotates the master seed per save), so a hardware key must stay
+    /// reachable while writing.
+    #[cfg(feature = "yubikey")]
+    pub fn open_with_challenge_response(
+        path: &Path,
+        password: &str,
+        keyfile: Option<&[u8]>,
+        challenge_response: ChallengeResponseKey,
+    ) -> Result<Self> {
+        if !path.exists() {
+            return Err(Error::NotFound(path.to_path_buf()));
+        }
+        let mut file = std::fs::File::open(path)?;
+        let key = database_key(password, keyfile)?
+            .with_challenge_response_key(challenge_response.clone());
+        let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
+        Ok(Vault {
+            inner: VaultInner {
+                path: path.to_path_buf(),
+                password: password.to_string(),
+                keyfile: keyfile.map(<[u8]>::to_vec),
+                challenge_response: Some(challenge_response),
+                db,
+            },
+        })
     }
 
     /// Open an existing kdbx file with a password.
@@ -238,6 +308,8 @@ impl Vault {
                 path: path.to_path_buf(),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
+                #[cfg(feature = "yubikey")]
+                challenge_response: None,
                 db,
             },
         })
@@ -298,7 +370,12 @@ impl Vault {
         // crash-safety on POSIX.
         {
             let mut tmp = std::fs::File::create(&tmp_path)?;
-            let key = database_key(&self.inner.password, self.inner.keyfile.as_deref())?;
+            #[allow(unused_mut)]
+            let mut key = database_key(&self.inner.password, self.inner.keyfile.as_deref())?;
+            #[cfg(feature = "yubikey")]
+            if let Some(cr) = &self.inner.challenge_response {
+                key = key.with_challenge_response_key(cr.clone());
+            }
             self.inner
                 .db
                 .save(&mut tmp, key)
