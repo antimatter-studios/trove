@@ -158,12 +158,20 @@ mod tests {
     fn wordlist_is_intact_and_diceware_draws_from_it() {
         let list = wordlist();
         assert_eq!(list.len(), 7776);
-        let phrase = diceware(6).unwrap();
-        let words: Vec<&str> = phrase.split('-').collect();
-        assert_eq!(words.len(), 6);
-        for w in words {
-            assert!(list.contains(&w), "'{w}' not in the EFF list");
+        // A handful of EFF words contain '-' (e.g. "t-shirt"), so the number of
+        // '-'-separated tokens in a multi-word phrase is NOT a reliable word
+        // count. Verify "draws from the list" with single-word phrases (no join,
+        // so the whole output must be a list member) over a large sample.
+        for _ in 0..2000 {
+            let w = diceware(1).unwrap();
+            assert!(list.contains(&w.as_str()), "'{w}' not in the EFF list");
         }
+        // A 6-word phrase joins with '-', so it has at least 6 tokens (more only
+        // when a drawn word itself contains '-'); none may be empty.
+        let phrase = diceware(6).unwrap();
+        let tokens: Vec<&str> = phrase.split('-').collect();
+        assert!(tokens.len() >= 6, "{phrase}");
+        assert!(tokens.iter().all(|t| !t.is_empty()), "{phrase}");
         assert!(diceware(0).is_err());
     }
 }
