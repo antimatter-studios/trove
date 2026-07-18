@@ -328,6 +328,11 @@ jobs:
     if: ${{ !inputs.crate_only }}
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (CHANGELOG.md + release-notes tooling)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -343,12 +348,23 @@ jobs:
           ls -1 | grep -v '^SHA256SUMS$' | xargs shasum -a 256 > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Generate release notes from CHANGELOG.md
+        # Reuses the github-guard changelog guard, which ALSO enforces (pre-push)
+        # that this version's section exists — so the release body can never drift
+        # from the committed CHANGELOG.md. One source of truth.
+        shell: bash
+        env:
+          REF_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          .githooks/pre-push.d/git-changelog.sh notes "$REF_NAME" > release-notes.md
+          echo "----- release notes -----"; cat release-notes.md
+
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: trove ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             dist/trove-*.tar.gz
             dist/trove-*.zip
