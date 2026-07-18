@@ -469,4 +469,20 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p trove-core
+        # Idempotent: if the API skip-check missed it (e.g. index lag on a
+        # re-cut of the same tag), crates.io still rejects a duplicate version —
+        # treat that specific "already exists" case as success, fail on anything
+        # else.
+        run: |
+          if cargo publish -p trove-core 2> publish.err; then
+            cat publish.err >&2 || true
+          else
+            cat publish.err >&2
+            # crates.io reports a duplicate version as "already exists" OR
+            # "already uploaded" depending on the path — accept either, fail else.
+            if grep -qiE 'already (exists|uploaded)' publish.err; then
+              echo "trove-core version already published — idempotent, treating as success."
+            else
+              exit 1
+            fi
+          fi
