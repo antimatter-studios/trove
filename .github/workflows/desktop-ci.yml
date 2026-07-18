@@ -6,20 +6,25 @@
 # (vitest) and the Tauri Rust backend (fmt / clippy / test), built by its own
 # manifest against the workspace `trove-core` (path dep).
 #
-# Path-filtered to `trove-desktop/**` and NOT a required status check, so a
-# core-only PR simply skips it (no merge deadlock), while a desktop-only PR
-# still gets the core required checks (which pass trivially — the app is
-# excluded from the workspace, so `cargo … --workspace` never touches it).
+# Runs on EVERY PR (no `paths:` filter) but gates the real jobs behind a
+# `changes` step: on a non-desktop PR the frontend/backend jobs skip, so their
+# `Frontend (vitest)` / `Backend (rust)` checks report `skipped` — which GitHub
+# counts as a pass for a required check. A desktop PR (or a change to this
+# workflow) flips `changes.desktop` true and the jobs run for real.
+#
+# Why not `paths:` filtering? A path-filtered workflow never *reports* its
+# checks on a non-matching PR, so once branch protection requires those checks
+# (github-guard auto-discovers them from a desktop PR run), every core-only PR
+# waits forever on checks that can't complete. Always-run + skip avoids that
+# deadlock while still gating desktop changes.
 
 name: Desktop CI
 
 on:
   push:
     branches: [main]
-    paths: ["trove-desktop/**", ".github/workflows/desktop-ci.yml"]
   pull_request:
     branches: [main]
-    paths: ["trove-desktop/**", ".github/workflows/desktop-ci.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -31,8 +36,28 @@ defaults:
     working-directory: trove-desktop
 
 jobs:
+  # Detect whether this PR/push touches the desktop app. The real jobs below
+  # gate on this, so they run only for desktop changes — but the workflow still
+  # triggers on every PR, so the required checks always get reported.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            desktop:
+              - 'trove-desktop/**'
+              - '.github/workflows/desktop-ci.yml'
+
   frontend:
     name: Frontend (vitest)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +72,8 @@ jobs:
 
   backend:
     name: Backend (rust)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
