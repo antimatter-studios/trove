@@ -11,17 +11,32 @@ Treat the vault as more than passwords. Entries can carry **files** (kubeconfig,
 ### macOS / Linuxbrew (via Homebrew)
 
 ```sh
-brew install antimatter-studios/tap/trove
+brew install antimatter-studios/tap/trove-cli
 ```
 
 That installs prebuilt `trove` + `troved` binaries from the [antimatter-studios/homebrew-tap](https://github.com/antimatter-studios/homebrew-tap) tap (macOS arm64/x86_64, Linux arm64/x86_64). The binaries are built and released by trove's own [release pipeline](.github/workflows/release.yml) — the tap just references them, so installs are a download, not a multi-minute compile.
 
+On macOS you can also install the desktop GUI as a cask, which pulls in the CLI:
+
+```sh
+brew install --cask antimatter-studios/tap/trove-desktop
+```
+
 ### Windows
 
-There are two ways to run trove on Windows:
+Native Windows and WSL2 are two independent worlds — install trove in whichever shell you actually use:
 
-- **Native** — download `trove-<version>-windows-x86_64.zip` from [Releases](https://github.com/antimatter-studios/trove/releases). The native build uses Windows **named pipes** instead of Unix-domain sockets for its control, ssh-agent and gpg-agent channels. (Homebrew is Unix-only, so there's no `brew` path on native Windows.)
-- **WSL2** — run the Linux build inside WSL2 (a real Linux environment): install via Linuxbrew exactly as above, or grab a `linux-*` tarball. Inside WSL everything works as on Linux; bridging the agent to native-Windows clients (Git for Windows, Windows OpenSSH) needs a socket→named-pipe relay such as [npiperelay](https://github.com/jstarks/npiperelay).
+- **Native (PowerShell / cmd)** — via [Scoop](https://scoop.sh):
+
+  ```powershell
+  scoop bucket add antimatter-studios https://github.com/antimatter-studios/scoop-bucket
+  scoop install trove
+  ```
+
+  That puts native `trove` + `troved` on your PATH. The native build uses Windows **named pipes** instead of Unix-domain sockets for its control, ssh-agent and gpg-agent channels, so it brokers for native-Windows clients (Git for Windows, Windows OpenSSH). You can also just download `trove-<version>-windows-x86_64.zip` from [Releases](https://github.com/antimatter-studios/trove/releases). (Homebrew is Unix-only, so there's no `brew` path on native Windows.)
+- **WSL2** — run the Linux build inside WSL2 (a real Linux environment): install via Linuxbrew exactly as above, or grab a `linux-*` tarball. Inside WSL everything works as on Linux; bridging the agent to native-Windows clients needs a socket→named-pipe relay such as [npiperelay](https://github.com/jstarks/npiperelay).
+
+The **Trove Desktop** GUI is self-contained — it reads kdbx files directly (embeds `trove-core`), so you don't need the CLI just to browse a vault. Install the CLI when you want your secrets brokered to ssh / git / gpg.
 
 ### From source (cargo)
 
