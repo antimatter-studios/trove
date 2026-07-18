@@ -243,7 +243,9 @@ jobs:
       - run: npm ci
 
       - name: Set desktop version from tag
-        if: startsWith(github.ref, 'refs/tags/')
+        # Fires on a tag push AND a manual re-release dispatch (where the tag
+        # arrives via inputs.tag, not github.ref).
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
         shell: bash
         env:
           REF_NAME: ${{ github.event.inputs.tag || github.ref_name }}
@@ -365,11 +367,10 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: trove ${{ github.event.inputs.tag || github.ref_name }}
           body_path: release-notes.md
-          files: |
-            dist/trove-*.tar.gz
-            dist/trove-*.zip
-            dist/Trove_*
-            dist/SHA256SUMS
+          # Upload everything that was checksummed above (CLI tarballs/zip + every
+          # desktop bundle, whatever tauri named it) so the uploaded set can't
+          # drift from SHA256SUMS.
+          files: dist/*
 
   # Publish the trove-core library to crates.io via crates.io Trusted
   # Publishing (GitHub OIDC) — the trusted publisher is registered against THIS
