@@ -1,9 +1,11 @@
 # trove release pipeline
 #
 # Fires when a `vX.Y.Z` tag is pushed (or via manual dispatch against an
-# existing tag). It builds the `trove` + `troved` binaries on native runners
-# and attaches them — tarballs plus SHA256SUMS — to a GitHub Release on THIS
-# repo. That Release is the only thing this pipeline produces.
+# existing tag). It builds the `trove` + `troved` CLI binaries AND the Tauri
+# desktop bundles (macOS universal / Linux / Windows) on native runners and
+# attaches them all — CLI tarballs, desktop .dmg/.deb/.AppImage/.exe, plus a
+# single SHA256SUMS — to one GitHub Release `trove vX.Y.Z`. It also publishes
+# trove-core to crates.io. CLI and desktop share one version + one release.
 #
 # Homebrew is NOT published from here. The antimatter-studios/homebrew-tap repo
 # PULLS a tagged version (rendering its own formula from this Release's
@@ -171,9 +173,158 @@ jobs:
             trove-*.zip
           retention-days: 1
 
+  # Build the Tauri desktop bundles (macOS universal / Linux / Windows) and
+  # attach them to the SAME release as the CLI. Signing runs only when an
+  # APPLE_CERTIFICATE secret is present; otherwise the macOS build is unsigned.
+  # The temp-keychain password is generated here at runtime, never stored, and
+  # nothing account-specific (identity/team) is hardcoded — it all comes from
+  # secrets, so a fork with no secrets simply builds unsigned.
+  build-desktop:
+    name: Build desktop ${{ matrix.label }}
+    needs: test
+    if: ${{ !inputs.crate_only }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-universal
+            os: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - label: linux-x86_64
+            os: ubuntu-22.04
+            rust-targets: ""
+            args: ""
+          - label: windows-x86_64
+            os: windows-latest
+            rust-targets: ""
+            args: ""
+    defaults:
+      run:
+        working-directory: trove-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: trove-desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2.7.3
+        with:
+          workspaces: trove-desktop/src-tauri
+          key: release-desktop-${{ matrix.label }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            build-essential \
+            file
+
+      - run: npm ci
+
+      - name: Set desktop version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          REF_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, pathlib, re
+          ver = os.environ["REF_NAME"].lstrip("v")
+          tc = pathlib.Path("src-tauri/tauri.conf.json")
+          c = json.loads(tc.read_text()); c["version"] = ver
+          tc.write_text(json.dumps(c, indent=2) + "\n")
+          pj = pathlib.Path("package.json")
+          p = json.loads(pj.read_text()); p["version"] = ver
+          pj.write_text(json.dumps(p, indent=2) + "\n")
+          cg = pathlib.Path("src-tauri/Cargo.toml")
+          txt = re.sub(r'(?m)^version = "[^"]*"', f'version = "{ver}"', cg.read_text(), count=1)
+          cg.write_text(txt)
+          print(f"desktop version set to {ver}")
+          EOF
+
+      - name: Detect macOS signing + generate ephemeral keychain password
+        id: signing
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+        shell: bash
+        run: |
+          if [ -n "$CERT" ]; then
+            echo "have_cert=true" >> "$GITHUB_OUTPUT"
+            # Throwaway password for the temp keychain tauri-action creates on
+            # the runner — generated here, never stored as a secret.
+            echo "KEYCHAIN_PASSWORD=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+            echo "APPLE_CERTIFICATE present — signed macOS build."
+          else
+            echo "have_cert=false" >> "$GITHUB_OUTPUT"
+            echo "No APPLE_CERTIFICATE — unsigned build (opens via right-click -> Open)."
+          fi
+
+      - name: Build desktop bundles — signed macOS (cert present)
+        if: matrix.label == 'macos-universal' && steps.signing.outputs.have_cert == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Signing identity + team come from secrets, not the source, so a fork
+          # never references this account. KEYCHAIN_PASSWORD is inherited from
+          # $GITHUB_ENV (generated above).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: trove-desktop
+          args: ${{ matrix.args }}
+
+      - name: Build desktop bundles — unsigned (Linux/Windows, or macOS w/o cert)
+        if: matrix.label != 'macos-universal' || steps.signing.outputs.have_cert != 'true'
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: trove-desktop
+          args: ${{ matrix.args }}
+
+      - name: Collect distributable bundles
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p bundles
+          find src-tauri/target -type f -path '*/bundle/*' \
+            \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.app.tar.gz' \) \
+            -exec cp {} bundles/ \;
+          ls -la bundles/
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: trove-desktop/bundles/*
+          if-no-files-found: error
+          retention-days: 1
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-desktop]
     if: ${{ !inputs.crate_only }}
     runs-on: ubuntu-latest
     steps:
@@ -188,7 +339,8 @@ jobs:
         run: |
           set -eux
           cd dist
-          shasum -a 256 trove-*.tar.gz trove-*.zip > SHA256SUMS
+          # CLI tarballs/zip + desktop bundles (Trove_*) — everything but the sums file.
+          ls -1 | grep -v '^SHA256SUMS$' | xargs shasum -a 256 > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create / update GitHub Release
@@ -200,6 +352,7 @@ jobs:
           files: |
             dist/trove-*.tar.gz
             dist/trove-*.zip
+            dist/Trove_*
             dist/SHA256SUMS
 
   # Publish the trove-core library to crates.io via crates.io Trusted
