@@ -42,6 +42,12 @@ wiped on exit — the `op run` of kdbx); `--json` on `list`/`search`/`db-info`;
 **Also:** `TROVE_SPAWN_TIMEOUT_SECS` knob for the daemon auto-spawn wait;
 `docs/security-review-2026-07-04.md`; unpredictable `exec` temp-dir names.
 
+**Desktop app (new):** a Tauri 2 GUI (`trove-desktop/`) that links `trove-core`
+directly — a three-pane vault browser that opens a `.kdbx` and reveals fields on
+demand (secrets stay in the backend, never in the entry list). Brought into this
+monorepo and shipped in the same release as macOS (universal), Linux
+(`.deb`/AppImage) and Windows (NSIS) bundles.
+
 ### Detailed entries
 
 - `trove git-credential <get|store|erase>` (beyond parity): a git credential
