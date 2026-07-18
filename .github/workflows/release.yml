@@ -346,8 +346,15 @@ jobs:
         run: |
           set -eux
           cd dist
-          # CLI tarballs/zip + desktop bundles (Trove_*) — everything but the sums file.
-          ls -1 | grep -v '^SHA256SUMS$' | xargs shasum -a 256 > SHA256SUMS
+          # Checksum every asset except the sums file itself. A loop (not
+          # `xargs`) so bundle names containing spaces — e.g. "Trove Desktop_…" —
+          # aren't word-split.
+          : > SHA256SUMS
+          for f in *; do
+            if [ "$f" != SHA256SUMS ]; then
+              shasum -a 256 "$f" >> SHA256SUMS
+            fi
+          done
           cat SHA256SUMS
 
       - name: Generate release notes from CHANGELOG.md
