@@ -1,7 +1,7 @@
 {
   "name": "trove-desktop",
   "private": true,
-  "version": "2026.6.30-0",
+  "version": "0.5.0",
   "type": "module",
   "author": "Chris Thomas",
   "license": "MIT",
