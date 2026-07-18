@@ -122,14 +122,30 @@ jobs:
           print(f"version set to {ver}")
           EOF
 
-      - name: Strip macOS signing config when no cert secret
-        # tauri.conf.json hardcodes the Developer ID identity. CI has no matching
-        # cert in its keychain unless APPLE_CERTIFICATE is provided; when absent,
-        # drop the signing section so the build produces an unsigned .app instead
-        # of failing with "The specified item could not be found in the keychain."
-        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE == ''
+      - name: Detect macOS signing availability
+        # A single source of truth for "do we have a signing cert?". The Apple
+        # env vars must NOT be passed to the build when absent: GitHub resolves a
+        # missing secret to an EMPTY STRING, and the Tauri CLI treats a present-
+        # but-empty APPLE_CERTIFICATE as "import this cert", which fails with
+        # "security import: failed to import keychain certificate".
+        id: signing
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+        shell: bash
+        run: |
+          if [ -n "$CERT" ]; then
+            echo "have_cert=true" >> "$GITHUB_OUTPUT"
+            echo "APPLE_CERTIFICATE present — macOS build will be signed."
+          else
+            echo "have_cert=false" >> "$GITHUB_OUTPUT"
+            echo "No APPLE_CERTIFICATE — macOS build will be UNSIGNED."
+          fi
+
+      - name: Strip macOS signing config (unsigned build)
+        # tauri.conf.json hardcodes the Developer ID identity. With no cert
+        # available, drop the signing section so the bundler doesn't try (and
+        # fail) to codesign against a certificate that isn't in the keychain.
+        if: matrix.platform == 'macos-latest' && steps.signing.outputs.have_cert != 'true'
         shell: bash
         run: |
           python3 - <<'EOF'
@@ -141,14 +157,17 @@ jobs:
           print("Stripped bundle.macOS — CI build will be unsigned")
           EOF
 
-      - name: Build & upload (tauri-action)
+      - name: Build & upload — signed macOS (cert present)
+        # Apple signing env is passed ONLY here — so an empty APPLE_CERTIFICATE
+        # never reaches the Linux/Windows legs or the unsigned-macOS path.
+        if: matrix.platform == 'macos-latest' && steps.signing.outputs.have_cert == 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # macOS signing + notarization. tauri-action imports the cert into a
           # temp keychain when APPLE_CERTIFICATE is set; stapling runs once the
           # notarization triple (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID) is
-          # also present. Absent → the strip step above produced an unsigned .app.
+          # also present.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -159,6 +178,23 @@ jobs:
         with:
           projectPath: trove-desktop
           # Attach to a release only on a tag push.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Trove Desktop {0}', github.ref_name) || '' }}
+          releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && format('Automated desktop build for `{0}`.', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: Build & upload — unsigned (Linux, Windows, or macOS without a cert)
+        # No Apple env at all. Linux/Windows never need it; unsigned macOS must
+        # not receive a present-but-empty APPLE_CERTIFICATE (which the Tauri CLI
+        # would try to import). An unsigned .app opens via right-click → Open.
+        if: matrix.platform != 'macos-latest' || steps.signing.outputs.have_cert != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: trove-desktop
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Trove Desktop {0}', github.ref_name) || '' }}
           releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && format('Automated desktop build for `{0}`.', github.ref_name) || '' }}
