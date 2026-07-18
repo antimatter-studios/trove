@@ -1,6 +1,6 @@
 {
   "language": { "name": "English" },
-  "app": { "title": "Trove" },
+  "app": { "title": "Trove Desktop" },
   "unlock": {
     "heading": "Unlock your vault",
     "vaultFile": "Vault file",
