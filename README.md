@@ -380,6 +380,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.5.0
+Full `keepassxc-cli` command parity — generic entry CRUD, keyfile + YubiKey composite keys, TOTP, password generation + breach audit, clipboard, and vault `merge`/`export`/`db-edit` — plus beyond-parity features `keepassxc-cli` has no equivalent for: `exec` (secrets scoped to a process tree), `--json` output, a `git-credential` helper, and `trove://` secret references. Also introduces the **Trove desktop app**: a Tauri 2 GUI, shipped as macOS, Linux, and Windows bundles alongside the CLI.
+
 ### v0.4.0
 Daemon-default `add file` / `add gpg` (with `--vault` as the global offline selector), and a `troved` singleton-socket flock that makes orphaned agent sockets impossible.
 
