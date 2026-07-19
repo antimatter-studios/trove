@@ -130,22 +130,47 @@ pub fn warn_on_version_mismatch(daemon_version: &str) {
     }
 }
 
+/// The warning for a daemon that predates version reporting: it can't tell us
+/// its build, which means it's older than this CLI and running stale code —
+/// exactly the drift worth flagging. `None` when suppressed. Kept alongside
+/// [`version_mismatch_warning`] so both paths share one voice.
+pub fn predates_version_reporting_warning() -> Option<String> {
+    if version_warn_disabled() {
+        return None;
+    }
+    Some(
+        "trove: warning: the running troved predates version reporting — it's an older build \
+         than this CLI and running stale code, which may speak a different protocol. Restart it \
+         to load the current binary: `trove lock` (or kill troved), then re-run."
+            .to_string(),
+    )
+}
+
 fn version_warn_disabled() -> bool {
     matches!(std::env::var("TROVE_NO_VERSION_WARN").as_deref(), Ok("1"))
 }
 
 /// Ask an already-running daemon for its build version via `GetVersion`, then
-/// warn on drift. Best-effort: any transport/parse failure (including "not
-/// running") is swallowed — the version check must never break a command. Used
-/// by commands that connect to a daemon they did NOT spawn (the spawn/unlock
-/// path already learns the version from the `Unlock` reply).
+/// warn on drift. Best-effort about *transport*: if we can't reach the daemon
+/// at all (including "not running") we stay silent — the version check must
+/// never break a command. But a successful round-trip that lacks a
+/// `daemon_version` is NOT silence-worthy: it means the daemon is old enough to
+/// not understand `GetVersion` (it replied `{"status":"err",...}`), which is the
+/// very stale-daemon case this guard exists to catch — so we warn. Used by
+/// commands that connect to a daemon they did NOT spawn (the unlock path already
+/// learns the version from the `Unlock` reply).
 pub fn check_running_daemon_version() {
     if version_warn_disabled() {
         return;
     }
     if let Ok(resp) = send(&Request::GetVersion) {
-        if let Some(v) = resp.get("daemon_version").and_then(Value::as_str) {
-            warn_on_version_mismatch(v);
+        match resp.get("daemon_version").and_then(Value::as_str) {
+            Some(v) => warn_on_version_mismatch(v),
+            None => {
+                if let Some(msg) = predates_version_reporting_warning() {
+                    eprintln!("{msg}");
+                }
+            }
         }
     }
 }
@@ -572,18 +597,79 @@ mod tests {
         );
     }
 
-    /// `TROVE_NO_VERSION_WARN=1` suppresses the drift warning even on a real
-    /// mismatch (the documented escape hatch for users who knowingly run mixed
-    /// builds).
+    /// `TROVE_NO_VERSION_WARN=1` suppresses BOTH drift warnings (the
+    /// version-mismatch one and the predates-reporting one) even on a real
+    /// mismatch — the documented escape hatch for users who knowingly run mixed
+    /// builds.
     #[test]
     fn version_warn_can_be_suppressed() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("TROVE_NO_VERSION_WARN", "1");
         assert!(
             version_mismatch_warning("0.3.0-dev-19990101000000").is_none(),
-            "TROVE_NO_VERSION_WARN=1 must suppress the warning"
+            "TROVE_NO_VERSION_WARN=1 must suppress the version-drift warning"
+        );
+        assert!(
+            predates_version_reporting_warning().is_none(),
+            "TROVE_NO_VERSION_WARN=1 must suppress the predates-reporting warning"
         );
         std::env::remove_var("TROVE_NO_VERSION_WARN");
+    }
+
+    /// A daemon too old to answer `GetVersion` (it can't report a version at
+    /// all) must still produce a warning by default — this is the primary
+    /// stale-daemon case (fresh CLI, pre-`GetVersion` daemon still running).
+    #[test]
+    fn predates_reporting_warns_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("TROVE_NO_VERSION_WARN");
+        let msg = predates_version_reporting_warning().expect("must warn by default");
+        assert!(
+            msg.contains("predates version reporting"),
+            "warning should explain the stale daemon: {msg}"
+        );
+    }
+
+    /// End-to-end for the pre-`GetVersion` gap Greptile flagged: an old daemon
+    /// answers `get-version` with `{"status":"err",...}` (a successful
+    /// round-trip that carries no `daemon_version`). `check_running_daemon_version`
+    /// must treat that as a stale daemon and NOT swallow it as a transport error.
+    /// We can't capture the stderr write here, but we can prove the classifying
+    /// logic: the reply is `Ok(_)` with no `daemon_version`, so the `None` arm
+    /// (which warns) is taken rather than the transport-error early return.
+    #[test]
+    fn old_daemon_error_reply_is_not_swallowed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("old.sock");
+        std::env::set_var("TROVE_SOCK", &sock);
+
+        // Stand in for a pre-GetVersion daemon: it rejects the unknown cmd.
+        let reply = serde_json::json!({"status": "err", "error": "invalid request: unknown cmd"})
+            .to_string();
+        let server = run_oneshot_listener(sock.clone(), reply);
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let resp = send(&Request::GetVersion).expect("round-trip succeeds");
+        server.join().ok();
+        // The key property: a *successful* round-trip with no version field —
+        // the case the original code silently dropped.
+        assert_eq!(resp["status"], "err");
+        assert!(
+            resp.get("daemon_version").is_none(),
+            "old daemon carries no daemon_version"
+        );
+        assert!(
+            predates_version_reporting_warning().is_some(),
+            "this is the case that must warn, not be swallowed"
+        );
+
+        std::env::remove_var("TROVE_SOCK");
     }
 
     /// The drift check runs for ordinary daemon commands but skips the probe
