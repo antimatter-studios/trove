@@ -19,9 +19,19 @@
 //!   goes out.** A user calling `unlock` should be able to assume that, by
 //!   the time `ok` returns, every materialized file is on disk. Doing it
 //!   asynchronously would race with the user's first `kubectl` invocation.
-//! * **Per-entry failure is logged but doesn't fail the whole unlock.** The
-//!   spec is explicit about this: a typo in `Materialize.Target` on one
-//!   entry must not prevent the rest of the vault from working.
+//! * **Per-entry failure doesn't fail the whole unlock, but is never
+//!   silent.** The spec is explicit that a typo in `Materialize.Target` on one
+//!   entry must not prevent the rest of the vault from working. But a failure
+//!   is both logged AND returned to the caller (`materialize_warnings` in the
+//!   unlock reply) so the CLI can warn loudly — `unlock` must never report `ok`
+//!   with a configured materialized file missing (issue #56).
+//! * **A missing parent directory is created, not rejected.** We `mkdir -p`
+//!   the target's missing ancestors at write time (mode 0700, so a 0600 secret
+//!   isn't dropped into a world-traversable dir), track exactly the dirs we
+//!   created, and remove them on lock/wipe if empty — a pre-existing dir is
+//!   never removed. Creating dirs does NOT bypass the tmpfs check: the
+//!   `AllowDiskBacked=false` policy is enforced against the resolved target
+//!   before any dir is created.
 //! * **Wipe on lock is synchronous.** `lock` should return only after we've
 //!   genuinely tried to wipe everything. If a wipe fails, we log it loudly
 //!   and keep going — but we don't return ok until the loop finishes.
@@ -112,6 +122,11 @@ pub struct MaterializationPlan {
 pub struct MaterializedFile {
     pub entry_title: String,
     pub target: PathBuf,
+    /// Parent directories trove itself created (mode 0700) to write `target`,
+    /// innermost-last. Empty if the parent already existed. On wipe we remove
+    /// these in reverse (innermost first) and only if empty, so a pre-existing
+    /// directory is NEVER removed.
+    pub created_dirs: Vec<PathBuf>,
     /// When this file should be wiped automatically, if ever.
     pub expires_at: Option<Instant>,
     /// Cancellation channel for the TTL timer task. Notify the cancel so the
@@ -229,8 +244,21 @@ pub fn materialize_one(
         .map_err(MaterializeError::Core)?
         .ok_or_else(|| MaterializeError::AttachmentMissing(plan.source_attachment.clone()))?;
 
-    write_file(&plan.resolved_target, plan.mode, &bytes)
-        .map_err(|e| MaterializeError::Io(plan.resolved_target.clone(), e))?;
+    // Create any missing parent directories (mkdir -p, mode 0700) so a target
+    // in a not-yet-existent dir materializes instead of silently vanishing.
+    // 0700 keeps a 0600 secret out of a world-traversable directory. We track
+    // exactly the dirs we created so wipe can remove them (and never a
+    // pre-existing dir). A failure here surfaces as a MaterializeError — the
+    // caller reflects it in the unlock result, never a silent success.
+    let created_dirs = create_parent_dirs(&plan.resolved_target)
+        .map_err(|e| MaterializeError::Mkdir(plan.resolved_target.clone(), e))?;
+
+    if let Err(e) = write_file(&plan.resolved_target, plan.mode, &bytes) {
+        // Roll back any dirs we just created so a failed write doesn't leave
+        // empty trove-made dirs behind. Best-effort, innermost first.
+        remove_created_dirs(&created_dirs);
+        return Err(MaterializeError::Io(plan.resolved_target.clone(), e));
+    }
 
     let cancel = Arc::new(Notify::new());
     let expires_at = plan.ttl.map(|d| Instant::now() + d);
@@ -239,6 +267,7 @@ pub fn materialize_one(
         spawn_ttl_task(
             plan.resolved_target.clone(),
             plan.entry_title.clone(),
+            created_dirs.clone(),
             ttl,
             cancel.clone(),
             store,
@@ -248,9 +277,78 @@ pub fn materialize_one(
     Ok(MaterializedFile {
         entry_title: plan.entry_title.clone(),
         target: plan.resolved_target.clone(),
+        created_dirs,
         expires_at,
         ttl_cancel: cancel,
     })
+}
+
+/// Create every missing parent directory of `target`, top-down, each with mode
+/// 0700 (user-only — a 0600 secret must not sit in a world-traversable dir).
+/// Returns the dirs we actually created, innermost-last, so the caller can undo
+/// them on wipe. A pre-existing parent yields an empty vec and no filesystem
+/// changes.
+///
+/// If creating any dir fails we roll back the ones we made in this call and
+/// return the error — we never leave a half-built, mis-permissioned chain.
+fn create_parent_dirs(target: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+    let missing = paths::missing_ancestors(target); // outermost-first
+    let mut created: Vec<PathBuf> = Vec::with_capacity(missing.len());
+    for dir in missing {
+        // Race guard: another process may have created it between the probe
+        // and now. Treat AlreadyExists as "not ours" — don't track it, don't
+        // fail.
+        match create_dir_0700(&dir) {
+            Ok(()) => created.push(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Someone (or something) created this dir between our probe and
+                // now. It isn't ours, so don't track it for removal — but keep
+                // going: deeper dirs in the pre-computed chain may still be
+                // missing and are ours to create.
+                continue;
+            }
+            Err(e) => {
+                remove_created_dirs(&created);
+                return Err(e);
+            }
+        }
+    }
+    Ok(created)
+}
+
+#[cfg(unix)]
+fn create_dir_0700(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+    // `mode` is masked by the process umask at creation time, so a hostile
+    // umask could yield something other than 0700 (e.g. dropping the
+    // user-execute bit, making the dir un-traversable). Force the exact mode
+    // afterwards — same treatment `write_file` gives to files.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn create_dir_0700(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().create(dir)
+}
+
+/// Remove directories trove created, innermost-first, and only while empty.
+/// Best-effort: a dir that isn't empty (something else dropped a file in it) or
+/// that we can't remove is left alone — we never force-remove. `dirs` is the
+/// created list (innermost-last), so we iterate in reverse.
+fn remove_created_dirs(dirs: &[PathBuf]) {
+    for dir in dirs.iter().rev() {
+        match std::fs::remove_dir(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                // Non-empty or permission problem: stop — outer dirs enclose
+                // this one, so they can't be empty either.
+                break;
+            }
+        }
+    }
 }
 
 /// Errors specific to the actual write step (distinct from PlanError).
@@ -258,6 +356,9 @@ pub fn materialize_one(
 pub enum MaterializeError {
     #[error("attachment '{0}' missing from entry at materialize time")]
     AttachmentMissing(String),
+
+    #[error("create parent dir for {0:?}: {1}")]
+    Mkdir(PathBuf, std::io::Error),
 
     #[error("write {0:?}: {1}")]
     Io(PathBuf, std::io::Error),
@@ -307,6 +408,7 @@ fn write_file(path: &std::path::Path, _mode: u32, bytes: &[u8]) -> std::io::Resu
 fn spawn_ttl_task(
     target: PathBuf,
     entry_title: String,
+    created_dirs: Vec<PathBuf>,
     ttl: Duration,
     cancel: Arc<Notify>,
     store: MaterializedStore,
@@ -329,6 +431,8 @@ fn spawn_ttl_task(
                         target.display(),
                     );
                 }
+                // Remove any parent dirs trove created for this file (empty-only).
+                remove_created_dirs(&created_dirs);
                 // Remove from the shared store so subsequent lock doesn't
                 // try to wipe a now-missing file (it's idempotent, but
                 // we'd rather not log a false-positive error).
@@ -365,6 +469,9 @@ pub async fn wipe_all(store: &MaterializedStore) {
                 report.errors,
             );
         }
+        // Remove parent dirs trove created for this file, innermost-first and
+        // only while empty — a pre-existing dir is never in this list.
+        remove_created_dirs(&m.created_dirs);
     }
 }
 
@@ -469,5 +576,59 @@ mod tests {
         assert!(!parse_bool("false").unwrap());
         assert!(!parse_bool("0").unwrap());
         assert!(parse_bool("maybe").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_parent_dirs_makes_missing_chain_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("x").join("y").join("secret");
+
+        let created = create_parent_dirs(&target).expect("create dirs");
+        // Two dirs created (x, x/y), innermost-last.
+        assert_eq!(
+            created,
+            vec![tmp.path().join("x"), tmp.path().join("x").join("y")]
+        );
+        for d in &created {
+            assert!(d.is_dir(), "{} should be a dir", d.display());
+            let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "created dir must be 0700");
+        }
+    }
+
+    #[test]
+    fn create_parent_dirs_noop_when_parent_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("secret");
+        assert!(
+            create_parent_dirs(&target).expect("noop").is_empty(),
+            "existing parent => nothing created"
+        );
+    }
+
+    #[test]
+    fn remove_created_dirs_removes_only_empty_innermost_first() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("p").join("q").join("secret");
+        let created = create_parent_dirs(&target).expect("create");
+        assert_eq!(created.len(), 2);
+        remove_created_dirs(&created);
+        assert!(!tmp.path().join("p").join("q").exists(), "q removed");
+        assert!(!tmp.path().join("p").exists(), "p removed");
+    }
+
+    #[test]
+    fn remove_created_dirs_keeps_nonempty_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("p").join("q").join("secret");
+        let created = create_parent_dirs(&target).expect("create");
+        // Drop a stray file into the innermost dir so it isn't empty.
+        std::fs::write(tmp.path().join("p").join("q").join("stray"), b"x").unwrap();
+        remove_created_dirs(&created);
+        // Innermost not empty => nothing removed (outer encloses it).
+        assert!(tmp.path().join("p").join("q").exists(), "non-empty q kept");
+        assert!(tmp.path().join("p").exists(), "p kept (encloses q)");
     }
 }
