@@ -15,14 +15,14 @@
 # inside it are deeper (e.g. `### v0.2.0`) sub-headings. Bypass: git push --no-verify.
 #
 # Also usable as a CLI: `git-changelog.sh notes vX.Y.Z` prints that version's
-# release notes from CHANGELOG.md. The release pipeline calls this, so the
+# release notes from CHANGELOG.md. A release pipeline can call this, so the
 # changelog this guard enforces is the single source of truth for release bodies.
 set -u
 dir=$(cd "$(dirname "$0")/.." && pwd)   # .githooks/
 # shellcheck source=../lib/common.sh
 . "$dir/lib/common.sh"
 
-# --- changelog extraction (shared by the hook below and the release pipeline) -
+# --- changelog extraction (shared by the hook below and a release pipeline) ---
 # Print CHANGELOG.md's body for a version (no heading) — from its "## vX.Y.Z"
 # heading up to the next "## v" heading, with leading blank lines trimmed.
 # Reads the changelog on stdin.
