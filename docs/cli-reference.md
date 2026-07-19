@@ -481,10 +481,19 @@ Host work-github
 
 `IdentitiesOnly yes` is the important line: it tells `ssh` to offer **only** the
 listed `IdentityFile` for that alias instead of walking every key the agent
-holds. The `IdentityFile` may be a `.pub` file — the public half is enough for
+holds. The `IdentityFile` here is a `.pub` file — the public half is enough for
 `ssh` to pick which agent key to use, and the private half never leaves the
-daemon — which pairs naturally with `trove get ssh <entry> --public --out`. Then
-address each account by its `Host`:
+daemon. `ssh` reads that file at connection time, so it **must exist on disk at
+the referenced path**; if it's missing, `ssh` silently skips the key and you get
+`Permission denied (publickey)`. Export the public keys to the exact paths named
+in the config with `trove get ssh --public`:
+
+```sh
+trove get ssh personal/github.com --public --out ~/.ssh/id_personal.pub
+trove get ssh work/github.com     --public --out ~/.ssh/id_work.pub
+```
+
+Then address each account by its `Host`:
 
 ```sh
 git clone git@work-github:acme/backend.git       # offers id_work
