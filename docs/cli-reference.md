@@ -454,6 +454,43 @@ Print the path to the troved SSH agent socket, then exit. Resolution order:
 
 Typical use: `export SSH_AUTH_SOCK="$(trove ssh-agent socket)"`.
 
+### Two accounts on one host
+
+The agent serves every unlocked key, and `ssh` offers them to a host in turn
+until one is accepted. When you hold two keys that are *both* valid for the same
+host — a common case is a personal and a work account on `github.com` — `ssh`
+may present the wrong one, landing you on the wrong account. This is a plain
+SSH-agent concern (not specific to trove), and the standard fix is a
+`~/.ssh/config` host alias that pins the identity:
+
+```
+# Personal account: the default github.com
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_personal.pub
+    IdentitiesOnly yes
+
+# Work account: reach it as `work-github`
+Host work-github
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_work.pub
+    IdentitiesOnly yes
+```
+
+`IdentitiesOnly yes` is the important line: it tells `ssh` to offer **only** the
+listed `IdentityFile` for that alias instead of walking every key the agent
+holds. The `IdentityFile` may be a `.pub` file — the public half is enough for
+`ssh` to pick which agent key to use, and the private half never leaves the
+daemon — which pairs naturally with `trove get ssh <entry> --public --out`. Then
+address each account by its `Host`:
+
+```sh
+git clone git@work-github:acme/backend.git       # offers id_work
+git clone git@github.com:me/dotfiles.git         # offers id_personal
+```
+
 ## trove gpg-agent
 
 ```
