@@ -183,6 +183,13 @@ trove lock
 # disable. Inspect with `trove idle get`.
 ```
 
+Where `trove status` reports only the daemon on the expected socket, `trove
+daemons` (Unix) scans every runtime dir and lists **all** trove daemons — live or
+stale leftovers from a crash — so a stray from an old build or a wedged process
+is visible instead of silently blocking `unlock`. `trove daemons kill --all`
+stops them: gracefully over the control socket, escalating to a signal for a
+wedged one, and clearing stale files.
+
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is a workspace member so `cargo test --workspace` runs it.
 
 ## Shipped (v0.5.0)

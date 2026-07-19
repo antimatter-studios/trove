@@ -4,6 +4,19 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## Unreleased
+
+**Daemon visibility + reap (`trove daemons`, Unix):** a new command that scans
+every runtime dir — not just the one expected control socket — and lists all
+trove daemons, live or the stale remains of a crashed one, with pid/socket/
+liveness. `trove daemons kill (<SOCKET> | --all)` stops a straggler: gracefully
+over its control socket, escalating to a signal (`SIGTERM`→`SIGKILL`) for a
+wedged daemon, and clearing stale files. This surfaces and clears orphans the
+single-path `status` probe misses — a wedged daemon, or a stray from an old
+build whose socket path differed and so ran alongside the current one. The
+singleton daemon now stamps its pid into the lockfile so a reaper can name and
+signal it (liveness still comes from the `flock`, not the pid).
+
 ## v0.5.0 — 2026-07-04
 
 Full `keepassxc-cli` command parity (the seven gaps in
