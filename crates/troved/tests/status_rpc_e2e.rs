@@ -319,6 +319,25 @@ async fn ssh_agent_list_returns_served_keys() {
     );
 }
 
+/// `GetVersion` reports the daemon's build version (the drift-check handshake),
+/// and works even while locked — no vault required.
+#[tokio::test]
+async fn get_version_reports_build_version_while_locked() {
+    let h = Harness::new(Duration::from_secs(900));
+    let resp = h.handle(Request::GetVersion).await;
+    let body = serde_json::to_value(&resp).unwrap();
+    assert_eq!(body["status"], "ok");
+    let ver = body["daemon_version"]
+        .as_str()
+        .expect("daemon_version string");
+    assert!(!ver.is_empty(), "daemon_version must not be empty: {body}");
+    assert_eq!(
+        ver,
+        env!("TROVE_BUILD_VERSION"),
+        "GetVersion must report the daemon's own build stamp"
+    );
+}
+
 /// `GpgAgentList` returns an empty list when no GPG keys are loaded (locked, or
 /// a vault without `gpg-priv` attachments) — never an error.
 #[tokio::test]

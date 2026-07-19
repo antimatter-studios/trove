@@ -75,6 +75,7 @@ pub async fn handle(
         Request::Ping
         | Request::Status
         | Request::GetIdleTimeout
+        | Request::GetVersion
         | Request::MaterializeStatus
         | Request::SshAgentList
         | Request::GpgAgentList => {}
@@ -361,6 +362,11 @@ pub async fn handle(
                 shutdown: false,
             }
         }
+
+        Request::GetVersion => Handled {
+            response: Response::ok_version(),
+            shutdown: false,
+        },
 
         Request::Status => {
             // Capture vault path (if any) without holding the state lock

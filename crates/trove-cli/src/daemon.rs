@@ -96,6 +96,60 @@ pub fn is_daemon_not_running(err: &anyhow::Error) -> bool {
     err.to_string().contains("troved is not running")
 }
 
+/// This CLI's build version, stamped by `build.rs` (same value the daemon
+/// reports). The single source of truth for the CLI↔daemon drift check.
+pub fn cli_version() -> &'static str {
+    env!("TROVE_BUILD_VERSION")
+}
+
+/// The drift warning for a given daemon version, or `None` when there's nothing
+/// to warn about: the versions agree, or the warning is suppressed via
+/// `TROVE_NO_VERSION_WARN=1`. Pure (modulo the two env reads) so the decision is
+/// unit-testable without capturing stderr.
+pub fn version_mismatch_warning(daemon_version: &str) -> Option<String> {
+    let cli = cli_version();
+    if daemon_version == cli || version_warn_disabled() {
+        return None;
+    }
+    Some(format!(
+        "trove: warning: version drift — cli {cli} · daemon {daemon_version}. \
+         The running troved is a different build than this CLI and may speak a \
+         different protocol. Restart it to load the current binary: \
+         `trove lock` (or kill troved), then re-run."
+    ))
+}
+
+/// Warn to stderr when the daemon we're driving is a different build than this
+/// CLI. A stale sibling `troved` (e.g. left behind by a CLI-only `cargo build`)
+/// can speak a subtly different protocol, so we flag it — but keep it a warning,
+/// not a hard failure: brew ships them matched and matched builds are the norm.
+/// Silent when the versions agree. `TROVE_NO_VERSION_WARN=1` suppresses it.
+pub fn warn_on_version_mismatch(daemon_version: &str) {
+    if let Some(msg) = version_mismatch_warning(daemon_version) {
+        eprintln!("{msg}");
+    }
+}
+
+fn version_warn_disabled() -> bool {
+    matches!(std::env::var("TROVE_NO_VERSION_WARN").as_deref(), Ok("1"))
+}
+
+/// Ask an already-running daemon for its build version via `GetVersion`, then
+/// warn on drift. Best-effort: any transport/parse failure (including "not
+/// running") is swallowed — the version check must never break a command. Used
+/// by commands that connect to a daemon they did NOT spawn (the spawn/unlock
+/// path already learns the version from the `Unlock` reply).
+pub fn check_running_daemon_version() {
+    if version_warn_disabled() {
+        return;
+    }
+    if let Ok(resp) = send(&Request::GetVersion) {
+        if let Some(v) = resp.get("daemon_version").and_then(Value::as_str) {
+            warn_on_version_mismatch(v);
+        }
+    }
+}
+
 /// Like `send`, but if the daemon isn't running we spawn `troved` ourselves,
 /// wait for the socket to come up, then retry. Used by every CLI command that
 /// talks to the daemon so users never need to start `troved` manually.
@@ -109,7 +163,27 @@ pub fn is_daemon_not_running(err: &anyhow::Error) -> bool {
 /// itself is now a singleton (it takes the same lock before binding), so the
 /// loser exits without binding — a startup race can no longer orphan a daemon.
 pub fn send_autospawn(req: &Request) -> Result<Value> {
-    send_autospawn_reporting(req).map(|(v, _)| v)
+    let v = send_autospawn_reporting(req).map(|(v, _)| v)?;
+    // Whether we spawned the daemon or reused a running one, it may be a stale
+    // sibling `troved` (the issue: a CLI-only rebuild leaves an old daemon
+    // next to the new CLI). Flag CLI↔daemon drift once the command has
+    // connected. Skip commands that already learn the version inline, that ARE
+    // the version probe, or that may tear the daemon down — probing those would
+    // be redundant, recursive, or just respawn a daemon we asked to exit.
+    if should_version_check(req) {
+        check_running_daemon_version();
+    }
+    Ok(v)
+}
+
+/// Commands that should trigger a CLI↔daemon drift check after connecting.
+/// Excludes `GetVersion` (the probe itself — avoids a recursive/duplicate
+/// round-trip) and `Lock`/`Shutdown` (they may stop the daemon, so a follow-up
+/// probe would only respawn one and warn spuriously). `Unlock` never reaches
+/// here — it uses [`send_autospawn_reporting`] and checks its inline
+/// `daemon_version` directly.
+fn should_version_check(req: &Request) -> bool {
+    !matches!(req, Request::GetVersion | Request::Lock | Request::Shutdown)
 }
 
 /// Like [`send_autospawn`], but also reports whether THIS call spawned the
@@ -473,5 +547,53 @@ mod tests {
 
         std::env::remove_var("TROVE_NO_AUTOSPAWN");
         std::env::remove_var("TROVE_SOCK");
+    }
+
+    /// Same-version → no warning; a different daemon version → a warning that
+    /// names both builds so the drift is obvious.
+    #[test]
+    fn version_mismatch_warning_fires_only_on_drift() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("TROVE_NO_VERSION_WARN");
+
+        // Matching version: silent.
+        assert!(
+            version_mismatch_warning(cli_version()).is_none(),
+            "matching versions must not warn"
+        );
+
+        // Drift: warns, and the message carries both versions.
+        let stale = "0.3.0-dev-19990101000000";
+        let msg = version_mismatch_warning(stale).expect("drift must warn");
+        assert!(msg.contains(stale), "warning must name the daemon version");
+        assert!(
+            msg.contains(cli_version()),
+            "warning must name the cli version"
+        );
+    }
+
+    /// `TROVE_NO_VERSION_WARN=1` suppresses the drift warning even on a real
+    /// mismatch (the documented escape hatch for users who knowingly run mixed
+    /// builds).
+    #[test]
+    fn version_warn_can_be_suppressed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("TROVE_NO_VERSION_WARN", "1");
+        assert!(
+            version_mismatch_warning("0.3.0-dev-19990101000000").is_none(),
+            "TROVE_NO_VERSION_WARN=1 must suppress the warning"
+        );
+        std::env::remove_var("TROVE_NO_VERSION_WARN");
+    }
+
+    /// The drift check runs for ordinary daemon commands but skips the probe
+    /// itself and the daemon-teardown commands.
+    #[test]
+    fn version_check_skips_probe_and_teardown_commands() {
+        assert!(should_version_check(&Request::List));
+        assert!(should_version_check(&Request::Status));
+        assert!(!should_version_check(&Request::GetVersion));
+        assert!(!should_version_check(&Request::Lock));
+        assert!(!should_version_check(&Request::Shutdown));
     }
 }
