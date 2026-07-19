@@ -135,6 +135,12 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binaries
+        # TROVE_RELEASE makes build.rs stamp the plain version (e.g. 0.6.0) into
+        # both binaries instead of a per-binary `-dev-<timestamp>`, so `trove`
+        # and `troved` match and the CLI↔daemon drift check never fires on a
+        # released build.
+        env:
+          TROVE_RELEASE: "1"
         run: cargo build --release --locked --target ${{ matrix.target }} -p trove-cli -p troved
 
       # Checksums are computed centrally on Ubuntu (the release job) where
