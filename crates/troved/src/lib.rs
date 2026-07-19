@@ -6,6 +6,10 @@
 
 #![forbid(unsafe_code)]
 
+/// Enumerate + reap trove control daemons across the runtime dirs (Unix only;
+/// builds on the singleton flock, which has no Windows analogue).
+#[cfg(unix)]
+pub mod daemons;
 pub mod gpg_agent;
 pub mod handler;
 pub mod idle;

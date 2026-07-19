@@ -237,7 +237,15 @@ async fn main() -> Result<()> {
     // no equivalent — `first_pipe_instance` in `ipc` rejects a second binder.
     #[cfg(unix)]
     let _singleton = match singleton::try_acquire(&sock_path) {
-        Ok(Some(lock)) => lock,
+        Ok(Some(mut lock)) => {
+            // Stamp our PID so `trove daemons` can name (and, if we ever wedge,
+            // signal) us. Best-effort: liveness is the flock's job, so a failed
+            // write just means `daemons` shows "pid ?" — it must not abort boot.
+            if let Err(e) = singleton::record_pid(&mut lock) {
+                eprintln!("troved: could not record pid in lockfile: {e}");
+            }
+            lock
+        }
         Ok(None) => {
             eprintln!(
                 "troved: another instance already holds {}; exiting",

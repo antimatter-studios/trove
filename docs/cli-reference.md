@@ -573,6 +573,37 @@ shadowed: `trove` completes via `_openstack`.
 fix it with: trove completions zsh --install
 ```
 
+## trove daemons *(Unix only)*
+
+```
+trove daemons [list [--json]]
+trove daemons kill (<SOCKET> | --all)
+```
+
+Where `trove status` probes only the one control-socket path it resolves,
+`daemons` scans the runtime dirs — `$XDG_RUNTIME_DIR`, `${TMPDIR:-/tmp}`, and the
+directory of any `$TROVE_SOCK` — for trove control sockets and their lockfiles.
+That surfaces **orphans the single-path probe misses**: a wedged daemon, or a
+stray from an old build that resolved its socket to a different path (the
+singleton lock is keyed per socket path, so such a daemon runs alongside the
+current one and is otherwise invisible).
+
+`list` (the default) prints one daemon per line — `STATE  PID  SOCKET` — where
+`STATE` is `live` (a running process holds the lock) or `stale` (leftover
+files from a crashed/killed daemon). Liveness is decided by a non-blocking probe
+of the singleton `flock`, which the kernel releases the instant the holder dies,
+so it needs no PID bookkeeping; the PID is read from the lockfile the live daemon
+stamped. `--json` emits an array of `{control_socket, lock_path, pid, alive,
+socket_exists}`. Read-only — never spawns a daemon.
+
+`kill` stops a straggler. Pass a `SOCKET` from `list`, or `--all` for every
+daemon found. A **live** daemon is asked to shut down over its control socket
+(the graceful path — it wipes keys, removes its own sockets, and exits);
+if it is wedged and won't answer, `kill` signals the stamped PID (`SIGTERM`,
+then `SIGKILL`). Only a PID that still holds the live lock is ever signalled, so
+a dead or reused PID is never hit. A **stale** entry just has its leftover
+socket/lock files removed. Exits non-zero if any target could not be stopped.
+
 ## troved — the daemon
 
 ```

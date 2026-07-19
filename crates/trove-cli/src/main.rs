@@ -204,6 +204,24 @@ enum Command {
     /// GPG keys, and materialized files in memory.
     Status,
 
+    /// List every trove daemon on the system — not just the one on the expected
+    /// socket — and, with `kill`, stop a straggler. Where `status` probes a
+    /// single control-socket path, this scans the runtime dirs
+    /// ($XDG_RUNTIME_DIR, $TMPDIR/tmp, and any $TROVE_SOCK dir) for trove
+    /// control sockets and lockfiles, so it also surfaces orphans from crashed
+    /// CLIs, wedged daemons, or old builds that used a different socket path.
+    ///
+    /// Each daemon is reported live (a running process holds its lock) or stale
+    /// (leftover files from a dead one), with its pid and socket. `kill` stops a
+    /// live daemon gracefully over its control socket, escalating to a signal
+    /// for a wedged one, and clears stale files. Unix only.
+    #[cfg(unix)]
+    Daemons {
+        /// Defaults to `list` when omitted.
+        #[command(subcommand)]
+        op: Option<DaemonsOp>,
+    },
+
     /// Configure or read the daemon's idle-lock timeout.
     Idle {
         #[command(subcommand)]
@@ -497,6 +515,31 @@ enum ExportFormat {
     Xml,
     /// KeePassXC's CSV column convention.
     Csv,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Subcommand)]
+enum DaemonsOp {
+    /// List every trove daemon found on the system (the default when no
+    /// subcommand is given), one per line: liveness, pid, and control socket.
+    List {
+        /// Machine-readable output: a JSON array of daemon records.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop a straggler. With `--all`, stop every daemon found; otherwise pass a
+    /// control-socket path (as printed by `list`). Live daemons are asked to
+    /// shut down over their control socket first, escalating to a signal if they
+    /// are wedged; stale leftover files are simply cleared.
+    Kill {
+        /// Control-socket path of the daemon to stop (from `list`).
+        #[arg(value_name = "SOCKET", required_unless_present = "all")]
+        socket: Option<PathBuf>,
+        /// Stop every trove daemon found, not just one.
+        #[arg(long, conflicts_with = "socket")]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1035,6 +1078,11 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_unlock(&vault, timeout, export, shell, pw_stdin),
         Command::Lock => cmd_lock(),
         Command::Status => cmd_status(),
+        #[cfg(unix)]
+        Command::Daemons { op } => match op.unwrap_or(DaemonsOp::List { json: false }) {
+            DaemonsOp::List { json } => cmd_daemons_list(json),
+            DaemonsOp::Kill { socket, all } => cmd_daemons_kill(socket.as_deref(), all),
+        },
         Command::Idle {
             op: IdleOp::Set { seconds },
         } => cmd_idle_set(seconds),
@@ -3890,6 +3938,143 @@ fn print_status(resp: &Value) {
     println!("SSH keys:        {ssh} loaded");
     println!("GPG keys:        {gpg} loaded");
     println!("Materialized:    {mat} files");
+}
+
+/// `trove daemons list` — enumerate every trove daemon on the system (live or
+/// stale), across the runtime dirs, so orphans on a non-default socket are
+/// visible. Read-only; never spawns anything.
+#[cfg(unix)]
+fn cmd_daemons_list(json: bool) -> Result<()> {
+    let daemons = troved::daemons::enumerate();
+    let current = daemon::control_socket_path();
+
+    if json {
+        let arr: Vec<Value> = daemons.iter().map(daemon_json).collect();
+        println!("{}", serde_json::to_string_pretty(&Value::Array(arr))?);
+        return Ok(());
+    }
+
+    if daemons.is_empty() {
+        println!("no trove daemons found");
+        return Ok(());
+    }
+
+    // Aligned columns: STATE  PID  SOCKET  [markers].
+    println!("{:<7} {:>7}  SOCKET", "STATE", "PID");
+    for d in &daemons {
+        let state = if d.alive { "live" } else { "stale" };
+        let pid = d.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+        let mut marks = Vec::new();
+        if d.control_sock == current {
+            marks.push("current");
+        }
+        if d.alive && !d.socket_exists() {
+            marks.push("no-socket");
+        }
+        let suffix = if marks.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", marks.join(", "))
+        };
+        println!(
+            "{:<7} {:>7}  {}{}",
+            state,
+            pid,
+            d.control_sock.display(),
+            suffix
+        );
+    }
+    Ok(())
+}
+
+/// One daemon record as JSON, for `daemons list --json`.
+#[cfg(unix)]
+fn daemon_json(d: &troved::daemons::DaemonInfo) -> Value {
+    serde_json::json!({
+        "control_socket": d.control_sock.display().to_string(),
+        "lock_path": d.lock_path.display().to_string(),
+        "pid": d.pid,
+        "alive": d.alive,
+        "socket_exists": d.socket_exists(),
+    })
+}
+
+/// `trove daemons kill [SOCKET | --all]` — stop a straggler (or clear stale
+/// remains). Prints one line per daemon acted on.
+#[cfg(unix)]
+fn cmd_daemons_kill(socket: Option<&Path>, all: bool) -> Result<()> {
+    let daemons = troved::daemons::enumerate();
+
+    let targets: Vec<troved::daemons::DaemonInfo> = if all {
+        daemons
+    } else {
+        // `required_unless_present = "all"` guarantees a socket here.
+        let want = socket.expect("clap requires SOCKET unless --all");
+        let want = normalize_path(want);
+        let hit = daemons
+            .into_iter()
+            .find(|d| normalize_path(&d.control_sock) == want);
+        match hit {
+            Some(d) => vec![d],
+            None => {
+                return Err(DaemonClassified {
+                    message: format!(
+                        "no trove daemon found at socket {} (run `trove daemons` to list them)",
+                        want.display()
+                    ),
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
+            }
+        }
+    };
+
+    if targets.is_empty() {
+        println!("no trove daemons found");
+        return Ok(());
+    }
+
+    let mut any_unreachable = false;
+    for d in &targets {
+        match troved::daemons::reap(d) {
+            Ok(outcome) => {
+                use troved::daemons::ReapOutcome::*;
+                let what = match outcome {
+                    Graceful => "shut down".to_string(),
+                    Signalled(sig) => format!("killed ({sig})"),
+                    AlreadyGone => "already exited; cleaned up".to_string(),
+                    ClearedStale => "cleared stale files".to_string(),
+                    Unreachable => {
+                        any_unreachable = true;
+                        "UNREACHABLE (wedged, no way to signal)".to_string()
+                    }
+                };
+                println!("{}: {}", d.control_sock.display(), what);
+            }
+            Err(e) => {
+                any_unreachable = true;
+                println!("{}: error: {e}", d.control_sock.display());
+            }
+        }
+    }
+
+    if any_unreachable {
+        return Err(DaemonClassified {
+            message: "one or more daemons could not be stopped".to_string(),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Best-effort path normalization for matching a user-supplied socket path
+/// against the enumerated ones: canonicalize if the file exists, else fall back
+/// to the path as given. (A stale entry's socket file may be gone, so we can't
+/// always canonicalize — but then the string forms already match.)
+#[cfg(unix)]
+fn normalize_path(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Render a second count as `<n>s` with a humanized suffix in brackets for
