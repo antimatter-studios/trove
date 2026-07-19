@@ -6,6 +6,8 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+## v0.6.0 — 2026-07-19
+
 **Daemon visibility + reap (`trove daemons`, Unix):** a new command that scans
 every runtime dir — not just the one expected control socket — and lists all
 trove daemons, live or the stale remains of a crashed one, with pid/socket/
@@ -16,6 +18,25 @@ single-path `status` probe misses — a wedged daemon, or a stray from an old
 build whose socket path differed and so ran alongside the current one. The
 singleton daemon now stamps its pid into the lockfile so a reaper can name and
 signal it (liveness still comes from the `flock`, not the pid).
+
+**CLI↔daemon version drift warning:** the CLI now learns the running (or freshly
+spawned) daemon's build version and warns on stderr when it differs from the
+CLI's — so a stale sibling `troved` (e.g. left by a CLI-only `cargo build`) no
+longer drives a subtly different protocol in silence. Warning-only, suppressible
+with `TROVE_NO_VERSION_WARN=1`. Release builds report a plain version and match,
+so it never fires on a release.
+
+**Materialize creates missing parent directories — and never silently fails:** a
+`Materialize.Target` whose parent directory doesn't exist now has that directory
+created (`0700`) instead of the entry being silently dropped, and any
+materialization that still can't be written surfaces a loud unlock warning
+rather than a false `ok`. Directories trove created are removed again on
+lock/TTL (only if empty; a pre-existing directory is never touched). The tmpfs /
+`AllowDiskBacked` guarantee is unchanged.
+
+**Docs — two accounts on one host:** guidance for the work-plus-personal case
+(e.g. two GitHub accounts): a `~/.ssh/config` host alias with `IdentitiesOnly
+yes` pointed at trove's agent, so only the intended key is offered per alias.
 
 ## v0.5.0 — 2026-07-04
 
