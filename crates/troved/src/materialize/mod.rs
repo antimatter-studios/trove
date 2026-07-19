@@ -319,7 +319,13 @@ fn create_parent_dirs(target: &std::path::Path) -> std::io::Result<Vec<PathBuf>>
 #[cfg(unix)]
 fn create_dir_0700(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().mode(0o700).create(dir)
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+    // `mode` is masked by the process umask at creation time, so a hostile
+    // umask could yield something other than 0700 (e.g. dropping the
+    // user-execute bit, making the dir un-traversable). Force the exact mode
+    // afterwards — same treatment `write_file` gives to files.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(not(unix))]
