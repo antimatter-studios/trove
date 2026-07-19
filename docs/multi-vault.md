@@ -37,7 +37,19 @@ Unlock a personal vault and a company vault. Different SSH keys coexist in the
 agent — `ssh-add -L` lists both; nothing shadows. The only place "personal vs
 company" needs attention is two keys **for the same host** (two `github.com`
 accounts), and that's a pure-SSH concern solved with `~/.ssh/config` host
-aliases (`IdentitiesOnly yes` + a `github-work` alias), not something trove does.
+aliases (`IdentitiesOnly yes` + a `work-github` alias), not something trove does.
+That pattern is documented today under
+[**Two accounts on one host**](cli-reference.md#two-accounts-on-one-host).
+
+**Future work — tag served keys by source vault.** Two same-host keys are still
+hard to tell apart in `ssh-add -l` / `trove ssh-agent list`: both show only the
+key comment, so which *vault* a key came from is invisible. When multi-vault
+lands, the served entries should be tagged with their source vault
+(`personal:github.com`, `work:github.com`) in that listing output, so a user can
+see at a glance which key is which and pick the right `~/.ssh/config` alias for
+it. This is display-only labelling — it doesn't change how the agent selects a
+key (that's still the host's choice per the union above); it just makes the
+choice legible. Tracked in [issue #54](https://github.com/antimatter-studios/trove/issues/54).
 
 ## `--vault` is the disambiguator, never a required positional
 
