@@ -402,6 +402,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.6.0
+`trove daemons` (Unix) to see and reap orphaned daemons — a wedged one, or a stray from an old build, that the single-path `status` misses. A CLI↔daemon version-drift warning that flags a stale sibling `troved`. Materialize now creates a target's missing parent directories (`0700`) and surfaces failures loudly instead of a silent no-op. Plus docs for using two accounts on one host (work + personal GitHub) via `~/.ssh/config` host aliases.
+
 ### v0.5.0
 Full `keepassxc-cli` command parity — generic entry CRUD, keyfile + YubiKey composite keys, TOTP, password generation + breach audit, clipboard, and vault `merge`/`export`/`db-edit` — plus beyond-parity features `keepassxc-cli` has no equivalent for: `exec` (secrets scoped to a process tree), `--json` output, a `git-credential` helper, and `trove://` secret references. Also introduces the **Trove desktop app**: a Tauri 2 GUI, shipped as macOS, Linux, and Windows bundles alongside the CLI.
 
