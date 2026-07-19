@@ -89,22 +89,32 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Is `name` a control-socket file trove would have created? We match `trove`
-/// control sockets (`trove.sock`, `trove-<uid>.sock`) but deliberately EXCLUDE
-/// the ssh/gpg agent sockets (`trove-ssh*.sock`, `trove-gpg*.sock`): those are
-/// bound by the same daemon and are not independent instances, so listing them
-/// would double-count. The lockfile only ever sits beside the CONTROL socket.
-fn is_control_socket_name(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix("trove") else {
-        return false;
-    };
-    let Some(stem) = rest.strip_suffix(".sock") else {
-        return false;
-    };
+/// If `name` is a trove control-socket file (`trove.sock`, `trove-<uid>.sock`),
+/// return the control-socket path `dir/name`. The agent sockets
+/// (`trove-ssh*.sock`, `trove-gpg*.sock`) are the SAME daemon's auxiliary
+/// listeners, not independent instances, so they're excluded to avoid
+/// double-counting.
+fn control_sock_from_sock_name(dir: &Path, name: &str) -> Option<PathBuf> {
+    let stem = name.strip_prefix("trove")?.strip_suffix(".sock")?;
     // stem is what sits between "trove" and ".sock": "" (trove.sock) or
-    // "-<uid>" (trove-501.sock). Reject the agent sockets, which the same
-    // daemon binds and which would otherwise double-count it.
-    !(stem.starts_with("-ssh") || stem.starts_with("-gpg"))
+    // "-<uid>" (trove-501.sock). Reject the agent sockets.
+    (!(stem.starts_with("-ssh") || stem.starts_with("-gpg"))).then(|| dir.join(name))
+}
+
+/// If `name` is a trove control LOCKFILE (`trove.lock`, `trove-<uid>.lock`),
+/// return the control-socket path it guards (the sibling `*.sock`). Scanning
+/// lockfiles too — not just sockets — is what surfaces a *lock-only* orphan: a
+/// daemon that removed its socket but still holds the flock (e.g. crashed
+/// between `unlink(socket)` and `exit`) leaves only a `.lock`, which a
+/// socket-only scan would miss even though the held flock blocks the next
+/// daemon from starting. Agent locks don't exist (only the control socket has a
+/// sibling lockfile), but exclude the agent prefixes anyway for symmetry.
+fn control_sock_from_lock_name(dir: &Path, name: &str) -> Option<PathBuf> {
+    let stem = name.strip_prefix("trove")?.strip_suffix(".lock")?;
+    if stem.starts_with("-ssh") || stem.starts_with("-gpg") {
+        return None;
+    }
+    Some(dir.join(format!("trove{stem}.sock")))
 }
 
 /// Classify one control-socket path into a [`DaemonInfo`]. `None` if it has no
@@ -140,30 +150,52 @@ fn classify(control_sock: &Path) -> Option<DaemonInfo> {
 pub fn enumerate() -> Vec<DaemonInfo> {
     let mut out: Vec<DaemonInfo> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-
     for dir in candidate_dirs() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if !is_control_socket_name(name) {
-                continue;
-            }
-            let control_sock = dir.join(name);
-            if !seen.insert(control_sock.clone()) {
-                continue;
-            }
-            if let Some(info) = classify(&control_sock) {
-                out.push(info);
-            }
-        }
+        scan_dir_into(&dir, &mut seen, &mut out);
     }
-
     out.sort_by(|a, b| a.control_sock.cmp(&b.control_sock));
     out
+}
+
+/// Enumerate the trove control daemons discoverable in a single directory,
+/// sorted by control-socket path. The building block of [`enumerate`], exposed
+/// so a caller (or a test) can scan one known directory without going through
+/// the process-global `TROVE_SOCK`/`XDG_RUNTIME_DIR`/`TMPDIR` resolution.
+pub fn enumerate_dir(dir: &Path) -> Vec<DaemonInfo> {
+    let mut out: Vec<DaemonInfo> = Vec::new();
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    scan_dir_into(dir, &mut seen, &mut out);
+    out.sort_by(|a, b| a.control_sock.cmp(&b.control_sock));
+    out
+}
+
+/// Scan `dir` for trove control sockets/lockfiles, appending each newly-seen
+/// daemon to `out`. `seen` de-duplicates by control-socket path across calls (so
+/// a socket that appears in two candidate dirs, or as both `.sock` and `.lock`,
+/// is reported once). An unreadable directory is skipped silently.
+fn scan_dir_into(dir: &Path, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<DaemonInfo>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // Derive the control-socket path from EITHER a `*.sock` or a `*.lock`
+        // entry, so a lock-only orphan (socket already unlinked but flock still
+        // held) is discovered too. Dedup by that path.
+        let Some(control_sock) = control_sock_from_sock_name(dir, name)
+            .or_else(|| control_sock_from_lock_name(dir, name))
+        else {
+            continue;
+        };
+        if !seen.insert(control_sock.clone()) {
+            continue;
+        }
+        if let Some(info) = classify(&control_sock) {
+            out.push(info);
+        }
+    }
 }
 
 /// How a [`reap`] attempt resolved.
@@ -174,11 +206,22 @@ pub enum ReapOutcome {
     /// The daemon didn't answer its socket; we signalled its recorded PID and
     /// it exited. The signal that finished it (`SIGTERM` or `SIGKILL`).
     Signalled(&'static str),
+    /// The daemon exited on its own between discovery and the signal (the PID
+    /// was already gone — `ESRCH`), so no signal was actually delivered. We
+    /// cleaned up whatever files remained.
+    AlreadyGone,
     /// Nothing live was here — we removed leftover stale socket/lock files.
     ClearedStale,
     /// The daemon appeared alive but we had no way to stop it (no socket
     /// response and no recorded PID — e.g. a pre-PID-stamp wedged daemon).
     Unreachable,
+}
+
+/// Result of [`signal_and_wait`]: either a signal actually stopped the process,
+/// or it was already gone when we went to signal it.
+enum SignalOutcome {
+    Signalled(&'static str),
+    AlreadyGone,
 }
 
 /// How long to wait for a daemon to disappear after we ask it to stop, whether
@@ -217,9 +260,9 @@ fn wait_until_gone(control_sock: &Path, budget: Duration) -> bool {
 
 /// Signal `pid` and wait for it to exit. Tries `SIGTERM` first (lets the daemon
 /// run its cleanup — wiping keys, removing sockets), escalating to `SIGKILL`
-/// only if it ignores the polite request. Returns the signal name that worked,
-/// or `None` if the process was already gone / unsignalable.
-fn signal_and_wait(control_sock: &Path, pid: u32) -> Option<&'static str> {
+/// only if it ignores the polite request. Returns which signal stopped it (or
+/// that it was already gone), or `None` if it stayed alive / was unsignalable.
+fn signal_and_wait(control_sock: &Path, pid: u32) -> Option<SignalOutcome> {
     use rustix::process::{kill_process, Pid, Signal};
 
     let raw = i32::try_from(pid).ok()?;
@@ -228,21 +271,23 @@ fn signal_and_wait(control_sock: &Path, pid: u32) -> Option<&'static str> {
     // SIGTERM: the daemon's handler runs the same cleanup as a `shutdown` RPC.
     match kill_process(target, Signal::TERM) {
         Ok(()) => {}
-        // ESRCH: already gone — the socket file was just stale. Treat as done.
-        Err(e) if e == rustix::io::Errno::SRCH => return Some("SIGTERM"),
+        // ESRCH: no such process — the daemon already exited on its own between
+        // the liveness gate and here. We didn't actually kill it, so report that
+        // honestly rather than claiming a SIGTERM landed.
+        Err(e) if e == rustix::io::Errno::SRCH => return Some(SignalOutcome::AlreadyGone),
         Err(_) => return None,
     }
     if wait_until_gone(control_sock, REAP_WAIT) {
-        return Some("SIGTERM");
+        return Some(SignalOutcome::Signalled("SIGTERM"));
     }
 
     // Still wedged after SIGTERM: escalate. This is the 95%-CPU-spin case the
-    // issue describes — a daemon too stuck to run its own signal handler.
-    match kill_process(target, Signal::KILL) {
-        Ok(()) | Err(_) => {}
-    }
+    // issue describes — a daemon too stuck to run its own signal handler. Ignore
+    // the result: SIGKILL can't be caught, and an ESRCH just means it died
+    // between the two signals — either way, `wait_until_gone` is the verdict.
+    let _ = kill_process(target, Signal::KILL);
     if wait_until_gone(control_sock, REAP_WAIT) {
-        Some("SIGKILL")
+        Some(SignalOutcome::Signalled("SIGKILL"))
     } else {
         None
     }
@@ -290,9 +335,13 @@ pub fn reap(info: &DaemonInfo) -> io::Result<ReapOutcome> {
     // the liveness gate so we never signal a PID whose daemon already exited.
     match singleton::holder_pid_if_live(&info.control_sock)? {
         Some(pid) => match signal_and_wait(&info.control_sock, pid) {
-            Some(sig) => {
+            Some(SignalOutcome::Signalled(sig)) => {
                 remove_stale_files(info);
                 Ok(ReapOutcome::Signalled(sig))
+            }
+            Some(SignalOutcome::AlreadyGone) => {
+                remove_stale_files(info);
+                Ok(ReapOutcome::AlreadyGone)
             }
             None => Ok(ReapOutcome::Unreachable),
         },
@@ -314,19 +363,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn control_socket_name_matches_control_only() {
-        assert!(is_control_socket_name("trove.sock"));
-        assert!(is_control_socket_name("trove-501.sock"));
-        assert!(is_control_socket_name("trove-0.sock"));
+    fn sock_name_maps_to_control_only() {
+        let d = Path::new("/run");
+        assert_eq!(
+            control_sock_from_sock_name(d, "trove.sock"),
+            Some(d.join("trove.sock"))
+        );
+        assert_eq!(
+            control_sock_from_sock_name(d, "trove-501.sock"),
+            Some(d.join("trove-501.sock"))
+        );
         // agent sockets are the same daemon — excluded.
-        assert!(!is_control_socket_name("trove-ssh.sock"));
-        assert!(!is_control_socket_name("trove-gpg.sock"));
-        assert!(!is_control_socket_name("trove-ssh-501.sock"));
-        assert!(!is_control_socket_name("trove-gpg-501.sock"));
+        assert_eq!(control_sock_from_sock_name(d, "trove-ssh.sock"), None);
+        assert_eq!(control_sock_from_sock_name(d, "trove-gpg.sock"), None);
+        assert_eq!(control_sock_from_sock_name(d, "trove-ssh-501.sock"), None);
+        assert_eq!(control_sock_from_sock_name(d, "trove-gpg-501.sock"), None);
         // unrelated files.
-        assert!(!is_control_socket_name("trove.lock"));
-        assert!(!is_control_socket_name("other.sock"));
-        assert!(!is_control_socket_name("trove"));
+        assert_eq!(control_sock_from_sock_name(d, "trove.lock"), None);
+        assert_eq!(control_sock_from_sock_name(d, "other.sock"), None);
+        assert_eq!(control_sock_from_sock_name(d, "trove"), None);
+    }
+
+    #[test]
+    fn lock_name_maps_to_its_sibling_control_socket() {
+        let d = Path::new("/run");
+        // A lockfile resolves to the control socket it guards — this is what
+        // makes a lock-only orphan discoverable.
+        assert_eq!(
+            control_sock_from_lock_name(d, "trove.lock"),
+            Some(d.join("trove.sock"))
+        );
+        assert_eq!(
+            control_sock_from_lock_name(d, "trove-501.lock"),
+            Some(d.join("trove-501.sock"))
+        );
+        // agent prefixes + non-locks excluded.
+        assert_eq!(control_sock_from_lock_name(d, "trove-ssh.lock"), None);
+        assert_eq!(control_sock_from_lock_name(d, "trove-gpg.lock"), None);
+        assert_eq!(control_sock_from_lock_name(d, "trove.sock"), None);
+        assert_eq!(control_sock_from_lock_name(d, "other.lock"), None);
     }
 
     #[test]
@@ -374,10 +449,9 @@ mod tests {
     }
 
     #[test]
-    fn enumerate_finds_a_daemon_under_trove_sock_dir() {
-        // Point TROVE_SOCK at an isolated dir so `candidate_dirs` scans it.
-        // env is process-global; this test is self-contained and doesn't race
-        // other daemons because it looks for its own unique socket path.
+    fn enumerate_dir_finds_a_live_daemon() {
+        // Scan one isolated dir directly (avoids the process-global env that
+        // `candidate_dirs` reads), so this can't race a real daemon.
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("trove.sock");
         let mut lock = singleton::try_acquire(&sock)
@@ -386,22 +460,42 @@ mod tests {
         singleton::record_pid(&mut lock).expect("record pid");
         std::fs::write(&sock, b"").expect("touch socket file");
 
-        // Scan the dir directly (avoids mutating process env in a parallel run).
-        let found: Vec<DaemonInfo> = {
-            let mut v = Vec::new();
-            for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
-                let name = entry.file_name();
-                let name = name.to_str().unwrap();
-                if is_control_socket_name(name) {
-                    if let Some(info) = classify(&dir.path().join(name)) {
-                        v.push(info);
-                    }
-                }
-            }
-            v
-        };
-        assert_eq!(found.len(), 1, "exactly our daemon should be found");
+        let found = enumerate_dir(dir.path());
+        assert_eq!(
+            found.len(),
+            1,
+            "exactly our daemon should be found (sock+lock dedup to one)"
+        );
         assert!(found[0].alive);
+        assert_eq!(found[0].control_sock, sock);
+    }
+
+    /// A lock-only orphan — socket already unlinked but the flock still held —
+    /// must still be discovered (regression: a socket-only scan misses it).
+    #[test]
+    fn enumerate_finds_a_lock_only_orphan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("trove.sock");
+
+        // Hold the lock (live) but remove the socket file: the daemon crashed
+        // between unlink(socket) and exit, leaving only the held lockfile.
+        let mut lock = singleton::try_acquire(&sock)
+            .expect("acquire")
+            .expect("won lock");
+        singleton::record_pid(&mut lock).expect("record pid");
+        assert!(
+            !sock.exists(),
+            "no socket file — only the lockfile is present"
+        );
+        assert!(singleton::lock_path(&sock).exists(), "lockfile present");
+
+        let found = enumerate_dir(dir.path());
+        assert_eq!(found.len(), 1, "the lock-only orphan must be discovered");
+        assert!(found[0].alive, "its held flock makes it live");
+        assert!(
+            !found[0].socket_exists(),
+            "and it is flagged as having no socket"
+        );
         assert_eq!(found[0].control_sock, sock);
     }
 
@@ -458,4 +552,11 @@ mod tests {
         // The live lock is still held (we never signalled anything).
         assert!(singleton::is_held(&sock).expect("probe"), "still held");
     }
+
+    // The `AlreadyGone` branch (ESRCH on the stamped PID → the daemon exited on
+    // its own before we signalled) is verified in the `daemons_e2e` integration
+    // test: reaching it requires holding an in-process flock while forking a
+    // throwaway process to mint a guaranteed-dead PID, and a concurrent fork's
+    // brief fd inheritance would flake the freed-lock assertions in the flock
+    // unit tests here. The e2e binary has no such shared in-process locks.
 }

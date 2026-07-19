@@ -126,9 +126,17 @@ pub fn is_held(control_sock: &Path) -> io::Result<bool> {
 
 /// The PID of the LIVE daemon holding `control_sock`, if one is holding it and
 /// stamped a readable PID. `None` means either nothing holds the lock (stale)
-/// or the holder predates PID stamping. Combines [`is_held`] and [`read_pid`]
-/// so a reaper never signals a PID whose daemon has already exited (guarding
-/// PID reuse: the flock check and the read are both against the live holder).
+/// or the holder predates PID stamping.
+///
+/// This narrows — but cannot fully close — the PID-reuse window: [`is_held`] and
+/// [`read_pid`] are two separate syscall sequences with no lock between them, so
+/// in principle the holder could exit and the OS recycle its PID in the gap,
+/// after which the returned PID would name a different process. That window is
+/// sub-microsecond and PID recycling that fast is effectively impossible, but it
+/// is the residual risk inherent to any PID-based reaping — treat this as a
+/// best-effort guard, not a race-free guarantee. (The graceful control-socket
+/// shutdown path, which needs no PID, is preferred; signalling is the fallback
+/// for a wedged daemon that won't answer.)
 pub fn holder_pid_if_live(control_sock: &Path) -> io::Result<Option<u32>> {
     if is_held(control_sock)? {
         Ok(read_pid(control_sock))

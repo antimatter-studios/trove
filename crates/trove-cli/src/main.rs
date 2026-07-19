@@ -4042,6 +4042,7 @@ fn cmd_daemons_kill(socket: Option<&Path>, all: bool) -> Result<()> {
                 let what = match outcome {
                     Graceful => "shut down".to_string(),
                     Signalled(sig) => format!("killed ({sig})"),
+                    AlreadyGone => "already exited; cleaned up".to_string(),
                     ClearedStale => "cleared stale files".to_string(),
                     Unreachable => {
                         any_unreachable = true;

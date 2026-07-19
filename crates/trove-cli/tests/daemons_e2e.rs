@@ -190,3 +190,52 @@ fn daemons_lists_and_clears_stale_after_sigkill() {
     assert!(!ctrl.exists(), "stale socket should be removed");
     assert!(!lock.exists(), "stale lockfile should be removed");
 }
+
+/// The `reap` `AlreadyGone` branch: a lockfile stamped with a PID that is
+/// already dead (ESRCH on SIGTERM) must report `AlreadyGone` — NOT `Signalled` —
+/// so an audit log never claims we killed a process that had already exited.
+///
+/// Reaching that branch needs the contrived "flock still held, but the stamped
+/// PID belongs to a *different*, already-dead process" state, which requires
+/// holding an in-process flock while forking a throwaway process for a dead PID.
+/// This lives in the e2e binary (not the `daemons` unit tests) because a
+/// concurrent fork's brief fd inheritance would flake the freed-lock assertions
+/// in the flock unit tests; nothing in this binary holds a shared in-process
+/// flock that a fork here could perturb.
+#[test]
+fn reap_stamped_dead_pid_reports_already_gone() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("trove.sock");
+
+    // A PID that has already exited (spawned then reaped) → SIGTERM yields ESRCH.
+    let mut child = Command::new("true").spawn().expect("spawn `true`");
+    let dead_pid = child.id();
+    child.wait().expect("reap child");
+
+    // Hold the lock (so the daemon classifies as alive) and stamp the dead PID.
+    // No socket file → reap skips the graceful path and goes straight to signal.
+    let mut held = troved::singleton::try_acquire(&sock)
+        .expect("acquire")
+        .expect("won lock");
+    held.seek(SeekFrom::Start(0)).unwrap();
+    held.set_len(0).unwrap();
+    writeln!(held, "{dead_pid}").unwrap();
+    held.flush().unwrap();
+
+    let daemons = troved::daemons::enumerate_dir(tmp.path());
+    let info = daemons
+        .into_iter()
+        .find(|d| d.control_sock == sock)
+        .expect("our daemon is discovered");
+    assert!(info.alive, "precondition: lock held → alive");
+    assert_eq!(info.pid, Some(dead_pid), "precondition: dead PID stamped");
+
+    let outcome = troved::daemons::reap(&info).expect("reap ok");
+    assert_eq!(
+        outcome,
+        troved::daemons::ReapOutcome::AlreadyGone,
+        "ESRCH on the stamped PID means it already exited, not that we killed it"
+    );
+}
