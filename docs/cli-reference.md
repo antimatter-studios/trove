@@ -610,7 +610,7 @@ Request envelope: `{"cmd": "<name>", ...}`. Response envelope: `{"status": "ok"|
 | `cmd` | Request fields | Response on success | Notes |
 | --- | --- | --- | --- |
 | `ping` | none | `{"status":"ok","pong":true}` | Heartbeat. Does **not** reset the idle timer. |
-| `unlock` | `path: string`, `password: string` | `{"status":"ok"}` | Loads vault, populates SSH+GPG stores, runs materialization. Synchronous: `ok` only after every materialized file is on disk. |
+| `unlock` | `path: string`, `password: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…]}` | Loads vault, populates SSH+GPG stores, runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the vault) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. |
 | `list` | none | `{"status":"ok","entries":[{"id","title","username","url","attachments"}, ...]}` | Errors if no vault is unlocked. |
 | `lock` | none | `{"status":"ok"}` | Wipes materialized files, drops vault, clears SSH+GPG stores, cancels idle timer. Idempotent. |
 | `shutdown` | none | `{"status":"ok"}` | Same as `lock`, then signals the daemon main loop to exit. |

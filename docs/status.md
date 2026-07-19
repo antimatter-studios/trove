@@ -139,11 +139,11 @@ whatever's unlocked. See [provisioning-sessions.md](provisioning-sessions.md).
 | Path safety (`..`, `/etc`, `/usr`, `/bin`, `/sbin`, `/var/log` rejected) | ✅ | |
 | `~` and `$HOME` / `$XDG_RUNTIME_DIR` expansion | ✅ | |
 | Refuse to clobber existing target | ✅ | |
-| Refuse missing parent dir | ✅ | Deliberate — caller must create the dir |
-| Linux tmpfs detection (`AllowDiskBacked=false`) | ✅ | Reads `/proc/mounts` longest-prefix |
+| Auto-create missing parent dirs (mode 0700) | ✅ | mkdir -p at write time; created dirs removed on lock/wipe if empty ([#56](https://github.com/antimatter-studios/trove/issues/56)) |
+| Surface materialize failures on unlock (never silent `ok`) | ✅ | `materialize_warnings` in the unlock reply; CLI prints loudly to stderr |
+| Linux tmpfs detection (`AllowDiskBacked=false`) | ✅ | Reads `/proc/mounts` longest-prefix; still applies to auto-created dirs |
 | macOS tmpfs guarantee | ⚠️ | APFS has no tmpfs; soft allowlist for `/tmp`, `/private/tmp`, `$XDG_RUNTIME_DIR` only |
 | Re-materialize when entries are added while vault is unlocked | ❌ | Currently needs lock+unlock cycle |
-| Auto-create parent dir | ❌ | Deliberate; could be `--create-parents` opt-in later |
 
 ### Idle-lock — `crates/troved/src/idle.rs`
 

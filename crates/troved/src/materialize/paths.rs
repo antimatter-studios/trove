@@ -10,9 +10,13 @@
 //!    - paths whose textual form contains a `..` segment (before expansion);
 //!    - paths under known system directories (`/etc/`, `/usr/`, `/bin/`,
 //!      `/sbin/`, `/var/log/`);
-//!    - paths whose parent directory does not yet exist (the user must
-//!      explicitly set up the destination dir);
 //!    - paths that already exist (don't clobber).
+//!
+//! A missing parent directory is **not** an error: the materializer creates
+//! the missing chain (mkdir -p, mode 0700) at write time. See
+//! [`missing_ancestors`] for the list of directories that would have to be
+//! created — the caller uses it both to create them and to remove trove's own
+//! dirs on wipe.
 //!
 //! Also exposes [`is_tmpfs_backed`] / [`is_ephemeral_macos_path`] so the
 //! caller can implement the `AllowDiskBacked=false` policy.
@@ -39,9 +43,6 @@ pub enum PathError {
 
     #[error("target points to a system directory ({0}); refusing to materialize")]
     SystemDirectory(String),
-
-    #[error("target parent directory does not exist: {0}")]
-    ParentMissing(PathBuf),
 
     #[error("target already exists: {0}")]
     AlreadyExists(PathBuf),
@@ -203,8 +204,10 @@ pub fn check_no_traversal(raw: &str) -> Result<(), PathError> {
 /// Final validation against the resolved absolute path:
 /// - re-check no `..` components (defense in depth);
 /// - reject system directories;
-/// - require parent dir exists;
 /// - reject existing target (no clobber).
+///
+/// A missing parent directory is **not** rejected here — the materializer
+/// creates the missing chain at write time (see [`missing_ancestors`]).
 fn check_resolved(p: &Path) -> Result<(), PathError> {
     for comp in p.components() {
         if matches!(comp, Component::ParentDir) {
@@ -222,17 +225,46 @@ fn check_resolved(p: &Path) -> Result<(), PathError> {
         }
     }
 
-    if let Some(parent) = p.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            return Err(PathError::ParentMissing(parent.to_path_buf()));
-        }
-    }
-
     if p.exists() {
         return Err(PathError::AlreadyExists(p.to_path_buf()));
     }
 
     Ok(())
+}
+
+/// The chain of parent directories of `target` that do not yet exist, ordered
+/// **outermost-first** (nearest existing ancestor's missing child first, down
+/// to the target's immediate parent last). Empty if the parent already exists.
+///
+/// Used two ways:
+/// * at write time: create each entry in order with mode 0700;
+/// * on wipe: remove trove's own created dirs in reverse (innermost first),
+///   only if empty.
+///
+/// This does NOT create anything and does NOT touch the filesystem beyond
+/// `exists()` probes. The returned paths are always ancestors of `target`.
+pub fn missing_ancestors(target: &Path) -> Vec<PathBuf> {
+    let parent = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        // Root or empty parent — nothing to create.
+        _ => return Vec::new(),
+    };
+
+    // Walk up from the parent collecting non-existent ancestors, stopping at
+    // the first ancestor that exists (or the filesystem root).
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut cur = Some(parent);
+    while let Some(dir) = cur {
+        if dir.as_os_str().is_empty() || dir.exists() {
+            break;
+        }
+        missing.push(dir.to_path_buf());
+        cur = dir.parent();
+    }
+    // Collected innermost-first; reverse to outermost-first so callers can
+    // create top-down.
+    missing.reverse();
+    missing
 }
 
 /// One-shot: take an entry's `Materialize.Target` value and produce a fully
@@ -433,11 +465,30 @@ mod tests {
     }
 
     #[test]
-    fn requires_parent_to_exist() {
-        let res = resolve_and_validate_target("/tmp/trove-no-such-dir-xyz/secret");
+    fn missing_parent_is_accepted_and_reported() {
+        // A missing parent no longer fails validation — the materializer will
+        // create it. Validation succeeds and `missing_ancestors` reports the
+        // dirs that would have to be created.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("a").join("b").join("secret");
+        let res = resolve_and_validate_target(target.to_str().unwrap());
+        assert!(res.is_ok(), "missing parent should validate: {res:?}");
+
+        let missing = missing_ancestors(&target);
+        assert_eq!(
+            missing,
+            vec![tmp.path().join("a"), tmp.path().join("a").join("b")],
+            "outermost-first chain of dirs to create"
+        );
+    }
+
+    #[test]
+    fn missing_ancestors_empty_when_parent_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("secret");
         assert!(
-            matches!(res, Err(PathError::ParentMissing(_))),
-            "got {res:?}"
+            missing_ancestors(&target).is_empty(),
+            "existing parent means nothing to create"
         );
     }
 

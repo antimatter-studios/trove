@@ -123,6 +123,20 @@ fn file_mode(path: &Path) -> u32 {
     std::fs::metadata(path).expect("stat").mode() & 0o777
 }
 
+/// Pull the `materialize_warnings` array out of an unlock `Response` as owned
+/// strings. Empty vec if the field is absent (clean unlock).
+fn unlock_warnings(resp: &Response) -> Vec<String> {
+    let body = serde_json::to_value(resp).expect("serialize");
+    body.get("materialize_warnings")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn unlock_writes_file_lock_wipes_it() {
     let tmp = TempDir::new().expect("tempdir");
@@ -306,16 +320,137 @@ async fn one_bad_entry_does_not_block_others() {
 }
 
 #[tokio::test]
-async fn missing_parent_dir_rejected_other_entries_still_materialize() {
+async fn missing_parent_dir_is_created_and_file_materializes() {
+    // Issue #56: a target whose parent dir doesn't exist must materialize —
+    // trove creates the missing chain (mode 0700), writes the file, and wipes
+    // both on lock. It must NOT silently succeed-without-writing.
     let tmp = TempDir::new().expect("tempdir");
     let vault_path = tmp.path().join("v.kdbx");
-    let good = tmp.path().join("good2");
-    let nonexistent_parent = tmp.path().join("does-not-exist").join("file");
+    // Two missing levels: <tmp>/a/b/secret — neither `a` nor `a/b` exist yet.
+    let level1 = tmp.path().join("a");
+    let level2 = level1.join("b");
+    let target = level2.join("secret");
+    let payload = b"secret in a missing dir\n".to_vec();
+
+    {
+        let mut v = create_vault(&vault_path);
+        add_materialize_entry(&mut v, "deep", &payload, &target, Some("600"), None);
+        v.save().expect("save");
+    }
+
+    let d = Daemon::new();
+    let resp = d
+        .handle(Request::Unlock {
+            path: vault_path.to_string_lossy().into_owned(),
+            password: PASSWORD.to_string(),
+            timeout: None,
+            keyfile: None,
+        })
+        .await;
+    assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
+    assert!(
+        unlock_warnings(&resp).is_empty(),
+        "clean unlock must carry no warnings: {:?}",
+        unlock_warnings(&resp)
+    );
+
+    // File present with the right bytes and mode.
+    assert!(target.exists(), "target must exist after unlock");
+    assert_eq!(std::fs::read(&target).expect("read"), payload);
+    assert_eq!(file_mode(&target), 0o600, "file mode honored");
+
+    // Created dirs are 0700 (user-only) — a 0600 secret must not sit in a
+    // world-traversable directory.
+    assert_eq!(file_mode(&level1), 0o700, "created parent dir must be 0700");
+    assert_eq!(file_mode(&level2), 0o700, "created parent dir must be 0700");
+
+    // Status shows it live.
+    let resp = d.handle(Request::MaterializeStatus).await;
+    let body = serde_json::to_value(&resp).expect("serialize");
+    let arr = body["materialized"].as_array().expect("array");
+    assert_eq!(arr.len(), 1, "one materialized file");
+
+    // Lock: file gone AND trove's own dirs removed (they're now empty).
+    let resp = d.handle(Request::Lock).await;
+    assert!(matches!(resp, Response::Ok(_)), "lock failed: {resp:?}");
+    assert!(!target.exists(), "target wiped on lock");
+    assert!(!level2.exists(), "trove-created dir b removed on lock");
+    assert!(!level1.exists(), "trove-created dir a removed on lock");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unwritable_target_fails_loudly_not_silently() {
+    // Issue #56 core contract: a genuinely un-writable target must surface a
+    // warning in the unlock result (never a silent `ok` with the file
+    // missing). We make the destination un-writable by putting the target
+    // under a 0500 (no-write) directory that already exists — the mkdir of the
+    // needed subdir then fails with EACCES.
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("v.kdbx");
+
+    // A directory we own but strip our own write bit from (0500).
+    let locked = tmp.path().join("locked");
+    std::fs::create_dir(&locked).expect("mkdir locked");
+    // Target needs a NEW subdir under `locked` — creating it must fail.
+    let target = locked.join("sub").join("secret");
+
+    // A sibling good entry to prove the failure doesn't poison the rest.
+    let good = tmp.path().join("good");
 
     {
         let mut v = create_vault(&vault_path);
         add_materialize_entry(&mut v, "good", b"ok\n", &good, None, None);
-        add_materialize_entry(&mut v, "bad-parent", b"x", &nonexistent_parent, None, None);
+        add_materialize_entry(&mut v, "unwritable", b"nope", &target, None, None);
+        v.save().expect("save");
+    }
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("chmod 0500");
+
+    let d = Daemon::new();
+    let resp = d
+        .handle(Request::Unlock {
+            path: vault_path.to_string_lossy().into_owned(),
+            password: PASSWORD.to_string(),
+            timeout: None,
+            keyfile: None,
+        })
+        .await;
+
+    // Unlock still ok (per spec: one bad entry doesn't break the vault) ...
+    assert!(matches!(resp, Response::Ok(_)), "unlock: {resp:?}");
+    // ... but the failure is REFLECTED, not swallowed.
+    let warnings = unlock_warnings(&resp);
+    assert!(
+        warnings.iter().any(|w| w.contains("unwritable")),
+        "un-writable target must surface a warning, got {warnings:?}"
+    );
+    assert!(!target.exists(), "un-writable target must not exist");
+    // The good entry still materialized.
+    assert!(good.exists(), "good entry unaffected by sibling failure");
+
+    // Restore write so TempDir cleanup can remove `locked`.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+        .expect("restore perms");
+    let _ = d.handle(Request::Lock).await;
+}
+
+#[tokio::test]
+async fn pre_existing_parent_dir_is_not_removed_on_lock() {
+    // The dir-cleanup on lock must ONLY remove dirs trove created — a
+    // pre-existing directory is never touched.
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("v.kdbx");
+    // `existing` already exists; target sits directly in it (no dir creation).
+    let existing = tmp.path().join("existing");
+    std::fs::create_dir(&existing).expect("mkdir existing");
+    let target = existing.join("secret");
+
+    {
+        let mut v = create_vault(&vault_path);
+        add_materialize_entry(&mut v, "e", b"payload", &target, None, None);
         v.save().expect("save");
     }
 
@@ -329,9 +464,15 @@ async fn missing_parent_dir_rejected_other_entries_still_materialize() {
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
-    assert!(good.exists());
-    assert!(!nonexistent_parent.exists());
-    let _ = d.handle(Request::Lock).await;
+    assert!(target.exists());
+
+    let resp = d.handle(Request::Lock).await;
+    assert!(matches!(resp, Response::Ok(_)));
+    assert!(!target.exists(), "target wiped");
+    assert!(
+        existing.exists(),
+        "pre-existing dir must survive lock (trove didn't create it)"
+    );
 }
 
 #[tokio::test]

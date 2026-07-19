@@ -480,6 +480,13 @@ pub enum OkBody {
         /// CLI at unlock so a stale daemon (still running pre-rebuild code) is
         /// obvious without hunting through `ps`.
         daemon_version: String,
+        /// Per-entry materialization failures (one human-readable line each).
+        /// Empty on a clean unlock. Materialization does not fail the unlock
+        /// (spec: a typo on one entry must not break the vault), but any file
+        /// that a configured entry failed to write MUST be reflected here so
+        /// the CLI can warn loudly — never a silent `ok` with a file missing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        materialize_warnings: Vec<String>,
     },
     /// Response to `Get`: the requested secret's bytes, base64-encoded.
     Secret {
@@ -558,10 +565,11 @@ impl Response {
             materialized,
         })
     }
-    pub fn ok_unlocked(code: String) -> Self {
+    pub fn ok_unlocked(code: String, materialize_warnings: Vec<String>) -> Self {
         Response::Ok(OkBody::Unlocked {
             code,
             daemon_version: env!("TROVE_BUILD_VERSION").to_string(),
+            materialize_warnings,
         })
     }
     pub fn ok_ssh_agent_list(ssh_keys: Vec<SshKeyDto>) -> Self {

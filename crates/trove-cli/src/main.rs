@@ -3728,6 +3728,17 @@ fn cmd_unlock(
         }
     }
 
+    // Surface any materialization failures loudly on stderr. Unlock still
+    // succeeds (a typo on one entry must not break the vault), but a configured
+    // materialized file that failed to write MUST be visible — never a silent
+    // `ok` with the file missing (issue #56). stderr, so `eval "$(…)"` on
+    // stdout is unaffected.
+    if let Some(warnings) = resp.get("materialize_warnings").and_then(Value::as_array) {
+        for w in warnings.iter().filter_map(Value::as_str) {
+            eprintln!("trove: warning: materialize failed — {w}");
+        }
+    }
+
     // Two delivery modes, so the operator never has to type `eval`:
     //   * subshell — set $TROVE_SESSION and exec the operator's own $SHELL, so
     //     they land in a session shell where `add`/`get` work immediately. The

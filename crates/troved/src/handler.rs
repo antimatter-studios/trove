@@ -131,7 +131,8 @@ pub async fn handle(
                     // still succeeds. The unlock RESPONSE goes out only after
                     // every materialize completes — so by the time the user
                     // sees `ok`, the files are on disk.
-                    let materialized = materialize_from_vault(&vault, mat_store).await;
+                    let (materialized, materialize_warnings) =
+                        materialize_from_vault(&vault, mat_store).await;
                     {
                         let mut g = mat_store.write().await;
                         // Replace wholesale, same as ssh/gpg stores.
@@ -173,7 +174,7 @@ pub async fn handle(
                         });
                     }
                     Handled {
-                        response: Response::ok_unlocked(code),
+                        response: Response::ok_unlocked(code, materialize_warnings),
                         shutdown: false,
                     }
                 }
@@ -955,12 +956,24 @@ async fn add_file(
 }
 
 /// Build the materialization plan for `vault` and execute every plan,
-/// returning the bookkeeping handles for the ones that succeeded. Per-entry
-/// failures (validation OR I/O) are logged, never propagated.
-async fn materialize_from_vault(vault: &Vault, store: &MaterializedStore) -> Vec<MaterializedFile> {
+/// returning the bookkeeping handles for the ones that succeeded plus a list of
+/// human-readable warnings for the ones that failed.
+///
+/// Per-entry failure (validation OR I/O) does NOT fail the unlock — the spec is
+/// explicit that a typo on one entry must not break the rest of the vault. But
+/// every failure is both logged to the daemon and returned as a warning so the
+/// CLI can surface it: unlock must never silently return `ok` with a configured
+/// materialized file missing (issue #56).
+async fn materialize_from_vault(
+    vault: &Vault,
+    store: &MaterializedStore,
+) -> (Vec<MaterializedFile>, Vec<String>) {
     let (plans, plan_errors) = materialize::build_plans(vault);
+    let mut warnings = Vec::new();
     for (title, e) in plan_errors {
-        eprintln!("materialize: skipping entry '{title}': {e}");
+        let line = format!("entry '{title}': {e}");
+        eprintln!("materialize: skipping {line}");
+        warnings.push(line);
     }
     let mut materialized = Vec::with_capacity(plans.len());
     for plan in plans {
@@ -976,11 +989,13 @@ async fn materialize_from_vault(vault: &Vault, store: &MaterializedStore) -> Vec
                 materialized.push(m);
             }
             Err(e) => {
-                eprintln!("materialize: failed for '{}': {}", plan.entry_title, e);
+                let line = format!("entry '{}': {e}", plan.entry_title);
+                eprintln!("materialize: failed for {line}");
+                warnings.push(line);
             }
         }
     }
-    materialized
+    (materialized, warnings)
 }
 
 /// Validate the provisioning session for a code-gated request: vault unlocked
