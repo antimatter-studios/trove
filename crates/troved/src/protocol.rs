@@ -42,6 +42,10 @@ pub enum Request {
     },
     /// v0.0.6.0: read the current idle-lock state.
     GetIdleTimeout,
+    /// Return the daemon's build version so a connecting CLI can flag a
+    /// CLI↔daemon drift (a stale sibling `troved` left behind by a CLI-only
+    /// rebuild). Read-only; works whether or not a vault is unlocked.
+    GetVersion,
     /// v0.0.9.0: snapshot of daemon state — vault path (if unlocked), idle
     /// timer state, and counts of in-memory secret stores. Read-only.
     Status,
@@ -241,6 +245,7 @@ impl std::fmt::Debug for Request {
                 .field("seconds", seconds)
                 .finish(),
             Request::GetIdleTimeout => f.write_str("GetIdleTimeout"),
+            Request::GetVersion => f.write_str("GetVersion"),
             Request::Status => f.write_str("Status"),
             Request::SshAgentList => f.write_str("SshAgentList"),
             Request::GpgAgentList => f.write_str("GpgAgentList"),
@@ -449,6 +454,11 @@ pub enum OkBody {
         seconds: u64,
         remaining: Option<u64>,
     },
+    /// Response body for `GetVersion`: the daemon's build version, stamped by
+    /// `build.rs`. Lets a connecting CLI warn on CLI↔daemon drift.
+    Version {
+        daemon_version: String,
+    },
     /// v0.0.9.0: response body for `Status`. `vault_path` is `Some` only when
     /// a vault is unlocked. `idle_timeout_secs` is the configured timeout
     /// (0 == disabled). `idle_remaining_secs` is `Some` only when the timer
@@ -525,6 +535,11 @@ impl Response {
     }
     pub fn ok_idle_timeout(seconds: u64, remaining: Option<u64>) -> Self {
         Response::Ok(OkBody::IdleTimeout { seconds, remaining })
+    }
+    pub fn ok_version() -> Self {
+        Response::Ok(OkBody::Version {
+            daemon_version: env!("TROVE_BUILD_VERSION").to_string(),
+        })
     }
     pub fn ok_status(
         vault_path: Option<PathBuf>,

@@ -3706,10 +3706,14 @@ fn cmd_unlock(
     } else {
         "already running"
     };
-    let cli_version = env!("TROVE_BUILD_VERSION");
+    let cli_version = daemon::cli_version();
     match resp.get("daemon_version").and_then(Value::as_str) {
         Some(daemon_version) => {
             eprintln!("trove: cli {cli_version} · daemon {daemon_version} ({spawn_state})");
+            // Beyond the informational banner, flag a genuine drift explicitly:
+            // the daemon we're now driving is a different build than this CLI
+            // (e.g. a stale sibling troved left by a CLI-only rebuild).
+            daemon::warn_on_version_mismatch(daemon_version);
         }
         // No version field ⇒ the daemon was built before version reporting, so
         // it's older than this CLI and running stale code. That's exactly the
@@ -3829,6 +3833,9 @@ fn cmd_status() -> Result<()> {
             }
             println!("Daemon:          running");
             print_status(&resp);
+            // Diagnostic command — a natural place to surface CLI↔daemon drift
+            // (a stale sibling troved speaking a slightly different protocol).
+            daemon::check_running_daemon_version();
         }
         Err(e) if daemon::is_daemon_not_running(&e) => {
             println!("Daemon:          not running (nothing unlocked)");
