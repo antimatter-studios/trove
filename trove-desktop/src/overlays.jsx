@@ -10,16 +10,24 @@ function Unlock({ vault, onUnlock, onChange }) {
   const [busy, setBusy] = React.useState(false);
   const ref = React.useRef(null);
   React.useEffect(() => { ref.current && ref.current.focus(); }, [vault.id]);
+  // Reset transient state when the target vault changes.
+  React.useEffect(() => { setPw(""); setErr(false); setBusy(false); }, [vault.id]);
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e && e.preventDefault();
-    if (!pw) return;
+    if (!pw || busy) return;
     setBusy(true); setErr(false);
-    setTimeout(() => {
-      // demo: any non-"wrong" password unlocks
-      if (pw.toLowerCase() === "wrong") { setErr(true); setBusy(false); setPw(""); return; }
-      onUnlock();
-    }, 420);
+    try {
+      // onUnlock decrypts the vault via the backend; it rejects on a bad
+      // password. On success the parent flips to the unlocked body and this
+      // component unmounts, so there is nothing more to do here.
+      await onUnlock(pw);
+    } catch (e2) {
+      setErr(e2 && typeof e2 === "string" ? e2 : (e2 && e2.message) || true);
+      setBusy(false);
+      setPw("");
+      ref.current && ref.current.focus();
+    }
   };
 
   return (
@@ -33,7 +41,7 @@ function Unlock({ vault, onUnlock, onChange }) {
           <div className="vc-ic"><Icon name="file" size={17} /></div>
           <div style={{ minWidth: 0 }}>
             <div className="vc-name">{vault.name}</div>
-            <div className="vc-path">~/vaults/{vault.file}</div>
+            <div className="vc-path">{vault.path || vault.file}</div>
           </div>
           <button type="button" className="vc-change" onClick={onChange}>Change</button>
         </div>
@@ -48,7 +56,7 @@ function Unlock({ vault, onUnlock, onChange }) {
             <Icon name={show ? "eyeOff" : "eye"} size={17} />
           </button>
         </div>
-        <div className="ul-err">{err && (<><Icon name="x" size={13} /> Incorrect master password. Try again.</>)}</div>
+        <div className="ul-err">{err && (<><Icon name="x" size={13} /> {typeof err === "string" ? err : "Incorrect master password. Try again."}</>)}</div>
 
         <button type="submit" className="ul-unlock" disabled={busy}>
           {busy ? <><Icon name="refresh" size={17} /> Decrypting…</> : <><Icon name="unlock" size={17} /> Unlock</>}
@@ -154,15 +162,31 @@ function genPassword() {
   let s = ""; for (let i = 0; i < 20; i++) s += sets[Math.floor(Math.random() * sets.length)];
   return s;
 }
-function EntryForm({ entry, onClose, onSave, onDelete }) {
+function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
   const editing = !!entry;
+  // The list DTO carries no secrets; the current password + notes for an existing
+  // entry are fetched (get_entry_detail) and handed in via `detail` to prefill.
   const [f, setF] = React.useState(() => entry ? {
-    path: entry.path, username: entry.username, password: entry.password, url: entry.url, notes: entry.notes || "", type: entry.type,
+    path: entry.path, username: entry.username,
+    password: (detail && detail.password) || "", url: entry.url,
+    notes: (detail && detail.notes) || "", type: entry.type,
   } : { path: "", username: "", password: genPassword(), url: "", notes: "", type: "login" });
   const [show, setShow] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
   const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
   const ref = React.useRef(null);
   React.useEffect(() => { ref.current && ref.current.focus(); }, []);
+
+  const save = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      // onSave persists via the backend and (on success) closes the form.
+      await onSave(f, entry);
+    } catch (e) {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="scrim center" onMouseDown={onClose}>
@@ -205,7 +229,7 @@ function EntryForm({ entry, onClose, onSave, onDelete }) {
           {editing && <button className="btn-danger" onClick={() => onDelete(entry)}><Icon name="trash" size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 5 }} />Delete</button>}
           <div className="grow" />
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={() => onSave(f, entry)}>{editing ? "Save changes" : "Add entry"}</button>
+          <button className="btn-primary" onClick={save} disabled={busy}>{editing ? "Save changes" : "Add entry"}</button>
         </div>
       </div>
     </div>
@@ -367,34 +391,39 @@ function VaultSwitcher({ vaults, activeId, onSwitch, onOpenNew, onClose }) {
 }
 
 /* ============ OPEN VAULT MODAL ============ */
-function OpenVaultModal({ files, onPick, onClose }) {
+// Lists the persisted "recent" vaults (from list_vaults) so one click switches
+// to it; "Browse…" opens the native file dialog to register a new .kdbx.
+function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
+  const list = recents || [];
   return (
     <div className="scrim center" onMouseDown={onClose}>
       <div className="modal" style={{ width: "min(440px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="mh-badge"><Icon name="file" size={18} /></div>
-          <div><h2>Open vault</h2><p>~/vaults</p></div>
+          <div><h2>Open vault</h2><p>Recent vaults</p></div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
         <div className="modal-body" style={{ gap: 4 }}>
-          {files.length === 0 && (
+          {list.length === 0 && (
             <div style={{ padding: "18px 6px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>
-              All vaults in ~/vaults are already open.
+              No recent vaults yet — browse to open one.
             </div>
           )}
-          {files.map((f) => (
-            <button key={f.file} className="vrow" onClick={() => onPick(f)}>
-              <span className="vdot add"><Icon name="file" size={13} /></span>
+          {list.map((v) => (
+            <button key={v.id} className={"vrow" + (v.id === activeId ? " on" : "")} onClick={() => onPick(v)}>
+              <span className={"vdot " + (v.locked ? "locked" : "unlocked")} title={v.locked ? "Locked" : "Unlocked"} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="vrn">{f.name}</div>
-                <div className="vrf">{f.file}</div>
+                <div className="vrn">{v.name}</div>
+                <div className="vrf">{v.file}{v.locked ? " · locked" : ""}</div>
               </div>
               <Icon name="chevron" size={14} style={{ color: "var(--text-ghost)" }} />
             </button>
           ))}
         </div>
         <div className="modal-foot" style={{ borderTop: "1px solid var(--border)" }}>
-          <span style={{ fontSize: 11.5, color: "var(--text-ghost)", display: "flex", alignItems: "center", gap: 6 }}><Icon name="lock" size={12} />Vaults open locked — you'll be asked for their master password.</span>
+          <span style={{ fontSize: 11.5, color: "var(--text-ghost)", display: "flex", alignItems: "center", gap: 6 }}><Icon name="lock" size={12} />Opens locked — you'll enter its master password.</span>
+          <div className="grow" />
+          <button className="btn-primary" onClick={onBrowse}><Icon name="folder" size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 5 }} />Browse…</button>
         </div>
       </div>
     </div>

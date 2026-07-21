@@ -1,12 +1,16 @@
 import React from 'react';
 import { Icon, TYPE_ICON } from './icons.jsx';
-import { buildTree } from './data.jsx';
+import { buildTree } from './tree.js';
 // Trove — helpers + three-pane views
 
 function relTime(iso) {
-  const d = new Date(iso), now = new Date("2026-07-04T12:00:00Z");
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  const now = new Date();
   const s = Math.floor((now - d) / 1000);
   const day = 86400;
+  if (s < 0) return "just now";
   if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m ago";
   if (s < day) return Math.floor(s / 3600) + "h ago";
   if (s < day * 30) return Math.floor(s / day) + "d ago";
@@ -14,7 +18,10 @@ function relTime(iso) {
   return Math.floor(s / (day * 365)) + "y ago";
 }
 function fullDate(iso) {
-  return new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
 function strengthInfo(v) {
   if (v >= 85) return { label: "Excellent", color: "var(--green)" };
@@ -152,17 +159,18 @@ function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCyc
 }
 
 /* ============ DETAIL ============ */
-function Field({ k, value, secret, revealed, onReveal, link, onCopy, copiedKey, copyId }) {
+function Field({ k, value, secret, revealed, onReveal, link, onCopy, copiedKey, copyId, maskLen }) {
   const isCopied = copiedKey === copyId;
+  const dots = typeof maskLen === "number" ? maskLen : (value ? value.length : 0);
   return (
     <div className="field">
-      <span className="fk">{k}</span>
+      <span className="fk" title={k}>{k}</span>
       <span
         className={"fv" + (secret && !revealed ? " secret" : "") + (link ? " link" : "")}
         onClick={link ? () => onCopy(value, copyId, "url") : undefined}
         title={link ? value : undefined}
       >
-        {secret && !revealed ? "•".repeat(Math.min(18, value.length)) : value}
+        {secret && !revealed ? "•".repeat(Math.min(18, dots)) : value}
       </span>
       <div className="facts">
         {secret && (
@@ -183,7 +191,7 @@ function Field({ k, value, secret, revealed, onReveal, link, onCopy, copiedKey, 
   );
 }
 
-function Detail({ entry, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal }) {
+function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal }) {
   if (!entry) {
     return (
       <div className="pane detail">
@@ -225,31 +233,31 @@ function Detail({ entry, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revea
         <div className="dt-section">
           <div className="dt-sec-label">Credentials</div>
           <Field k="Username" value={entry.username} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":user"} />
-          <Field k="Password" value={entry.password} secret revealed={revealed} onReveal={onToggleReveal} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":pass"} />
+          <Field k="Password" value={password || ""} maskLen={entry.pwLen} secret revealed={revealed} onReveal={onToggleReveal} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":pass"} />
           <div className="strength">
             <div className="strength-bar"><i style={{ width: entry.strength + "%", background: si.color }} /></div>
             <div className="strength-meta">
               <span style={{ color: si.color, fontWeight: 600, fontSize: 11.5 }}>{si.label}</span>
-              <span style={{ color: "var(--text-faint)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{entry.strength}/100 · {entry.password.length} chars</span>
+              <span style={{ color: "var(--text-faint)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{entry.strength}/100 · {entry.pwLen} chars</span>
             </div>
           </div>
           {entry.url && <div style={{ height: 8 }} />}
           {entry.url && <Field k="URL" value={entry.url} link onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":url"} />}
         </div>
 
-        {entry.fields && entry.fields.length > 0 && (
+        {fields && fields.length > 0 && (
           <div className="dt-section">
             <div className="dt-sec-label">Attributes</div>
-            {entry.fields.map((f, i) => (
+            {fields.map((f, i) => (
               <Field key={i} k={f.k} value={f.v} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":attr" + i} />
             ))}
           </div>
         )}
 
-        {entry.notes && (
+        {notes && (
           <div className="dt-section">
             <div className="dt-sec-label">Notes</div>
-            <div className="notes">{entry.notes}</div>
+            <div className="notes">{notes}</div>
           </div>
         )}
 

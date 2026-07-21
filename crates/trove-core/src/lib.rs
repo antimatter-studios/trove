@@ -81,6 +81,13 @@ pub struct EntrySummary {
     /// itself is excluded (an entry directly under root has an empty
     /// `group_path`). Use `display_path()` to render as `Group/Sub/Title`.
     pub group_path: Vec<String>,
+    /// Entry creation time as an RFC3339 UTC string (e.g.
+    /// `2026-07-21T14:12:00+00:00`), from the kdbx entry's `CreationTime`.
+    /// `None` when the vault does not record it.
+    pub created: Option<String>,
+    /// Entry last-modification time as an RFC3339 UTC string, from the kdbx
+    /// entry's `LastModificationTime`. `None` when unavailable.
+    pub modified: Option<String>,
 }
 
 impl EntrySummary {
@@ -1078,6 +1085,16 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
         url: e.get_url().map(str::to_owned),
         attachment_names,
         group_path: build_group_path(e),
+        // kdbx stores these as second-precision naive UTC datetimes; render
+        // them as RFC3339 UTC strings. `and_utc()` reinterprets the naive
+        // value as UTC (it already is, per the KDBX spec) without shifting it.
+        // The datetime type is chrono's, re-exported through keepass; we call
+        // its methods without naming it so trove-core needs no direct chrono dep.
+        created: e.times.creation.map(|dt| dt.and_utc().to_rfc3339()),
+        modified: e
+            .times
+            .last_modification
+            .map(|dt| dt.and_utc().to_rfc3339()),
     }
 }
 
