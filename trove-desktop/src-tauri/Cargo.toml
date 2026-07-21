@@ -20,6 +20,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Server-side password-strength scoring for the entry list (the DTO carries a
+# 0..=100 score, never the password itself).
+zxcvbn = "3"
 
 # In the monorepo the GUI links trove-core directly from the workspace source,
 # so a core change is picked up without a crates.io publish + version bump. The

@@ -25,12 +25,8 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.0.0",
-    "i18next": "^26.1.0",
-    "i18next-browser-languagedetector": "^8.2.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-i18next": "^17.0.7",
-    "zustand": "^5.0.13"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
