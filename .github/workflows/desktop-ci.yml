@@ -120,3 +120,27 @@ jobs:
 
       - name: cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  # Lockstep guard: the desktop is EXCLUDED from the workspace (own Cargo.lock),
+  # so it can't inherit `version.workspace`. This always-run check (no Tauri
+  # compile) fails if the desktop version — or the trove-core version its lock
+  # pins — ever drifts from the workspace version. It runs on every PR (not gated
+  # behind `changes.desktop`), so a core release bump that forgets the desktop is
+  # caught immediately, not on the next desktop PR.
+  version-lockstep:
+    name: Version lockstep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: desktop version + lock trove-core must equal the workspace version
+        run: |
+          ws=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
+          st=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          pj=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' package.json | head -1)
+          core=$(awk '/^name = "trove-core"$/{getline; sub(/^version = "/,""); sub(/"$/,""); print; exit}' src-tauri/Cargo.lock)
+          echo "workspace=$ws  desktop.cargo=$st  desktop.pkg=$pj  lock.trove-core=$core"
+          fail=0
+          [ "$st"   = "$ws" ] || { echo "::error::src-tauri/Cargo.toml version ($st) != workspace ($ws)"; fail=1; }
+          [ "$pj"   = "$ws" ] || { echo "::error::package.json version ($pj) != workspace ($ws)"; fail=1; }
+          [ "$core" = "$ws" ] || { echo "::error::Cargo.lock pins trove-core $core != workspace $ws — run: cargo update --manifest-path trove-desktop/src-tauri/Cargo.toml && commit the lock"; fail=1; }
+          exit $fail

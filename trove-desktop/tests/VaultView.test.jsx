@@ -1,63 +1,96 @@
-// PROOF #3 — the design's interactions work: selecting an entry drives the
-// detail pane, revealing unmasks the password, and the command palette opens.
-// These are behaviors of the real Claude design, exercised in the live DOM.
+// Interactions on an unlocked vault: entries load from the backend
+// (list_entries), selecting drives the detail pane (get_entry_detail),
+// revealing unmasks the fetched password, and the command palette opens.
+// All backend calls are mocked via src/api.js.
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { render, fireEvent } from '@testing-library/react';
-import App from '../src/design/app.jsx';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { render, fireEvent, waitFor } from '@testing-library/react';
 
-function mount() {
-  return render(<App />).container;
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
+vi.mock('../src/api.js', () => ({
+  listVaults: vi.fn(),
+  registerVault: vi.fn(),
+  createVault: vi.fn(),
+  unlockVault: vi.fn(),
+  lockVault: vi.fn(),
+  listEntries: vi.fn(),
+  getField: vi.fn(),
+  getEntryDetail: vi.fn(),
+  saveEntry: vi.fn(),
+  deleteEntry: vi.fn(),
+  setFavorite: vi.fn(),
+}));
+
+import * as api from '../src/api.js';
+import App from '../src/App.jsx';
+
+const ENTRIES = [
+  { id: 'e1', path: 'infra/prod/postgres', title: 'postgres', group: ['infra', 'prod'], groupPath: 'infra/prod', username: 'trove_app', url: 'postgres://db.prod', type: 'db', entryType: 'db', strength: 93, pwLen: 20, fav: true, created: '2025-02-01T09:00:00Z', modified: '2026-07-01T06:20:00Z', attachmentNames: [] },
+  { id: 'e2', path: 'personal/email/fastmail', title: 'fastmail', group: ['personal', 'email'], groupPath: 'personal/email', username: 'you@fastmail.com', url: 'https://app.fastmail.com', type: 'login', entryType: 'login', strength: 95, pwLen: 30, fav: false, created: '2024-11-01T08:00:00Z', modified: '2026-06-29T20:10:00Z', attachmentNames: [] },
+];
+const DETAIL = { notes: 'primary db', fields: [{ k: 'Host', v: 'db.prod' }], password: 'pg-Pr0d-8842!zQmx-vK' };
+// An already-unlocked vault so the app lazily loads its entries via list_entries.
+const OPEN_VAULT = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/vaults/personal.kdbx', locked: false };
+
+async function mountUnlocked() {
+  const utils = render(<App />);
+  const c = utils.container;
+  await waitFor(() => expect(c.querySelectorAll('.list .erow').length).toBe(2));
+  return c;
 }
 
-describe('design interactions', () => {
-  beforeEach(() => {
-    try {
-      localStorage.clear();
-    } catch {
-      /* ignore */
-    }
+beforeEach(() => {
+  vi.clearAllMocks();
+  try { localStorage.clear(); } catch { /* ignore */ }
+  api.listVaults.mockResolvedValue([OPEN_VAULT]);
+  api.listEntries.mockResolvedValue(ENTRIES);
+  api.getEntryDetail.mockResolvedValue(DETAIL);
+  api.getField.mockResolvedValue(DETAIL.password);
+});
+
+describe('unlocked vault interactions', () => {
+  it('loads entries into the three-pane', async () => {
+    const c = await mountUnlocked();
+    expect(c.querySelector('.body .pane.sidebar')).toBeTruthy();
+    expect(c.querySelector('.body .pane.list')).toBeTruthy();
+    expect(c.querySelector('.body .pane.detail')).toBeTruthy();
+    expect(c.textContent).toContain('All entries');
+    expect(api.listEntries).toHaveBeenCalledWith('v1');
   });
 
-  it('selecting a different entry updates the detail title', () => {
-    const c = mount();
-    const rows = [...c.querySelectorAll('.list .erow')];
-    expect(rows.length).toBeGreaterThan(1);
+  it('selecting a different entry updates the detail title (via get_entry_detail)', async () => {
+    const c = await mountUnlocked();
     const before = c.querySelector('.detail .dt-title')?.textContent;
-    // Click a row whose title differs from the current selection.
-    const other = rows.find(
-      (r) => r.querySelector('.etitle-txt')?.textContent !== before,
-    );
+    const rows = [...c.querySelectorAll('.list .erow')];
+    const other = rows.find((r) => r.querySelector('.etitle-txt')?.textContent !== before);
     fireEvent.click(other);
-    const after = c.querySelector('.detail .dt-title')?.textContent;
-    expect(after).toBeTruthy();
-    expect(after).not.toBe(before);
+    await waitFor(() => {
+      const after = c.querySelector('.detail .dt-title')?.textContent;
+      expect(after).toBeTruthy();
+      expect(after).not.toBe(before);
+    });
+    expect(api.getEntryDetail).toHaveBeenCalled();
   });
 
-  it('revealing unmasks the password field', () => {
-    const c = mount();
-    const field = c.querySelector('.detail .field'); // first credential field w/ secret
-    // Find the secret field specifically.
-    const secretField = [...c.querySelectorAll('.detail .field')].find((f) =>
-      f.querySelector('.fv.secret'),
-    );
-    expect(secretField).toBeTruthy();
-    expect(secretField.querySelector('.fv.secret')).toBeTruthy();
-    // The reveal control is the first .fact button in that field.
-    const revealBtn = secretField.querySelector('.facts .fact');
-    fireEvent.click(revealBtn);
-    // After reveal, the value is no longer masked as a secret.
-    expect(secretField.querySelector('.fv.secret')).toBeFalsy();
-    expect(field).toBeTruthy();
+  it('revealing unmasks the fetched password', async () => {
+    const c = await mountUnlocked();
+    const secretField = await waitFor(() => {
+      const f = [...c.querySelectorAll('.detail .field')].find((x) => x.querySelector('.fv.secret'));
+      if (!f) throw new Error('secret field not ready');
+      return f;
+    });
+    expect(secretField.querySelector('.fv.secret').textContent).toMatch(/^•+$/);
+    fireEvent.click(secretField.querySelector('.facts .fact')); // reveal is the first fact button
+    await waitFor(() => expect(secretField.querySelector('.fv.secret')).toBeFalsy());
+    expect(secretField.querySelector('.fv').textContent).toContain(DETAIL.password);
   });
 
-  it('the command palette opens from the toolbar', () => {
-    const c = mount();
-    // The command-palette button carries the ⌘K title.
+  it('opens the command palette from the toolbar', async () => {
+    const c = await mountUnlocked();
     const palBtn = c.querySelector('button[title*="Command palette"]');
     expect(palBtn).toBeTruthy();
     fireEvent.click(palBtn);
-    expect(document.querySelector('.palette')).toBeTruthy();
+    await waitFor(() => expect(document.querySelector('.palette')).toBeTruthy());
     expect(document.querySelector('.pal-input input')).toBeTruthy();
   });
 });
