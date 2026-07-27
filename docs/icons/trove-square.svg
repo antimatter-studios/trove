@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
+
+<defs>
+<linearGradient id="brassBg" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+<stop offset="0" stop-color="oklch(0.85 0.115 88)"></stop><stop offset="1" stop-color="oklch(0.70 0.12 78)"></stop>
+</linearGradient>
+<clipPath id="plateClip"><rect x="7" y="7" width="86" height="86" rx="10"></rect></clipPath>
+<g id="keyD"><g transform="rotate(45 50 50) translate(0 4)">
+<circle cx="50" cy="9.5" r="3.4" fill="currentColor"></circle>
+<circle cx="50" cy="26" r="12.5" fill="none" stroke="currentColor" stroke-width="5"></circle>
+<circle cx="50" cy="26" r="5" fill="none" stroke="currentColor" stroke-width="3.4"></circle>
+<rect x="44.5" y="39.5" width="11" height="5.5" rx="2" fill="currentColor"></rect>
+<rect x="46.8" y="42" width="6.4" height="44" rx="3" fill="currentColor"></rect>
+<rect x="53" y="62" width="9" height="5" rx="1.5" fill="currentColor"></rect>
+<rect x="53" y="70" width="12" height="5" rx="1.5" fill="currentColor"></rect>
+<rect x="53" y="78" width="8" height="5" rx="1.5" fill="currentColor"></rect>
+</g></g>
+</defs>
+<clipPath id="outer"><rect width="100" height="100" rx="8"></rect></clipPath>
+<g clip-path="url(#outer)">
+<rect width="100" height="100" fill="oklch(0.165 0.015 80)"></rect>
+<rect x="7" y="7" width="86" height="86" rx="10" fill="url(#brassBg)"></rect>
+<g clip-path="url(#plateClip)">
+<path d="M-22 64 L64 -22 L84 -2 L-2 84 Z" fill="oklch(0.98 0.04 95 / 0.22)"></path>
+<path d="M6 106 L106 6 L114 14 L14 114 Z" fill="oklch(0.98 0.04 95 / 0.14)"></path>
+</g>
+<rect x="7" y="7" width="86" height="86" rx="10" fill="none" stroke="oklch(0.96 0.05 90 / 0.4)" stroke-width="1"></rect>
+<g color="oklch(0.96 0.05 90 / 0.5)" transform="translate(0 1.2)"><use href="#keyD"></use></g>
+<g color="oklch(0.21 0.035 85)"><use href="#keyD"></use></g>
+</g>
+</svg>
