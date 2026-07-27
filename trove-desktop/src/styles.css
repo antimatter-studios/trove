@@ -197,9 +197,16 @@ input { font-family: inherit; }
 .divider-v { width: 1px; height: 22px; background: var(--border); }
 
 /* ============ BODY GRID ============ */
-.body { flex: 1; min-height: 0; display: grid; grid-template-columns: 230px minmax(272px, 1fr) minmax(332px, 1.12fr); }
+.body { flex: 1; min-height: 0; display: flex; }
 .pane { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-.pane + .pane { border-left: 1px solid var(--border); }
+.body > .sidebar { flex: 0 0 var(--sidebar-w, 230px); }
+.body > .list { flex: 0 0 var(--list-w, 320px); }
+.body > .detail { flex: 1 1 0; }
+/* Draggable pane dividers: a wide invisible hit-area with a centered hairline
+   that thickens/accents on hover + while dragging. Double-click resets width. */
+.pane-divider { flex: 0 0 7px; align-self: stretch; position: relative; z-index: 5; cursor: col-resize; }
+.pane-divider::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; transform: translateX(-50%); width: 1px; background: var(--border); transition: width .1s ease, background .1s ease; }
+.pane-divider:hover::after, .pane-divider.dragging::after { width: 2px; background: var(--accent-strong); }
 
 /* ---- sidebar ---- */
 .sidebar { background: var(--bg-0); }
@@ -507,8 +514,8 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
 .status-pill .lk.amber { color: var(--amber); }
 
 @media (max-width: 900px) {
-  .body { grid-template-columns: 1fr; }
-  .sidebar, .list { display: none; }
+  .sidebar, .list, .pane-divider { display: none; }
+  .body > .detail { flex: 1 1 100%; }
 }
 
 /* ---- desktop-app overrides: fill the native window, drop the fake frame ---- */

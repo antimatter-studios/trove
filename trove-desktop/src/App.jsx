@@ -9,6 +9,43 @@ import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu,
 
 const { useState, useEffect, useRef, useCallback } = React;
 
+// Three-pane sizing: the sidebar and entry-list widths are user-draggable (and
+// persisted); the detail pane flexes to fill the rest.
+const DEFAULT_SIDEBAR_W = 230;
+const DEFAULT_LIST_W = 320;
+const SIDEBAR_MIN = 170, SIDEBAR_MAX = 420;
+const LIST_MIN = 240, LIST_MAX = 620;
+const clampW = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// A draggable vertical divider between two panes. Reports incremental cursor
+// deltas while dragging; double-click resets the adjacent pane to its default.
+function ResizeHandle({ onDelta, onReset, label }) {
+  const [drag, setDrag] = useState(false);
+  const last = useRef(0);
+  useEffect(() => {
+    if (!drag) return;
+    const move = (e) => { const inc = e.clientX - last.current; last.current = e.clientX; if (inc) onDelta(inc); };
+    const up = () => { setDrag(false); document.body.style.cursor = ""; document.body.style.userSelect = ""; };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+  }, [drag, onDelta]);
+  const down = (e) => {
+    e.preventDefault();
+    last.current = e.clientX;
+    setDrag(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+  return (
+    <div
+      className={"pane-divider" + (drag ? " dragging" : "")}
+      role="separator" aria-orientation="vertical" aria-label={label} tabIndex={-1}
+      onMouseDown={down} onDoubleClick={onReset}
+    />
+  );
+}
+
 // Placeholder so the chrome renders before any vault is registered (fresh
 // install with no persisted recents). It reads as a locked, empty vault.
 const NO_VAULT = { id: null, name: "No vault", file: "—", path: "", locked: true, entries: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
@@ -45,6 +82,12 @@ function App() {
   const [revealed, setRevealed] = useState(false);
   // Secret detail for the selected entry, fetched on selection (get_entry_detail).
   const [detail, setDetail] = useState({ notes: "", fields: [], password: "" });
+
+  // Draggable pane widths (persisted). Detail flexes to fill the remainder.
+  const [sidebarW, setSidebarW] = useState(() => { try { return Number(localStorage.getItem("trove.sidebarW")) || DEFAULT_SIDEBAR_W; } catch (e) { return DEFAULT_SIDEBAR_W; } });
+  const [listW, setListW] = useState(() => { try { return Number(localStorage.getItem("trove.listW")) || DEFAULT_LIST_W; } catch (e) { return DEFAULT_LIST_W; } });
+  useEffect(() => { try { localStorage.setItem("trove.sidebarW", String(sidebarW)); } catch (e) {} }, [sidebarW]);
+  useEffect(() => { try { localStorage.setItem("trove.listW", String(listW)); } catch (e) {} }, [listW]);
 
   const [copiedKey, setCopiedKey] = useState(null);
   const [clip, setClip] = useState(null);
@@ -367,11 +410,21 @@ function App() {
         {locked ? (
           <Unlock vault={vault} onUnlock={unlock} onChange={() => setSwitcher(true)} />
         ) : (
-          <div className="body">
+          <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
             <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} />
+            <ResizeHandle
+              label="Resize sidebar"
+              onDelta={(inc) => setSidebarW((w) => clampW(w + inc, SIDEBAR_MIN, SIDEBAR_MAX))}
+              onReset={() => setSidebarW(DEFAULT_SIDEBAR_W)}
+            />
             <EntryList
               entries={filtered} selectedId={selId} onSelect={setSelId}
               title={groupTitle} subtitle={groupSub} sort={sort} onCycleSort={cycleSort}
+            />
+            <ResizeHandle
+              label="Resize entry list"
+              onDelta={(inc) => setListW((w) => clampW(w + inc, LIST_MIN, LIST_MAX))}
+              onReset={() => setListW(DEFAULT_LIST_W)}
             />
             <Detail
               entry={selected} notes={detail.notes} fields={detail.fields} password={detail.password}
