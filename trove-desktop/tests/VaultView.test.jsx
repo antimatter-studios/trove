@@ -93,4 +93,11 @@ describe('unlocked vault interactions', () => {
     await waitFor(() => expect(document.querySelector('.palette')).toBeTruthy());
     expect(document.querySelector('.pal-input input')).toBeTruthy();
   });
+
+  it('renders two draggable pane dividers between the three panes', async () => {
+    const c = await mountUnlocked();
+    const dividers = c.querySelectorAll('.body .pane-divider');
+    expect(dividers).toHaveLength(2);
+    dividers.forEach((d) => expect(d.getAttribute('role')).toBe('separator'));
+  });
 });
