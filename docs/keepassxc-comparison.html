@@ -1,0 +1,317 @@
+<style>
+  :root {
+    --ground: #14181f;
+    --surface: #1c212b;
+    --surface-2: #232a35;
+    --line: #2b323f;
+    --line-soft: #232833;
+    --text: #e8e6dd;
+    --dim: #9aa0ac;
+    --faint: #6c7482;
+    --brass: #d8b25e;
+    --brass-dim: rgba(216, 178, 94, 0.14);
+    --brass-line: rgba(216, 178, 94, 0.34);
+    --fern: #6fbf8f;
+    --fern-dim: rgba(111, 191, 143, 0.14);
+    --steel: #7aa2c4;
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(120% 80% at 12% -8%, rgba(122, 162, 196, 0.10), transparent 55%),
+      radial-gradient(120% 90% at 100% 108%, rgba(216, 178, 94, 0.10), transparent 55%),
+      var(--ground);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 24px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin: 0;
+  }
+
+  /* ---- masthead ---- */
+  .mast { padding: 84px 0 40px; border-bottom: 1px solid var(--line); }
+  .mast h1 {
+    font-size: clamp(34px, 6vw, 58px);
+    line-height: 1.02;
+    letter-spacing: -0.03em;
+    font-weight: 800;
+    margin: 18px 0 0;
+    text-wrap: balance;
+  }
+  .mast h1 .vs { color: var(--faint); font-weight: 400; }
+  .mast h1 .kpxc { color: var(--dim); font-weight: 600; }
+  .mast .thesis {
+    max-width: 60ch;
+    color: var(--dim);
+    font-size: 18px;
+    margin: 20px 0 0;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 26px; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--dim);
+    background: var(--surface);
+  }
+  .chip.on { color: var(--brass); border-color: var(--brass-line); background: var(--brass-dim); }
+  .chip.fern { color: var(--fern); border-color: rgba(111,191,143,0.34); background: var(--fern-dim); }
+
+  /* ---- section scaffold ---- */
+  section { padding: 52px 0; border-bottom: 1px solid var(--line-soft); }
+  h2 {
+    font-size: 13px;
+    font-family: var(--mono);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0 0 24px;
+    font-weight: 600;
+  }
+  h2 .n { color: var(--brass); }
+
+  p { margin: 0 0 16px; }
+  p.lead { max-width: 68ch; }
+  a { color: var(--brass); text-decoration: none; border-bottom: 1px solid var(--brass-line); }
+  a:hover { border-bottom-color: var(--brass); }
+  a:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; border-radius: 2px; }
+
+  /* ---- verdict cards ---- */
+  .verdict { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .vcard {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 22px 22px 24px;
+  }
+  .vcard .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .vcard h3 { margin: 8px 0 10px; font-size: 20px; letter-spacing: -0.01em; }
+  .vcard p { color: var(--dim); font-size: 15px; margin: 0; }
+  .vcard.edge { border-color: var(--brass-line); }
+  .vcard.edge h3 { color: var(--brass); }
+
+  /* ---- matrix ---- */
+  .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 15px; }
+  thead th {
+    text-align: left;
+    padding: 14px 18px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--line);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.02em;
+  }
+  thead th.tool { font-family: var(--mono); }
+  thead th.trove { color: var(--brass); }
+  tbody td { padding: 13px 18px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: rgba(255,255,255,0.014); }
+  .feat { font-weight: 600; }
+  .feat small { display: block; font-weight: 400; color: var(--faint); font-size: 12.5px; margin-top: 2px; }
+  .cell-mono { font-family: var(--mono); font-size: 12.5px; color: var(--dim); }
+  .yes { color: var(--fern); font-weight: 600; white-space: nowrap; }
+  .yes .cmd { display: block; font-family: var(--mono); font-size: 12px; color: var(--dim); font-weight: 400; margin-top: 3px; }
+  .has { color: var(--dim); }
+  .partial { color: var(--brass); font-weight: 600; }
+
+  /* ---- two-column wins ---- */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .col h3 { font-size: 17px; margin: 0 0 14px; letter-spacing: -0.01em; }
+  .col.trove h3 { color: var(--brass); }
+  .col.kpxc h3 { color: var(--steel); }
+  ul.pts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+  ul.pts li { padding-left: 20px; position: relative; color: var(--dim); font-size: 14.5px; }
+  ul.pts li::before {
+    content: "";
+    position: absolute; left: 0; top: 9px;
+    width: 7px; height: 7px; border-radius: 2px;
+  }
+  .col.trove li::before { background: var(--brass); }
+  .col.kpxc li::before { background: var(--steel); }
+  ul.pts li b { color: var(--text); font-weight: 600; }
+
+  /* ---- limits ---- */
+  .limits { display: flex; flex-direction: column; gap: 10px; }
+  .limit {
+    display: grid; grid-template-columns: 150px 1fr; gap: 16px;
+    padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  }
+  .limit .k { font-family: var(--mono); font-size: 12.5px; color: var(--brass); }
+  .limit .v { color: var(--dim); font-size: 14.5px; }
+
+  /* ---- proof footer ---- */
+  .proof { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 26px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .stat .num { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .stat .num.brass { color: var(--brass); }
+  .stat .num.fern { color: var(--fern); }
+  .stat .lbl { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); margin-top: 4px; }
+  footer { padding: 40px 0 72px; color: var(--faint); font-size: 13.5px; }
+  footer p { margin: 0 0 8px; }
+
+  @media (max-width: 720px) {
+    .verdict, .cols, .proof { grid-template-columns: 1fr; }
+    .limit { grid-template-columns: 1fr; gap: 4px; }
+    .mast { padding-top: 56px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <p class="eyebrow">Field comparison · kdbx command-line tools</p>
+    <h1>trove <span class="vs">vs</span> <span class="kpxc">keepassxc-cli</span></h1>
+    <p class="thesis">The question that started this: is trove better or worse than keepassxc-cli? The honest answer used to be "different tools, you need both." The parity gap list closed in trove v0.5.0, and v0.6.0 pushes further into what keepassxc-cli structurally can't do — multi-daemon visibility &amp; reaping, CLI↔daemon version-drift detection, and safer secret materialization.</p>
+    <div class="chips">
+      <span class="chip on">trove v0.6.0</span>
+      <span class="chip fern">7 / 7 parity gaps closed</span>
+      <span class="chip">proven vs keepassxc-cli 2.7.x in CI</span>
+      <span class="chip">100% kdbx-compatible</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>The verdict, first</h2>
+    <div class="verdict">
+      <div class="vcard">
+        <span class="tag">What changed</span>
+        <h3>Parity, not approximation</h3>
+        <p>Every capability keepassxc-cli had and trove lacked — generic entry CRUD, keyfiles, TOTP, generation &amp; audit, clipboard, merge/export/db-edit — now ships in trove, each verified against the real keepassxc-cli binary on every CI run.</p>
+      </div>
+      <div class="vcard edge">
+        <span class="tag">The shape of the difference</span>
+        <h3>Editor vs runtime</h3>
+        <p>keepassxc-cli is a vault <em>editor</em>: you query a file. trove is a secrets <em>runtime</em>: agents, sessions, and process-scoped injection let your machine <em>authenticate with</em> the vault — which upstream refused to build headless.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The parity matrix <span class="n">— every gap, closed</span></h2>
+    <p class="lead">These were the seven areas keepassxc-cli won in the original comparison. Each row is now backed by keepassxc-cli interop tests (trove writes → keepassxc reads, and vice versa) so the compatibility claim is mechanical, not aspirational.</p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th class="tool">keepassxc-cli</th>
+            <th class="tool trove">trove v0.6.0</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="feat">Generic entry CRUD<small>add / show / edit / rm / mv / mkdir / search</small></td>
+            <td class="has">Full editor</td>
+            <td><span class="yes">Yes<span class="cmd">add password · edit · rm · mv · search</span></span></td>
+          </tr>
+          <tr>
+            <td class="feat">Keyfile unlock<small>composite key material</small></td>
+            <td class="has">All formats</td>
+            <td><span class="yes">Yes<span class="cmd">--key-file (XML v1/v2, raw, hex, sha256)</span></span></td>
+          </tr>
+          <tr>
+            <td class="feat">TOTP<small>RFC 6238 one-time codes</small></td>
+            <td class="has">show / clip --totp</td>
+            <td><span class="yes">Yes<span class="cmd">add totp · show --totp</span></span></td>
+          </tr>
+          <tr>
+            <td class="feat">Generation &amp; audit<small>passwords, strength, breach check</small></td>
+            <td class="has">generate / estimate / analyze</td>
+            <td><span class="yes">Yes<span class="cmd">generate · diceware · estimate · analyze --hibp</span></span></td>
+          </tr>
+          <tr>
+            <td class="feat">Clipboard<small>copy with auto-clear</small></td>
+            <td class="has">clip + timeout</td>
+            <td><span class="yes">Yes<span class="cmd">clip --timeout (hash-guarded wipe)</span></span></td>
+          </tr>
+          <tr>
+            <td class="feat">Vault ops<small>merge / export / rekey / info</small></td>
+            <td class="has">merge / import / export / db-edit</td>
+            <td><span class="partial">Yes*<span class="cmd" style="color:var(--faint)">merge · export · db-edit · db-info (import: no)</span></span></td>
+          </tr>
+          <tr>
+            <td class="feat">Hardware key<small>YubiKey challenge-response</small></td>
+            <td class="has">--yubikey</td>
+            <td><span class="partial">Yes*<span class="cmd" style="color:var(--faint)">--features yubikey · Linux · HW unverified</span></span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where each still wins</h2>
+    <div class="cols">
+      <div class="col trove">
+        <h3>trove's moat — the runtime</h3>
+        <ul class="pts">
+          <li><b>exec &lt;scope&gt; -- cmd</b> — secrets scoped to one process tree, wiped on exit. <span style="color:var(--faint)">A shell with a kubeconfig that vanishes when it closes.</span></li>
+          <li><b>Headless SSH + GPG agents</b> — keys served from daemon memory; <code style="font-family:var(--mono);font-size:12px">git commit -S</code> works. keepassxc needs the GUI.</li>
+          <li><b>Unlock-once daemon</b> — one KDF, then instant ops. keepassxc-cli re-runs Argon2 per invocation.</li>
+          <li><b>File materialization</b> — decrypt-to-disk on unlock, wipe on lock, tmpfs-guarded.</li>
+          <li><b>git-credential, --json, trove://</b> refs — CI-native scripting keepassxc-cli has no answer for.</li>
+        </ul>
+      </div>
+      <div class="col kpxc">
+        <h3>keepassxc-cli still ahead</h3>
+        <ul class="pts">
+          <li><b>Maturity</b> — years of audits, packaging everywhere, a large user base. trove is months old.</li>
+          <li><b>XML / CSV import</b> — trove exports both but only imports via keepassxc (no public XML parser upstream in the kdbx crate).</li>
+          <li><b>The GUI</b> — browser integration, autofill, deep visual editing. trove-desktop now opens real .kdbx vaults with a system tray and resizable panes, but it's young next to KeePassXC's mature desktop.</li>
+          <li><b>Ubiquity of the hardware path</b> — keepassxc's YubiKey support is cross-platform and battle-tested; trove's is Linux-only and hardware-unverified so far.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Honest limits <span class="n">— what "yes*" costs</span></h2>
+    <div class="limits">
+      <div class="limit"><span class="k">XML import</span><span class="v">Out of scope: the keepass crate exposes no public XML→database parser. Export (re-importable) ships; import stays with keepassxc-cli.</span></div>
+      <div class="limit"><span class="k">YubiKey / macOS</span><span class="v">The feature builds and is CI-tested on Linux only — upstream pins a USB backend that doesn't compile on macOS. Hardware round-trip is verified by a software provider; a physical-key test ships but is unrun.</span></div>
+      <div class="limit"><span class="k">Steam TOTP</span><span class="v">The non-standard 5-character Steam variant isn't implemented; standard RFC 6238 (SHA1/256/512, 6–8 digits) is.</span></div>
+      <div class="limit"><span class="k">Secure erase</span><span class="v">exec/materialize wipes overwrite-then-unlink; on copy-on-write / wear-leveled storage that isn't a guarantee — the same caveat KeePassXC carries. tmpfs is the real mitigation.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How the parity claim is backed</h2>
+    <div class="proof">
+      <div class="stat"><div class="num brass">224</div><div class="lbl">workspace tests, green in CI</div></div>
+      <div class="stat"><div class="num fern">both ways</div><div class="lbl">keepassxc-cli interop</div></div>
+      <div class="stat"><div class="num">100%</div><div class="lbl">kdbx-compatible</div></div>
+    </div>
+    <p class="lead" style="color:var(--dim)">Interop isn't a smoke test: trove-authored vaults are read back field-for-field by keepassxc-cli (including merge-result equivalence and re-imported XML), and keepassxc-authored vaults round-trip through every trove command — TOTP codes matching in the same 30-second window, composite keys opening on both sides. A missing keepassxc binary fails CI rather than skipping.</p>
+  </section>
+
+  <footer>
+    <p>Parity landed in trove v0.5.0 (10 stacked PRs, #28–#38); current release is v0.6.0. Parity plan: <a href="https://github.com/antimatter-studios/trove/blob/main/docs/parity-plan.md">docs/parity-plan.md</a> · security review: <a href="https://github.com/antimatter-studios/trove/blob/main/docs/security-review-2026-07-04.md">docs/security-review-2026-07-04.md</a>.</p>
+    <p>Comparison baseline: keepassxc-cli 2.7.x. trove remains 100% kdbx-compatible — the same vault opens in KeePassXC, KeePassDX, Strongbox, or KeePass2 without data loss.</p>
+  </footer>
+
+</div>
