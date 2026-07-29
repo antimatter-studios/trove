@@ -26,7 +26,11 @@ function buildTree(entries) {
     name: node.name,
     path: node.path,
     count: node.count,
-    children: Object.values(node.children).map(toArr),
+    // Sort each level's folders alphabetically (natural, case-insensitive);
+    // the recursion through toArr applies it at every depth.
+    children: Object.values(node.children)
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }))
+      .map(toArr),
   });
   return toArr(root).children;
 }
