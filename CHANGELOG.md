@@ -6,6 +6,11 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+## v0.7.1 — 2026-07-29
+
+**Sorted sidebar:** the desktop app's group tree now lists folders alphabetically at
+every level (natural, case-insensitive) instead of in entry-insertion order.
+
 ## v0.7.0 — 2026-07-29
 
 **Desktop app, now backed by real vaults:** the Trove desktop app graduates from a

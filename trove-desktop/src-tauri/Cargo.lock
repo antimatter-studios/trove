@@ -3986,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "trove-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "keepass",
  "thiserror 1.0.69",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "trove-desktop"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
