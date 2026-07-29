@@ -423,10 +423,13 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
 .ul-sub { text-align: center; font-size: 12.5px; color: var(--text-faint); margin-top: 5px; }
 .vault-chip { display: flex; align-items: center; gap: 11px; padding: 11px 12px; border-radius: 11px; background: var(--bg-1); border: 1px solid var(--border-soft); margin: 22px 0 16px; }
 .vault-chip .vc-ic { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--bg-3); color: var(--text-dim); flex: none; }
-.vault-chip .vc-name { font-size: 13px; font-weight: 600; }
-.vault-chip .vc-path { font-size: 11px; color: var(--text-faint); font-family: var(--font-mono); }
-.vault-chip .vc-change { margin-left: auto; font-size: 11.5px; color: var(--accent-strong); background: none; border: none; }
-.vault-chip .vc-change:hover { text-decoration: underline; }
+.vault-chip .vc-meta { flex: 1; min-width: 0; }
+.vault-chip .vc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vault-chip .vc-path { display: flex; min-width: 0; margin-top: 2px; font-size: 11px; color: var(--text-faint); font-family: var(--font-mono); }
+.vault-chip .vc-path .vc-dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vault-chip .vc-path .vc-file { flex: none; white-space: nowrap; }
+.vault-chip .vc-change { flex: none; align-self: center; margin-left: 4px; padding: 5px 11px; border-radius: 7px; border: 1px solid var(--border-soft); background: var(--bg-2); color: var(--accent-strong); font-size: 11.5px; font-weight: 500; transition: background .12s, border-color .12s; }
+.vault-chip .vc-change:hover { background: var(--bg-3); border-color: var(--border); }
 .ul-field { position: relative; display: flex; align-items: center; }
 .ul-field input {
   width: 100%; height: 46px; padding: 0 46px 0 14px; border-radius: 11px; font-size: 15px;
