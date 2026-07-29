@@ -213,6 +213,13 @@ async fn git_commit_dash_capital_s_against_our_agent() {
         "git commit stderr: {}",
         String::from_utf8_lossy(&commit.stderr)
     );
+    // NOTE: if this fails locally with "gpg: signing failed: No secret key"
+    // while CI is green, the culprit is almost always a *development* gpg build
+    // (odd minor version, e.g. 2.5.x from Homebrew HEAD): its agent-protocol
+    // handshake for the keygrip differs from what our gpg-agent implements,
+    // which targets stable gpg (2.2/2.4, as used in CI). Socket routing is not
+    // the issue — `gpgconf --list-dirs agent-socket` resolves to the same
+    // $GNUPGHOME/S.gpg-agent this test symlinks. Retest with a stable gpg.
     assert!(
         commit.status.success(),
         "git commit -S should succeed against our gpg agent"

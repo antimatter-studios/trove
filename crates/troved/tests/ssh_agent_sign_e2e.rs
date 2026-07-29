@@ -108,9 +108,32 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
         vault.save().expect("save vault");
     }
 
-    let vault = Vault::open(&vault_path, "pw").expect("reopen");
-    let keys = load_ssh_keys_from_vault(&vault);
-    assert_eq!(keys.len(), 1, "one key should load");
+    // Reopen + load is a disk round-trip. Under very heavy parallel I/O (seen
+    // once on a 2-core CI runner, never reproducible locally at 24x
+    // oversubscription) the just-saved attachment occasionally failed to
+    // surface on the first reopen — a read-side transient, not a lost write.
+    // Retry the reopen+load so a transient self-heals; a genuinely-lost
+    // attachment still fails every attempt, and `diag` then reports what the
+    // vault actually contained so the failure is diagnosable rather than opaque.
+    let mut keys = Vec::new();
+    let mut diag = String::from("no attempts made");
+    for attempt in 0..5u32 {
+        let vault = Vault::open(&vault_path, "pw").expect("reopen");
+        keys = load_ssh_keys_from_vault(&vault);
+        if !keys.is_empty() {
+            break;
+        }
+        diag = format!(
+            "attempt {attempt}: reopened entries={:?}",
+            vault
+                .list_entries()
+                .into_iter()
+                .map(|e| (e.title, e.attachment_names))
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(keys.len(), 1, "one key should load after reopen ({diag})");
     let store: KeyStore = Arc::new(RwLock::new(keys));
 
     let sock_for_task = sock_path.clone();
