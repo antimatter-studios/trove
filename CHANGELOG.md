@@ -6,6 +6,32 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+## v0.7.0 — 2026-07-29
+
+**Desktop app, now backed by real vaults:** the Trove desktop app graduates from a
+design prototype to a working KeePass manager. It opens, creates, unlocks, and locks
+real `.kdbx` files; browses the group/entry tree; adds, edits, moves, and deletes
+entries; and reveals and copies secrets on demand behind an auto-clearing clipboard,
+locking itself after five minutes idle. Recently-opened vaults are remembered, and
+opening one uses the native file picker. Passwords never sit in the entry list —
+strength is scored server-side and each secret is fetched only when its entry is
+selected.
+
+**App icon + system tray:** ships the Trove icon as the application and menu-bar /
+tray icon, with a Show Trove / Quit Trove menu, plus a web favicon.
+
+**Resizable three-pane layout:** drag the dividers between the sidebar, entry list,
+and detail pane to resize them; double-click a divider to reset it; the widths
+persist across restarts.
+
+**Unlock-screen polish:** the locked-vault chip no longer wraps its path or lets it
+collide with the Change control on a long path — the directory truncates with an
+ellipsis while the filename stays visible (full path on hover), and Change is now a
+proper button.
+
+**Library:** `trove-core`'s `EntrySummary` now carries `created` / `modified`
+timestamps. The `trove` and `troved` CLIs are unchanged from v0.6.0.
+
 ## v0.6.0 — 2026-07-19
 
 **Daemon visibility + reap (`trove daemons`, Unix):** a new command that scans

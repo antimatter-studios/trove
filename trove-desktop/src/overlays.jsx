@@ -30,6 +30,14 @@ function Unlock({ vault, onUnlock, onChange }) {
     }
   };
 
+  // Split the path so the chip truncates the *directory* (ellipsis) while
+  // always keeping the filename visible — right-truncating the whole path
+  // would hide the .kdbx name, which is the part that identifies the vault.
+  const fullPath = vault.path || vault.file || "";
+  const lastSlash = fullPath.lastIndexOf("/");
+  const pathDir = lastSlash > 0 ? fullPath.slice(0, lastSlash) : "";
+  const pathFile = lastSlash >= 0 ? fullPath.slice(lastSlash) : fullPath;
+
   return (
     <div className="unlock-desk embed">
       <form className="unlock-card" onSubmit={submit}>
@@ -39,9 +47,12 @@ function Unlock({ vault, onUnlock, onChange }) {
 
         <div className="vault-chip">
           <div className="vc-ic"><Icon name="file" size={17} /></div>
-          <div style={{ minWidth: 0 }}>
+          <div className="vc-meta">
             <div className="vc-name">{vault.name}</div>
-            <div className="vc-path">{vault.path || vault.file}</div>
+            <div className="vc-path" title={fullPath}>
+              {pathDir && <span className="vc-dir">{pathDir}</span>}
+              <span className="vc-file">{pathFile}</span>
+            </div>
           </div>
           <button type="button" className="vc-change" onClick={onChange}>Change</button>
         </div>
