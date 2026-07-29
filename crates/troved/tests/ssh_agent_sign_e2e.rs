@@ -26,6 +26,7 @@ use tokio::sync::RwLock;
 use trove_core::Vault;
 use troved::handler::load_ssh_keys_from_vault;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
+use troved::ssh_agent::keys::parse_private_key;
 use troved::ssh_agent::{self, KeyStore};
 
 fn noop_idle() -> Arc<IdleTracker> {
@@ -43,6 +44,47 @@ fn have_tool(name: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Built only when the key-load assertion fails (a CI-only flake). For every
+/// entry attachment it reports the bytes actually read back and whether they
+/// parse, so the failure says which side broke: `read=None` / `0 bytes` is a
+/// read-side loss; `parse=Err(..)` with a non-zero length is corrupt/unparseable
+/// content. Keeps the opaque "0 != 1" from ever recurring without an explanation.
+fn diagnose_empty(vault: &Vault) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    for e in vault.list_entries() {
+        let _ = write!(
+            s,
+            "entry {:?} attachments={:?}; ",
+            e.title, e.attachment_names
+        );
+        for name in &e.attachment_names {
+            match vault.read_binary(&e.id, name) {
+                Ok(Some(bytes)) => {
+                    let parse = match parse_private_key(&bytes, "diag") {
+                        Ok(_) => "parse=OK".to_string(),
+                        Err(err) => format!("parse=Err({err})"),
+                    };
+                    let head =
+                        String::from_utf8_lossy(&bytes[..bytes.len().min(27)]).replace('\n', "\\n");
+                    let _ = write!(
+                        s,
+                        "[{name}: {} bytes, head={head:?}, {parse}] ",
+                        bytes.len()
+                    );
+                }
+                Ok(None) => {
+                    let _ = write!(s, "[{name}: read=None] ");
+                }
+                Err(err) => {
+                    let _ = write!(s, "[{name}: read=Err({err})] ");
+                }
+            }
+        }
+    }
+    s
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -108,32 +150,20 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
         vault.save().expect("save vault");
     }
 
-    // Reopen + load is a disk round-trip. Under very heavy parallel I/O (seen
-    // once on a 2-core CI runner, never reproducible locally at 24x
-    // oversubscription) the just-saved attachment occasionally failed to
-    // surface on the first reopen — a read-side transient, not a lost write.
-    // Retry the reopen+load so a transient self-heals; a genuinely-lost
-    // attachment still fails every attempt, and `diag` then reports what the
-    // vault actually contained so the failure is diagnosable rather than opaque.
-    let mut keys = Vec::new();
-    let mut diag = String::from("no attempts made");
-    for attempt in 0..5u32 {
-        let vault = Vault::open(&vault_path, "pw").expect("reopen");
-        keys = load_ssh_keys_from_vault(&vault);
-        if !keys.is_empty() {
-            break;
-        }
-        diag = format!(
-            "attempt {attempt}: reopened entries={:?}",
-            vault
-                .list_entries()
-                .into_iter()
-                .map(|e| (e.title, e.attachment_names))
-                .collect::<Vec<_>>()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(keys.len(), 1, "one key should load after reopen ({diag})");
+    // Reopen from disk and load its SSH keys. This has flaked on CI (never
+    // reproducible locally, 360+ runs) by yielding zero keys. If that happens,
+    // `diagnose_empty` dumps enough to tell the two remaining causes apart: the
+    // attachment bytes going missing on the read side (len 0 / read=None) vs.
+    // present-but-unparseable bytes (bytes there, parse=Err). The message is
+    // only built when the assertion fails, so the happy path pays nothing.
+    let vault = Vault::open(&vault_path, "pw").expect("reopen");
+    let keys = load_ssh_keys_from_vault(&vault);
+    assert_eq!(
+        keys.len(),
+        1,
+        "one key should load after reopen — {}",
+        diagnose_empty(&vault)
+    );
     let store: KeyStore = Arc::new(RwLock::new(keys));
 
     let sock_for_task = sock_path.clone();
