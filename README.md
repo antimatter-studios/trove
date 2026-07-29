@@ -402,6 +402,12 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.7.1
+The desktop app's sidebar folder tree now lists groups alphabetically at every level (natural, case-insensitive) instead of in insertion order.
+
+### v0.7.0
+The Trove desktop app graduates from a design prototype to a working KeePass manager backed by real `.kdbx` files: open/create/unlock/lock, entry CRUD, on-demand secret reveal behind an auto-clearing clipboard, five-minute idle auto-lock, remembered recent vaults, and a native file picker. Ships the Trove app + menu-bar/tray icon (with a Show / Quit menu) and a web favicon, plus a resizable three-pane layout (drag to size, double-click to reset, widths persisted) and unlock-screen polish. `trove-core`'s `EntrySummary` gains created/modified timestamps; the `trove` and `troved` CLIs are unchanged.
+
 ### v0.6.0
 `trove daemons` (Unix) to see and reap orphaned daemons — a wedged one, or a stray from an old build, that the single-path `status` misses. A CLI↔daemon version-drift warning that flags a stale sibling `troved`. Materialize now creates a target's missing parent directories (`0700`) and surfaces failures loudly instead of a silent no-op. Plus docs for using two accounts on one host (work + personal GitHub) via `~/.ssh/config` host aliases.
 
