@@ -140,7 +140,7 @@ async fn start_daemon() -> Daemon {
     let vault = tmp.path().join("v.kdbx");
     Vault::create(&vault, PASSWORD).expect("create empty vault");
 
-    let state: SharedState = Arc::new(Mutex::new(None));
+    let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));

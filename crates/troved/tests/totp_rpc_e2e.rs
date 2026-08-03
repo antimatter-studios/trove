@@ -35,7 +35,7 @@ impl Harness {
     fn new() -> Self {
         let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
         Self {
-            state: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(troved::vaults::VaultSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
             mat_store: Arc::new(RwLock::new(Vec::new())),

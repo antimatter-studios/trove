@@ -6,6 +6,8 @@
 //!   * The `KeyStore` is initially empty; `RequestIdentities` returns an
 //!     empty list and `SignRequest` returns `SSH_AGENT_FAILURE`.
 //!   * `unlock` populates it; `lock` / shutdown clears it.
+//!   * `unlock` also pushes the same keys into the user's own agent, and
+//!     `lock` asks for them back — see [`forward`].
 //!
 //! Threading: each accepted connection is spawned onto the tokio runtime.
 //! We never hold the key-store lock across an `await` that talks to the
@@ -19,16 +21,72 @@ use tokio::sync::RwLock;
 
 use crate::ipc;
 
+/// Forwarding of unlocked keys into the user's own ssh-agent (the KeePassXC
+/// model). On by default, off with `TROVE_SSH_FORWARD=0`, and inert when
+/// `$SSH_AUTH_SOCK` names nothing or names us. Unix only — it speaks the agent
+/// protocol over a Unix socket, and `SSH_AUTH_SOCK` has no native-Windows
+/// analogue.
+#[cfg(unix)]
+pub mod forward;
 pub mod keeagent;
 pub mod keys;
 pub mod wire;
 
-pub use keys::LoadedKey;
+pub use keys::{ForwardedKey, LoadedKey};
+
+/// Push the just-unlocked keys into the user's own ssh-agent, returning one
+/// warning line per key that couldn't be handed over.
+///
+/// The whole point is that this cannot fail an unlock: an absent, wedged or
+/// hostile agent produces warnings and nothing else. On native Windows there is
+/// no `SSH_AUTH_SOCK`-style agent to forward to, so it's a no-op.
+pub async fn forward_on_unlock(keys: &[LoadedKey], idle_timeout_secs: u64) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        forward::on_unlock(keys, idle_timeout_secs).await.warnings
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (keys, idle_timeout_secs);
+        Vec::new()
+    }
+}
+
+/// The subset of `keys` whose entries asked to be removed from the external
+/// agent at lock. Snapshot this off the key store before clearing it.
+pub fn keys_to_unforward(keys: &[LoadedKey]) -> Vec<ForwardedKey> {
+    #[cfg(unix)]
+    {
+        forward::to_unforward(keys)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = keys;
+        Vec::new()
+    }
+}
+
+/// Ask the user's own ssh-agent to drop the keys captured by
+/// [`keys_to_unforward`]. Best-effort; warnings go to stderr, since `lock` has
+/// no warning channel on the wire.
+pub async fn unforward_on_lock(keys: &[ForwardedKey]) {
+    #[cfg(unix)]
+    {
+        for w in forward::on_lock(keys).await.warnings {
+            eprintln!("ssh-agent: warning: {w}");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = keys;
+    }
+}
 
 use crate::idle::IdleTracker;
 use crate::ssh_agent::wire::{
     encode_identities_answer, encode_sign_response, parse_request, read_message, write_message,
     AgentRequest, SSH_AGENT_FAILURE, SSH_AGENT_IDENTITIES_ANSWER, SSH_AGENT_SIGN_RESPONSE,
+    SSH_AGENT_SUCCESS,
 };
 
 /// Shared key store. `RwLock` because reads (sign / list) vastly outnumber
@@ -70,11 +128,17 @@ pub async fn run(
     let mut listener = ipc::bind(&socket_path).await?;
     eprintln!("ssh-agent listening on {}", socket_path.display());
 
+    // Agent-lock state belongs to this listener and is shared by every
+    // connection it serves — `ssh-add -x` in one shell must lock the agent for
+    // all of them.
+    let agent_lock: AgentLock = Arc::new(tokio::sync::RwLock::new(None));
+
     loop {
         match listener.accept().await {
             Ok(stream) => {
                 let store = store.clone();
                 let idle = idle.clone();
+                let agent_lock = agent_lock.clone();
                 // Bump on every accepted connection — the act of opening a
                 // socket connection is itself client activity.
                 idle.bump();
@@ -83,7 +147,7 @@ pub async fn run(
                     // error inside `serve_connection` is logged at most once
                     // per connection at debug-equivalent verbosity (silent
                     // in release; we don't depend on the `log` crate).
-                    let _ = serve_connection(stream, store, idle).await;
+                    let _ = serve_connection(stream, store, agent_lock, idle).await;
                 });
             }
             Err(_) => {
@@ -94,9 +158,39 @@ pub async fn run(
     }
 }
 
+/// Agent-wide lock state (`ssh-add -x` / `-X`), shared across the connections
+/// one listener serves.
+///
+/// We keep a SHA-256 of the passphrase rather than the passphrase itself: the
+/// agent only ever needs to answer "is this the same secret again?", so there
+/// is no reason to hold the plaintext.
+///
+/// This is deliberately **independent of vault lock**. It is a property of the
+/// agent, matching OpenSSH semantics — locking the agent doesn't lock your
+/// vault, and unlocking your vault doesn't unlock the agent.
+pub type AgentLock = Arc<tokio::sync::RwLock<Option<[u8; 32]>>>;
+
+/// Constant-time comparison of two 32-byte digests, so a wrong passphrase
+/// can't be recovered a byte at a time by timing the reply.
+fn digests_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+fn passphrase_digest(passphrase: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(passphrase);
+    h.finalize().into()
+}
+
 async fn serve_connection(
     stream: ipc::Stream,
     store: KeyStore,
+    agent_lock: AgentLock,
     idle: Arc<IdleTracker>,
 ) -> std::io::Result<()> {
     let (mut read_half, mut write_half) = tokio::io::split(stream);
@@ -119,7 +213,92 @@ async fn serve_connection(
             }
         };
 
+        // While locked, OpenSSH's agent refuses everything except UNLOCK —
+        // an identity listing comes back empty and signing fails. Mirror that,
+        // otherwise `ssh-add -x` would look like it worked while keys kept
+        // signing.
+        let locked = agent_lock.read().await.is_some();
+        if locked && !matches!(req, AgentRequest::Unlock { .. }) {
+            let resp = match req {
+                // An empty list rather than a failure: this is what OpenSSH
+                // returns, and clients treat a failure here as "no agent".
+                AgentRequest::RequestIdentities => {
+                    let body = encode_identities_answer(&[]);
+                    write_message(&mut write_half, SSH_AGENT_IDENTITIES_ANSWER, &body).await
+                }
+                _ => write_message(&mut write_half, SSH_AGENT_FAILURE, &[]).await,
+            };
+            if resp.is_err() {
+                return Ok(());
+            }
+            continue;
+        }
+
         match req {
+            AgentRequest::RemoveIdentity { key_blob } => {
+                let removed = {
+                    let mut guard = store.write().await;
+                    let before = guard.len();
+                    guard.retain(|k| k.public_blob != key_blob);
+                    before != guard.len()
+                };
+                // Removing here drops the key from the agent only — the vault
+                // still holds it, and the next unlock re-serves it.
+                let ty = if removed {
+                    SSH_AGENT_SUCCESS
+                } else {
+                    SSH_AGENT_FAILURE
+                };
+                if write_message(&mut write_half, ty, &[]).await.is_err() {
+                    return Ok(());
+                }
+            }
+
+            AgentRequest::RemoveAllIdentities => {
+                {
+                    let mut guard = store.write().await;
+                    // Clearing zeroizes each key on drop.
+                    guard.clear();
+                }
+                if write_message(&mut write_half, SSH_AGENT_SUCCESS, &[])
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+
+            AgentRequest::Lock { passphrase } => {
+                let mut guard = agent_lock.write().await;
+                // Already locked → failure, matching OpenSSH.
+                let ty = if guard.is_some() {
+                    SSH_AGENT_FAILURE
+                } else {
+                    *guard = Some(passphrase_digest(&passphrase));
+                    SSH_AGENT_SUCCESS
+                };
+                drop(guard);
+                if write_message(&mut write_half, ty, &[]).await.is_err() {
+                    return Ok(());
+                }
+            }
+
+            AgentRequest::Unlock { passphrase } => {
+                let mut guard = agent_lock.write().await;
+                let ty = match guard.as_ref() {
+                    Some(expected) if digests_equal(expected, &passphrase_digest(&passphrase)) => {
+                        *guard = None;
+                        SSH_AGENT_SUCCESS
+                    }
+                    // Wrong passphrase, or not locked at all.
+                    _ => SSH_AGENT_FAILURE,
+                };
+                drop(guard);
+                if write_message(&mut write_half, ty, &[]).await.is_err() {
+                    return Ok(());
+                }
+            }
+
             AgentRequest::RequestIdentities => {
                 // Build the answer under a brief read lock; the lock is
                 // dropped *before* we await the network write.

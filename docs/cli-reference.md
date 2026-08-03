@@ -454,6 +454,20 @@ Print the path to the troved SSH agent socket, then exit. Resolution order:
 
 Typical use: `export SSH_AUTH_SOCK="$(trove ssh-agent socket)"`.
 
+### Forwarding into your own ssh-agent
+
+`SSH_AUTH_SOCK` is inherited at fork, so exporting it in a shell never reaches an
+already-running editor. For those, unlock also pushes each key into whatever
+agent `$SSH_AUTH_SOCK` already names — the KeePassXC model — and lock asks that
+agent to drop them again. Per-entry behaviour comes from `KeeAgent.settings` and
+is editable from KeePassXC itself; see `docs/macos.md`. `TROVE_SSH_FORWARD=0`
+turns it off, and it does nothing when `$SSH_AUTH_SOCK` is unset or already
+points at trove.
+
+Note what this costs: the private bytes leave troved, so trove's lock can only
+*ask* for them back. `IdentityAgent /path/to/trove-ssh.sock` in `~/.ssh/config`
+solves the same reachability problem with nothing leaving the daemon.
+
 ### Two accounts on one host
 
 The agent serves every unlocked key, and `ssh` offers them to a host in turn
@@ -521,7 +535,7 @@ Print the path to the troved GPG agent socket. Resolution order:
 gpg(1) wants a fixed path under `$GNUPGHOME`. Typical use:
 
 ```sh
-ln -sf "$(trove gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
+ln -sf "$(trove gpg-agent socket)" "$(gpgconf --list-dirs agent-socket)"
 ```
 
 ## trove materialize
@@ -623,7 +637,8 @@ All env vars are read at process start.
 | `TROVE_SOCK` | `$XDG_RUNTIME_DIR/trove.sock` or `${TMPDIR:-/tmp}/trove-$UID.sock` | Path of the control socket. |
 | `TROVE_SSH_SOCK` | `$XDG_RUNTIME_DIR/trove-ssh.sock` or `${TMPDIR:-/tmp}/trove-ssh-$UID.sock` | Path of the SSH agent socket. |
 | `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |
-| `TROVE_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. |
+| `TROVE_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. Also the default lifetime constraint on forwarded SSH keys. |
+| `TROVE_SSH_FORWARD` | (on) | Set to `0` / `false` / `no` / `off` to stop pushing unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`. Read on every unlock, not just at start. Forwarding is already inert when `$SSH_AUTH_SOCK` is unset or points at trove's own socket. |
 | `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
 | `TMPDIR` | `/tmp` | Used as fallback when `XDG_RUNTIME_DIR` is unset/empty. |
@@ -641,11 +656,11 @@ Request envelope: `{"cmd": "<name>", ...}`. Response envelope: `{"status": "ok"|
 | `cmd` | Request fields | Response on success | Notes |
 | --- | --- | --- | --- |
 | `ping` | none | `{"status":"ok","pong":true}` | Heartbeat. Does **not** reset the idle timer. |
-| `unlock` | `path: string`, `password: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…]}` | Loads vault, populates SSH+GPG stores, runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the vault) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. |
-| `list` | none | `{"status":"ok","entries":[{"id","title","username","url","attachments"}, ...]}` | Errors if no vault is unlocked. |
-| `lock` | none | `{"status":"ok"}` | Wipes materialized files, drops vault, clears SSH+GPG stores, cancels idle timer. Idempotent. |
+| `unlock` | `path: string`, `password: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…],"ssh_forward_warnings":[…]}` | **Additive** — adds this vault to the unlocked set rather than replacing it, and the SSH/GPG stores are rebuilt from the union of every open vault (see [multi-vault.md](multi-vault.md)). Re-unlocking a vault already open replaces just that one. Runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the vault) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. A target another unlocked vault already materialized is skipped and warned about, never overwritten. Also forwards the unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`, under the same contract: never fails the unlock, per-key failures land in `ssh_forward_warnings` (omitted when empty). |
+| `list` | none | `{"status":"ok","entries":[{"id","title","username","url","attachments"}, ...]}` | The union across every unlocked vault, in unlock order. Errors if none is unlocked. |
+| `lock` | `vault: string` *(optional)* | `{"status":"ok"}` | Without `vault`: wipes all materialized files, drops every vault, clears the SSH+GPG stores, cancels the idle timer. With `vault`: drops only that vault, wipes only **its** materialized files, rebuilds the key stores from what is still open, and keeps the idle timer armed; errors if no vault is unlocked at that path. Either way, keys that dropped out of the store are also removed from the agent named by `$SSH_AUTH_SOCK` (unless the entry set `RemoveAtDatabaseClose=false`); keys another still-unlocked vault provides stay. Idempotent. |
 | `shutdown` | none | `{"status":"ok"}` | Same as `lock`, then signals the daemon main loop to exit. |
-| `materialize-status` | none | `{"status":"ok","materialized":[{"title","target_path","ttl_remaining_seconds","exists"}, ...]}` | Read-only; works even with vault locked (returns empty array). |
+| `materialize-status` | none | `{"status":"ok","materialized":[{"title","target_path","vault","ttl_remaining_seconds","exists"}, ...]}` | Read-only; works even with every vault locked (returns empty array). `vault` names the unlocked vault the file came from. |
 | `set-idle-timeout` | `seconds: u64` | `{"status":"ok"}` | `0` disables auto-lock. Takes effect immediately; if the new timeout has already elapsed, the timer fires on the next driver wake. |
 | `get-idle-timeout` | none | `{"status":"ok","seconds": u64, "remaining": u64\|null}` | `seconds` is the configured timeout. `remaining` is seconds-until-fire if a vault is unlocked, else `null`. |
 

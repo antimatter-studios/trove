@@ -11,3 +11,9 @@
 # e.g. crates/troved/tests/fixtures/ is silently ignored and `git add` no-ops.
 *.kdbx
 !**/fixtures/*.kdbx
+
+# Agent worktrees created by tooling — code lives on their branches, not here.
+.claude/
+
+# gpg writes these next to the cwd when a signing test goes sideways.
+dbgmd-*

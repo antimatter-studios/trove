@@ -195,9 +195,17 @@ enum Command {
         shell: bool,
     },
 
-    /// Tell the running `troved` to lock the vault: wipe materialized files,
-    /// drop SSH+GPG keys, drop the vault. Idempotent.
-    Lock,
+    /// Tell the running `troved` to lock: wipe materialized files, drop
+    /// SSH+GPG keys, drop the vault. Idempotent.
+    ///
+    /// With several vaults unlocked, a bare `trove lock` locks all of them.
+    /// `--vault <PATH>` locks just that one and leaves the rest serving.
+    Lock {
+        /// Lock only the vault opened from this `.kdbx`, instead of all of
+        /// them. Errors if no vault is unlocked at that path.
+        #[arg(long = "vault", value_name = "PATH")]
+        vault: Option<PathBuf>,
+    },
 
     /// Print a human-readable summary of the running `troved`'s state:
     /// vault path (if unlocked), idle-lock state, and counts of SSH keys,
@@ -1076,7 +1084,7 @@ fn run(cli: Cli) -> Result<()> {
             export,
             shell,
         } => cmd_unlock(&vault, timeout, export, shell, pw_stdin),
-        Command::Lock => cmd_lock(),
+        Command::Lock { vault } => cmd_lock(vault.as_deref()),
         Command::Status => cmd_status(),
         #[cfg(unix)]
         Command::Daemons { op } => match op.unwrap_or(DaemonsOp::List { json: false }) {
@@ -3597,7 +3605,10 @@ fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
             std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let mut materialised_count = 0usize;
         for plan in &plans {
-            match troved::materialize::materialize_one(&vault, plan, store.clone()) {
+            // Offline `trove materialize` opens exactly one vault, so the
+            // per-vault attribution the daemon needs is just that vault's path.
+            let vault_key = troved::vaults::canonical_key(vault.path());
+            match troved::materialize::materialize_one(&vault, &vault_key, plan, store.clone()) {
                 Ok(m) => {
                     println!(
                         "materialized '{}' -> {} (mode {:o}{}{})",
@@ -3787,6 +3798,15 @@ fn cmd_unlock(
         }
     }
 
+    // Same deal for keys that didn't make it into the user's own ssh-agent.
+    // Forwarding never fails the unlock, but a key that's silently absent is
+    // only discovered later by a `git push` that asks for a password.
+    if let Some(warnings) = resp.get("ssh_forward_warnings").and_then(Value::as_array) {
+        for w in warnings.iter().filter_map(Value::as_str) {
+            eprintln!("trove: warning: ssh-agent forwarding failed — {w}");
+        }
+    }
+
     // Two delivery modes, so the operator never has to type `eval`:
     //   * subshell — set $TROVE_SESSION and exec the operator's own $SHELL, so
     //     they land in a session shell where `add`/`get` work immediately. The
@@ -3852,8 +3872,11 @@ fn looks_like_vault_error(msg: &str) -> bool {
 
 /// `trove lock` — send `lock` to the daemon. Idempotent on the daemon side;
 /// we treat its response as the source of truth.
-fn cmd_lock() -> Result<()> {
-    let resp = match daemon::send_autospawn(&daemon::Request::Lock) {
+fn cmd_lock(vault: Option<&std::path::Path>) -> Result<()> {
+    let req = daemon::Request::Lock {
+        vault: vault.map(|p| p.display().to_string()),
+    };
+    let resp = match daemon::send_autospawn(&req) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
@@ -3871,7 +3894,10 @@ fn cmd_lock() -> Result<()> {
         }
         .into());
     }
-    println!("vault locked");
+    match vault {
+        Some(p) => println!("vault locked: {}", p.display()),
+        None => println!("vault locked"),
+    }
     Ok(())
 }
 
@@ -3909,13 +3935,31 @@ fn cmd_status() -> Result<()> {
 }
 
 fn print_status(resp: &Value) {
-    // Vault path. `null` -> "no vault unlocked".
-    let vault_line = match resp.get("vault_path") {
-        Some(v) if v.is_null() => "no vault unlocked".to_string(),
-        Some(v) => v.as_str().unwrap_or("(unparseable vault_path)").to_string(),
-        None => "no vault unlocked".to_string(),
-    };
-    println!("Vault:           {vault_line}");
+    // `vault_paths` lists every unlocked vault (unlock is additive). Older
+    // daemons don't send it, so fall back to the single `vault_path`.
+    let paths: Vec<&str> = resp
+        .get("vault_paths")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    match paths.len() {
+        0 => {
+            // Vault path. `null` -> "no vault unlocked".
+            let vault_line = match resp.get("vault_path") {
+                Some(v) if v.is_null() => "no vault unlocked".to_string(),
+                Some(v) => v.as_str().unwrap_or("(unparseable vault_path)").to_string(),
+                None => "no vault unlocked".to_string(),
+            };
+            println!("Vault:           {vault_line}");
+        }
+        1 => println!("Vault:           {}", paths[0]),
+        n => {
+            println!("Vaults:          {n} unlocked");
+            for p in paths {
+                println!("                 {p}");
+            }
+        }
+    }
 
     let idle_secs = resp.get("idle_timeout_secs").and_then(Value::as_u64);
     let idle_line = match idle_secs {

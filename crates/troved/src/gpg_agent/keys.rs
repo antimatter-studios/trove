@@ -1,5 +1,5 @@
-//! OpenPGP secret-key parsing (ed25519 EdDSA primary + Curve25519 ECDH subkey)
-//! and keygrip computation.
+//! OpenPGP secret-key parsing (ed25519 EdDSA, Curve25519 ECDH, RSA) and
+//! keygrip computation.
 //!
 //! ## Why hand-rolled?
 //!
@@ -7,9 +7,13 @@
 //! — extract the 32-byte ed25519 secret seed and the 32-byte cv25519 secret
 //! scalar from a `gpg --export-secret-keys` output (primary + ECDH subkey) —
 //! would add ~170 transitive crates to the build. The OpenPGP packet layout
-//! for `algorithm=22` (EdDSA Legacy) and `algorithm=18` (ECDH) is small and
-//! stable; we parse it directly. Anything else (RSA, ECDSA, Ed448) is silently
-//! skipped.
+//! for `algorithm=22` (EdDSA Legacy), `algorithm=18` (ECDH) and
+//! `algorithm=1/2/3` (RSA) is small and stable; we parse it directly. Anything
+//! else (DSA, ECDSA, Ed448) is silently skipped.
+//!
+//! RSA matters disproportionately: `gpg --gen-key` defaulted to it until
+//! GnuPG 2.3, so most existing PGP keys are RSA. See the RSA packet layout in
+//! `parse_rsa_secret_key_body`.
 //!
 //! ## Format reference
 //!
@@ -68,6 +72,11 @@ pub enum LoadedGpgKey {
     Ed25519(LoadedEd25519Key),
     /// ECDH-on-Curve25519 encryption subkey.
     Cv25519(LoadedCv25519Key),
+    /// RSA key (OpenPGP algorithms 1, 2 and 3). Still the overwhelming
+    /// majority of PGP keys in the wild — `gpg --gen-key` defaulted to RSA
+    /// until GnuPG 2.3 made ed25519 the default — so skipping these made
+    /// trove useless for most existing keys.
+    Rsa(LoadedRsaKey),
 }
 
 /// Primary EdDSA signing key.
@@ -84,6 +93,32 @@ pub struct LoadedEd25519Key {
     /// User-facing label — typically the vault entry's title.
     pub comment: String,
     signing_key: SigningKey,
+}
+
+/// An RSA key parsed from an OpenPGP secret-key packet.
+///
+/// Every component is stored as an unsigned big-endian magnitude with leading
+/// zeros stripped — the form libgcrypt uses on the wire and in keygrips, and
+/// the form `rsa::BigUint::from_bytes_be` wants.
+///
+/// The secret components live in a `Zeroizing<Vec<u8>>` so they are wiped when
+/// the key store is cleared on lock, matching the ed25519/cv25519 variants.
+pub struct LoadedRsaKey {
+    /// 20-byte SHA-1 keygrip. For RSA this is `SHA-1(signed-MPI(n))` — the
+    /// bare modulus, with no S-expression framing. See [`keygrip_for_rsa`].
+    pub keygrip: [u8; 20],
+    /// Public modulus.
+    pub n: Vec<u8>,
+    /// Public exponent.
+    pub e: Vec<u8>,
+    /// User-facing label — typically the vault entry's title.
+    pub comment: String,
+    /// Private exponent.
+    d: Zeroizing<Vec<u8>>,
+    /// First prime factor.
+    p: Zeroizing<Vec<u8>>,
+    /// Second prime factor.
+    q: Zeroizing<Vec<u8>>,
 }
 
 /// Curve25519 ECDH encryption subkey. Holds the 32-byte secret scalar (already
@@ -132,6 +167,7 @@ impl LoadedGpgKey {
         match self {
             LoadedGpgKey::Ed25519(k) => &k.keygrip,
             LoadedGpgKey::Cv25519(k) => &k.keygrip,
+            LoadedGpgKey::Rsa(k) => &k.keygrip,
         }
     }
 
@@ -140,6 +176,7 @@ impl LoadedGpgKey {
         match self {
             LoadedGpgKey::Ed25519(k) => &k.comment,
             LoadedGpgKey::Cv25519(k) => &k.comment,
+            LoadedGpgKey::Rsa(k) => &k.comment,
         }
     }
 
@@ -149,8 +186,191 @@ impl LoadedGpgKey {
     pub fn sign_raw(&self, data: &[u8]) -> Option<[u8; 64]> {
         match self {
             LoadedGpgKey::Ed25519(k) => Some(k.signing_key.sign(data).to_bytes()),
-            LoadedGpgKey::Cv25519(_) => None,
+            LoadedGpgKey::Cv25519(_) | LoadedGpgKey::Rsa(_) => None,
         }
+    }
+}
+
+/// OpenPGP hash algorithm ids we can wrap in a PKCS#1 v1.5 `DigestInfo`.
+/// From RFC 4880 §9.4. `SETHASH` names them either numerically or as
+/// `--hash=<name>`, so both spellings map here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgpHash {
+    Sha1,
+    Sha224,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl PgpHash {
+    /// Resolve what `SETHASH` recorded. Accepts `--hash=sha256` style names
+    /// (stored verbatim) and the `algoN` form the numeric variant produces.
+    pub fn from_sethash(spec: Option<&str>) -> Option<Self> {
+        let s = spec?.to_ascii_lowercase();
+        match s.as_str() {
+            "sha1" | "algo2" => Some(PgpHash::Sha1),
+            "sha224" | "algo11" => Some(PgpHash::Sha224),
+            "sha256" | "algo8" => Some(PgpHash::Sha256),
+            "sha384" | "algo9" => Some(PgpHash::Sha384),
+            "sha512" | "algo10" => Some(PgpHash::Sha512),
+            _ => None,
+        }
+    }
+
+    /// The DER `DigestInfo` prefix PKCS#1 v1.5 prepends to the raw digest.
+    fn digest_info_prefix(self) -> &'static [u8] {
+        match self {
+            PgpHash::Sha1 => &[
+                0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04,
+                0x14,
+            ],
+            PgpHash::Sha224 => &[
+                0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x04, 0x05, 0x00, 0x04, 0x1c,
+            ],
+            PgpHash::Sha256 => &[
+                0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x01, 0x05, 0x00, 0x04, 0x20,
+            ],
+            PgpHash::Sha384 => &[
+                0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x02, 0x05, 0x00, 0x04, 0x30,
+            ],
+            PgpHash::Sha512 => &[
+                0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+                0x03, 0x05, 0x00, 0x04, 0x40,
+            ],
+        }
+    }
+
+    /// Digest length in bytes, used to reject a hash that doesn't match the
+    /// algorithm the client claimed.
+    fn digest_len(self) -> usize {
+        match self {
+            PgpHash::Sha1 => 20,
+            PgpHash::Sha224 => 28,
+            PgpHash::Sha256 => 32,
+            PgpHash::Sha384 => 48,
+            PgpHash::Sha512 => 64,
+        }
+    }
+}
+
+impl LoadedRsaKey {
+    /// Modulus size in bits — what `ssh-add`-style listings and diagnostics want.
+    pub fn bits(&self) -> usize {
+        if self.n.is_empty() {
+            return 0;
+        }
+        self.n.len() * 8 - leading_zero_bits(&self.n)
+    }
+
+    /// Sign a **pre-computed digest** with PKCS#1 v1.5, the scheme OpenPGP
+    /// RSA signatures use.
+    ///
+    /// gpg-agent hands us the digest via `SETHASH`, never the message, so this
+    /// wraps the digest in a DER `DigestInfo` itself rather than hashing.
+    /// Returns the raw big-endian signature (modulus-width).
+    pub fn sign_prehash(&self, hash: &[u8], alg: PgpHash) -> Option<Vec<u8>> {
+        // A digest whose length contradicts the declared algorithm means the
+        // client and we disagree about what was hashed — refuse rather than
+        // sign something the verifier will reject.
+        if hash.len() != alg.digest_len() {
+            eprintln!(
+                "gpg-agent: PKSIGN refused: {:?} expects a {}-byte digest, got {}",
+                alg,
+                alg.digest_len(),
+                hash.len()
+            );
+            return None;
+        }
+        let key = self.to_rsa_private_key()?;
+        let mut prefixed = Vec::with_capacity(alg.digest_info_prefix().len() + hash.len());
+        prefixed.extend_from_slice(alg.digest_info_prefix());
+        prefixed.extend_from_slice(hash);
+        // `Pkcs1v15Sign::new_unprefixed` signs exactly the bytes given, which
+        // is what we want now that the DigestInfo is already attached.
+        key.sign(rsa::Pkcs1v15Sign::new_unprefixed(), &prefixed)
+            .ok()
+    }
+
+    /// Modulus length in bytes — the width of a ciphertext block.
+    pub fn modulus_len(&self) -> usize {
+        self.n.len()
+    }
+
+    /// Decrypt an RSA-wrapped session key and return it in the **padded**
+    /// PKCS#1 v1.5 form gpg expects on the wire.
+    ///
+    /// gpg-agent's `PKDECRYPT` hands the client back the whole block
+    /// (`02 || PS || 00 || session-key`) because `g10/pubkey-enc.c` does the
+    /// unpadding itself and insists on seeing the `0x02` block-type byte. So we
+    /// have to produce that shape — but we deliberately do NOT get there with a
+    /// raw private-key operation.
+    ///
+    /// Instead we decrypt through the crate's reviewed PKCS#1 v1.5
+    /// implementation, which performs the padding check in constant time, and
+    /// then re-wrap the recovered session key with fresh random padding of the
+    /// original length. gpg parses the reconstructed block to exactly the same
+    /// session key: it only scans past `PS` to the `0x00` separator, and the
+    /// padding bytes are random by definition, so their values carry no
+    /// meaning.
+    ///
+    /// Why this matters: a raw operation would return the decryption of *any*
+    /// input, making the daemon a full decryption oracle for anything that can
+    /// reach the gpg socket. Going through the checked path means a malformed
+    /// ciphertext is rejected rather than answered.
+    pub fn decrypt_session_key_block(&self, ciphertext_be: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+        use rand::RngCore;
+        let key = self.to_rsa_private_key()?;
+        // Checked, constant-time PKCS#1 v1.5 decryption — this is the part that
+        // must not be hand-rolled or bypassed.
+        let session_key = Zeroizing::new(key.decrypt(rsa::Pkcs1v15Encrypt, ciphertext_be).ok()?);
+
+        // Re-wrap. libgcrypt serialises the block as an unsigned MPI, so the
+        // leading 0x00 of `00 02 ...` is already gone and the value gpg sees
+        // starts at the 0x02 — hence `modulus_len - 1` here, which is what a
+        // real gpg-agent returns (255 bytes for a 2048-bit key).
+        let block_len = self.modulus_len().checked_sub(1)?;
+        // 0x02, at least 8 padding bytes, 0x00 separator, then the key.
+        if session_key.len() + 2 + 8 > block_len {
+            return None;
+        }
+        let ps_len = block_len - session_key.len() - 2;
+
+        let mut block = Vec::with_capacity(block_len);
+        block.push(0x02);
+        // PS must be non-zero bytes, or gpg would find the separator early.
+        let mut ps = vec![0u8; ps_len];
+        rand::thread_rng().fill_bytes(&mut ps);
+        for b in ps.iter_mut() {
+            if *b == 0 {
+                *b = 1;
+            }
+        }
+        block.extend_from_slice(&ps);
+        block.push(0x00);
+        block.extend_from_slice(&session_key);
+        Some(Zeroizing::new(block))
+    }
+
+    /// Rebuild an `rsa::RsaPrivateKey` from the stored components.
+    ///
+    /// `from_components` recomputes and validates the CRT parameters, so a
+    /// malformed packet fails here rather than producing garbage signatures.
+    fn to_rsa_private_key(&self) -> Option<rsa::RsaPrivateKey> {
+        use rsa::BigUint;
+        rsa::RsaPrivateKey::from_components(
+            BigUint::from_bytes_be(&self.n),
+            BigUint::from_bytes_be(&self.e),
+            BigUint::from_bytes_be(&self.d),
+            vec![
+                BigUint::from_bytes_be(&self.p),
+                BigUint::from_bytes_be(&self.q),
+            ],
+        )
+        .ok()
     }
 }
 
@@ -161,11 +381,13 @@ impl LoadedGpgKey {
 #[allow(dead_code)]
 impl LoadedGpgKey {
     /// 32-byte public Q. For ed25519 this is the EdDSA point; for cv25519 it
-    /// is the Montgomery-form point.
-    pub fn public_q(&self) -> &[u8; 32] {
+    /// is the Montgomery-form point. `None` for RSA, which has no such point —
+    /// callers that need it are ECC-specific by construction.
+    pub fn public_q(&self) -> Option<&[u8; 32]> {
         match self {
-            LoadedGpgKey::Ed25519(k) => &k.public_q,
-            LoadedGpgKey::Cv25519(k) => &k.public_q,
+            LoadedGpgKey::Ed25519(k) => Some(&k.public_q),
+            LoadedGpgKey::Cv25519(k) => Some(&k.public_q),
+            LoadedGpgKey::Rsa(_) => None,
         }
     }
 }
@@ -194,6 +416,13 @@ impl std::fmt::Debug for LoadedGpgKey {
                 .field("keygrip", &self.keygrip_hex())
                 .field("secret", &"<redacted>")
                 .finish(),
+            LoadedGpgKey::Rsa(k) => f
+                .debug_struct("LoadedGpgKey::Rsa")
+                .field("comment", &k.comment)
+                .field("keygrip", &self.keygrip_hex())
+                .field("bits", &k.bits())
+                .field("secret", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -202,8 +431,8 @@ impl std::fmt::Debug for LoadedGpgKey {
 pub enum ParseError {
     #[error("not a valid OpenPGP packet stream: {0}")]
     Malformed(String),
-    #[error("no ed25519 signing key found in this export")]
-    NoEd25519,
+    #[error("no signing key found in this export (need ed25519 or RSA)")]
+    NoSigningKey,
     #[error("encrypted secret keys are not supported")]
     Encrypted,
     #[error("ed25519 public/private key inconsistency")]
@@ -258,19 +487,18 @@ pub fn parse_gpg_export(bytes: &[u8], comment: &str) -> Result<Vec<LoadedGpgKey>
     if !found_any_packet {
         return Err(ParseError::Malformed("empty packet stream".into()));
     }
-    // We require at least one ed25519 *signing* key in the bundle. A pure
-    // encryption-only key (no signing primary) is a real but exotic
-    // configuration; if it ever happens we surface the same error so the
-    // operator notices.
-    let has_signing = out.iter().any(|k| matches!(k, LoadedGpgKey::Ed25519(_)));
+    // We require at least one *signing-capable* key in the bundle — ed25519 or
+    // RSA. A pure encryption-only bundle (a cv25519 subkey with no signing
+    // primary) is a real but exotic configuration; we surface an error so the
+    // operator notices rather than silently loading a key that cannot sign.
+    let has_signing = out
+        .iter()
+        .any(|k| matches!(k, LoadedGpgKey::Ed25519(_) | LoadedGpgKey::Rsa(_)));
     if !has_signing {
-        // If we saw secret-key packets but none parsed, return NoEd25519 so
-        // the operator gets the actionable "wrong algorithm" message rather
-        // than a generic Malformed.
-        if saw_any_secret_key_packet {
-            return Err(ParseError::NoEd25519);
-        }
-        return Err(ParseError::NoEd25519);
+        // Same actionable message whether or not secret-key packets appeared:
+        // nothing in this export can sign.
+        let _ = saw_any_secret_key_packet;
+        return Err(ParseError::NoSigningKey);
     }
     Ok(out)
 }
@@ -393,8 +621,86 @@ fn parse_secret_key_packet(body: &[u8], comment: &str) -> Result<Option<LoadedGp
         18 => {
             parse_cv25519_secret_key_body(body, comment).map(|opt| opt.map(LoadedGpgKey::Cv25519))
         }
+        // 1 = RSA (Encrypt or Sign), 2 = RSA Encrypt-Only, 3 = RSA Sign-Only.
+        // All three share the same packet layout; 2 and 3 are long deprecated
+        // but old keys still carry them, and rejecting them would strand
+        // exactly the users this support exists for.
+        1..=3 => parse_rsa_secret_key_body(body, comment).map(|opt| opt.map(LoadedGpgKey::Rsa)),
         _ => Ok(None),
     }
+}
+
+/// Read one OpenPGP MPI at `p`: two bytes of bit-length, then
+/// `ceil(bits/8)` bytes of big-endian magnitude. Returns the magnitude with
+/// leading zero bytes stripped, plus the new offset.
+fn read_mpi<'a>(body: &'a [u8], p: usize, what: &str) -> Result<(&'a [u8], usize), ParseError> {
+    if p + 2 > body.len() {
+        return Err(ParseError::Malformed(format!(
+            "truncated MPI header ({what})"
+        )));
+    }
+    let bits = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
+    let len = bits.div_ceil(8);
+    let start = p + 2;
+    let end = start + len;
+    if end > body.len() {
+        return Err(ParseError::Malformed(format!(
+            "truncated MPI body ({what})"
+        )));
+    }
+    let mut slice = &body[start..end];
+    while slice.first() == Some(&0) {
+        slice = &slice[1..];
+    }
+    Ok((slice, end))
+}
+
+/// Parse the body of an RSA (algo 1/2/3) secret-key packet, version 4.
+///
+/// Layout per RFC 4880 §5.5.3, confirmed against `gpg --list-packets` output:
+/// public `n, e`, then the S2K usage byte, then secret `d, p, q, u`, then a
+/// 2-byte checksum. Only the unencrypted form (usage byte 0) is supported —
+/// trove's own vault is the encryption boundary, so a passphrase-protected
+/// export is skipped with a warning rather than silently half-loaded.
+fn parse_rsa_secret_key_body(
+    body: &[u8],
+    comment: &str,
+) -> Result<Option<LoadedRsaKey>, ParseError> {
+    let (n, p_after_n) = read_mpi(body, 6, "n")?;
+    let (e, p_after_e) = read_mpi(body, p_after_n, "e")?;
+
+    if p_after_e >= body.len() {
+        return Err(ParseError::Malformed("missing S2K usage byte".into()));
+    }
+    let s2k_usage = body[p_after_e];
+    if s2k_usage != 0 {
+        eprintln!(
+            "gpg: skipping passphrase-protected RSA key '{comment}' \
+             (S2K usage {s2k_usage}); export with an empty passphrase"
+        );
+        return Ok(None);
+    }
+
+    let (d, p_after_d) = read_mpi(body, p_after_e + 1, "d")?;
+    let (p_prime, p_after_p) = read_mpi(body, p_after_d, "p")?;
+    let (q_prime, _) = read_mpi(body, p_after_p, "q")?;
+    // `u` (p^-1 mod q) follows, but `RsaPrivateKey::from_components`
+    // recomputes the CRT parameters, so we don't need to carry it.
+
+    if n.is_empty() || e.is_empty() || d.is_empty() || p_prime.is_empty() || q_prime.is_empty() {
+        return Err(ParseError::Malformed("RSA component is zero".into()));
+    }
+
+    let keygrip = keygrip_for_rsa(n);
+    Ok(Some(LoadedRsaKey {
+        keygrip,
+        n: n.to_vec(),
+        e: e.to_vec(),
+        comment: comment.to_string(),
+        d: Zeroizing::new(d.to_vec()),
+        p: Zeroizing::new(p_prime.to_vec()),
+        q: Zeroizing::new(q_prime.to_vec()),
+    }))
 }
 
 /// Parse the body of an EdDSA (algo 22) secret-key packet, version 4.
@@ -806,6 +1112,38 @@ pub fn keygrip_for_cv25519(public_q_32: &[u8; 32]) -> [u8; 20] {
     grip
 }
 
+/// Compute the libgcrypt keygrip of an RSA public key.
+///
+/// **RSA is the odd one out.** The ECC grips above hash a wrapped parameter
+/// list (`(1:p<P>)(1:a<A>)…`). RSA hashes the **bare modulus and nothing
+/// else** — no S-expression framing, and the public exponent is not involved.
+/// libgcrypt's `compute_keygrip` for RSA pulls the `n` token out of the key
+/// S-expression and writes its data straight into the digest.
+///
+/// The one subtlety is that the value it writes is the MPI in **signed** form,
+/// so a leading `0x00` is present whenever the top bit is set — which for a
+/// well-formed RSA modulus is always, since an k-bit modulus has bit k-1 set.
+/// We reproduce the general rule rather than hardcoding the byte.
+///
+/// This was determined **empirically**, not from the spec: hashing the
+/// obvious `(1:n<N>)(1:e<E>)` form produced
+/// `b62d8ce0…`, while gpg reported `237e7f46…` for the same key. See
+/// `rsa_keygrip_matches_gpg`, which pins it against a real
+/// `gpg 2.5.21 / libgcrypt 1.12.2` export.
+pub fn keygrip_for_rsa(n: &[u8]) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    // Signed-MPI form: prepend a zero byte when the high bit is set, so the
+    // value is unambiguously positive.
+    if n.first().is_some_and(|b| b & 0x80 != 0) {
+        hasher.update([0u8]);
+    }
+    hasher.update(n);
+    let out = hasher.finalize();
+    let mut grip = [0u8; 20];
+    grip.copy_from_slice(&out);
+    grip
+}
+
 fn push_sexp_param(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
     out.push(b'(');
     out.extend_from_slice(name.len().to_string().as_bytes());
@@ -815,6 +1153,102 @@ fn push_sexp_param(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
     out.push(b':');
     out.extend_from_slice(value);
     out.push(b')');
+}
+
+#[cfg(test)]
+mod rsa_tests {
+    use super::*;
+
+    /// A real `gpg --export-secret-keys` output for a throwaway RSA-2048 key,
+    /// generated with GnuPG 2.5.21 in an isolated GNUPGHOME. Not a credential
+    /// for anything — it exists so the parser is tested against bytes gpg
+    /// actually produces rather than bytes we invented.
+    const RSA_EXPORT: &[u8] = include_bytes!("../../tests/fixtures/rsa2048-secret.gpg");
+
+    /// What `gpg --with-keygrip --list-secret-keys` reported for that key.
+    /// This is the whole point of the fixture: the keygrip is how gpg-agent
+    /// addresses a key, so if ours disagrees, gpg never asks us to sign.
+    const GPG_REPORTED_KEYGRIP: &str = "237e7f46842208d3fbe82251a64a3b8bab609a27";
+
+    #[test]
+    fn parses_a_real_gpg_rsa_export() {
+        let keys = parse_gpg_export(RSA_EXPORT, "rsa-fixture").expect("parse");
+        assert_eq!(keys.len(), 1, "expected exactly the primary RSA key");
+        let LoadedGpgKey::Rsa(k) = &keys[0] else {
+            panic!("expected an RSA key, got {:?}", keys[0]);
+        };
+        assert_eq!(k.bits(), 2048, "modulus should be 2048 bits");
+        assert_eq!(k.comment, "rsa-fixture");
+        // e = 65537, the universal default.
+        assert_eq!(k.e.as_slice(), &[0x01, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn rsa_keygrip_matches_gpg() {
+        let keys = parse_gpg_export(RSA_EXPORT, "rsa-fixture").expect("parse");
+        assert_eq!(
+            keys[0].keygrip_hex(),
+            GPG_REPORTED_KEYGRIP,
+            "our keygrip must equal the one gpg computed, or gpg-agent will \
+             never route a signature request to us"
+        );
+    }
+
+    #[test]
+    fn rsa_signature_verifies_under_the_public_key() {
+        use rsa::signature::Verifier as _;
+
+        let keys = parse_gpg_export(RSA_EXPORT, "rsa-fixture").expect("parse");
+        let LoadedGpgKey::Rsa(k) = &keys[0] else {
+            panic!("expected RSA");
+        };
+
+        // gpg-agent hands us a digest, never the message.
+        let digest: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(b"trove rsa pksign").into();
+        let sig = k
+            .sign_prehash(&digest, PgpHash::Sha256)
+            .expect("sign should succeed");
+        assert_eq!(sig.len(), 256, "2048-bit modulus → 256-byte signature");
+
+        // Verify with an independently reconstructed public key, so this
+        // checks the signature rather than just that signing returned bytes.
+        let public = rsa::RsaPublicKey::new(
+            rsa::BigUint::from_bytes_be(&k.n),
+            rsa::BigUint::from_bytes_be(&k.e),
+        )
+        .expect("public key");
+        let vk = rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(public);
+        let signature = rsa::pkcs1v15::Signature::try_from(sig.as_slice()).expect("sig");
+        vk.verify(b"trove rsa pksign", &signature)
+            .expect("signature must verify under the matching public key");
+    }
+
+    #[test]
+    fn refuses_a_digest_that_contradicts_the_declared_hash() {
+        let keys = parse_gpg_export(RSA_EXPORT, "rsa-fixture").expect("parse");
+        let LoadedGpgKey::Rsa(k) = &keys[0] else {
+            panic!("expected RSA");
+        };
+        // 20 bytes is a SHA-1 digest; claiming SHA-256 over it would produce a
+        // signature no verifier accepts. Refusing beats signing garbage.
+        assert!(
+            k.sign_prehash(&[0u8; 20], PgpHash::Sha256).is_none(),
+            "a SHA-1-sized digest declared as SHA-256 must be refused"
+        );
+    }
+
+    #[test]
+    fn sethash_spellings_both_resolve() {
+        // gpg sends either `--hash=sha256` or the numeric OpenPGP algo id.
+        assert_eq!(PgpHash::from_sethash(Some("sha256")), Some(PgpHash::Sha256));
+        assert_eq!(PgpHash::from_sethash(Some("algo8")), Some(PgpHash::Sha256));
+        assert_eq!(PgpHash::from_sethash(Some("algo9")), Some(PgpHash::Sha384));
+        assert_eq!(PgpHash::from_sethash(Some("algo10")), Some(PgpHash::Sha512));
+        assert_eq!(PgpHash::from_sethash(Some("algo11")), Some(PgpHash::Sha224));
+        assert_eq!(PgpHash::from_sethash(Some("algo2")), Some(PgpHash::Sha1));
+        assert_eq!(PgpHash::from_sethash(None), None);
+        assert_eq!(PgpHash::from_sethash(Some("md5")), None);
+    }
 }
 
 #[cfg(test)]
@@ -866,11 +1300,13 @@ mod tests {
     }
 
     #[test]
-    fn skips_non_ed25519_algorithm() {
+    fn skips_unsupported_algorithm() {
         let mut body = Vec::new();
         body.push(4);
         body.extend_from_slice(&[0, 0, 0, 0]);
-        body.push(1); // RSA — not handled
+        // 17 = DSA. RSA (1) used to be the example here, but RSA is supported
+        // now, so this needs an algorithm that genuinely still isn't handled.
+        body.push(17);
         body.extend_from_slice(&[0u8; 16]);
 
         let mut packet = Vec::new();
@@ -880,7 +1316,7 @@ mod tests {
         packet.extend_from_slice(&body);
 
         let err = parse_gpg_export(&packet, "rsa").unwrap_err();
-        assert!(matches!(err, ParseError::NoEd25519));
+        assert!(matches!(err, ParseError::NoSigningKey));
     }
 
     #[test]

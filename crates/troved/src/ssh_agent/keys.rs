@@ -29,6 +29,9 @@ use sha2::{Sha256, Sha512};
 use ssh_key::private::{KeypairData, RsaKeypair};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, PrivateKey};
 
+use super::keeagent::ForwardPolicy;
+use super::wire;
+
 /// Hash algorithm chosen by an SSH agent client through `SIGN_REQUEST`
 /// flag bits. Only meaningful for RSA — ed25519 and ECDSA always use the
 /// hash baked into their algorithm identifier.
@@ -73,8 +76,31 @@ pub struct LoadedKey {
     pub public_blob: Vec<u8>,
     /// Comment shown by `ssh-add -l`. We use the entry title.
     pub comment: String,
+    /// What the owning entry's `KeeAgent.settings` asked for regarding the copy
+    /// pushed into the user's own ssh-agent. Irrelevant to how trove's own agent
+    /// serves this key — see [`super::keeagent::ForwardPolicy`].
+    pub forward: ForwardPolicy,
     /// Underlying private key. Not exposed; signing happens via [`Self::sign`].
     private_key: PrivateKey,
+}
+
+/// A key we handed to an agent we don't own, reduced to what's needed to ask
+/// for it back: the public blob (the agent's identity for it) and the comment
+/// (for warnings). Deliberately not a [`LoadedKey`] — nothing that outlives the
+/// key store should carry private bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardedKey {
+    pub public_blob: Vec<u8>,
+    pub comment: String,
+}
+
+impl From<&LoadedKey> for ForwardedKey {
+    fn from(k: &LoadedKey) -> Self {
+        ForwardedKey {
+            public_blob: k.public_blob.clone(),
+            comment: k.comment.clone(),
+        }
+    }
 }
 
 /// Errors specific to parsing a vault attachment as an SSH key.
@@ -92,6 +118,13 @@ pub enum ParseError {
     PublicBlob(String),
 }
 
+/// Errors building an `ADD_IDENTITY` payload for another agent.
+#[derive(Debug, thiserror::Error)]
+pub enum AddIdentityError {
+    #[error("cannot forward a {0} key to an external agent")]
+    Unsupported(String),
+}
+
 /// Errors from signing. None of these should crash the daemon — the caller
 /// maps them all to `SSH_AGENT_FAILURE`.
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +140,65 @@ impl LoadedKey {
     #[allow(dead_code)] // used by tests + future logging
     pub fn algorithm_name(&self) -> &'static str {
         algorithm_name_static(&self.private_key.algorithm())
+    }
+
+    /// Build the body of an `SSH_AGENTC_ADD_IDENTITY` message for this key —
+    /// the payload that hands the *private* key to another agent.
+    ///
+    /// Used only by the opt-in forward-to-system-agent path
+    /// ([`super::forward`]), which is how KeePassXC makes keys visible to
+    /// every process in a login session. Note what this gives up: the bytes
+    /// leave troved, so trove's idle-lock no longer governs them — see the
+    /// module docs there.
+    ///
+    /// Per-algorithm layouts are from `PROTOCOL.agent`. Note RSA orders the
+    /// modulus **before** the exponent here, the opposite of the SSH public
+    /// key blob, so this cannot reuse the public-blob encoder.
+    pub fn agent_add_body(&self, comment: &str) -> Result<Vec<u8>, AddIdentityError> {
+        use ssh_key::Mpint;
+        let mut body = Vec::new();
+        match self.private_key.key_data() {
+            KeypairData::Ed25519(kp) => {
+                wire::put_string(&mut body, b"ssh-ed25519");
+                let public = kp.public.as_ref();
+                wire::put_string(&mut body, public);
+                // The agent expects `seed || public`, 64 bytes, matching the
+                // libsodium layout OpenSSH uses internally.
+                let mut secret = Vec::with_capacity(64);
+                secret.extend_from_slice(&kp.private.to_bytes());
+                secret.extend_from_slice(public);
+                wire::put_string(&mut body, &secret);
+            }
+            KeypairData::Rsa(kp) => {
+                wire::put_string(&mut body, b"ssh-rsa");
+                wire::put_string(&mut body, kp.public.n.as_bytes());
+                wire::put_string(&mut body, kp.public.e.as_bytes());
+                wire::put_string(&mut body, kp.private.d.as_bytes());
+                wire::put_string(&mut body, kp.private.iqmp.as_bytes());
+                wire::put_string(&mut body, kp.private.p.as_bytes());
+                wire::put_string(&mut body, kp.private.q.as_bytes());
+            }
+            KeypairData::Ecdsa(kp) => {
+                let curve = kp.curve().as_str();
+                wire::put_string(&mut body, format!("ecdsa-sha2-{curve}").as_bytes());
+                wire::put_string(&mut body, curve.as_bytes());
+                wire::put_string(&mut body, kp.public_key_bytes());
+                // The private scalar goes on the wire as an `mpint`, not a
+                // `string` — fixed-width bytes would be rejected by OpenSSH.
+                let d = Mpint::from_positive_bytes(kp.private_key_bytes())
+                    .map_err(|_| AddIdentityError::Unsupported(format!("ecdsa-{curve}")))?;
+                wire::put_string(&mut body, d.as_bytes());
+            }
+            other => {
+                let name = other
+                    .algorithm()
+                    .map(|a| algorithm_name_static(&a).to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                return Err(AddIdentityError::Unsupported(name));
+            }
+        }
+        wire::put_string(&mut body, comment.as_bytes());
+        Ok(body)
     }
 
     /// Produce an SSH agent `SIGN_RESPONSE` body — the wire-format
@@ -305,6 +397,9 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
     Ok(LoadedKey {
         public_blob,
         comment: comment.to_string(),
+        // Callers that read a `KeeAgent.settings` blob overwrite this; a bare
+        // parse (content scan, `trove generate ssh`, tests) gets the default.
+        forward: ForwardPolicy::default(),
         private_key: pk,
     })
 }

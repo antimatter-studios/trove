@@ -120,6 +120,10 @@ pub struct MaterializationPlan {
 /// wipe it on lock / TTL expiry.
 #[derive(Debug)]
 pub struct MaterializedFile {
+    /// Canonical path of the vault this file came from. Several vaults can be
+    /// unlocked at once, so locking one must wipe only its own files and leave
+    /// the others' in place.
+    pub vault: PathBuf,
     pub entry_title: String,
     pub target: PathBuf,
     /// Parent directories trove itself created (mode 0700) to write `target`,
@@ -236,6 +240,7 @@ pub fn build_plans(vault: &Vault) -> (Vec<MaterializationPlan>, Vec<(String, Pla
 /// continue with other plans (already true at the call site).
 pub fn materialize_one(
     vault: &Vault,
+    vault_key: &std::path::Path,
     plan: &MaterializationPlan,
     store: MaterializedStore,
 ) -> Result<MaterializedFile, MaterializeError> {
@@ -275,6 +280,7 @@ pub fn materialize_one(
     }
 
     Ok(MaterializedFile {
+        vault: vault_key.to_path_buf(),
         entry_title: plan.entry_title.clone(),
         target: plan.resolved_target.clone(),
         created_dirs,
@@ -455,7 +461,41 @@ pub async fn wipe_all(store: &MaterializedStore) {
         let mut guard = store.write().await;
         std::mem::take(&mut *guard)
     };
-    for m in drained {
+    wipe_each(drained);
+}
+
+/// Wipe only the files materialized from `vault`, leaving every other unlocked
+/// vault's files on disk. This is what `lock --vault` and a re-unlock of an
+/// already-open vault use: locking one vault must not pull another vault's
+/// kubeconfig out from under a running process.
+pub async fn wipe_for_vault(store: &MaterializedStore, vault: &std::path::Path) {
+    let taken: Vec<MaterializedFile> = {
+        let mut guard = store.write().await;
+        // `extract_if` isn't stable for Vec on our MSRV, so partition by hand.
+        let (mine, theirs) = std::mem::take(&mut *guard)
+            .into_iter()
+            .partition(|m| m.vault == vault);
+        *guard = theirs;
+        mine
+    };
+    wipe_each(taken);
+}
+
+/// The resolved targets currently claimed by materialized files, with the vault
+/// that claimed each. Used at unlock to spot a second vault materializing over
+/// a path a first vault already owns.
+pub async fn claimed_targets(store: &MaterializedStore) -> Vec<(PathBuf, PathBuf)> {
+    store
+        .read()
+        .await
+        .iter()
+        .map(|m| (m.target.clone(), m.vault.clone()))
+        .collect()
+}
+
+/// Shared teardown for the wipe entry points above.
+fn wipe_each(files: Vec<MaterializedFile>) {
+    for m in files {
         // Cancel the TTL task first so it doesn't race us. It's safe even if
         // the task already fired or never existed (Notify wakeup with no
         // waiter is a no-op).
@@ -480,6 +520,10 @@ pub async fn wipe_all(store: &MaterializedStore) {
 pub struct MaterializeStatus {
     pub title: String,
     pub target_path: String,
+    /// Which unlocked vault this file came from. Wire-optional so an older CLI
+    /// reading a newer daemon's reply ignores it rather than failing to parse.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vault: String,
     /// Seconds remaining until TTL expiry, or `null` if no TTL.
     pub ttl_remaining_seconds: Option<u64>,
     /// `true` if the file currently exists on disk. (Best-effort: race
@@ -496,6 +540,7 @@ pub async fn status_snapshot(store: &MaterializedStore) -> Vec<MaterializeStatus
         .map(|m| MaterializeStatus {
             title: m.entry_title.clone(),
             target_path: m.target.display().to_string(),
+            vault: m.vault.display().to_string(),
             ttl_remaining_seconds: m.expires_at.map(
                 |t| {
                     if t > now {

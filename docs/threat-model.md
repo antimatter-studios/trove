@@ -54,7 +54,12 @@ Where could secrets leak from each delivery surface? One section per surface.
 
 - **Path / perms.** Same as SSH — `0600` in runtime dir.
 - **Wire format.** Assuan ASCII. We never expose private scalars over the wire — only signatures and ECDH-derived session keys.
-- **PKDECRYPT.** Returns the OpenPGP wrapped session key, which gpg then uses to decrypt the symmetric envelope. Coverage is partial (ed25519+cv25519, AES-128/192/256-KW) — anything else cleanly errors out rather than failing in a confusing way.
+- **PKDECRYPT.** Returns the OpenPGP wrapped session key, which gpg then uses to decrypt the symmetric envelope. Covers ed25519+cv25519 (ECDH, AES-128/192/256-KW) and RSA (PKCS#1 v1.5) — anything else cleanly errors out rather than failing in a confusing way.
+- **RSA decrypt does not use a raw private-key operation.** gpg-agent hands the client back the *whole padded* PKCS#1 v1.5 block (`02 || PS || 00 || session-key`) because `g10/pubkey-enc.c` unpads it itself. The obvious way to produce that shape is an unpadded private-key op — which would make the daemon a full decryption oracle for anything that reaches the socket, returning the plaintext of *any* ciphertext.
+
+  We don't do that. Decryption goes through the `rsa` crate's checked PKCS#1 v1.5 path, which validates the padding in constant time, and the recovered session key is then re-wrapped with fresh random padding of the original length before it goes on the wire. gpg parses the reconstructed block to exactly the same session key — it scans past `PS` to the `0x00` separator, and padding bytes are random by definition — so compatibility is unaffected while a malformed ciphertext is *rejected* rather than answered.
+
+  Residual exposure is the same as for signing: anyone who can reach the socket can ask the agent to decrypt legitimate ciphertexts. That is adversary #4, bounded by `0600` perms plus `SO_PEERCRED` on Unix — and on Windows by the pipe ACL alone, since there is no `SO_PEERCRED` there (see [windows.md](windows.md)).
 
 ### File materialization
 
