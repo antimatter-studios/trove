@@ -5,7 +5,9 @@
 .history/
 .secrets
 .DS_Store
-.secrets
 *.swp
+# Never commit a vault by accident — except curated test fixtures. The `**/`
+# matters: without it the negation anchors to the repo root, so a fixture under
+# e.g. crates/troved/tests/fixtures/ is silently ignored and `git add` no-ops.
 *.kdbx
-!tests/fixtures/*.kdbx
+!**/fixtures/*.kdbx
