@@ -6,6 +6,53 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## Unreleased
 
+**Several vaults unlocked at once.** `unlock` is now additive rather than
+replacing whatever was open: a personal vault and a work vault can serve keys
+simultaneously, and the SSH and GPG agents serve the union. Agents identify a key
+by public blob or keygrip, so different keys simply coexist. `trove lock --vault
+<PATH>` drops one vault and leaves the rest serving; a bare `trove lock` still
+drops everything. `list`, `search` and `status` span the whole open set, and
+`status` reports every unlocked vault.
+
+A title held by two open vaults is refused with both vault paths named rather
+than resolved by guessing — returning the wrong vault's secret would be worse
+than an error. Materialized files are first-wins across vaults: a target another
+open vault already owns is skipped with a warning instead of being overwritten,
+since overwriting would replace data a live process is using.
+
+**RSA OpenPGP keys work.** trove previously parsed only ed25519 and cv25519 and
+silently skipped everything else — and `gpg --gen-key` defaulted to RSA until
+GnuPG 2.3, so most existing PGP keys could not be used at all. RSA (OpenPGP
+algorithms 1, 2 and 3) is now supported for both signing and decryption, which
+covers git commit signing, artifact and distro package signing, and the
+decryption path `pass`, `sops` and `git-crypt` depend on.
+
+**The ssh-agent answers management commands.** `ssh-add -d`, `-D`, `-x` and `-X`
+previously failed against trove's agent, which only answered identity listings
+and signature requests. `REMOVE_IDENTITY`, `REMOVE_ALL_IDENTITIES`, `LOCK` and
+`UNLOCK` are now implemented, with OpenSSH's locked semantics: a locked agent
+returns an empty identity list rather than an error, refuses to sign, and keeps
+its keys in memory until unlocked.
+
+**SSH keys reach processes that never inherited the socket** *(on by default —
+existing installs will start forwarding after upgrading; set `TROVE_SSH_FORWARD=0`
+to keep the previous behaviour)*: unlock now also pushes
+each key into whatever agent `$SSH_AUTH_SOCK` already names — the KeePassXC model —
+and lock, idle-lock and shutdown ask that agent to drop them again. `SSH_AUTH_SOCK`
+is inherited at fork, so exporting it in a shell never reaches an already-running
+editor; this does. Per-key behaviour comes from each entry's `KeeAgent.settings`, so
+it's configurable from KeePassXC itself: `RemoveAtDatabaseClose`,
+`UseLifetimeConstraintWhenSigning` + `LifetimeConstraintDuration`, and
+`UseConfirmConstraintWhenSigning` are all honoured. Keys with no stated lifetime
+inherit trove's own auto-lock window, so a forwarded copy expires roughly when the
+vault would have locked anyway.
+
+Forwarding never fails an unlock: per-key failures come back as
+`ssh_forward_warnings` and `trove unlock` prints them on stderr. `TROVE_SSH_FORWARD=0`
+turns it off, and it does nothing when `$SSH_AUTH_SOCK` is unset or already points at
+trove. `RemoveAtDatabaseClose=false` applies only to the forwarded copy — trove's own
+agent still drops every key on lock.
+
 ## v0.7.1 — 2026-07-29
 
 **Sorted sidebar:** the desktop app's group tree now lists folders alphabetically at

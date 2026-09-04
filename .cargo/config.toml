@@ -1,0 +1,20 @@
+# Cargo config for this repo. Applies to anything cargo launches — build
+# scripts, `cargo run`, and every test binary.
+
+[env]
+# Keep the test suite out of the developer's own ssh-agent.
+#
+# Unlock forwards every unlocked SSH key into whatever agent `$SSH_AUTH_SOCK`
+# names (see crates/troved/src/ssh_agent/forward.rs). `cargo test` inherits the
+# developer's environment, so without this every test that unlocks a vault would
+# push throwaway keys into their real, live agent — and a test that unlocks
+# without locking would leave them there.
+#
+# Forced, because the whole point is to beat an inherited value. The tests that
+# actually exercise forwarding (`ssh_forward_unlock_lock_e2e`) clear this
+# themselves and point `SSH_AUTH_SOCK` at a private `ssh-agent` of their own, so
+# the feature is still covered end to end.
+#
+# This is not how the shipped binary behaves: an installed troved is not
+# launched through cargo and forwards by default.
+TROVE_SSH_FORWARD = { value = "0", force = true }

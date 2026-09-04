@@ -34,7 +34,7 @@ struct Harness {
 
 impl Harness {
     fn new(timeout: Duration) -> Self {
-        let state: SharedState = Arc::new(Mutex::new(None));
+        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
@@ -131,9 +131,15 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
     let body = serde_json::to_value(&resp).unwrap();
 
     assert_eq!(body["status"], "ok");
+    // The daemon canonicalises the path — it keys the unlocked set by it, so
+    // two spellings of one file must not become two vaults. On macOS the
+    // tempdir lives under /var, a symlink to /private/var, so comparing
+    // against the raw path would fail there and nowhere else.
     assert_eq!(
         body["vault_path"].as_str().unwrap(),
-        vault_path.to_string_lossy()
+        std::fs::canonicalize(&vault_path)
+            .expect("vault path canonicalises")
+            .to_string_lossy()
     );
     assert_eq!(body["idle_timeout_secs"], 60);
     assert!(
@@ -180,7 +186,7 @@ async fn status_request_does_not_bump_idle_timer() {
 
     // Use the "real" callback that drops the vault when it fires, so we can
     // assert via List / direct state read.
-    let state: SharedState = Arc::new(Mutex::new(None));
+    let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
@@ -190,7 +196,7 @@ async fn status_request_does_not_bump_idle_timer() {
         let s = cb_state.clone();
         let fut: LockFuture = Box::pin(async move {
             let mut g = s.lock().await;
-            *g = None;
+            g.drain();
         });
         fut
     });
@@ -225,7 +231,7 @@ async fn status_request_does_not_bump_idle_timer() {
 
     // Vault should be locked: status did NOT bump.
     assert!(
-        state.lock().await.is_none(),
+        state.lock().await.is_empty(),
         "status must not keep the idle timer alive"
     );
 }
@@ -254,7 +260,7 @@ async fn lock_signals_daemon_shutdown_when_open_set_empties() {
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
 
     let handled = handle(
-        Request::Lock,
+        Request::Lock { vault: None },
         &h.state,
         &h.key_store,
         &h.gpg_store,

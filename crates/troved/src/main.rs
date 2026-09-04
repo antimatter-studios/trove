@@ -72,8 +72,17 @@ fn build_lock_callback(
             materialize::wipe_all(&mat_store).await;
             {
                 let mut guard = state.lock().await;
-                *guard = None;
+                // Idle-lock is all-or-nothing: every open vault goes.
+                guard.drain();
             }
+            // Take the forwarded copies back out of the user's own ssh-agent
+            // before clearing the store — the per-entry `RemoveAtDatabaseClose`
+            // wish rides on the loaded key. Idle-lock is exactly the case the
+            // forwarding docs warn about: without this, an auto-lock would leave
+            // keys usable in another agent until their lifetime constraint
+            // expired.
+            let forwarded = ssh_agent::keys_to_unforward(&key_store.read().await);
+            ssh_agent::unforward_on_lock(&forwarded).await;
             {
                 let mut keys = key_store.write().await;
                 keys.clear();
@@ -91,7 +100,7 @@ fn build_lock_callback(
             // daemon exits so the next `unlock` starts a fresh process. (Same
             // invariant — stay alive only while a vault is open or materialized
             // files still need cleanup.)
-            let vault_open = state.lock().await.is_some();
+            let vault_open = !state.lock().await.is_empty();
             let has_materialized = !mat_store.read().await.is_empty();
             if !vault_open && !has_materialized {
                 shutdown.notify_one();
@@ -269,7 +278,7 @@ async fn main() -> Result<()> {
 
     eprintln!("listening on {}", sock_path.display());
 
-    let state: SharedState = Arc::new(Mutex::new(None));
+    let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
@@ -403,8 +412,15 @@ async fn main() -> Result<()> {
     materialize::wipe_all(&mat_store).await;
     {
         let mut guard = state.lock().await;
-        *guard = None;
+        guard.drain();
     }
+    // A SIGTERM'd daemon is still a lock: pull the forwarded copies back out of
+    // the user's own agent before we drop ours. Bounded by the forwarder's own
+    // per-request timeout, so a wedged agent can't stop us exiting. What this
+    // can't cover is SIGKILL — which is exactly what the lifetime constraint on
+    // every forwarded add is for.
+    let forwarded = ssh_agent::keys_to_unforward(&key_store.read().await);
+    ssh_agent::unforward_on_lock(&forwarded).await;
     {
         let mut keys = key_store.write().await;
         keys.clear();
@@ -448,7 +464,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut listener = ipc::bind(&sock_path).await.unwrap();
 
-            let state: SharedState = Arc::new(Mutex::new(None));
+            let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
             let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
             let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));

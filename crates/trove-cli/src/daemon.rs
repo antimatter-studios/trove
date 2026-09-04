@@ -208,7 +208,10 @@ pub fn send_autospawn(req: &Request) -> Result<Value> {
 /// here — it uses [`send_autospawn_reporting`] and checks its inline
 /// `daemon_version` directly.
 fn should_version_check(req: &Request) -> bool {
-    !matches!(req, Request::GetVersion | Request::Lock | Request::Shutdown)
+    !matches!(
+        req,
+        Request::GetVersion | Request::Lock { .. } | Request::Shutdown
+    )
 }
 
 /// Like [`send_autospawn`], but also reports whether THIS call spawned the
@@ -679,7 +682,7 @@ mod tests {
         assert!(should_version_check(&Request::List));
         assert!(should_version_check(&Request::Status));
         assert!(!should_version_check(&Request::GetVersion));
-        assert!(!should_version_check(&Request::Lock));
+        assert!(!should_version_check(&Request::Lock { vault: None }));
         assert!(!should_version_check(&Request::Shutdown));
     }
 }

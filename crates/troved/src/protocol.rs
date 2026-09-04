@@ -30,7 +30,16 @@ pub enum Request {
         keyfile: Option<String>,
     },
     List,
-    Lock,
+    /// Lock one unlocked vault, or all of them.
+    ///
+    /// `vault` names the file to lock; `None` locks every open vault, which is
+    /// what a bare `trove lock` sends and what the single-vault daemon always
+    /// did. Wire-optional, so an older CLI's `{"cmd":"lock"}` still means
+    /// "lock everything".
+    Lock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vault: Option<String>,
+    },
     Shutdown,
     /// Inspect what the daemon has currently materialized. Read-only; works
     /// even if the vault is locked (returns an empty list in that case).
@@ -237,7 +246,7 @@ impl std::fmt::Debug for Request {
                 .field("keyfile", &"<redacted>")
                 .finish(),
             Request::List => f.write_str("List"),
-            Request::Lock => f.write_str("Lock"),
+            Request::Lock { vault } => f.debug_struct("Lock").field("vault", vault).finish(),
             Request::Shutdown => f.write_str("Shutdown"),
             Request::MaterializeStatus => f.write_str("MaterializeStatus"),
             Request::SetIdleTimeout { seconds } => f
@@ -466,6 +475,11 @@ pub enum OkBody {
     /// in the corresponding in-memory stores.
     Status {
         vault_path: Option<PathBuf>,
+        /// Every unlocked vault, in unlock order. `vault_path` above stays as
+        /// the first of these so an older CLI keeps working; a multi-vault-aware
+        /// client reads this instead. Wire-optional for the same reason.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        vault_paths: Vec<PathBuf>,
         idle_timeout_secs: u64,
         idle_remaining_secs: Option<u64>,
         ssh_keys: usize,
@@ -487,6 +501,12 @@ pub enum OkBody {
         /// the CLI can warn loudly — never a silent `ok` with a file missing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         materialize_warnings: Vec<String>,
+        /// Per-key failures forwarding into the user's own ssh-agent. Same
+        /// contract as `materialize_warnings`: forwarding is a convenience and
+        /// never fails the unlock, but a key that didn't make it into the agent
+        /// must be visible rather than discovered later by a failing `git push`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ssh_forward_warnings: Vec<String>,
     },
     /// Response to `Get`: the requested secret's bytes, base64-encoded.
     Secret {
@@ -549,7 +569,7 @@ impl Response {
         })
     }
     pub fn ok_status(
-        vault_path: Option<PathBuf>,
+        vault_paths: Vec<PathBuf>,
         idle_timeout_secs: u64,
         idle_remaining_secs: Option<u64>,
         ssh_keys: usize,
@@ -557,7 +577,11 @@ impl Response {
         materialized: usize,
     ) -> Self {
         Response::Ok(OkBody::Status {
-            vault_path,
+            // Older clients read `vault_path` and know nothing of a set; give
+            // them the first unlocked vault rather than null, so a
+            // single-vault daemon looks exactly as it always did.
+            vault_path: vault_paths.first().cloned(),
+            vault_paths,
             idle_timeout_secs,
             idle_remaining_secs,
             ssh_keys,
@@ -565,11 +589,16 @@ impl Response {
             materialized,
         })
     }
-    pub fn ok_unlocked(code: String, materialize_warnings: Vec<String>) -> Self {
+    pub fn ok_unlocked(
+        code: String,
+        materialize_warnings: Vec<String>,
+        ssh_forward_warnings: Vec<String>,
+    ) -> Self {
         Response::Ok(OkBody::Unlocked {
             code,
             daemon_version: env!("TROVE_BUILD_VERSION").to_string(),
             materialize_warnings,
+            ssh_forward_warnings,
         })
     }
     pub fn ok_ssh_agent_list(ssh_keys: Vec<SshKeyDto>) -> Self {

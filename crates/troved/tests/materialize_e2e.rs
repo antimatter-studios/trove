@@ -38,7 +38,7 @@ struct Daemon {
 
 impl Daemon {
     fn new() -> Self {
-        let state: SharedState = Arc::new(Mutex::new(None));
+        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
         let key_store: troved::ssh_agent::KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: troved::gpg_agent::GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
@@ -187,7 +187,7 @@ async fn unlock_writes_file_lock_wipes_it() {
     assert_eq!(arr[0]["exists"], true);
 
     // Lock — file must vanish.
-    let resp = d.handle(Request::Lock).await;
+    let resp = d.handle(Request::Lock { vault: None }).await;
     assert!(matches!(resp, Response::Ok(_)), "lock failed: {resp:?}");
     assert!(!target.exists(), "target file should be wiped on lock");
 
@@ -234,7 +234,7 @@ async fn ttl_wipes_file_while_vault_remains_unlocked() {
     assert!(matches!(resp, Response::Ok(_)), "list after ttl: {resp:?}");
 
     // Lock to clean up.
-    let _ = d.handle(Request::Lock).await;
+    let _ = d.handle(Request::Lock { vault: None }).await;
 }
 
 #[tokio::test]
@@ -270,7 +270,7 @@ async fn multi_file_unlock_and_lock() {
     assert_eq!(file_mode(&t2), 0o600);
     assert_eq!(file_mode(&t3), 0o644);
 
-    let resp = d.handle(Request::Lock).await;
+    let resp = d.handle(Request::Lock { vault: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
     for p in [&t1, &t2, &t3] {
         assert!(!p.exists(), "{} should be wiped", p.display());
@@ -316,7 +316,7 @@ async fn one_bad_entry_does_not_block_others() {
     assert!(matches!(resp, Response::Ok(_)), "unlock should still ok");
     assert!(good.exists(), "good entry should still materialize");
 
-    let _ = d.handle(Request::Lock).await;
+    let _ = d.handle(Request::Lock { vault: None }).await;
 }
 
 #[tokio::test]
@@ -371,7 +371,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
     assert_eq!(arr.len(), 1, "one materialized file");
 
     // Lock: file gone AND trove's own dirs removed (they're now empty).
-    let resp = d.handle(Request::Lock).await;
+    let resp = d.handle(Request::Lock { vault: None }).await;
     assert!(matches!(resp, Response::Ok(_)), "lock failed: {resp:?}");
     assert!(!target.exists(), "target wiped on lock");
     assert!(!level2.exists(), "trove-created dir b removed on lock");
@@ -434,7 +434,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
     // Restore write so TempDir cleanup can remove `locked`.
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
         .expect("restore perms");
-    let _ = d.handle(Request::Lock).await;
+    let _ = d.handle(Request::Lock { vault: None }).await;
 }
 
 #[tokio::test]
@@ -466,7 +466,7 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
     assert!(matches!(resp, Response::Ok(_)));
     assert!(target.exists());
 
-    let resp = d.handle(Request::Lock).await;
+    let resp = d.handle(Request::Lock { vault: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
     assert!(!target.exists(), "target wiped");
     assert!(
@@ -479,8 +479,8 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
 async fn relock_after_lock_is_idempotent() {
     // Lock with nothing materialized must not error.
     let d = Daemon::new();
-    let resp = d.handle(Request::Lock).await;
+    let resp = d.handle(Request::Lock { vault: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
-    let resp = d.handle(Request::Lock).await;
+    let resp = d.handle(Request::Lock { vault: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
 }

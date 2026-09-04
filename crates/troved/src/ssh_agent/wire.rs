@@ -22,12 +22,57 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // SSH agent message type bytes. See PROTOCOL.agent in the OpenSSH source.
 pub const SSH_AGENT_FAILURE: u8 = 5;
-#[allow(dead_code)] // reserved for future add/remove/lock support
 pub const SSH_AGENT_SUCCESS: u8 = 6;
 pub const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
 pub const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
 pub const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
 pub const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
+
+// Client-side message types. troved *serves* the protocol above; these are
+// used when it acts as a client of the user's own ssh-agent to forward keys
+// into it (see `super::forward`).
+pub const SSH_AGENTC_ADD_IDENTITY: u8 = 17;
+pub const SSH_AGENTC_REMOVE_IDENTITY: u8 = 18;
+pub const SSH_AGENTC_REMOVE_ALL_IDENTITIES: u8 = 19;
+pub const SSH_AGENTC_LOCK: u8 = 22;
+pub const SSH_AGENTC_UNLOCK: u8 = 23;
+pub const SSH_AGENTC_ADD_ID_CONSTRAINED: u8 = 25;
+/// Constraint tag: the agent drops the key after N seconds by itself.
+pub const SSH_AGENT_CONSTRAIN_LIFETIME: u8 = 1;
+/// Constraint tag: the agent prompts the user before each use of the key.
+pub const SSH_AGENT_CONSTRAIN_CONFIRM: u8 = 2;
+
+/// Frame a message for the wire: `uint32 len || byte type || body`.
+pub fn frame_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 5);
+    write_u32(&mut out, (body.len() + 1) as u32);
+    out.push(msg_type);
+    out.extend_from_slice(body);
+    out
+}
+
+/// Append an RFC 4251 `string` to a payload being built.
+pub fn put_string(out: &mut Vec<u8>, data: &[u8]) {
+    write_string(out, data);
+}
+
+/// `SSH_AGENTC_REMOVE_IDENTITY` body: `string public_key_blob`.
+pub fn remove_identity_body(public_blob: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(public_blob.len() + 4);
+    write_string(&mut body, public_blob);
+    body
+}
+
+/// Turn an `ADD_IDENTITY` body into an `ADD_ID_CONSTRAINED` body by appending
+/// a lifetime constraint (`byte SSH_AGENT_CONSTRAIN_LIFETIME || uint32 secs`).
+///
+/// This is the backstop for the guarantee trove gives up by handing a key to
+/// an agent it doesn't own: even if trove is killed and never gets to send
+/// `REMOVE_IDENTITY`, the key still expires.
+pub fn append_lifetime_constraint(body: &mut Vec<u8>, seconds: u32) {
+    body.push(SSH_AGENT_CONSTRAIN_LIFETIME);
+    write_u32(body, seconds);
+}
 
 /// A decoded incoming agent request (just the parts we act on).
 #[derive(Debug)]
@@ -43,6 +88,17 @@ pub enum AgentRequest {
         #[allow(dead_code)]
         flags: u32,
     },
+    /// `SSH_AGENTC_REMOVE_IDENTITY` — drop the key with this public blob.
+    RemoveIdentity { key_blob: Vec<u8> },
+    /// `SSH_AGENTC_REMOVE_ALL_IDENTITIES` — drop every key we serve. Scoped to
+    /// *our* store, so unlike sending this to someone else's agent there is no
+    /// collateral damage.
+    RemoveAllIdentities,
+    /// `SSH_AGENTC_LOCK` — refuse everything until unlocked with the same
+    /// passphrase (`ssh-add -x`).
+    Lock { passphrase: Vec<u8> },
+    /// `SSH_AGENTC_UNLOCK` — release a [`Self::Lock`] (`ssh-add -X`).
+    Unlock { passphrase: Vec<u8> },
     /// Any other request type. We respond with `SSH_AGENT_FAILURE`.
     Unsupported(u8),
 }
@@ -50,7 +106,7 @@ pub enum AgentRequest {
 /// Sanity cap on a single agent message. The protocol allows up to 2^32-1
 /// bytes; in practice OpenSSH itself caps at 256 KiB. We pick the same value
 /// — anything bigger almost certainly indicates a desync or a malicious peer.
-const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+pub(super) const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 
 /// Read one framed agent message from `r`. Returns the raw type-tag and the
 /// payload (without the type byte). EOF before any bytes returns `Ok(None)`
@@ -127,8 +183,37 @@ pub fn parse_request(msg_type: u8, payload: &[u8]) -> Result<AgentRequest, WireE
                 flags,
             })
         }
+        SSH_AGENTC_REMOVE_IDENTITY => {
+            let mut cur = Cursor::new(payload);
+            let key_blob = cur.read_string()?.to_vec();
+            if !cur.is_empty() {
+                return Err(WireError::TrailingBytes);
+            }
+            Ok(AgentRequest::RemoveIdentity { key_blob })
+        }
+        SSH_AGENTC_REMOVE_ALL_IDENTITIES => Ok(AgentRequest::RemoveAllIdentities),
+        SSH_AGENTC_LOCK | SSH_AGENTC_UNLOCK => {
+            let mut cur = Cursor::new(payload);
+            let passphrase = cur.read_string()?.to_vec();
+            if !cur.is_empty() {
+                return Err(WireError::TrailingBytes);
+            }
+            if msg_type == SSH_AGENTC_LOCK {
+                Ok(AgentRequest::Lock { passphrase })
+            } else {
+                Ok(AgentRequest::Unlock { passphrase })
+            }
+        }
         other => Ok(AgentRequest::Unsupported(other)),
     }
+}
+
+/// Append a confirm constraint to an `ADD_IDENTITY` body, turning it into an
+/// `ADD_ID_CONSTRAINED` body. The receiving agent then prompts the user before
+/// every use of the key — the strongest control that survives handing a key to
+/// an agent we don't own.
+pub fn append_confirm_constraint(body: &mut Vec<u8>) {
+    body.push(SSH_AGENT_CONSTRAIN_CONFIRM);
 }
 
 /// Encode an `IDENTITIES_ANSWER` payload from `(key_blob, comment)` pairs.

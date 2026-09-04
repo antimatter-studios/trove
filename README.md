@@ -123,7 +123,7 @@ troved &
 #   idle-lock timeout: 900 seconds
 ```
 
-The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock) and `TROVE_SOCK` / `TROVE_SSH_SOCK` / `TROVE_GPG_SOCK` (override socket paths).
+The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock), `TROVE_SOCK` / `TROVE_SSH_SOCK` / `TROVE_GPG_SOCK` (override socket paths), and `TROVE_SSH_FORWARD=0` (see below).
 
 ### 3. Wire up the SSH agent
 
@@ -139,13 +139,15 @@ ssh-add -L          # should list every ed25519/RSA-3072+/P-256/P-384 key in the
 ssh github.com      # signs against the daemon
 ```
 
+Exporting `SSH_AUTH_SOCK` only reaches processes started afterwards, so unlock *also* pushes the keys into whatever agent `$SSH_AUTH_SOCK` already named — the KeePassXC model — and lock asks that agent to drop them again. That's what makes an already-running editor able to push. Per-key behaviour (removal at lock, lifetime and confirm constraints) comes from each entry's `KeeAgent.settings` and is editable in KeePassXC itself; `TROVE_SSH_FORWARD=0` turns the whole thing off. The trade: the private bytes leave the daemon, so lock can only *ask* for them back. `IdentityAgent "$(trove ssh-agent socket)"` in `~/.ssh/config` solves the same reachability problem with nothing leaving troved — see [docs/macos.md](docs/macos.md).
+
 For scripted use, `trove --password-stdin unlock my-vault.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).
 
 ### 4. Wire up the GPG agent
 
 ```sh
 # Point gpg(1) at our socket. gpg insists on a fixed path under $GNUPGHOME.
-ln -sf "$(trove gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
+ln -sf "$(trove gpg-agent socket)" "$(gpgconf --list-dirs agent-socket)"
 
 # After `unlock` (above), git commit -S works against an ed25519 OpenPGP key.
 git commit -S -m "signed with troved"
@@ -176,6 +178,12 @@ trove materialize-status
 # Manual lock — wipes materialized files, drops vault + SSH/GPG keys from memory.
 trove lock
 
+# `unlock` is additive: unlock a second vault and both serve at once, with the
+# agents holding the union of their keys. `--vault` then locks just one and
+# leaves the rest serving (see docs/multi-vault.md).
+trove unlock work-vault.kdbx
+trove lock --vault work-vault.kdbx
+
 # Or do nothing — the daemon auto-locks after TROVE_IDLE_TIMEOUT seconds of
 # no activity (default 900s). Activity = any control-RPC except `ping`,
 # any SSH agent message, any GPG Assuan command.
@@ -190,7 +198,7 @@ is visible instead of silently blocking `unlock`. `trove daemons kill --all`
 stops them: gracefully over the control socket, escalating to a signal for a
 wedged one, and clearing stale files.
 
-See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, and [docs/threat-model.md](docs/threat-model.md) for what this defends against. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is a workspace member so `cargo test --workspace` runs it.
+See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, [docs/threat-model.md](docs/threat-model.md) for what this defends against, and [docs/macos.md](docs/macos.md) / [docs/windows.md](docs/windows.md) for how agent integration differs per platform. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is deliberately **excluded** from the workspace (it pins EOL `keepass` producers to test cross-version compatibility, and those drag in advisories the app's graph shouldn't carry), so `cargo test --workspace` does **not** run it — use `cargo test --manifest-path crates/keepass-spec-tests/Cargo.toml`. The `interop_*` tests there are oracle-mandatory: they fail rather than skip when `keepassxc-cli` is missing.
 
 ## Shipped (v0.5.0)
 

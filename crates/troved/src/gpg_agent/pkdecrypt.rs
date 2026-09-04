@@ -63,6 +63,116 @@ pub enum DecryptError {
     UnwrapFailed,
     #[error("padding check failed")]
     BadPadding,
+    #[error("RSA private-key operation failed")]
+    RsaFailed,
+}
+
+/// Decrypt an RSA-wrapped session key.
+///
+/// Returns the **padded** PKCS#1 v1.5 block, not the session key — see
+/// [`crate::gpg_agent::keys::LoadedRsaKey::decrypt_session_key_block`] for why. gpg does the
+/// unpadding, and rejects anything that doesn't start with the `0x02`
+/// block-type byte.
+pub fn rsa_decrypt(
+    ciphertext_sexp: &[u8],
+    key: &crate::gpg_agent::keys::LoadedRsaKey,
+) -> Result<Vec<u8>, DecryptError> {
+    let a = parse_rsa_ciphertext(ciphertext_sexp)?;
+    let modulus_len = key.modulus_len();
+
+    // The ciphertext MPI can arrive at either width, and both happen in
+    // practice:
+    //   * one byte LONGER than the modulus, when gpg sends it in signed form
+    //     and the top bit is set (a leading 0x00);
+    //   * SHORTER, when the value has genuine leading zero bytes and they were
+    //     stripped as an unsigned MPI.
+    // Normalise to exactly the modulus width — strip leading zeros, then
+    // left-pad — or the private-key operation returns garbage.
+    let trimmed: &[u8] = {
+        let mut t = a.as_slice();
+        while t.len() > modulus_len && t.first() == Some(&0) {
+            t = &t[1..];
+        }
+        t
+    };
+    if trimmed.len() > modulus_len {
+        return Err(DecryptError::Malformed(format!(
+            "ciphertext {} bytes exceeds {}-byte modulus",
+            trimmed.len(),
+            modulus_len
+        )));
+    }
+    let mut padded = vec![0u8; modulus_len];
+    padded[modulus_len - trimmed.len()..].copy_from_slice(trimmed);
+
+    Ok(key
+        .decrypt_session_key_block(&padded)
+        .ok_or(DecryptError::RsaFailed)?
+        .to_vec())
+}
+
+/// Pull the single `a` MPI out of an `(7:enc-val(3:rsa(1:a…)))` blob.
+fn parse_rsa_ciphertext(blob: &[u8]) -> Result<Vec<u8>, DecryptError> {
+    scan_sexp_leaves(blob)
+        .into_iter()
+        .find(|(name, _)| name == b"a")
+        .map(|(_, val)| val)
+        .ok_or_else(|| DecryptError::Malformed("missing (a ...) in enc-val".into()))
+}
+
+/// Walk a canonical S-expression and yield every `(<name><value>)` leaf.
+///
+/// Deliberately lenient: it skips anything it can't read rather than failing,
+/// because the blobs gpg sends carry parameters we don't care about alongside
+/// the ones we do.
+fn scan_sexp_leaves(blob: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < blob.len() {
+        if blob[i] != b'(' {
+            i += 1;
+            continue;
+        }
+        let mut p = i + 1;
+        let Some((name_len, after)) = read_decimal_prefix(blob, p) else {
+            i += 1;
+            continue;
+        };
+        p = after;
+        if p + name_len > blob.len() {
+            i += 1;
+            continue;
+        }
+        let name = &blob[p..p + name_len];
+        p += name_len;
+        let Some((val_len, after)) = read_decimal_prefix(blob, p) else {
+            i += 1;
+            continue;
+        };
+        p = after;
+        if p + val_len > blob.len() {
+            i += 1;
+            continue;
+        }
+        out.push((name.to_vec(), blob[p..p + val_len].to_vec()));
+        i = p + val_len;
+    }
+    out
+}
+
+/// Read `<digits>:` at `blob[p]`; returns the length and the offset past the
+/// colon.
+fn read_decimal_prefix(blob: &[u8], p: usize) -> Option<(usize, usize)> {
+    let start = p;
+    let mut end = p;
+    while end < blob.len() && blob[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == start || end >= blob.len() || blob[end] != b':' {
+        return None;
+    }
+    let n: usize = std::str::from_utf8(&blob[start..end]).ok()?.parse().ok()?;
+    Some((n, end + 1))
 }
 
 /// Decrypt the wrapped session key contained in `ciphertext_sexp` using our

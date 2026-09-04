@@ -1,11 +1,11 @@
 //! GPG agent socket: speaks the Assuan protocol against an in-memory
 //! ed25519 key store loaded from vault attachments named `gpg-priv`.
 //!
-//! ## Scope (v0.0.3.0)
+//! ## Scope
 //!
-//! Signing-only. The bare minimum to make `git commit -S` work for an
-//! ed25519 OpenPGP key. We do NOT implement:
-//!   * PKDECRYPT (no decryption — useful for symmetric & email);
+//! Sign and decrypt, for ed25519/cv25519 and RSA. Enough for `git commit -S`,
+//! and for the tools built on gpg decryption (`pass`, `sops`, `git-crypt`,
+//! encrypted mail). We do NOT implement:
 //!   * GENKEY / IMPORT_KEY (key generation/import);
 //!   * PASSWD (passphrase change);
 //!   * pinentry interaction (we never prompt — keys are unlocked when the
@@ -253,11 +253,28 @@ async fn handle_command(
         "KEYINFO" => {
             let arg = cmd.rest.trim();
             let keys = store.read().await;
-            if arg == "--list" || arg.is_empty() {
+            // Field 6 is the protection status: `P` = needs a passphrase,
+            // `C` = stored in the clear, `-` = unknown. Our keys are held
+            // unprotected in memory (the vault is the encryption boundary), so
+            // `C` is the truthful answer. Reporting `P` made gpg expect a
+            // pinentry exchange that never comes, and it gave up with the
+            // deeply unhelpful "No secret key" — see `gpg_rsa_signing_e2e`.
+            const PROTECTION_CLEAR: &str = "C";
+            // `--data` asks for the reply on `D` data lines instead of `S`
+            // status lines. Real gpg-agent honours this; ignoring it left
+            // clients that pass it seeing no answer at all.
+            let want_data = arg.split_whitespace().any(|t| t == "--data");
+            if arg == "--list" || arg.is_empty() || arg.split_whitespace().all(|t| t == "--data") {
                 for k in keys.iter() {
-                    let grip = k.keygrip_hex();
-                    let line = format!("{} D - - - P - - -", grip.to_uppercase());
-                    send!(write_status(w, "KEYINFO", &line));
+                    let line = format!(
+                        "{} D - - - {PROTECTION_CLEAR} - - -",
+                        k.keygrip_hex().to_uppercase()
+                    );
+                    if want_data {
+                        send!(write_data(w, format!("{line}\n").as_bytes()));
+                    } else {
+                        send!(write_status(w, "KEYINFO", &line));
+                    }
                 }
                 send!(write_ok(w));
             } else {
@@ -269,8 +286,12 @@ async fn handle_command(
                     .to_ascii_lowercase();
                 if let Some(k) = keys.iter().find(|k| k.keygrip_hex() == grip_arg) {
                     let grip = k.keygrip_hex().to_uppercase();
-                    let line = format!("{grip} D - - - P - - -");
-                    send!(write_status(w, "KEYINFO", &line));
+                    let line = format!("{grip} D - - - {PROTECTION_CLEAR} - - -");
+                    if want_data {
+                        send!(write_data(w, format!("{line}\n").as_bytes()));
+                    } else {
+                        send!(write_status(w, "KEYINFO", &line));
+                    }
                     send!(write_ok(w));
                 } else {
                     send!(write_err(w, ERR_NO_SECRET_KEY, "No_Secret_Key"));
@@ -402,17 +423,41 @@ async fn handle_command(
                     return CommandOutcome::Continue;
                 }
             };
-            let sig_bytes_opt: Option<[u8; 64]> = {
+            // The sig-val S-expression differs by algorithm, so build it while
+            // we still know which variant answered.
+            let sexp_opt: Option<Vec<u8>> = {
                 let keys = store.read().await;
                 keys.iter()
                     .find(|k| k.keygrip_hex() == grip)
-                    .and_then(|k| k.sign_raw(&hash))
+                    .and_then(|k| match k {
+                        keys::LoadedGpgKey::Ed25519(_) => {
+                            k.sign_raw(&hash).map(|sig| encode_eddsa_sigval(&sig))
+                        }
+                        keys::LoadedGpgKey::Rsa(rsa) => {
+                            // RSA needs the hash algorithm to build the PKCS#1
+                            // DigestInfo; EdDSA signs the raw bytes and doesn't.
+                            match keys::PgpHash::from_sethash(session.hash_algo.as_deref()) {
+                                Some(alg) => rsa
+                                    .sign_prehash(&hash, alg)
+                                    .map(|sig| encode_rsa_sigval(&sig)),
+                                None => {
+                                    eprintln!(
+                                        "gpg-agent: PKSIGN refused: RSA needs a hash algorithm \
+                                         from SETHASH, got {:?}",
+                                        session.hash_algo
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        keys::LoadedGpgKey::Cv25519(_) => None,
+                    })
             };
-            match sig_bytes_opt {
-                Some(sig) => {
-                    let sexp = encode_eddsa_sigval(&sig);
+            match sexp_opt {
+                Some(sexp) => {
                     // Reset session sign state on success.
                     session.hash = None;
+                    session.hash_algo = None;
                     session.sigkey = None;
                     send!(write_data(w, &sexp));
                     send!(write_ok(w));
@@ -468,56 +513,60 @@ async fn handle_command(
                 eprintln!("gpg-agent: got ciphertext {} bytes", ciphertext_bytes.len());
             }
 
-            // Pull out the key. We hold the lock for as little as possible —
-            // copy what we need into local stack vars, drop the guard.
-            #[allow(clippy::type_complexity)]
-            let key_data: Option<([u8; 32], [u8; 32], [u8; 20], u8, u8)> = {
+            // Resolve the key and decrypt under a single read lock. The
+            // decrypt is synchronous (no awaits), so holding the guard across
+            // it is fine and concurrent decrypts still proceed in parallel —
+            // same pattern as PKSIGN.
+            enum Outcome {
+                Done(Vec<u8>),
+                NoKey,
+                Failed(String),
+            }
+            let outcome = {
                 let keys = store.read().await;
-                keys.iter()
-                    .find(|k| k.keygrip_hex() == grip)
-                    .and_then(|k| match k {
-                        keys::LoadedGpgKey::Cv25519(c) => Some((
-                            c.secret_scalar_le(),
-                            c.public_q,
-                            c.fingerprint,
-                            c.kdf_hash_algo,
-                            c.kdf_sym_algo,
-                        )),
-                        _ => None,
-                    })
+                match keys.iter().find(|k| k.keygrip_hex() == grip) {
+                    Some(keys::LoadedGpgKey::Cv25519(c)) => match ecdh_decrypt(
+                        &ciphertext_bytes,
+                        &c.secret_scalar_le(),
+                        &c.public_q,
+                        &c.fingerprint,
+                        c.kdf_hash_algo,
+                        c.kdf_sym_algo,
+                    ) {
+                        Ok(blob) => Outcome::Done(blob),
+                        Err(e) => Outcome::Failed(e.to_string()),
+                    },
+                    // RSA returns the PKCS#1 block still padded — gpg strips it.
+                    Some(keys::LoadedGpgKey::Rsa(r)) => {
+                        match pkdecrypt::rsa_decrypt(&ciphertext_bytes, r) {
+                            Ok(blob) => Outcome::Done(blob),
+                            Err(e) => Outcome::Failed(e.to_string()),
+                        }
+                    }
+                    // Signing keys can't decrypt, and an unknown grip is the
+                    // same answer to the client either way.
+                    _ => Outcome::NoKey,
+                }
             };
 
-            let (secret_le, public_q, fingerprint, kdf_hash, kdf_sym) = match key_data {
-                Some(t) => t,
-                None => {
+            match outcome {
+                Outcome::Done(session_key_blob) => {
+                    let sexp = encode_value_sexp(&session_key_blob);
+                    session.sigkey = None;
+                    send!(write_data(w, &sexp));
+                    send!(write_ok(w));
+                }
+                Outcome::NoKey => {
                     send!(write_err(
                         w,
                         ERR_NO_SECRET_KEY,
                         "No_Secret_Key_or_wrong_type"
                     ));
                     session.sigkey = None;
-                    return CommandOutcome::Continue;
                 }
-            };
-
-            match ecdh_decrypt(
-                &ciphertext_bytes,
-                &secret_le,
-                &public_q,
-                &fingerprint,
-                kdf_hash,
-                kdf_sym,
-            ) {
-                Ok(session_key_blob) => {
-                    let sexp = encode_value_sexp(&session_key_blob);
-                    session.sigkey = None;
-                    send!(write_data(w, &sexp));
-                    send!(write_ok(w));
-                }
-                Err(e) => {
-                    // We don't echo `e` (it may include length info that
-                    // could leak about the input shape). Map to a stable
-                    // category. Logging at info-level is fine.
+                Outcome::Failed(e) => {
+                    // Don't echo `e` to the client — it can carry length
+                    // detail about the input. Log it, return a stable category.
                     eprintln!("gpg-agent: PKDECRYPT failed for grip {grip}: {e}");
                     session.sigkey = None;
                     send!(write_err(w, ERR_INV_VALUE, "decrypt_failed"));
@@ -717,7 +766,36 @@ pub fn encode_value_sexp(payload: &[u8]) -> Vec<u8> {
 /// followed by the 32-byte raw point. Libgcrypt is permissive about the
 /// prefix and we keep it for parity with what gpg's own `READKEY` returns.
 pub fn encode_public_key_sexp(key: &keys::LoadedGpgKey) -> Vec<u8> {
+    // RSA isn't an ECC curve, so it takes an entirely different shape:
+    // `(public-key(rsa(n <n>)(e <e>)))`. Handle it before the ECC path.
+    if let keys::LoadedGpgKey::Rsa(k) = key {
+        // libgcrypt emits `n` as a SIGNED MPI, so a modulus with the top bit
+        // set (i.e. every well-formed one) carries a leading 0x00 and is one
+        // byte longer than the raw magnitude. A real gpg-agent returns
+        // `(1:n257:...)` for RSA-2048; emitting the 256-byte unsigned form
+        // makes gpg reject the key. Same convention as the keygrip.
+        let n_std: Vec<u8> = if k.n.first().is_some_and(|b| b & 0x80 != 0) {
+            let mut v = Vec::with_capacity(k.n.len() + 1);
+            v.push(0);
+            v.extend_from_slice(&k.n);
+            v
+        } else {
+            k.n.clone()
+        };
+        let mut out: Vec<u8> = Vec::with_capacity(n_std.len() + k.e.len() + 48);
+        out.extend_from_slice(b"(10:public-key(3:rsa(1:n");
+        out.extend_from_slice(n_std.len().to_string().as_bytes());
+        out.push(b':');
+        out.extend_from_slice(&n_std);
+        out.extend_from_slice(b")(1:e");
+        out.extend_from_slice(k.e.len().to_string().as_bytes());
+        out.push(b':');
+        out.extend_from_slice(&k.e);
+        out.extend_from_slice(b")))");
+        return out;
+    }
     let (curve_name, flags, q): (&[u8], &[u8], [u8; 33]) = match key {
+        keys::LoadedGpgKey::Rsa(_) => unreachable!("handled above"),
         keys::LoadedGpgKey::Ed25519(k) => {
             let mut q = [0u8; 33];
             q[0] = 0x40;
@@ -761,9 +839,34 @@ pub fn encode_eddsa_sigval(sig: &[u8; 64]) -> Vec<u8> {
     out
 }
 
+/// Build the libgcrypt `sig-val` S-expression for an RSA PKCS#1 v1.5
+/// signature: `(7:sig-val(3:rsa(1:s<len>:<sig>)))`.
+///
+/// One integer, not the `(r,s)` pair EdDSA uses. The signature is the raw
+/// modulus-width big-endian block straight out of the RSA operation — gpg
+/// re-encodes it as an MPI itself, so no leading-zero trimming here.
+pub fn encode_rsa_sigval(sig: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sig.len() + 32);
+    out.extend_from_slice(b"(7:sig-val(3:rsa(1:s");
+    out.extend_from_slice(sig.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(sig);
+    out.extend_from_slice(b")))");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_rsa_sigval_layout() {
+        let blob = encode_rsa_sigval(&[0xABu8; 256]);
+        assert!(blob.starts_with(b"(7:sig-val(3:rsa(1:s256:"));
+        assert!(blob.ends_with(b")))"));
+        // Header + 256 payload bytes + closing parens.
+        assert_eq!(blob.len(), b"(7:sig-val(3:rsa(1:s256:".len() + 256 + 3);
+    }
 
     #[test]
     fn resolve_gpg_socket_honours_explicit_override() {

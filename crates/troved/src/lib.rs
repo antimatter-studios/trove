@@ -21,3 +21,6 @@ pub mod protocol;
 #[cfg(unix)]
 pub mod singleton;
 pub mod ssh_agent;
+/// The set of vaults currently held unlocked. `Unlock` is additive; see the
+/// module docs and `docs/multi-vault.md`.
+pub mod vaults;

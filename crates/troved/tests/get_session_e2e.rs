@@ -47,7 +47,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let state: SharedState = Arc::new(Mutex::new(None));
+        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
@@ -178,7 +178,7 @@ async fn lock_invalidates_then_reunlock_rotates_code() {
     assert_eq!(b["status"], "ok", "get should work before lock: {b}");
 
     // Lock invalidates the code.
-    let b = h.handle_as(Request::Lock, OWNER).await;
+    let b = h.handle_as(Request::Lock { vault: None }, OWNER).await;
     assert_eq!(b["status"], "ok");
     let b = h.handle_as(get(&code1, "id", ENTRY), OWNER).await;
     assert_eq!(b["status"], "err", "code must be dead after lock: {b}");

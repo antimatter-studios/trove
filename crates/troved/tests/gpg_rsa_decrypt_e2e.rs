@@ -1,24 +1,29 @@
-//! End-to-end test: drive a real `gpg --decrypt` against our gpg agent
-//! socket and confirm the recovered plaintext matches what we encrypted.
+//! End-to-end test: drive a real `gpg --decrypt` of an **RSA**-encrypted
+//! message against our gpg agent socket, and confirm the recovered plaintext
+//! matches what we encrypted. Also exercises RSA `PKSIGN` on the same bundle.
+//!
+//! This is the majority case in the wild: most PGP keys still in circulation
+//! are RSA, and `pass`, `sops`, `git-crypt` and encrypted mail all hammer the
+//! decrypt path.
 //!
 //! Skips automatically when `gpg` or `gpgconf` aren't on `$PATH`.
 //!
 //! What it does:
 //!   1. Spin up an isolated `GNUPGHOME`.
-//!   2. Generate a real ed25519+cv25519 GPG key (`--quick-generate-key default
-//!      default`) — that gives us a signing primary plus an encryption subkey.
+//!   2. Generate a real RSA key with an RSA *encryption subkey*. This needs a
+//!      `--batch --gen-key` parameter file: `--quick-generate-key ... rsa2048`
+//!      produces a sign-only primary and no subkey at all, which would leave
+//!      nothing to decrypt with.
 //!   3. Export the secret key bundle as a binary blob.
 //!   4. Stash it in a real .kdbx vault under attachment `gpg-priv`.
 //!   5. Open the vault, populate the in-memory GPG key store. Both keygrips
-//!      (signing + encryption) should appear.
-//!   6. Encrypt a message with `gpg --encrypt` (uses real gpg-agent for the
-//!      encryption side — encryption needs no secret).
+//!      (signing primary + encryption subkey) should appear as RSA keys.
+//!   6. Encrypt a message with `gpg --encrypt` (encryption needs no secret).
 //!   7. Spawn our GPG agent listener on a temp socket; symlink it as
 //!      `$GNUPGHOME/S.gpg-agent` so gpg connects to *our* agent.
 //!   8. Run `gpg --decrypt` and assert the plaintext matches.
-//!   9. Run `gpg --list-keys` and assert it succeeds (uses READKEY).
+//!   9. Run `gpg --sign` + `gpg --verify` to prove RSA PKSIGN too.
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +49,7 @@ fn have_tool(name: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
+async fn gpg_rsa_decrypt_against_our_agent_recovers_plaintext() {
     if !have_tool("gpg") || !have_tool("gpgconf") {
         eprintln!("SKIP: gpg/gpgconf not on $PATH");
         return;
@@ -59,33 +64,41 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
         perms.set_mode(0o700);
         std::fs::set_permissions(&gnupghome, perms).unwrap();
     }
+    let params_path = tmp.path().join("keyparams");
     let secret_path = tmp.path().join("secret.gpg");
     let vault_path = tmp.path().join("vault.kdbx");
     let sock_path = tmp.path().join("gpg.sock");
     let plaintext_path = tmp.path().join("plain.txt");
     let cipher_path = tmp.path().join("plain.gpg");
     let recovered_path = tmp.path().join("recovered.txt");
+    let signed_path = tmp.path().join("signed.gpg");
 
-    // 1. Generate a default key — gives ed25519 primary + cv25519 subkey on
-    // modern gpg.
+    // 1. Generate an RSA primary *plus* an RSA encryption subkey. 2048 bits
+    // keeps generation fast; the code path is bit-length agnostic.
+    std::fs::write(
+        &params_path,
+        b"Key-Type: RSA\n\
+          Key-Length: 2048\n\
+          Key-Usage: sign\n\
+          Subkey-Type: RSA\n\
+          Subkey-Length: 2048\n\
+          Subkey-Usage: encrypt\n\
+          Name-Real: trove rsa itest\n\
+          Name-Email: rsa@trove\n\
+          Expire-Date: 0\n\
+          %no-protection\n\
+          %commit\n",
+    )
+    .expect("write key params");
     let kg = Command::new("gpg")
         .env("GNUPGHOME", &gnupghome)
-        .args([
-            "--batch",
-            "--pinentry-mode",
-            "loopback",
-            "--passphrase",
-            "",
-            "--quick-generate-key",
-            "trove-decrypt-itest <decrypt@trove>",
-            "default",
-            "default",
-        ])
+        .args(["--batch", "--gen-key"])
+        .arg(&params_path)
         .output()
-        .expect("spawn gpg --quick-generate-key");
+        .expect("spawn gpg --gen-key");
     if !kg.status.success() {
         let stderr = String::from_utf8_lossy(&kg.stderr);
-        eprintln!("SKIP: gpg --quick-generate-key failed:\n{stderr}");
+        eprintln!("SKIP: gpg --batch --gen-key failed:\n{stderr}");
         return;
     }
 
@@ -105,6 +118,21 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
         .expect("find fingerprint")
         .to_string();
     assert_eq!(fpr.len(), 40, "fpr should be 40 hex chars: {fpr:?}");
+
+    // Collect the keygrips gpg itself computed. Ours must match exactly or
+    // gpg will never route a PKDECRYPT to us.
+    let mut gpg_keygrips: Vec<String> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("grp:::::::::"))
+        .filter_map(|s| s.split(':').next())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    gpg_keygrips.sort();
+    assert_eq!(
+        gpg_keygrips.len(),
+        2,
+        "expected a primary + encryption subkey keygrip, got {gpg_keygrips:?}"
+    );
 
     // 3. Export the secret key bundle (primary + subkey).
     let ex = Command::new("gpg")
@@ -131,10 +159,10 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
     assert!(!secret_bytes.is_empty());
 
     // 4. Stash in a vault.
-    let password = "decrypt-itest-pw";
+    let password = "rsa-decrypt-itest-pw";
     {
         let mut vault = Vault::create(&vault_path, password).expect("create vault");
-        let id = vault.add_entry("gpg-decrypt-itest").expect("add entry");
+        let id = vault.add_entry("gpg-rsa-decrypt-itest").expect("add entry");
         vault
             .attach_binary(&id, "gpg-priv", &secret_bytes)
             .expect("attach gpg-priv");
@@ -144,38 +172,29 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
     // 5. Populate the GPG key store from the vault.
     let vault = Vault::open(&vault_path, password).expect("reopen");
     let keys = load_gpg_keys_from_vault(&vault);
-    // Should contain both the ed25519 primary and the cv25519 subkey.
-    assert!(
-        keys.len() >= 2,
-        "vault should yield both signing and encryption GPG keys, got {}",
+    assert_eq!(
+        keys.len(),
+        2,
+        "vault should yield the RSA primary and the RSA encryption subkey, got {}",
         keys.len()
     );
-    let mut have_ed25519 = false;
-    let mut have_cv25519 = false;
     for k in &keys {
-        match k {
-            troved::gpg_agent::keys::LoadedGpgKey::Ed25519(_) => have_ed25519 = true,
-            troved::gpg_agent::keys::LoadedGpgKey::Cv25519(_) => have_cv25519 = true,
-            // This fixture is an ed25519 bundle; an RSA key here would mean
-            // the parser mis-dispatched on the algorithm byte.
-            troved::gpg_agent::keys::LoadedGpgKey::Rsa(_) => {
-                panic!("unexpected RSA key in the ed25519 fixture")
-            }
-        }
+        assert!(
+            matches!(k, troved::gpg_agent::keys::LoadedGpgKey::Rsa(_)),
+            "expected every key in an RSA bundle to parse as RSA, got {k:?}"
+        );
     }
-    assert!(
-        have_ed25519,
-        "expected an ed25519 signing key in the bundle"
-    );
-    assert!(
-        have_cv25519,
-        "expected a cv25519 encryption subkey in the bundle"
+    let mut our_keygrips: Vec<String> = keys.iter().map(|k| k.keygrip_hex()).collect();
+    our_keygrips.sort();
+    assert_eq!(
+        our_keygrips, gpg_keygrips,
+        "our RSA keygrips must match the ones gpg computed"
     );
     let store: GpgKeyStore = Arc::new(RwLock::new(keys));
 
     // 6. Encrypt a message using *real* gpg-agent (encryption needs only the
     // recipient's public key — it doesn't need our agent yet).
-    let original_plain = b"trove-test plaintext: hello, ECDH world! 1234567890 the quick brown fox";
+    let original_plain = b"trove-test plaintext: hello, RSA world! 1234567890 the quick brown fox";
     std::fs::write(&plaintext_path, original_plain).expect("write plaintext");
     let enc = Command::new("gpg")
         .env("GNUPGHOME", &gnupghome)
@@ -224,6 +243,16 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
     let _ = std::fs::remove_file(&agent_symlink);
     std::os::unix::fs::symlink(&sock_path, &agent_symlink).expect("symlink");
 
+    // Anything that fails from here on has to tear the agent down before it
+    // panics, or the test binary hangs on the still-running listener.
+    let cleanup = |handle: tokio::task::JoinHandle<()>| {
+        handle.abort();
+        let _ = Command::new("gpgconf")
+            .env("GNUPGHOME", &gnupghome)
+            .args(["--kill", "all"])
+            .output();
+    };
+
     // 8. Decrypt against our agent.
     let dec = Command::new("gpg")
         .env("GNUPGHOME", &gnupghome)
@@ -233,54 +262,72 @@ async fn gpg_decrypt_against_our_agent_recovers_plaintext() {
         .output()
         .expect("spawn gpg --decrypt");
     let dec_stderr = String::from_utf8_lossy(&dec.stderr).into_owned();
-    eprintln!(
-        "gpg --decrypt stdout: {}",
-        String::from_utf8_lossy(&dec.stdout)
-    );
     eprintln!("gpg --decrypt stderr: {dec_stderr}");
     if !dec.status.success() {
-        agent_handle.abort();
-        let _ = Command::new("gpgconf")
-            .env("GNUPGHOME", &gnupghome)
-            .args(["--kill", "all"])
-            .output();
+        cleanup(agent_handle);
         panic!("gpg --decrypt against our agent failed.\nstderr:\n{dec_stderr}");
     }
     let recovered = std::fs::read(&recovered_path).expect("read recovered");
-    assert_eq!(
-        recovered, original_plain,
-        "decrypted plaintext must match the original"
-    );
+    if recovered != original_plain {
+        cleanup(agent_handle);
+        panic!("decrypted plaintext must match the original");
+    }
 
-    // 9. Run gpg --list-keys to exercise READKEY.
+    // 9. READKEY: our RSA public-key S-expression has to match the shape a
+    // real agent returns, or `gpg --list-keys` against a keyring stub breaks.
+    // A real gpg 2.5.21 replies `D (10:public-key(3:rsa(1:n257:…)(1:e3:…)))`
+    // for rsa2048 — note the 257, i.e. the modulus carries libgcrypt's sign
+    // byte.
+    let rk = Command::new("gpg-connect-agent")
+        .env("GNUPGHOME", &gnupghome)
+        .arg(format!("READKEY {}", our_keygrips[0].to_uppercase()))
+        .arg("/bye")
+        .output()
+        .expect("spawn gpg-connect-agent READKEY");
+    let rk_stdout = String::from_utf8_lossy(&rk.stdout).into_owned();
+    if !rk_stdout.starts_with("D (10:public-key(3:rsa(1:n257:") {
+        cleanup(agent_handle);
+        panic!("READKEY returned an unexpected shape:\n{rk_stdout}");
+    }
+
     let lk2 = Command::new("gpg")
         .env("GNUPGHOME", &gnupghome)
         .args(["--list-keys"])
         .output()
         .expect("spawn gpg --list-keys");
-    eprintln!(
-        "gpg --list-keys stdout: {}",
-        String::from_utf8_lossy(&lk2.stdout)
-    );
-    eprintln!(
-        "gpg --list-keys stderr: {}",
-        String::from_utf8_lossy(&lk2.stderr)
-    );
-    // We assert *success* — list-keys reads pubkeys from the keyring, but it
-    // does call into the agent for state queries. If READKEY misbehaves, the
-    // command may print warnings; we accept warnings, not failures.
-    assert!(
-        lk2.status.success(),
-        "gpg --list-keys should succeed even when our agent is in front: {}",
-        String::from_utf8_lossy(&lk2.stderr)
-    );
+    if !lk2.status.success() {
+        cleanup(agent_handle);
+        panic!(
+            "gpg --list-keys should succeed with our agent in front: {}",
+            String::from_utf8_lossy(&lk2.stderr)
+        );
+    }
 
-    agent_handle.abort();
-    let _ = Command::new("gpgconf")
+    // 10. RSA PKSIGN: sign with our agent, verify with gpg's own crypto.
+    let sg = Command::new("gpg")
         .env("GNUPGHOME", &gnupghome)
-        .args(["--kill", "all"])
-        .output();
-}
+        .args(["--batch", "--yes", "--sign", "--output"])
+        .arg(&signed_path)
+        .arg(&plaintext_path)
+        .output()
+        .expect("spawn gpg --sign");
+    let sg_stderr = String::from_utf8_lossy(&sg.stderr).into_owned();
+    if !sg.status.success() {
+        cleanup(agent_handle);
+        panic!("gpg --sign against our agent failed.\nstderr:\n{sg_stderr}");
+    }
+    let vf = Command::new("gpg")
+        .env("GNUPGHOME", &gnupghome)
+        .args(["--batch", "--verify"])
+        .arg(&signed_path)
+        .output()
+        .expect("spawn gpg --verify");
+    let vf_stderr = String::from_utf8_lossy(&vf.stderr).into_owned();
+    let vf_ok = vf.status.success();
 
-#[allow(dead_code)]
-fn _force_use(_: PathBuf) {}
+    cleanup(agent_handle);
+    assert!(
+        vf_ok,
+        "gpg --verify rejected the RSA signature our agent produced.\nstderr:\n{vf_stderr}"
+    );
+}

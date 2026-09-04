@@ -234,7 +234,7 @@ async fn pksign_full_round_trip_signs_and_verifies() {
         .pop()
         .expect("at least one key");
     let grip = key.keygrip_hex();
-    let public_q = *key.public_q();
+    let public_q = *key.public_q().expect("ecc key has a public point");
     let _agent = spawn_agent_with_keys(&sock, vec![key]).await;
 
     let stream = connect_retry(&sock).await;

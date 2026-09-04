@@ -1,9 +1,13 @@
-# Multi-vault unlock — design notes (future work)
+# Multi-vault unlock — design notes
 
-Status: **design only, not implemented.** This captures the model worked out so
-it isn't lost. Today trove holds at most one unlocked vault in the daemon; the
-commands still take a `<VAULT>` positional. The notes below describe where we
-want to go and why.
+Status: **phase 1 implemented.** The daemon holds a set of unlocked vaults
+(`troved::vaults::VaultSet`); `unlock` is additive, the SSH/GPG agents serve the
+union, `list`/`search`/`status` span the whole set, and `lock [--vault <path>]`
+drops one vault or all of them. Phases 2 and 3 below — dropping the vestigial
+`<VAULT>` positional and adding `--vault` disambiguation to the read/write
+commands — are **not** implemented: a title held by two open vaults is refused
+with a message naming both, which is safe but not yet resolvable without locking
+one of them.
 
 ## Goal
 
@@ -31,6 +35,10 @@ So "dump every unlocked vault's keys into the agents" needs **no collision
 handling at all** at the agent layer. Collisions only bite the commands that
 address an entry **by title**: `get`, `add`, `remove`.
 
+The same public-blob/keygrip addressing generalises one level up — "which vault
+owns this key" becomes "which *backend* owns this key". See
+[agent-routing.md](agent-routing.md).
+
 ### Motivating example
 
 Unlock a personal vault and a company vault. Different SSH keys coexist in the
@@ -50,6 +58,27 @@ see at a glance which key is which and pick the right `~/.ssh/config` alias for
 it. This is display-only labelling — it doesn't change how the agent selects a
 key (that's still the host's choice per the union above); it just makes the
 choice legible. Tracked in [issue #54](https://github.com/antimatter-studios/trove/issues/54).
+
+## Materialized files collide the *opposite* way from keys
+
+Keys are last-unlock-wins because a collision is harmless — same keypair, same
+signature, only the label differs. **Materialized files are not keys.** Two
+vaults with an entry targeting the same path (`/tmp/kubeconfig`) is a real
+conflict: overwriting replaces data a running process may be using, and locking
+either vault would then wipe a file the other still expects to exist.
+
+So files are **first-wins**: the daemon tracks which vault materialized each
+path, and an unlock that would write over a path another open vault already owns
+skips that entry and reports it in the unlock response's `materialize_warnings`
+(never a silent `ok` with the wrong bytes on disk). Two guards cover this:
+
+- plan validation already refuses a target that **exists** on disk, whatever put
+  it there — this is what fires in the ordinary case;
+- the cross-vault claim check catches the narrower case where the file has been
+  deleted behind trove's back but the path is still owned and still due a wipe.
+
+`lock --vault <path>` wipes only that vault's files, which is why
+`MaterializedFile` carries its source vault.
 
 ## `--vault` is the disambiguator, never a required positional
 
@@ -157,8 +186,8 @@ Recommendation: one daemon-session code + `SO_PEERCRED`; `--vault` disambiguates
 
 ## Suggested phasing
 
-1. Additive unlock → union into the SSH/GPG agents; `list`/`status` across all;
-   `lock [--vault]`. (Biggest UX win, no write path, lowest risk.)
+1. ✅ **Done.** Additive unlock → union into the SSH/GPG agents; `list`/`status`
+   across all; `lock [--vault]`. (Biggest UX win, no write path, lowest risk.)
 2. Drop the vestigial `<VAULT>` from `get`; add `--vault` disambiguation + the
    collision error; add `get --public` / `--out`.
 3. Daemon-side `add`/`remove` (mutate in memory + `save()` to the known path),
