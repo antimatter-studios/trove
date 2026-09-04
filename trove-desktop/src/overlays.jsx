@@ -309,6 +309,140 @@ function HelpModal({ onClose }) {
   );
 }
 
+/* ============ NEW VAULT ============ */
+// Second half of "create a vault": the file has been chosen, now set the master
+// password. There is no recovery for a forgotten one, so it is confirmed.
+function NewVaultModal({ path, onCreate, onClose }) {
+  const [pw, setPw] = React.useState("");
+  const [confirm, setConfirm] = React.useState("");
+  const [show, setShow] = React.useState(false);
+  const [err, setErr] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => { ref.current && ref.current.focus(); }, []);
+
+  const file = String(path || "").split("/").pop();
+  const submit = async (e) => {
+    e && e.preventDefault();
+    if (busy) return;
+    if (!pw) { setErr("Choose a master password."); return; }
+    if (pw !== confirm) { setErr("The two passwords don't match."); return; }
+    setBusy(true); setErr("");
+    try {
+      await onCreate(path, pw);
+    } catch (e2) {
+      setBusy(false);
+      setErr(String(e2 && e2.message ? e2.message : e2) || "Couldn't create the vault.");
+    }
+  };
+
+  return (
+    <div className="scrim center" onMouseDown={onClose}>
+      <div className="modal" style={{ width: "min(460px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div className="mh-badge"><Icon name="plus" size={18} /></div>
+          <div><h2>New vault</h2><p>{file}</p></div>
+          <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
+        </div>
+        <form onSubmit={submit}>
+          <div className="modal-body" style={{ gap: 12 }}>
+            <div className="fld">
+              <label>Master password</label>
+              <input ref={ref} className="inp mono" type={show ? "text" : "password"} value={pw}
+                     autoComplete="new-password"
+                     onChange={(e) => { setPw(e.target.value); setErr(""); }} />
+            </div>
+            <div className="fld">
+              <label>Confirm password</label>
+              <input className="inp mono" type={show ? "text" : "password"} value={confirm}
+                     autoComplete="new-password"
+                     onChange={(e) => { setConfirm(e.target.value); setErr(""); }} />
+            </div>
+            <label className="set-row">
+              <input type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} />
+              <span><b>Show passwords</b></span>
+            </label>
+            <p style={{ fontSize: 12.5, color: err ? "var(--red)" : "var(--text-dim)", lineHeight: 1.6, margin: 0 }}>
+              {err || "There is no way to recover this password. Store it somewhere you won't lose it."}
+            </p>
+          </div>
+          <div className="modal-foot">
+            <div className="grow" />
+            <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn-primary" disabled={busy}>{busy ? "Creating…" : "Create vault"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ============ SETTINGS ============ */
+// What the vault does to the rest of the machine when it unlocks. Both
+// switches are off by default and both are undone on lock.
+function SettingsModal({ settings, onChange, onClose }) {
+  const set = (patch) => onChange({ ...settings, ...patch });
+  const lifetime = settings.systemAgentLifetime;
+  return (
+    <div className="scrim center" onMouseDown={onClose}>
+      <div className="modal" style={{ width: "min(520px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div className="mh-badge"><Icon name="key" size={18} /></div>
+          <div><h2>Settings</h2><p>What unlocking this vault does to the rest of your machine.</p></div>
+          <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
+        </div>
+        <div className="modal-body" style={{ gap: 14 }}>
+          <label className="set-row">
+            <input type="checkbox" checked={settings.systemAgent}
+                   onChange={(e) => set({ systemAgent: e.target.checked })} />
+            <span>
+              <b>Add SSH keys to the system agent</b>
+              <em>Every app — your terminal, VS Code, anything in the Dock — can then use them. Removed again when the vault locks.</em>
+            </span>
+          </label>
+
+          {settings.systemAgent && (
+            <div style={{ paddingLeft: 26, display: "grid", gap: 10 }}>
+              <label className="set-row">
+                <span>
+                  <b>Expire after</b>
+                  <em>The agent drops the keys by itself after this long, even if Trove never gets to remove them. 0 = never.</em>
+                </span>
+                <input type="number" min="0" step="60" value={lifetime}
+                       style={{ width: 92, marginLeft: "auto" }}
+                       onChange={(e) => set({ systemAgentLifetime: Math.max(0, Number(e.target.value) || 0) })} />
+                <span style={{ opacity: 0.7 }}>sec</span>
+              </label>
+              <label className="set-row">
+                <input type="checkbox" checked={settings.systemAgentConfirm}
+                       onChange={(e) => set({ systemAgentConfirm: e.target.checked })} />
+                <span>
+                  <b>Confirm before each use</b>
+                  <em>The system agent asks before every signature. Needs an askpass helper.</em>
+                </span>
+              </label>
+            </div>
+          )}
+
+          <label className="set-row">
+            <input type="checkbox" checked={settings.materialize}
+                   onChange={(e) => set({ materialize: e.target.checked })} />
+            <span>
+              <b>Write materialized files on unlock</b>
+              <em>Entries with <code>Materialize.*</code> fields are written to their target paths, and wiped when the vault locks.</em>
+            </span>
+          </label>
+
+          <p style={{ fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.6, margin: 0 }}>
+            Changes apply the next time a vault unlocks. Keys already given to the
+            system agent stay there until the vault locks.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============ TOAST ============ */
 function ClipboardToast({ data, onClear }) {
   const pct = (data.left / data.total) * 100;
@@ -374,7 +508,7 @@ function ThemeMenu({ theme, accent, onTheme, onAccent, onClose }) {
 }
 
 /* ============ VAULT SWITCHER ============ */
-function VaultSwitcher({ vaults, activeId, onSwitch, onOpenNew, onClose }) {
+function VaultSwitcher({ vaults, activeId, onSwitch, onOpenNew, onNewVault, onClose }) {
   return (
     <React.Fragment>
       <div className="pop-scrim" onMouseDown={onClose} />
@@ -392,9 +526,13 @@ function VaultSwitcher({ vaults, activeId, onSwitch, onOpenNew, onClose }) {
         ))}
         <div className="pop-div" />
         <button className="vrow" onClick={() => { onClose(); onOpenNew(); }}>
-          <span className="vdot add"><Icon name="plus" size={13} /></span>
+          <span className="vdot add"><Icon name="folder" size={13} /></span>
           <div style={{ flex: 1 }}><div className="vrn" style={{ fontWeight: 500 }}>Open vault…</div></div>
           <span className="kbd">⌘O</span>
+        </button>
+        <button className="vrow" onClick={() => { onClose(); onNewVault(); }}>
+          <span className="vdot add"><Icon name="plus" size={13} /></span>
+          <div style={{ flex: 1 }}><div className="vrn" style={{ fontWeight: 500 }}>New vault…</div></div>
         </button>
       </div>
     </React.Fragment>
@@ -441,4 +579,4 @@ function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
   );
 }
 
-export { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal };
+export { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal};

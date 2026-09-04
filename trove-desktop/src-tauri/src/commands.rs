@@ -22,11 +22,16 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use trove_core::{EntryId, Vault};
+use troved::materialize::{self, MaterializedFile, MaterializedStore};
+use troved::ssh_agent::{self, ForwardedKey, LoadedKey};
 use zxcvbn::zxcvbn;
 
 /// Basename of the JSON file (in the app config dir) that persists the
 /// registered vault set as a list of `{path, name}`.
 const RECENTS_FILE: &str = "vaults.json";
+
+/// Basename of the JSON file (in the app config dir) holding app settings.
+const SETTINGS_FILE: &str = "settings.json";
 
 // --- state -----------------------------------------------------------------
 
@@ -36,6 +41,61 @@ pub struct RegisteredVault {
     pub path: PathBuf,
     pub name: String,
     pub vault: Option<Vault>,
+    /// The keys this vault pushed into the system agent, so locking removes
+    /// exactly those and never another vault's (or another app's) identities.
+    /// `ForwardedKey` carries the per-entry `RemoveAtDatabaseClose` wish.
+    pub exported_keys: Vec<ForwardedKey>,
+    /// Files this vault materialized, wiped on lock. Shares the daemon's
+    /// store type so `materialize::wipe_all` does the removal.
+    pub materialized: MaterializedStore,
+}
+
+impl RegisteredVault {
+    pub fn new(path: PathBuf, name: String) -> Self {
+        Self {
+            path,
+            name,
+            vault: None,
+            exported_keys: Vec::new(),
+            materialized: MaterializedStore::default(),
+        }
+    }
+}
+
+/// Persisted app settings. Mirrors the daemon's switches, but as real
+/// settings rather than environment variables — a GUI has no shell.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Settings {
+    /// Push the vault's SSH keys into the OS agent on unlock, remove on lock.
+    /// This is what makes vault keys usable by other applications and by a
+    /// terminal, neither of which can be handed troved's own socket.
+    ///
+    /// The daemon reads `TROVE_SSH_FORWARD` for the same decision; a windowed
+    /// app has no shell, so it keeps the choice here.
+    pub system_agent: bool,
+    /// Fallback lifetime, in seconds, for a key whose entry doesn't state one:
+    /// the agent drops it by itself after this long, which is the only part of
+    /// the guarantee that survives the app quitting without locking.
+    pub system_agent_lifetime: u32,
+    /// Write `Materialize.*` entries to their target paths on unlock, and wipe
+    /// them on lock.
+    pub materialize: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            // On by default. The per-entry gate is the real control: only
+            // entries whose KeeAgent.settings ask for agent loading are
+            // exported, which is what `trove add ssh` writes and what
+            // KeePassXC users already set. A vault of hand-attached,
+            // unmarked keys exports nothing.
+            system_agent: true,
+            system_agent_lifetime: 900,
+            materialize: false,
+        }
+    }
 }
 
 /// The full multi-vault state: vault id → registered vault.
@@ -96,6 +156,14 @@ pub struct EntryDto {
     /// RFC3339 UTC, or `""` if unknown.
     pub modified: String,
     pub attachment_names: Vec<String>,
+    /// Name of the attachment on this entry that holds an SSH private key,
+    /// or `""` when there isn't one. The UI shows the agent toggle only for
+    /// entries that have a key.
+    pub ssh_key_attachment: String,
+    /// Whether this entry is declared for agent loading — i.e. whether
+    /// unlocking adds it to the system agent. Backed by `KeeAgent.settings`,
+    /// the same bytes KeePassXC reads and writes.
+    pub agent_key: bool,
 }
 
 /// One custom string field (`k` = name, `v` = value).
@@ -253,6 +321,107 @@ fn save_recents(app: &AppHandle, recents: &[RecentEntry]) -> Result<(), String> 
     std::fs::write(&path, json).map_err(|e| format!("writing recents: {e}"))
 }
 
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("resolving app config dir: {e}"))?;
+    Ok(dir.join(SETTINGS_FILE))
+}
+
+/// Read settings, falling back to defaults for a missing or unreadable file —
+/// a corrupt settings file must never stop the app from opening a vault.
+pub fn load_settings(app: &AppHandle) -> Settings {
+    let Ok(path) = settings_path(app) else {
+        return Settings::default();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Settings::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let path = settings_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("creating app config dir: {e}"))?;
+    }
+    let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("writing settings: {e}"))
+}
+
+// --- unlock/lock side effects ----------------------------------------------
+
+/// Push this vault's SSH keys into the system agent, returning what went in so
+/// `lock` can take exactly those back out.
+///
+/// The heavy lifting is `troved`'s forwarding code, which honours each entry's
+/// `KeeAgent.settings` — whether to load it at all, its lifetime, and whether
+/// the agent should confirm each use. The app supplies only the yes/no and the
+/// fallback window, because the daemon takes those from the environment and a
+/// windowed app has no shell.
+///
+/// Best-effort by design: a vault still opens if the agent is unreachable.
+fn export_keys(vault: &Vault, settings: &Settings) -> Vec<ForwardedKey> {
+    if !settings.system_agent {
+        return Vec::new();
+    }
+    let keys: Vec<LoadedKey> = troved::handler::load_ssh_keys_from_vault(vault);
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let warnings = tauri::async_runtime::block_on(ssh_agent::forward_on_unlock_when(
+        true,
+        &keys,
+        u64::from(settings.system_agent_lifetime),
+    ));
+    for w in warnings {
+        eprintln!("trove: ssh-agent: {w}");
+    }
+    ssh_agent::keys_to_unforward(&keys)
+}
+
+/// Materialize every entry whose `Materialize.*` fields validate. Plan errors
+/// are reported, never fatal — one bad entry must not block the unlock.
+fn materialize_all(
+    vault: &Vault,
+    vault_path: &Path,
+    store: &MaterializedStore,
+    settings: &Settings,
+) {
+    if !settings.materialize {
+        return;
+    }
+    // The daemon keys materialized files by vault so `lock --vault` wipes only
+    // that vault's; the app has one store per registered vault but passes the
+    // same key so the bookkeeping matches.
+    let vault_key = troved::vaults::canonical_key(vault_path);
+    let (plans, errors) = materialize::build_plans(vault);
+    for (title, e) in errors {
+        eprintln!("trove: skipping materialization for '{title}': {e}");
+    }
+    for plan in &plans {
+        match materialize::materialize_one(vault, &vault_key, plan, store.clone()) {
+            Ok(MaterializedFile { target, .. }) => {
+                eprintln!("trove: materialized {}", target.display())
+            }
+            Err(e) => eprintln!("trove: materializing '{}' failed: {e}", plan.entry_title),
+        }
+    }
+}
+
+/// Undo both side effects, in the daemon's order: files off disk first, then
+/// keys out of the agent.
+fn undo_side_effects(rv: &mut RegisteredVault) {
+    tauri::async_runtime::block_on(async {
+        materialize::wipe_all(&rv.materialized).await;
+        if !rv.exported_keys.is_empty() {
+            ssh_agent::unforward_on_lock(&rv.exported_keys).await;
+        }
+    });
+    rv.exported_keys.clear();
+}
+
 /// Add-or-update one recent by canonical path, then persist the whole list.
 fn persist_recent(app: &AppHandle, canonical: &Path, name: &str) -> Result<(), String> {
     let cpath = canonical.to_string_lossy().into_owned();
@@ -370,6 +539,7 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
     };
     let pw_len = u16::try_from(password.chars().count()).unwrap_or(u16::MAX);
     let strength = strength(&password);
+    let (ssh_key_attachment, agent_key) = agent_key_state(vault, &s.id, &s.attachment_names);
 
     EntryDto {
         id,
@@ -386,7 +556,58 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
         created: s.created.unwrap_or_default(),
         modified: s.modified.unwrap_or_default(),
         attachment_names: s.attachment_names,
+        ssh_key_attachment,
+        agent_key,
     }
+}
+
+/// Which attachment on this entry is an SSH private key, and whether the entry
+/// currently asks for it to be loaded into an agent.
+///
+/// `KeeAgent.settings` is authoritative when present — it names the attachment
+/// and carries the opt-in. Without it we look for a parseable key so the UI can
+/// still offer the toggle, and report it as not declared (which is exactly how
+/// the export path treats it).
+fn agent_key_state(vault: &Vault, id: &EntryId, attachment_names: &[String]) -> (String, bool) {
+    if attachment_names
+        .iter()
+        .any(|a| a == troved::ssh_agent::keeagent::ATTACHMENT_NAME)
+    {
+        if let Ok(Some(bytes)) = vault.read_binary(id, troved::ssh_agent::keeagent::ATTACHMENT_NAME)
+        {
+            // A declared entry names its attachment and is opted in; an entry
+            // that opted out still tells us which attachment it was about, so
+            // read that out of the blob either way.
+            let named = keeagent_attachment_name(&bytes);
+            return match troved::ssh_agent::keeagent::parse(&bytes, "") {
+                troved::ssh_agent::keeagent::Decision::Load { attachment, .. } => {
+                    (attachment, true)
+                }
+                troved::ssh_agent::keeagent::Decision::Skip => (named.unwrap_or_default(), false),
+            };
+        }
+    }
+    let found = attachment_names
+        .iter()
+        .find(|name| {
+            vault
+                .read_binary(id, name)
+                .ok()
+                .flatten()
+                .is_some_and(|b| troved::ssh_agent::keys::parse_private_key(&b, "").is_ok())
+        })
+        .cloned()
+        .unwrap_or_default();
+    (found, false)
+}
+
+/// Pull `<AttachmentName>` out of a settings blob without judging the opt-in.
+fn keeagent_attachment_name(bytes: &[u8]) -> Option<String> {
+    let xml = std::str::from_utf8(bytes).ok()?;
+    let start = xml.find("<AttachmentName>")? + "<AttachmentName>".len();
+    let rest = &xml[start..];
+    let end = rest.find("</AttachmentName>")?;
+    Some(rest[..end].trim().to_string())
 }
 
 // --- mutation helpers (shared by commands + tests) -------------------------
@@ -540,14 +761,9 @@ pub fn list_vaults(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<V
         match ensure_no_id_collision(&guard, &id, &cpath) {
             Ok(true) => continue, // already registered under this same path
             Ok(false) => {
-                guard.vaults.insert(
-                    id,
-                    RegisteredVault {
-                        path: cpath,
-                        name: r.name.clone(),
-                        vault: None,
-                    },
-                );
+                guard
+                    .vaults
+                    .insert(id, RegisteredVault::new(cpath, r.name.clone()));
             }
             Err(e) => eprintln!("trove: skipping recent vault — {e}"),
         }
@@ -588,11 +804,7 @@ pub fn register_vault(
         }
         guard.vaults.insert(
             id.clone(),
-            RegisteredVault {
-                path: cpath.clone(),
-                name: name.clone(),
-                vault: None,
-            },
+            RegisteredVault::new(cpath.clone(), name.clone()),
         );
     }
     persist_recent(&app, &cpath, &name)?;
@@ -624,14 +836,11 @@ pub fn create_vault(
         // Refuse to overwrite a *different* vault that hashes to the same id.
         // (Same path re-creating over itself is fine — it just re-registers.)
         ensure_no_id_collision(&guard, &id, &cpath)?;
-        guard.vaults.insert(
-            id.clone(),
-            RegisteredVault {
-                path: cpath.clone(),
-                name: name.clone(),
-                vault: Some(vault),
-            },
-        );
+        guard.vaults.insert(id.clone(), {
+            let mut rv = RegisteredVault::new(cpath.clone(), name.clone());
+            rv.vault = Some(vault);
+            rv
+        });
     }
     persist_recent(&app, &cpath, &name)?;
     let guard = state.lock().map_err(poisoned)?;
@@ -645,6 +854,7 @@ pub fn create_vault(
 /// Decrypt a registered vault, store the open `Vault`, return its entry list.
 #[tauri::command]
 pub fn unlock_vault(
+    app: AppHandle,
     id: String,
     password: String,
     state: State<'_, VaultState>,
@@ -656,6 +866,15 @@ pub fn unlock_vault(
         .ok_or_else(|| "vault is not registered".to_string())?;
     let vault = Vault::open(&rv.path, &password).map_err(|e| e.to_string())?;
     let entries = build_entry_dtos(&vault);
+
+    // Unlocking here does what unlocking in the daemon does: keys into the
+    // system agent (the only route to applications and terminals that can't
+    // be pointed at our own socket) and materialized files onto disk. Both
+    // are settings-gated and both are undone by `lock_vault`.
+    let settings = load_settings(&app);
+    rv.exported_keys = export_keys(&vault, &settings);
+    materialize_all(&vault, &rv.path.clone(), &rv.materialized, &settings);
+
     rv.vault = Some(vault);
     Ok(entries)
 }
@@ -668,8 +887,22 @@ pub fn lock_vault(id: String, state: State<'_, VaultState>) -> Result<(), String
         .vaults
         .get_mut(&id)
         .ok_or_else(|| "vault is not registered".to_string())?;
+    undo_side_effects(rv);
     rv.vault = None;
     Ok(())
+}
+
+/// Current app settings, for the settings UI.
+#[tauri::command]
+pub fn get_settings(app: AppHandle) -> Settings {
+    load_settings(&app)
+}
+
+/// Persist app settings. Takes effect on the next unlock; already-exported
+/// keys stay in the agent until the vault locks.
+#[tauri::command]
+pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+    save_settings(&app, &settings)
 }
 
 /// Re-read the entry list for an unlocked vault.
@@ -750,6 +983,114 @@ pub fn set_favorite(
         apply_set_favorite(vault, &eid, fav)?;
         Ok(build_entry_dtos(vault))
     })
+}
+
+/// Pick whether this entry's SSH key is added to the system agent on unlock.
+///
+/// Writes the same `KeeAgent.settings` bytes KeePassXC reads, so the choice
+/// travels with the vault file and both tools agree. Applies immediately as
+/// well as on the next unlock: enabling exports the key now, disabling takes
+/// it back out of the agent.
+#[tauri::command]
+pub fn set_agent_key(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    enabled: bool,
+    state: State<'_, VaultState>,
+) -> Result<Vec<EntryDto>, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    let settings = load_settings(&app);
+
+    let mut guard = state.lock().map_err(poisoned)?;
+    let rv = guard
+        .vaults
+        .get_mut(&id)
+        .ok_or_else(|| "vault is not registered".to_string())?;
+    let vault = rv
+        .vault
+        .as_mut()
+        .ok_or_else(|| "vault is locked".to_string())?;
+
+    let summary = vault
+        .list_entries()
+        .into_iter()
+        .find(|s| s.id == eid)
+        .ok_or_else(|| "entry not found".to_string())?;
+    let (attachment, _) = agent_key_state(vault, &eid, &summary.attachment_names);
+    if attachment.is_empty() {
+        return Err("this entry has no SSH private key attachment".to_string());
+    }
+
+    let key_bytes = vault
+        .read_binary(&eid, &attachment)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("attachment '{attachment}' is missing"))?;
+    // Parsed once up front, purely to learn this entry's public blob — it's how
+    // we find the same key again after the write, and how the agent addresses
+    // it. Refuse early if the attachment isn't a key we can serve.
+    let probe = troved::ssh_agent::keys::parse_private_key(&key_bytes, &summary.title)
+        .map_err(|e| format!("attachment '{attachment}' is not a usable SSH key: {e}"))?;
+
+    vault
+        .attach_binary(
+            &eid,
+            troved::ssh_agent::keeagent::ATTACHMENT_NAME,
+            &troved::ssh_agent::keeagent::settings_xml_with(&attachment, enabled),
+        )
+        .map_err(|e| e.to_string())?;
+    vault.save().map_err(|e| e.to_string())?;
+
+    // Reflect the change in the running agent, so the toggle does what it says
+    // without waiting for a lock/unlock cycle.
+    if settings.system_agent {
+        // Re-read the entry so the key carries the policy we just wrote, then
+        // apply it to the live agent — the toggle should do what it says
+        // without waiting for a lock/unlock cycle.
+        // On enable the reloaded key carries the settings we just wrote; on
+        // disable the loader no longer returns it at all, so fall back to the
+        // probe — we still have to tell the agent to drop it.
+        let key = troved::handler::load_ssh_keys_from_vault(vault)
+            .into_iter()
+            .find(|k| k.public_blob == probe.public_blob)
+            .unwrap_or(probe);
+        {
+            let forwarded = ssh_agent::keys_to_unforward(std::slice::from_ref(&key));
+            tauri::async_runtime::block_on(async {
+                if enabled {
+                    for w in ssh_agent::forward_on_unlock_when(
+                        true,
+                        std::slice::from_ref(&key),
+                        u64::from(settings.system_agent_lifetime),
+                    )
+                    .await
+                    {
+                        eprintln!("trove: ssh-agent: {w}");
+                    }
+                } else {
+                    // Not keys_to_unforward: that honours RemoveAtDatabaseClose,
+                    // and this is an explicit "take it out now" regardless.
+                    ssh_agent::unforward_on_lock(&[ForwardedKey::from(&key)]).await;
+                }
+            });
+            if enabled {
+                for f in forwarded {
+                    if !rv
+                        .exported_keys
+                        .iter()
+                        .any(|k| k.public_blob == f.public_blob)
+                    {
+                        rv.exported_keys.push(f);
+                    }
+                }
+            } else {
+                rv.exported_keys
+                    .retain(|k| k.public_blob != key.public_blob);
+            }
+        }
+    }
+
+    Ok(build_entry_dtos(vault))
 }
 
 // --- tests -----------------------------------------------------------------
@@ -921,11 +1262,7 @@ mod tests {
         let id = vault_id_for(Path::new("/vaults/a.kdbx"));
         state.vaults.insert(
             id.clone(),
-            RegisteredVault {
-                path: PathBuf::from("/vaults/a.kdbx"),
-                name: "a".to_string(),
-                vault: None,
-            },
+            RegisteredVault::new(PathBuf::from("/vaults/a.kdbx"), "a".to_string()),
         );
 
         // Same id + same path → idempotent, no clobber.

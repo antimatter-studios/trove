@@ -29,3 +29,9 @@ zxcvbn = "3"
 # crate is still published to crates.io for external consumers; only the app,
 # the CLI and the daemon consume it by path.
 trove-core = { path = "../../crates/trove-core" }
+# The GUI is troved in desktop form: it does the same work on unlock (export
+# keys into the system agent, materialize files) and on lock (withdraw, wipe),
+# so it links the daemon's library for that logic rather than reimplementing
+# it. Same arrangement trove-cli already uses; it pulls in tokio, which Tauri
+# is running anyway.
+troved = { path = "../../crates/troved" }

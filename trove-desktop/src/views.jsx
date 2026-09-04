@@ -191,7 +191,7 @@ function Field({ k, value, secret, revealed, onReveal, link, onCopy, copiedKey, 
   );
 }
 
-function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal }) {
+function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey }) {
   if (!entry) {
     return (
       <div className="pane detail">
@@ -229,6 +229,23 @@ function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onD
             </div>
           </div>
         </div>
+
+        {entry.sshKeyAttachment && (
+          <div className="dt-section">
+            <div className="dt-sec-label">SSH agent</div>
+            <label className="set-row">
+              <input type="checkbox" checked={!!entry.agentKey}
+                     onChange={(e) => onToggleAgentKey(entry.id, e.target.checked)} />
+              <span>
+                <b>Add this key to the system agent</b>
+                <em>
+                  Unlocking loads <code>{entry.sshKeyAttachment}</code> into your SSH
+                  agent, so every app can use it. Removed again when the vault locks.
+                </em>
+              </span>
+            </label>
+          </div>
+        )}
 
         <div className="dt-section">
           <div className="dt-sec-label">Credentials</div>
