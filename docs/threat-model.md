@@ -43,6 +43,7 @@ Where could secrets leak from each delivery surface? One section per surface.
 - **Swap.** Linux swap and macOS swap can hit disk. We don't `mlock` decrypted regions today. Real concern; partially mitigated by tmpfs-only materialization defaults on Linux.
 - **Hibernation.** Same family as swap. Disable hibernation on machines that hold long-lived troved unlocks if you care.
 - **Other processes running as the user.** A process running as the same UID can `ptrace` us, read `/proc/self/mem`, or open our `0600` Unix sockets (we own them; same-UID can open them). This is the irreducible "secrets in user space" assumption — every password manager has it.
+- **Signing narrows that on macOS.** An ad-hoc linker-signed binary — what `cargo build` produces — can be attached to by any same-uid process; `task_for_pid` succeeds and the daemon's memory is readable. Apple's own `/usr/bin/ssh-agent` is SIP-protected and refuses. Signing with a Developer ID certificate and the hardened runtime, carrying no `get-task-allow` entitlement, puts `troved` in that second class. Release builds are signed in CI when the `APPLE_*` secrets are present; a locally-built daemon is not, so treat a dev build as readable by anything running as you. See [scripts/sign-macos.sh](../scripts/sign-macos.sh).
 
 ### SSH agent socket
 

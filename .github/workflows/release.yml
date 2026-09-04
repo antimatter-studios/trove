@@ -143,6 +143,51 @@ jobs:
           TROVE_RELEASE: "1"
         run: cargo build --release --locked --target ${{ matrix.target }} -p trove-cli -p troved
 
+      # Sign the macOS binaries before they go into the tarball. This is not
+      # only about Gatekeeper: troved holds decrypted vault material, and an
+      # unsigned binary can be attached to by any process running as the same
+      # user (task_for_pid succeeds). The hardened runtime, with no
+      # get-task-allow entitlement, refuses that — the same protection Apple's
+      # own ssh-agent gets from SIP. Skipped when the cert secret is absent, so
+      # forks and secretless runs still produce (unsigned) artifacts.
+      - name: Import signing certificate (macOS)
+        id: cli-signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -eu
+          if [ -z "${CERT:-}" ]; then
+            echo "have_cert=false" >> "$GITHUB_OUTPUT"
+            echo "No APPLE_CERTIFICATE — unsigned CLI binaries."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/trove-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          echo "have_cert=true" >> "$GITHUB_OUTPUT"
+          echo "APPLE_CERTIFICATE present — signing CLI binaries."
+
+      - name: Sign binaries (macOS)
+        if: runner.os == 'macOS' && steps.cli-signing.outputs.have_cert == 'true'
+        shell: bash
+        env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          BIN="target/${{ matrix.target }}/release"
+          scripts/sign-macos.sh "$BIN/trove" "$BIN/troved"
+
       # Checksums are computed centrally on Ubuntu (the release job) where
       # `shasum` is reliable, so packaging here is archive-only.
       - name: Package tarball (Unix)
