@@ -28,11 +28,21 @@ const DEFAULT_LIFETIME_SECS: u32 = 600;
 /// lives in attachment `key_attachment`. The blob mirrors what KeePassXC writes
 /// when a user enables "Add key to agent when database is opened".
 pub fn settings_xml(key_attachment: &str) -> Vec<u8> {
+    settings_xml_with(key_attachment, true)
+}
+
+/// [`settings_xml`] with the opt-in switched either way.
+///
+/// Writing `false` is how a key is withdrawn from agent loading: the attachment
+/// stays, the declaration says no. There is no "remove attachment" in the vault
+/// API, and an explicit no is clearer than a missing blob anyway — a missing
+/// blob means "content-scan me", which is not the same thing.
+pub fn settings_xml_with(key_attachment: &str, allow: bool) -> Vec<u8> {
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
          <EntrySettings>\n\
-         \x20 <AllowUseOfSshKey>true</AllowUseOfSshKey>\n\
-         \x20 <AddAtDatabaseOpen>true</AddAtDatabaseOpen>\n\
+         \x20 <AllowUseOfSshKey>{allow}</AllowUseOfSshKey>\n\
+         \x20 <AddAtDatabaseOpen>{allow}</AddAtDatabaseOpen>\n\
          \x20 <RemoveAtDatabaseClose>true</RemoveAtDatabaseClose>\n\
          \x20 <UseConfirmConstraintWhenSigning>false</UseConfirmConstraintWhenSigning>\n\
          \x20 <UseLifetimeConstraintWhenSigning>false</UseLifetimeConstraintWhenSigning>\n\

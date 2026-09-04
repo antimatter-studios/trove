@@ -231,8 +231,24 @@ pub async fn add_all(
 /// Returns an empty report — never an error — when forwarding is switched off
 /// or when there is no external agent to forward to.
 pub async fn on_unlock(keys: &[LoadedKey], idle_timeout_secs: u64) -> ForwardReport {
+    on_unlock_when(forwarding_enabled(), keys, idle_timeout_secs).await
+}
+
+/// [`on_unlock`] with the decision supplied by the caller instead of read from
+/// the environment.
+///
+/// `TROVE_SSH_FORWARD` is the *daemon's* control surface. A windowed app has no
+/// shell to set it in — it keeps the choice in its own settings — and
+/// `.cargo/config.toml` forces the variable off for anything cargo launches,
+/// which includes `npm run tauri dev`. A GUI that read the environment would
+/// therefore silently never forward while being developed.
+pub async fn on_unlock_when(
+    enabled: bool,
+    keys: &[LoadedKey],
+    idle_timeout_secs: u64,
+) -> ForwardReport {
     let mut report = ForwardReport::default();
-    if keys.is_empty() || !forwarding_enabled() {
+    if keys.is_empty() || !enabled {
         return report;
     }
     let Some(sock) = system_agent_socket(&super::resolve_ssh_socket_path()) else {

@@ -20,6 +20,9 @@ vi.mock('../src/api.js', () => ({
   saveEntry: vi.fn(),
   deleteEntry: vi.fn(),
   setFavorite: vi.fn(),
+  getSettings: vi.fn(),
+  setAgentKey: vi.fn(),
+  setSettings: vi.fn(),
 }));
 
 import * as api from '../src/api.js';
@@ -33,6 +36,8 @@ const DETAIL = { notes: 'primary db', fields: [{ k: 'Host', v: 'db.prod' }], pas
 const LOCKED_VAULT = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/vaults/personal.kdbx', locked: true };
 
 beforeEach(() => {
+  api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
+  api.setSettings.mockResolvedValue(undefined);
   vi.clearAllMocks();
   document.documentElement.removeAttribute('data-theme');
   document.documentElement.removeAttribute('data-accent');

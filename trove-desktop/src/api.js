@@ -79,3 +79,22 @@ export function deleteEntry(id, entryId) {
 export function setFavorite(id, entryId, fav) {
   return invoke('set_favorite', { id, entryId, fav }).then(normEntries);
 }
+
+/* ---- App settings ---- */
+
+// get_settings() -> Settings
+// { systemAgent, systemAgentLifetime, systemAgentConfirm, materialize }
+export function getSettings() {
+  return invoke('get_settings');
+}
+
+// set_settings(settings) -> ()  (takes effect on the next unlock)
+export function setSettings(settings) {
+  return invoke('set_settings', { settings });
+}
+
+// set_agent_key(id, entryId, enabled) -> Vec<EntryDto>
+// Picks whether this entry's SSH key is added to the system agent on unlock.
+export function setAgentKey(id, entryId, enabled) {
+  return invoke('set_agent_key', { id, entryId, enabled }).then(normEntries);
+}

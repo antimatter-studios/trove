@@ -78,7 +78,7 @@ body {
   overflow: hidden;
 }
 .ic { display: block; flex: none; }
-button { font-family: inherit; color: inherit; cursor: pointer; }
+button { font-family: inherit; color: inherit; cursor: pointer; white-space: nowrap; }
 input { font-family: inherit; }
 ::selection { background: var(--accent-line); color: var(--text); }
 
@@ -397,6 +397,9 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
 .pw-tool { width: 38px; height: 38px; border-radius: 9px; display: grid; place-items: center; border: 1px solid var(--border); background: var(--bg-0); color: var(--text-dim); }
 .pw-tool:hover { color: var(--text); border-color: var(--border-strong); }
 .modal-foot { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--border); }
+/* A label sharing the row with buttons gives up space first: the buttons keep
+   their intrinsic width instead of being squeezed until the text wraps. */
+.modal-foot > button { flex-shrink: 0; }
 .modal-foot .grow { flex: 1; }
 .btn-ghost { height: 36px; padding: 0 15px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); font-size: 13px; font-weight: 500; }
 .btn-ghost:hover { color: var(--text); border-color: var(--border-strong); }

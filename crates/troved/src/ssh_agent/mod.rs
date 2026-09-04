@@ -52,6 +52,27 @@ pub async fn forward_on_unlock(keys: &[LoadedKey], idle_timeout_secs: u64) -> Ve
     }
 }
 
+/// [`forward_on_unlock`] for a caller that decides for itself whether to
+/// forward — the desktop app, which keeps the choice in its settings because it
+/// has no shell to carry `TROVE_SSH_FORWARD`.
+pub async fn forward_on_unlock_when(
+    enabled: bool,
+    keys: &[LoadedKey],
+    idle_timeout_secs: u64,
+) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        forward::on_unlock_when(enabled, keys, idle_timeout_secs)
+            .await
+            .warnings
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (enabled, keys, idle_timeout_secs);
+        Vec::new()
+    }
+}
+
 /// The subset of `keys` whose entries asked to be removed from the external
 /// agent at lock. Snapshot this off the key store before clearing it.
 pub fn keys_to_unforward(keys: &[LoadedKey]) -> Vec<ForwardedKey> {

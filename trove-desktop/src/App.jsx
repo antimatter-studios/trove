@@ -1,10 +1,10 @@
 import React from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { Icon } from './icons.jsx';
 import { buildTree } from './tree.js';
 import * as api from './api.js';
 import { Sidebar, EntryList, Detail } from './views.jsx';
-import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast } from './overlays.jsx';
+import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal } from './overlays.jsx';
 // Trove — main app (multi-vault, backed by real .kdbx files via src/api.js)
 
 const { useState, useEffect, useRef, useCallback } = React;
@@ -85,9 +85,12 @@ function App() {
   const [form, setForm] = useState(null);
   const [del, setDel] = useState(null);
   const [help, setHelp] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState(null);
   const [themeMenu, setThemeMenu] = useState(false);
   const [switcher, setSwitcher] = useState(false);
   const [openVault, setOpenVault] = useState(false);
+  const [newVaultPath, setNewVaultPath] = useState(null);
   const [revealed, setRevealed] = useState(false);
   // Secret detail for the selected entry, fetched on selection (get_entry_detail).
   const [detail, setDetail] = useState({ notes: "", fields: [], password: "" });
@@ -105,6 +108,16 @@ function App() {
   const clipTimer = useRef(null);
   const copiedTimer = useRef(null);
   const plainTimer = useRef(null);
+
+  // App settings live in the backend (they drive what unlock does to the
+  // machine), not in localStorage. Load once; write through on every change.
+  useEffect(() => { api.getSettings().then(setSettings).catch((e) => console.error("settings load failed", e)); }, []);
+  // Per-key opt-in. The backend writes KeeAgent.settings into the vault and
+  // adds/removes the key in the running agent, then hands back a fresh list.
+  const saveSettings = useCallback((next) => {
+    setSettings(next);
+    api.setSettings(next).catch((e) => console.error("settings save failed", e));
+  }, []);
 
   useEffect(() => { document.documentElement.dataset.theme = theme; try { localStorage.setItem("trove.theme", theme); } catch (e) {} }, [theme]);
   useEffect(() => { document.documentElement.dataset.accent = accent; try { localStorage.setItem("trove.accent", accent); } catch (e) {} }, [accent]);
@@ -246,6 +259,27 @@ function App() {
     setPalette(false); setForm(null); setDel(null); setRevealed(false);
   };
   // Native file dialog → register the picked .kdbx (locked) → switch to it.
+  // Create: choose where the .kdbx goes, then set its master password. Split in
+  // two because the native save dialog can't collect a password.
+  const newVault = async () => {
+    let picked;
+    try {
+      picked = await save({ defaultPath: "vault.kdbx", filters: [{ name: "KeePass vault", extensions: ["kdbx"] }] });
+    } catch (e) { return; }
+    if (!picked) return;
+    // A typed filename may arrive without the extension depending on the platform.
+    setNewVaultPath(picked.endsWith(".kdbx") ? picked : picked + ".kdbx");
+  };
+
+  const createVault = async (path, password) => {
+    const dto = await api.createVault(path, password);
+    setVaults((vs) => vs.some((v) => v.id === dto.id) ? vs : [...vs, withViewState(dto)]);
+    setActiveId(dto.id);
+    setNewVaultPath(null);
+    setOpenVault(false);
+    flashPlain("Created " + dto.file);
+  };
+
   const browseVault = async () => {
     let picked;
     try {
@@ -269,6 +303,17 @@ function App() {
       const list = await api.setFavorite(vault.id, id, !(cur && cur.fav));
       patch({ entries: list });
     } catch (e) {}
+  };
+
+  // Per-key opt-in. The backend writes KeeAgent.settings into the vault and
+  // adds/removes the key in the running agent, then hands back a fresh list.
+  const toggleAgentKey = async (entryId, enabled) => {
+    try {
+      const list = await api.setAgentKey(vault.id, entryId, enabled);
+      patch({ entries: list });
+    } catch (e) {
+      console.error("agent key toggle failed", e);
+    }
   };
 
   const openNew = () => setForm({ entry: null, detail: null });
@@ -319,6 +364,8 @@ function App() {
     { label: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", icon: theme === "dark" ? "sun" : "moon", kbd: "⌘J", run: toggleTheme },
     { label: "Change color theme…", icon: "droplet", run: () => setThemeMenu(true) },
     { label: "Keyboard shortcuts", icon: "command", kbd: "?", run: () => setHelp(true) },
+    { label: "Settings…", icon: "key", run: () => setSettingsOpen(true) },
+    { label: "New vault…", icon: "plus", run: () => newVault() },
   ];
 
   // ---- keyboard ----
@@ -414,6 +461,7 @@ function App() {
             <div className="divider-v" />
             <button className="icon-btn" onClick={toggleTheme} title="Toggle theme (⌘J)"><Icon name={theme === "dark" ? "sun" : "moon"} size={17} /></button>
             <button className={"icon-btn" + (themeMenu ? " active" : "")} onClick={() => setThemeMenu((m) => !m)} title="Appearance"><Icon name="droplet" size={17} /></button>
+            <button className="icon-btn" onClick={() => setSettingsOpen(true)} title="Settings"><Icon name="key" size={17} /></button>
             <button className="icon-btn" onClick={() => setHelp(true)} title="Shortcuts (?)" style={{ fontWeight: 700, fontSize: 15 }}>?</button>
             {!locked && <button className="icon-btn" onClick={lock} title="Lock (⌘L)"><Icon name="lock" size={17} /></button>}
           </div>
@@ -444,6 +492,7 @@ function App() {
               onCopy={copy} copiedKey={copiedKey}
               onEdit={openEdit} onDelete={(e) => setDel(e)} onToggleFav={toggleFav}
               revealed={revealed} onToggleReveal={() => setRevealed((r) => !r)}
+              onToggleAgentKey={toggleAgentKey}
             />
           </div>
         )}
@@ -453,8 +502,10 @@ function App() {
         {form && <EntryForm entry={form.entry} detail={form.detail} onClose={() => setForm(null)} onSave={saveEntry} onDelete={(e) => { setForm(null); setDel(e); }} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}
         {help && <HelpModal onClose={() => setHelp(false)} />}
+        {settingsOpen && settings && <SettingsModal settings={settings} onChange={saveSettings} onClose={() => setSettingsOpen(false)} />}
         {themeMenu && <ThemeMenu theme={theme} accent={accent} onTheme={setTheme} onAccent={setAccent} onClose={() => setThemeMenu(false)} />}
-        {switcher && <VaultSwitcher vaults={vaults} activeId={activeId} onSwitch={switchVault} onOpenNew={() => setOpenVault(true)} onClose={() => setSwitcher(false)} />}
+        {switcher && <VaultSwitcher vaults={vaults} activeId={activeId} onSwitch={switchVault} onOpenNew={() => setOpenVault(true)} onNewVault={newVault} onClose={() => setSwitcher(false)} />}
+        {newVaultPath && <NewVaultModal path={newVaultPath} onCreate={createVault} onClose={() => setNewVaultPath(null)} />}
         {openVault && <OpenVaultModal recents={vaults} activeId={activeId} onPick={(v) => { setOpenVault(false); switchVault(v.id); }} onBrowse={browseVault} onClose={() => setOpenVault(false)} />}
 
         {/* toasts */}

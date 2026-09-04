@@ -19,6 +19,9 @@ vi.mock('../src/api.js', () => ({
   saveEntry: vi.fn(),
   deleteEntry: vi.fn(),
   setFavorite: vi.fn(),
+  getSettings: vi.fn(),
+  setAgentKey: vi.fn(),
+  setSettings: vi.fn(),
 }));
 
 import * as api from '../src/api.js';
@@ -40,6 +43,8 @@ async function mountUnlocked() {
 }
 
 beforeEach(() => {
+  api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
+  api.setSettings.mockResolvedValue(undefined);
   vi.clearAllMocks();
   try { localStorage.clear(); } catch { /* ignore */ }
   api.listVaults.mockResolvedValue([OPEN_VAULT]);
