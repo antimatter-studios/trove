@@ -181,20 +181,23 @@ fn decode(bytes: &[u8]) -> Option<String> {
         }
         return None;
     }
-    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
         return None;
     }
     let (body, big_endian) = utf16?;
-    let units: Vec<u16> = body
-        .chunks_exact(2)
-        .map(|c| {
-            if big_endian {
-                u16::from_be_bytes([c[0], c[1]])
-            } else {
-                u16::from_le_bytes([c[0], c[1]])
-            }
-        })
-        .collect();
+    // Indexed rather than `chunks_exact(2)`: clippy's
+    // `chunks_exact_to_as_chunks` fires on a constant chunk size and steers you
+    // to `as_chunks`, which is newer than the toolchain floor this crate builds
+    // on. Stepping by two needs neither.
+    let mut units: Vec<u16> = Vec::with_capacity(body.len() / 2);
+    for i in (0..body.len().saturating_sub(1)).step_by(2) {
+        let pair = [body[i], body[i + 1]];
+        units.push(if big_endian {
+            u16::from_be_bytes(pair)
+        } else {
+            u16::from_le_bytes(pair)
+        });
+    }
     String::from_utf16(&units).ok()
 }
 
@@ -397,13 +400,12 @@ mod tests {
     fn utf16_output_starts_with_a_bom_and_declares_utf16() {
         let bytes = settings_xml_encoded("k", true, Encoding::Utf16Le);
         assert_eq!(&bytes[..2], &[0xFF, 0xFE], "BOM, as KeePassXC writes");
-        let text = String::from_utf16(
-            &bytes[2..]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect::<Vec<_>>(),
-        )
-        .expect("valid UTF-16");
+        let body = &bytes[2..];
+        let mut units = Vec::with_capacity(body.len() / 2);
+        for i in (0..body.len().saturating_sub(1)).step_by(2) {
+            units.push(u16::from_le_bytes([body[i], body[i + 1]]));
+        }
+        let text = String::from_utf16(&units).expect("valid UTF-16");
         assert!(
             text.contains("encoding=\"UTF-16\""),
             "must not lie about its encoding"
