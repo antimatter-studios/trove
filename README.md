@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.8.0
+Several vaults can be unlocked at once — `unlock` is additive, both agents serve the union, and `lock --vault <PATH>` drops one while the rest keep serving. Unlocking now also pushes your SSH keys into the *system* agent (the KeePassXC model), which is the only way keys reach a GUI application or an already-running terminal; the desktop app does the same on unlock, plus file materialization, a settings panel and a per-entry toggle. RSA OpenPGP keys work for signing and decryption. `KeeAgent.settings` written by KeePassXC are read correctly at last — they are UTF-16, which a UTF-8 reader silently mis-parsed, so every key you had marked was being skipped. New `--env` flag opens a vault from a `.env.trove` without a prompt. macOS release binaries are signed with the hardened runtime, so a same-uid process can no longer read the daemon's memory.
+
 ### v0.7.1
 The desktop app's sidebar folder tree now lists groups alphabetically at every level (natural, case-insensitive) instead of in insertion order.
 
