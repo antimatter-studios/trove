@@ -110,8 +110,17 @@ function App() {
   const plainTimer = useRef(null);
 
   // App settings live in the backend (they drive what unlock does to the
-  // machine), not in localStorage. Load once; write through on every change.
-  useEffect(() => { api.getSettings().then(setSettings).catch((e) => console.error("settings load failed", e)); }, []);
+  // machine), not in localStorage. Read on first open rather than at mount:
+  // nothing on the main screen needs them, and a promise resolving at mount
+  // lands a state update in the middle of whatever else is starting up — which
+  // made the unlock tests flaky on a loaded machine.
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+    if (settings) return;
+    api.getSettings()
+      .then(setSettings)
+      .catch((e) => console.error("settings load failed", e));
+  }, [settings]);
   // Per-key opt-in. The backend writes KeeAgent.settings into the vault and
   // adds/removes the key in the running agent, then hands back a fresh list.
   const saveSettings = useCallback((next) => {
@@ -364,7 +373,7 @@ function App() {
     { label: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", icon: theme === "dark" ? "sun" : "moon", kbd: "⌘J", run: toggleTheme },
     { label: "Change color theme…", icon: "droplet", run: () => setThemeMenu(true) },
     { label: "Keyboard shortcuts", icon: "command", kbd: "?", run: () => setHelp(true) },
-    { label: "Settings…", icon: "key", run: () => setSettingsOpen(true) },
+    { label: "Settings…", icon: "key", run: openSettings },
     { label: "New vault…", icon: "plus", run: () => newVault() },
   ];
 
@@ -461,7 +470,7 @@ function App() {
             <div className="divider-v" />
             <button className="icon-btn" onClick={toggleTheme} title="Toggle theme (⌘J)"><Icon name={theme === "dark" ? "sun" : "moon"} size={17} /></button>
             <button className={"icon-btn" + (themeMenu ? " active" : "")} onClick={() => setThemeMenu((m) => !m)} title="Appearance"><Icon name="droplet" size={17} /></button>
-            <button className="icon-btn" onClick={() => setSettingsOpen(true)} title="Settings"><Icon name="key" size={17} /></button>
+            <button className="icon-btn" onClick={openSettings} title="Settings"><Icon name="key" size={17} /></button>
             <button className="icon-btn" onClick={() => setHelp(true)} title="Shortcuts (?)" style={{ fontWeight: 700, fontSize: 15 }}>?</button>
             {!locked && <button className="icon-btn" onClick={lock} title="Lock (⌘L)"><Icon name="lock" size={17} /></button>}
           </div>
