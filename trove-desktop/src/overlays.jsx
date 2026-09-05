@@ -378,64 +378,81 @@ function NewVaultModal({ path, onCreate, onClose }) {
 }
 
 /* ============ SETTINGS ============ */
-// What the vault does to the rest of the machine when it unlocks. Both
-// switches are off by default and both are undone on lock.
+// Every switch here changes what unlocking does to the rest of the machine, so
+// each row states the consequence rather than naming the mechanism. Rows that
+// only apply while forwarding is on are nested under it and go inert instead of
+// vanishing, so the panel never reflows under the pointer.
+function Switch({ checked, onChange, disabled }) {
+  return (
+    <span className="switch">
+      <input type="checkbox" checked={checked} disabled={disabled}
+             onChange={(e) => onChange(e.target.checked)} />
+      <span className="track" />
+      <span className="knob" />
+    </span>
+  );
+}
+
+function SetRow({ title, desc, sub, off, children }) {
+  return (
+    <div className={"set-row" + (sub ? " set-sub" : "") + (off ? " off" : "")}>
+      <div className="srb">
+        <div className="srt">{title}</div>
+        <div className="srd">{desc}</div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function SettingsModal({ settings, onChange, onClose }) {
   const set = (patch) => onChange({ ...settings, ...patch });
-  const lifetime = settings.systemAgentLifetime;
+  const agent = settings.systemAgent;
   return (
     <div className="scrim center" onMouseDown={onClose}>
-      <div className="modal" style={{ width: "min(520px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
+      <div className="modal" style={{ width: "min(560px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="mh-badge"><Icon name="key" size={18} /></div>
-          <div><h2>Settings</h2><p>What unlocking this vault does to the rest of your machine.</p></div>
+          <div><h2>Settings</h2><p>What unlocking a vault does to the rest of your machine.</p></div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
-        <div className="modal-body" style={{ gap: 14 }}>
-          <label className="set-row">
-            <input type="checkbox" checked={settings.systemAgent}
-                   onChange={(e) => set({ systemAgent: e.target.checked })} />
-            <span>
-              <b>Add SSH keys to the system agent</b>
-              <em>Every app — your terminal, VS Code, anything in the Dock — can then use them. Removed again when the vault locks.</em>
-            </span>
-          </label>
 
-          {settings.systemAgent && (
-            <div style={{ paddingLeft: 26, display: "grid", gap: 10 }}>
-              <label className="set-row">
-                <span>
-                  <b>Expire after</b>
-                  <em>The agent drops the keys by itself after this long, even if Trove never gets to remove them. 0 = never.</em>
-                </span>
-                <input type="number" min="0" step="60" value={lifetime}
-                       style={{ width: 92, marginLeft: "auto" }}
+        <div className="modal-body">
+          <div className="set-group">
+            <div className="set-group-head"><div className="sgt">SSH keys</div></div>
+
+            <SetRow
+              title="Add keys to the system agent on unlock"
+              desc="Your terminal, your editor and anything launched from the Dock can then use them. Trove takes them back out when the vault locks.">
+              <Switch checked={agent} onChange={(v) => set({ systemAgent: v })} />
+            </SetRow>
+
+            <SetRow sub off={!agent}
+              title="Expire keys after"
+              desc="The agent drops them itself once this long has passed — the only protection left if Trove quits without locking. Keys whose entry states its own lifetime use that instead. 0 means never.">
+              <span className="set-num">
+                <input className="inp" type="number" min="0" step="60" disabled={!agent}
+                       value={settings.systemAgentLifetime}
                        onChange={(e) => set({ systemAgentLifetime: Math.max(0, Number(e.target.value) || 0) })} />
-                <span style={{ opacity: 0.7 }}>sec</span>
-              </label>
-              <label className="set-row">
-                <input type="checkbox" checked={settings.systemAgentConfirm}
-                       onChange={(e) => set({ systemAgentConfirm: e.target.checked })} />
-                <span>
-                  <b>Confirm before each use</b>
-                  <em>The system agent asks before every signature. Needs an askpass helper.</em>
-                </span>
-              </label>
-            </div>
-          )}
+                <span className="unit">sec</span>
+              </span>
+            </SetRow>
+          </div>
 
-          <label className="set-row">
-            <input type="checkbox" checked={settings.materialize}
-                   onChange={(e) => set({ materialize: e.target.checked })} />
-            <span>
-              <b>Write materialized files on unlock</b>
-              <em>Entries with <code>Materialize.*</code> fields are written to their target paths, and wiped when the vault locks.</em>
-            </span>
-          </label>
+          <div className="set-group">
+            <div className="set-group-head"><div className="sgt">Files</div></div>
+            <SetRow
+              title="Write materialized files on unlock"
+              desc="Entries carrying Materialize fields are written to their target paths, and wiped again on lock."
+            >
+              <Switch checked={settings.materialize} onChange={(v) => set({ materialize: v })} />
+            </SetRow>
+          </div>
 
-          <p style={{ fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.6, margin: 0 }}>
-            Changes apply the next time a vault unlocks. Keys already given to the
-            system agent stay there until the vault locks.
+          <p className="set-note">
+            Which keys are eligible is decided per entry — open a key and use
+            “Add this key to the system agent”. Changes here apply at the next
+            unlock; keys already handed to the agent stay until the vault locks.
           </p>
         </div>
       </div>

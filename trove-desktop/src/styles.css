@@ -477,6 +477,55 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
 .toast-check { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--teal-dim); color: var(--teal); }
 
 /* shortcuts help */
+/* ---- settings ------------------------------------------------------------
+   A settings row is a switch, a name, and the sentence explaining what turning
+   it on actually does to your machine — these settings hand private keys to
+   other processes, so the consequence belongs next to the control, not in a
+   tooltip. Rows that only matter while their parent is on are nested and fade
+   out rather than disappearing, so the panel doesn't jump under the cursor. */
+.set-group { border: 1px solid var(--border-soft); border-radius: 12px; background: var(--bg-0); overflow: hidden; }
+.set-group + .set-group { margin-top: 12px; }
+.set-group-head { padding: 12px 15px 11px; border-bottom: 1px solid var(--border-soft); background: var(--raise); }
+.set-group-head .sgt { font-size: 10.5px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; color: var(--text-ghost); }
+
+.set-row { display: flex; align-items: flex-start; gap: 13px; padding: 13px 15px; }
+.set-row + .set-row { border-top: 1px solid var(--border-soft); }
+.set-row .srb { min-width: 0; flex: 1; }
+.set-row .srt { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.35; }
+.set-row .srd { font-size: 12px; color: var(--text-faint); line-height: 1.55; margin-top: 3px; }
+.set-row .srd code { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dim); }
+
+/* Dependent rows: indented under their parent, dimmed and inert when off. */
+.set-sub { padding-left: 30px; background: var(--bg-desk); }
+.set-sub.off { opacity: .42; pointer-events: none; }
+
+/* Numeric setting: the input sits with its unit, right-aligned to the switches
+   above it so the control column stays a column. */
+.set-num { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+.set-num .inp { height: 32px; width: 82px; text-align: right; padding: 0 9px; font-size: 12.5px; }
+.set-num .unit { font-size: 11.5px; color: var(--text-ghost); }
+
+/* Switch. A real control rather than a browser checkbox, because the rest of
+   the app is a designed surface and a raw tick box in it reads as unfinished. */
+.switch { position: relative; flex-shrink: 0; width: 38px; height: 22px; margin-top: 1px; }
+.switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }
+.switch .track {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  transition: background .14s, border-color .14s;
+}
+.switch .knob {
+  position: absolute; top: 3px; left: 3px; width: 15px; height: 15px; border-radius: 50%;
+  background: var(--text-dim); transition: transform .14s, background .14s;
+}
+.switch input:checked ~ .track { background: var(--accent-dim); border-color: var(--accent-line); }
+.switch input:checked ~ .knob { transform: translateX(16px); background: var(--accent-strong); }
+.switch input:focus-visible ~ .track { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.switch input:disabled { cursor: default; }
+
+/* Closing note under the groups — why a change doesn't take effect instantly. */
+.set-note { font-size: 12px; color: var(--text-ghost); line-height: 1.6; margin: 2px 2px 0; }
+
 .help-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 26px; padding: 6px 4px; }
 .help-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--border-soft); }
 .help-row .hl { font-size: 12.5px; color: var(--text-dim); }
