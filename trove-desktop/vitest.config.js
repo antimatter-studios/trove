@@ -6,6 +6,11 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     globals: true,
+    // A loaded CI runner needs longer than the 5s default: these tests drive a
+    // full unlock-and-render through async commands. Must stay ABOVE the
+    // `asyncUtilTimeout` in tests/setup.js, or waitFor is still waiting when
+    // vitest gives up and the failure points at the wrong thing.
+    testTimeout: 20000,
     setupFiles: ['./tests/setup.js'],
     include: ['tests/**/*.test.{js,jsx,ts,tsx}'],
     coverage: {

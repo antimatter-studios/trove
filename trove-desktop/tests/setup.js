@@ -6,4 +6,6 @@ import { configure } from '@testing-library/dom';
 // three panes off an async command, and when the box is busy that can take
 // longer than a second. The symptom is an assertion failing on a *different*
 // test each run, which reads like a race but is only a deadline.
-configure({ asyncUtilTimeout: 10000 });
+// Below `testTimeout` in vitest.config.js so a genuine hang is reported as a
+// failed assertion here, not as a bare vitest timeout.
+configure({ asyncUtilTimeout: 8000 });
