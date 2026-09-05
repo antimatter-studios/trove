@@ -5,6 +5,12 @@
 //! the entry's key into its SSH agent. We parse the same blob so trove and
 //! KeePassXC agree on which entries to activate.
 //!
+//! Written by KeePassXC as **UTF-16**, with `SelectedType` lowercased and the
+//! constraint tags spelled `...WhenAdding`. Reading only UTF-8, matching
+//! `Attachment` case-sensitively, or looking for `...WhenSigning` all cause a
+//! marked entry to be silently skipped — verified against a real KeePassXC
+//! vault where trove served 2 keys and KeePassXC served 5.
+//!
 //! Rules:
 //!   * Settings present, AllowUseOfSshKey=true, AddAtDatabaseOpen=true,
 //!     SelectedType=Attachment → load the named AttachmentName only.
@@ -38,14 +44,57 @@ pub fn settings_xml(key_attachment: &str) -> Vec<u8> {
 /// API, and an explicit no is clearer than a missing blob anyway — a missing
 /// blob means "content-scan me", which is not the same thing.
 pub fn settings_xml_with(key_attachment: &str, allow: bool) -> Vec<u8> {
+    settings_xml_encoded(key_attachment, allow, Encoding::Utf8)
+}
+
+/// Which encoding to write. We read both (KeePassXC writes UTF-16, trove has
+/// always written UTF-8), so we can write both — and the tests prove each
+/// round-trips through [`parse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    /// What trove writes by default: valid XML, and readable by eye.
+    Utf8,
+    /// Byte-for-byte what KeePassXC produces: UTF-16 little-endian with a BOM.
+    /// Use when a vault must look native to KeePassXC.
+    Utf16Le,
+}
+
+/// [`settings_xml_with`] in a chosen encoding.
+///
+/// The declared `encoding=` always matches the bytes — a file that lies about
+/// its encoding is exactly the trap this module had to be fixed for.
+pub fn settings_xml_encoded(key_attachment: &str, allow: bool, encoding: Encoding) -> Vec<u8> {
+    let text = settings_xml_text(key_attachment, allow, encoding);
+    match encoding {
+        Encoding::Utf8 => text.into_bytes(),
+        Encoding::Utf16Le => {
+            let mut out = vec![0xFF, 0xFE]; // BOM, as KeePassXC writes it
+            for unit in text.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            out
+        }
+    }
+}
+
+fn settings_xml_text(key_attachment: &str, allow: bool, encoding: Encoding) -> String {
+    let declared = match encoding {
+        Encoding::Utf8 => "utf-8",
+        Encoding::Utf16Le => "UTF-16",
+    };
+    settings_xml_body(key_attachment, allow, declared)
+}
+
+fn settings_xml_body(key_attachment: &str, allow: bool, declared: &str) -> String {
+    let _ = declared;
     format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+        "<?xml version=\"1.0\" encoding=\"{declared}\"?>\n\
          <EntrySettings>\n\
          \x20 <AllowUseOfSshKey>{allow}</AllowUseOfSshKey>\n\
          \x20 <AddAtDatabaseOpen>{allow}</AddAtDatabaseOpen>\n\
          \x20 <RemoveAtDatabaseClose>true</RemoveAtDatabaseClose>\n\
-         \x20 <UseConfirmConstraintWhenSigning>false</UseConfirmConstraintWhenSigning>\n\
-         \x20 <UseLifetimeConstraintWhenSigning>false</UseLifetimeConstraintWhenSigning>\n\
+         \x20 <UseConfirmConstraintWhenAdding>false</UseConfirmConstraintWhenAdding>\n\
+         \x20 <UseLifetimeConstraintWhenAdding>false</UseLifetimeConstraintWhenAdding>\n\
          \x20 <LifetimeConstraintDuration>{DEFAULT_LIFETIME_SECS}</LifetimeConstraintDuration>\n\
          \x20 <Location>\n\
          \x20   <SelectedType>Attachment</SelectedType>\n\
@@ -53,7 +102,6 @@ pub fn settings_xml_with(key_attachment: &str, allow: bool) -> Vec<u8> {
          \x20 </Location>\n\
          </EntrySettings>\n"
     )
-    .into_bytes()
 }
 
 /// How an entry wants a key handled once it has been pushed into an agent that
@@ -70,13 +118,13 @@ pub struct ForwardPolicy {
     /// daemon's core guarantee. So `false` here means "leave the copy sitting in
     /// the other agent" — it never means "keep serving it from troved".
     pub remove_at_close: bool,
-    /// `UseLifetimeConstraintWhenSigning` + `LifetimeConstraintDuration`, folded
+    /// `UseLifetimeConstraintWhenAdding` + `LifetimeConstraintDuration`, folded
     /// into one value: `Some(n)` when the entry asks the receiving agent to
     /// expire the key after `n` seconds (`SSH_AGENT_CONSTRAIN_LIFETIME`),
     /// `None` when the entry expresses no preference and the daemon's own
     /// default applies.
     pub lifetime_secs: Option<u32>,
-    /// `UseConfirmConstraintWhenSigning` — make the receiving agent prompt the
+    /// `UseConfirmConstraintWhenAdding` — make the receiving agent prompt the
     /// user before every use of the key (`SSH_AGENT_CONSTRAIN_CONFIRM`).
     pub confirm: bool,
 }
@@ -107,21 +155,68 @@ pub enum Decision {
     Skip,
 }
 
+/// Decode the attachment to text.
+///
+/// KeePassXC writes this file as **UTF-16** (its own exports declare
+/// `encoding="UTF-16"`), so a UTF-8-only reader skips every entry a KeePassXC
+/// user has marked — which is the opposite of the intent, and silently. We
+/// accept UTF-8 (what trove itself writes), and UTF-16 in either byte order,
+/// with or without a BOM.
+fn decode(bytes: &[u8]) -> Option<String> {
+    // UTF-16 MUST be detected before trying UTF-8: NUL is a valid UTF-8
+    // character, so `from_utf8` happily accepts UTF-16LE ASCII text and returns
+    // "<\0A\0l\0l\0o\0w...". Every tag lookup then misses and the entry is
+    // skipped with no error to explain it — which is exactly the bug this
+    // function exists to fix.
+    let utf16 = match (bytes.first(), bytes.get(1)) {
+        (Some(0xFF), Some(0xFE)) => Some((&bytes[2..], false)),
+        (Some(0xFE), Some(0xFF)) => Some((&bytes[2..], true)),
+        (Some(0x00), Some(_)) => Some((bytes, true)),
+        (Some(_), Some(0x00)) => Some((bytes, false)),
+        _ => None,
+    };
+    if utf16.is_none() {
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            return Some(s.trim_start_matches('\u{feff}').to_string());
+        }
+        return None;
+    }
+    if bytes.len() < 2 || !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let (body, big_endian) = utf16?;
+    // Indexed rather than `chunks_exact(2)`: clippy's
+    // `chunks_exact_to_as_chunks` fires on a constant chunk size and steers you
+    // to `as_chunks`, which is newer than the toolchain floor this crate builds
+    // on. Stepping by two needs neither.
+    let mut units: Vec<u16> = Vec::with_capacity(body.len() / 2);
+    for i in (0..body.len().saturating_sub(1)).step_by(2) {
+        let pair = [body[i], body[i + 1]];
+        units.push(if big_endian {
+            u16::from_be_bytes(pair)
+        } else {
+            u16::from_le_bytes(pair)
+        });
+    }
+    String::from_utf16(&units).ok()
+}
+
 /// Parse the bytes of a `KeeAgent.settings` attachment.
 ///
 /// Returns `Skip` on parse failure — conservative, avoids loading a key the
 /// user didn't opt in to.
 pub fn parse(bytes: &[u8], entry_title: &str) -> Decision {
-    let xml = match std::str::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => {
+    let decoded = match decode(bytes) {
+        Some(s) => s,
+        None => {
             eprintln!(
-                "keeagent: '{}': KeeAgent.settings is not valid UTF-8, skipping",
+                "keeagent: '{}': KeeAgent.settings is neither UTF-8 nor UTF-16, skipping",
                 entry_title
             );
             return Decision::Skip;
         }
     };
+    let xml = decoded.as_str();
 
     if !bool_tag(xml, "AllowUseOfSshKey") || !bool_tag(xml, "AddAtDatabaseOpen") {
         return Decision::Skip;
@@ -131,13 +226,19 @@ pub fn parse(bytes: &[u8], entry_title: &str) -> Decision {
         // Absent tag ⇒ the default, not `false`: `bool_tag` can't tell "said no"
         // from "said nothing", and for removal those must differ.
         remove_at_close: bool_tag_or(xml, "RemoveAtDatabaseClose", true),
-        lifetime_secs: bool_tag(xml, "UseLifetimeConstraintWhenSigning")
-            .then(|| u32_tag(xml, "LifetimeConstraintDuration").unwrap_or(DEFAULT_LIFETIME_SECS)),
-        confirm: bool_tag(xml, "UseConfirmConstraintWhenSigning"),
+        lifetime_secs: (bool_tag(xml, "UseLifetimeConstraintWhenAdding")
+            || bool_tag(xml, "UseLifetimeConstraintWhenSigning"))
+        .then(|| u32_tag(xml, "LifetimeConstraintDuration").unwrap_or(DEFAULT_LIFETIME_SECS)),
+        confirm: bool_tag(xml, "UseConfirmConstraintWhenAdding")
+            || bool_tag(xml, "UseConfirmConstraintWhenSigning"),
     };
 
-    match str_tag(xml, "SelectedType").as_deref() {
-        Some("Attachment") => match str_tag(xml, "AttachmentName") {
+    // KeePassXC writes `attachment`; older/other writers use `Attachment`.
+    match str_tag(xml, "SelectedType")
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("attachment") => match str_tag(xml, "AttachmentName") {
             Some(name) if !name.is_empty() => Decision::Load {
                 attachment: name,
                 forward,
@@ -197,6 +298,120 @@ fn str_tag(xml: &str, tag: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Exactly what KeePassXC 2.7 writes: UTF-16LE with a BOM, `SelectedType`
+    /// lowercased, and the constraint tags spelled `...WhenAdding`. Taken from
+    /// a real vault — trove skipped every entry like this, silently, because
+    /// `str::from_utf8` accepts UTF-16LE ASCII (NUL is a valid UTF-8 char) and
+    /// then no tag ever matches.
+    fn keepassxc_utf16(attachment: &str) -> Vec<u8> {
+        let text = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+             <EntrySettings xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n\
+             \x20 <AllowUseOfSshKey>true</AllowUseOfSshKey>\n\
+             \x20 <AddAtDatabaseOpen>true</AddAtDatabaseOpen>\n\
+             \x20 <RemoveAtDatabaseClose>true</RemoveAtDatabaseClose>\n\
+             \x20 <UseConfirmConstraintWhenAdding>false</UseConfirmConstraintWhenAdding>\n\
+             \x20 <UseLifetimeConstraintWhenAdding>true</UseLifetimeConstraintWhenAdding>\n\
+             \x20 <LifetimeConstraintDuration>600</LifetimeConstraintDuration>\n\
+             \x20 <Location>\n\
+             \x20   <SelectedType>attachment</SelectedType>\n\
+             \x20   <AttachmentName>{attachment}</AttachmentName>\n\
+             \x20 </Location>\n\
+             </EntrySettings>\n"
+        );
+        let mut out = vec![0xFF, 0xFE];
+        for u in text.encode_utf16() {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn reads_a_real_keepassxc_utf16_blob() {
+        match parse(&keepassxc_utf16("gitea_ed25519"), "gitea") {
+            Decision::Load {
+                attachment,
+                forward,
+            } => {
+                assert_eq!(attachment, "gitea_ed25519");
+                assert_eq!(forward.lifetime_secs, Some(600), "WhenAdding spelling");
+                assert!(!forward.confirm);
+            }
+            Decision::Skip => panic!("a marked KeePassXC entry must not be skipped"),
+        }
+    }
+
+    #[test]
+    fn utf16_without_a_bom_is_still_read() {
+        let with_bom = keepassxc_utf16("id_ed25519");
+        let no_bom = &with_bom[2..];
+        assert!(matches!(parse(no_bom, "e"), Decision::Load { .. }));
+    }
+
+    #[test]
+    fn utf16_big_endian_is_read() {
+        let text = "<?xml version=\"1.0\"?><EntrySettings>\
+            <AllowUseOfSshKey>true</AllowUseOfSshKey>\
+            <AddAtDatabaseOpen>true</AddAtDatabaseOpen>\
+            <Location><SelectedType>attachment</SelectedType>\
+            <AttachmentName>k</AttachmentName></Location></EntrySettings>";
+        let mut be = vec![0xFE, 0xFF];
+        for u in text.encode_utf16() {
+            be.extend_from_slice(&u.to_be_bytes());
+        }
+        assert!(matches!(parse(&be, "e"), Decision::Load { .. }));
+    }
+
+    #[test]
+    fn selected_type_is_case_insensitive() {
+        for variant in ["attachment", "Attachment", "ATTACHMENT"] {
+            let xml = format!(
+                "<EntrySettings><AllowUseOfSshKey>true</AllowUseOfSshKey>\
+                 <AddAtDatabaseOpen>true</AddAtDatabaseOpen><Location>\
+                 <SelectedType>{variant}</SelectedType><AttachmentName>k</AttachmentName>\
+                 </Location></EntrySettings>"
+            );
+            assert!(
+                matches!(parse(xml.as_bytes(), "e"), Decision::Load { .. }),
+                "SelectedType={variant} should load"
+            );
+        }
+    }
+
+    /// What we write must read back — in either encoding, through the same
+    /// parser a KeePassXC file goes through.
+    #[test]
+    fn both_encodings_we_write_round_trip() {
+        for enc in [Encoding::Utf8, Encoding::Utf16Le] {
+            let bytes = settings_xml_encoded("id_ed25519", true, enc);
+            match parse(&bytes, "e") {
+                Decision::Load { attachment, .. } => assert_eq!(attachment, "id_ed25519"),
+                Decision::Skip => panic!("{enc:?} did not round-trip"),
+            }
+            let off = settings_xml_encoded("id_ed25519", false, enc);
+            assert!(
+                matches!(parse(&off, "e"), Decision::Skip),
+                "{enc:?} opt-out must skip"
+            );
+        }
+    }
+
+    #[test]
+    fn utf16_output_starts_with_a_bom_and_declares_utf16() {
+        let bytes = settings_xml_encoded("k", true, Encoding::Utf16Le);
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE], "BOM, as KeePassXC writes");
+        let body = &bytes[2..];
+        let mut units = Vec::with_capacity(body.len() / 2);
+        for i in (0..body.len().saturating_sub(1)).step_by(2) {
+            units.push(u16::from_le_bytes([body[i], body[i + 1]]));
+        }
+        let text = String::from_utf16(&units).expect("valid UTF-16");
+        assert!(
+            text.contains("encoding=\"UTF-16\""),
+            "must not lie about its encoding"
+        );
+    }
+
     fn xml(allow: bool, add_at_open: bool, sel_type: &str, att: &str) -> Vec<u8> {
         format!(
             r#"<?xml version="1.0" encoding="utf-8"?>
@@ -221,8 +436,8 @@ mod tests {
   <AllowUseOfSshKey>true</AllowUseOfSshKey>
   <AddAtDatabaseOpen>true</AddAtDatabaseOpen>
   <RemoveAtDatabaseClose>{remove}</RemoveAtDatabaseClose>
-  <UseConfirmConstraintWhenSigning>{confirm}</UseConfirmConstraintWhenSigning>
-  <UseLifetimeConstraintWhenSigning>{use_lifetime}</UseLifetimeConstraintWhenSigning>
+  <UseConfirmConstraintWhenAdding>{confirm}</UseConfirmConstraintWhenAdding>
+  <UseLifetimeConstraintWhenAdding>{use_lifetime}</UseLifetimeConstraintWhenAdding>
   <LifetimeConstraintDuration>{duration}</LifetimeConstraintDuration>
   <Location>
     <SelectedType>Attachment</SelectedType>
