@@ -632,6 +632,14 @@ Permission model: every socket is bound by the daemon, then `chmod 0600` so only
 
 All env vars are read at process start.
 
+`--env` loads them from a file first: bare `--env` reads `./.env.trove`, `--env <dir>`
+reads `<dir>/.env.trove`, and `--env <file>` reads that file. Lines are `KEY=VALUE`,
+with `#` comments, an optional `export ` prefix and optional quotes. A variable already
+set in the environment wins, so the file supplies defaults rather than overriding the
+caller. `TROVE_DB_PASSWORD` in such a file unlocks the vault without a prompt — and is
+only consulted when `--env` was passed, so an exported password never silently opens a
+vault for a command that didn't ask for one.
+
 | Env var | Default | Effect |
 | --- | --- | --- |
 | `TROVE_SOCK` | `$XDG_RUNTIME_DIR/trove.sock` or `${TMPDIR:-/tmp}/trove-$UID.sock` | Path of the control socket. |
@@ -639,6 +647,7 @@ All env vars are read at process start.
 | `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |
 | `TROVE_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. Also the default lifetime constraint on forwarded SSH keys. |
 | `TROVE_SSH_FORWARD` | (on) | Set to `0` / `false` / `no` / `off` to stop pushing unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`. Read on every unlock, not just at start. Forwarding is already inert when `$SSH_AUTH_SOCK` is unset or points at trove's own socket. |
+| `TROVE_DB_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above). Prefer keeping it in a `0600` `.env.trove` that is never exported — an exported variable is inherited by every child process. |
 | `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
 | `TMPDIR` | `/tmp` | Used as fallback when `XDG_RUNTIME_DIR` is unset/empty. |

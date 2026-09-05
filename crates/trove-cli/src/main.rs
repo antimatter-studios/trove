@@ -57,6 +57,26 @@ struct Cli {
     #[arg(long = "password-stdin", global = true)]
     password_stdin: bool,
 
+    /// Load environment variables from a `.env.trove` file before running.
+    ///
+    /// Bare `--env` reads `./.env.trove`; pass a path to read a different file.
+    /// Lines are `KEY=VALUE`, with `#` comments, an optional `export ` prefix
+    /// and optional quotes. A variable already set in the environment wins, so
+    /// the file supplies defaults rather than overriding the caller.
+    ///
+    /// Its main use is `TROVE_DB_PASSWORD`, which unlocks the vault without a
+    /// prompt. Nothing is read unless this flag is given — trove never picks up
+    /// a password file just because one happens to exist next to it.
+    #[arg(
+        long = "env",
+        global = true,
+        num_args = 0..=1,
+        default_missing_value = DEFAULT_ENV_FILE,
+        conflicts_with = "password_stdin",
+        value_name = "PATH"
+    )]
+    env_file: Option<PathBuf>,
+
     /// Operate directly on this .kdbx file (offline mode), bypassing the daemon.
     ///
     /// trove has two modes, selected by the presence of this flag:
@@ -962,6 +982,16 @@ fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponseKey> {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    // First, before anything reads the environment — socket paths, the vault
+    // default, the idle timeout all come from it.
+    ENV_OPT_IN
+        .set(cli.env_file.is_some())
+        .expect("run() is called once");
+    if let Some(given) = cli.env_file.as_deref() {
+        let path = resolve_env_file(given);
+        let n = load_env_file(&path)?;
+        eprintln!("trove: loaded {n} variable(s) from {}", path.display());
+    }
     let pw_stdin = cli.password_stdin;
     // Fail fast on an unreadable keyfile, before any password prompt.
     let keyfile_bytes = match cli.key_file.as_deref() {
@@ -1646,7 +1676,9 @@ fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
             vault_path.display()
         ));
     }
-    let password = if pw_stdin {
+    let password = if let Some(p) = password_from_env() {
+        p
+    } else if pw_stdin {
         read_password_from_stdin().context("reading new vault password from stdin")?
     } else {
         prompt_new_password().context("reading new vault password")?
@@ -2337,7 +2369,9 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     if !path.exists() {
         return Err(CoreError::NotFound(path.to_path_buf()).into());
     }
-    let password = if pw_stdin {
+    let password = if let Some(p) = password_from_env() {
+        p
+    } else if pw_stdin {
         read_password_from_stdin().context("reading vault password from stdin")?
     } else {
         rpassword::prompt_password("Vault password: ").context("reading vault password")?
@@ -2361,6 +2395,83 @@ fn prompt_new_password() -> Result<String> {
         return Err(anyhow!("password must not be empty"));
     }
     Ok(first)
+}
+
+/// Filename `--env` falls back to: used bare, and appended when the path given
+/// is a directory.
+const DEFAULT_ENV_FILE: &str = ".env.trove";
+/// The variable that supplies the vault password. Everything else in the file
+/// is loaded too — `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths — so
+/// one file can carry a whole trove configuration, not just a secret.
+const PASSWORD_VAR: &str = "TROVE_DB_PASSWORD";
+
+/// Whether `--env` was given. Only then will a password be taken from the
+/// environment: an exported `TROVE_DB_PASSWORD` must never silently unlock a
+/// vault for a command that didn't ask for it.
+static ENV_OPT_IN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Resolve what `--env` was given to an actual file: a directory gets
+/// `.env.trove` appended, a file is taken as-is.
+fn resolve_env_file(given: &Path) -> PathBuf {
+    if given.is_dir() {
+        given.join(DEFAULT_ENV_FILE)
+    } else {
+        given.to_path_buf()
+    }
+}
+
+/// Read `KEY=VALUE` lines from a dotenv-style file into the process
+/// environment. A variable already set wins, so the file supplies defaults and
+/// never overrides an explicit caller.
+///
+/// Deliberately minimal: `#` comments, blank lines, an optional `export `
+/// prefix, and optionally quoted values. No interpolation and no multi-line
+/// values — this holds configuration and a password, not a shell script.
+fn load_env_file(path: &Path) -> Result<usize> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading env file {}", path.display()))?;
+    let mut set = 0usize;
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!("{}:{}: expected KEY=VALUE", path.display(), i + 1));
+        };
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(anyhow!(
+                "{}:{}: invalid variable name",
+                path.display(),
+                i + 1
+            ));
+        }
+        let v = value.trim();
+        let unquoted = v
+            .strip_prefix('"')
+            .and_then(|x| x.strip_suffix('"'))
+            .or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+            .unwrap_or(v);
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, unquoted);
+            set += 1;
+        }
+    }
+    Ok(set)
+}
+
+/// The vault password from the environment, if `--env` opted in and the
+/// variable is set to something non-empty.
+fn password_from_env() -> Option<String> {
+    if !ENV_OPT_IN.get().copied().unwrap_or(false) {
+        return None;
+    }
+    match std::env::var(PASSWORD_VAR) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
 }
 
 fn read_password_from_stdin() -> Result<String> {
@@ -3710,7 +3821,9 @@ fn cmd_unlock(
         .to_str()
         .ok_or_else(|| anyhow!("vault path is not valid utf-8"))?
         .to_string();
-    let password = if pw_stdin {
+    let password = if let Some(p) = password_from_env() {
+        p
+    } else if pw_stdin {
         read_password_from_stdin().context("reading vault password from stdin")?
     } else {
         rpassword::prompt_password("Vault password: ").context("reading vault password")?
