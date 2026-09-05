@@ -4,7 +4,49 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
-## Unreleased
+## v0.8.0 — 2026-09-05
+
+**Unlocking in the desktop app now does what unlocking in the daemon does.** The
+app held its own vault and talked to nothing, so opening one gave you an entry
+list and no more: no agent keys, no materialized files, nothing another
+application or a terminal could see. It now forwards the vault's SSH keys into
+the system agent and writes `Materialize.*` entries to their targets, and
+locking undoes both — files first, then keys. Per-vault bookkeeping means
+locking one vault never retracts another's keys. Both are settings-gated, with a
+settings panel and a per-entry "add this key to the system agent" toggle that
+writes the same `KeeAgent.settings` KeePassXC reads. A GUI has no shell, so this
+is the only route from a desktop unlock to the rest of the machine.
+
+**KeePassXC's `KeeAgent.settings` are finally read correctly.** On a real
+KeePassXC vault trove served 2 SSH keys where KeePassXC served 5, and the two
+that worked got in through the content-scan fallback — every key the user had
+explicitly marked was skipped, silently. Three causes: the file is UTF-16 and
+`str::from_utf8` *accepts* those bytes (NUL is valid UTF-8), so every tag lookup
+missed; `SelectedType` is written lowercase; and the constraint tags are spelled
+`...WhenAdding`, not `...WhenSigning`, so lifetime and confirm constraints never
+applied. Reading now handles UTF-8 and UTF-16 (either byte order, BOM optional),
+matches case-insensitively, and accepts both tag spellings. Since we read both
+encodings we write both — `settings_xml_encoded` takes an `Encoding`, and the
+declared `encoding=` always matches the bytes. Proven against the real
+`keepassxc-cli` in both directions.
+
+**`--env` opens a vault without a prompt.** `trove unlock <vault> --env` reads
+`./.env.trove`; `--env <dir>` reads that directory's; `--env <file>` reads that
+file. It is a general loader, not a password mechanism: every `KEY=VALUE` lands
+in the environment, so `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT` and the socket paths
+can live in one file, and `TROVE_DB_PASSWORD` is simply the one the unlock path
+also consults. A variable already set wins, so the file supplies defaults; and
+the password is used only when `--env` was passed, so an exported
+`TROVE_DB_PASSWORD` can never silently unlock a vault for a command that didn't
+ask for one.
+
+**macOS binaries are signed with the hardened runtime.** Not for Gatekeeper —
+Homebrew tarballs aren't quarantined — but because `troved` holds the decrypted
+vault and your SSH keys in memory, and an ad-hoc signed binary can be attached
+to by any process running as the same user. Apple's own `ssh-agent` is
+SIP-protected and refuses; a Developer ID signature with the hardened runtime
+and no `get-task-allow` puts `troved` in that class. Release builds sign when
+the `APPLE_*` secrets are present; `scripts/sign-macos.sh` does it locally.
 
 **Several vaults unlocked at once.** `unlock` is now additive rather than
 replacing whatever was open: a personal vault and a work vault can serve keys
