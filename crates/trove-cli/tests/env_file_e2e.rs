@@ -1,0 +1,254 @@
+//! End-to-end tests for `--env`: load a dotenv-style file before running, so a
+//! vault opens without a prompt, a pipeline, or a password on the command line.
+//!
+//! Three forms, all exercised below: bare `--env` (`./.env.trove` in the
+//! current directory), `--env <dir>` (that directory's `.env.trove`), and
+//! `--env <file>`.
+//!
+//! Two properties matter beyond "it works":
+//!   * A variable already set in the environment WINS over the file, so the
+//!     file supplies defaults and never overrides an explicit caller.
+//!   * The password is taken from the environment ONLY when `--env` was passed.
+//!     An exported `TROVE_DB_PASSWORD` must never silently unlock a vault for a
+//!     command that didn't ask for it.
+//!
+//! Skips gracefully when the `trove` binary is missing.
+
+#![allow(missing_docs)]
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use tempfile::TempDir;
+
+const PASSWORD: &str = "env-file-test-pw";
+
+fn find_trove() -> Option<PathBuf> {
+    let p = PathBuf::from(option_env!("CARGO_BIN_EXE_trove")?);
+    p.exists().then_some(p)
+}
+
+/// Run `trove` in `cwd` with a clean environment plus `extra_env`.
+fn run_in(
+    trove: &Path,
+    cwd: &Path,
+    args: &[&str],
+    stdin: &str,
+    extra_env: &[(&str, &str)],
+) -> Output {
+    let mut cmd = Command::new(trove);
+    cmd.args(args)
+        .current_dir(cwd)
+        .env_remove("TROVE_SESSION")
+        .env_remove("TROVE_DB_PASSWORD")
+        .env_remove("TROVE_VAULT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn trove");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait for trove")
+}
+
+/// A vault with one entry, plus a `.env.trove` in `dir` naming its password.
+fn fixture(trove: &Path, dir: &Path) -> PathBuf {
+    let vault = dir.join("v.kdbx");
+    let out = run_in(
+        trove,
+        dir,
+        &[
+            "init",
+            "--vault",
+            vault.to_str().unwrap(),
+            "--password-stdin",
+        ],
+        &format!("{PASSWORD}\n"),
+        &[],
+    );
+    assert!(out.status.success(), "init should succeed");
+    std::fs::write(
+        dir.join(".env.trove"),
+        format!("# vault credentials\nTROVE_DB_PASSWORD={PASSWORD}\n"),
+    )
+    .expect("write .env.trove");
+    vault
+}
+
+#[test]
+fn bare_env_reads_dot_env_trove_from_the_current_directory() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "bare --env should unlock: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn env_accepts_a_directory_and_appends_the_default_filename() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    let elsewhere = TempDir::new().expect("second tempdir");
+
+    // Run from a directory with no .env.trove of its own, pointing at the one
+    // that has it.
+    let out = run_in(
+        &trove,
+        elsewhere.path(),
+        &[
+            "list",
+            "--vault",
+            vault.to_str().unwrap(),
+            "--env",
+            tmp.path().to_str().unwrap(),
+        ],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "--env <dir> should find <dir>/.env.trove: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn env_accepts_an_explicit_file_path() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    let renamed = tmp.path().join("credentials.env");
+    std::fs::rename(tmp.path().join(".env.trove"), &renamed).expect("rename");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &[
+            "list",
+            "--vault",
+            vault.to_str().unwrap(),
+            "--env",
+            renamed.to_str().unwrap(),
+        ],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "--env <file> should read that file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn the_environment_wins_over_the_file() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+
+    // The file holds the right password; the environment holds a wrong one.
+    // The environment must win, so this must FAIL — proving the file supplies
+    // defaults rather than overriding the caller.
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[("TROVE_DB_PASSWORD", "not-the-password")],
+    );
+    assert!(
+        !out.status.success(),
+        "an explicit environment variable must override the file"
+    );
+}
+
+#[test]
+fn the_password_is_only_used_when_env_was_asked_for() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+
+    // Correct password in the environment, but no --env: trove must not use it.
+    // Stdin is closed, so a prompt fails rather than hanging.
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap()],
+        "",
+        &[("TROVE_DB_PASSWORD", PASSWORD)],
+    );
+    assert!(
+        !out.status.success(),
+        "TROVE_DB_PASSWORD must not unlock a vault unless --env opted in"
+    );
+}
+
+#[test]
+fn a_missing_env_file_is_an_error_not_a_silent_prompt() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    std::fs::remove_file(tmp.path().join(".env.trove")).expect("remove");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(!out.status.success(), "a missing --env file must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(".env.trove"),
+        "the error should name the file it looked for, got: {err}"
+    );
+}
+
+#[test]
+fn other_trove_variables_load_from_the_file_too() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    // `--env` is a general loader, not a password mechanism: anything in the
+    // file lands in the environment. TROVE_VAULT is the useful one — it makes
+    // the path argument unnecessary for other tooling.
+    std::fs::write(
+        tmp.path().join(".env.trove"),
+        format!("export TROVE_DB_PASSWORD=\"{PASSWORD}\"\nTROVE_NO_VERSION_WARN=1\n"),
+    )
+    .expect("write");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "quoted values and `export ` prefixes should parse: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
