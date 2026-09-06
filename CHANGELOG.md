@@ -4,6 +4,22 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.9.1 — 2026-09-06
+
+**The app is called Trove.** The Dock read "TroveDesktop" — the name of the
+repository that builds it, not something a person calls an application. The Dock
+and Finder label an app by its bundle filename, so the display keys in
+`Info.plist` could not fix this on their own: LaunchServices already held a
+friendlier name while the Dock showed otherwise. `productName` is what names the
+bundle, so the app is now `Trove.app`, with `CFBundleName` and the window title
+agreeing with it.
+
+The identifier stays `com.trove.desktop`, so macOS treats this as the same
+application — preferences and granted permissions carry over rather than
+resetting. The Homebrew cask token stays `trove-desktop`, which is what keeps it
+a separate package from the `trove-cli` formula, and the CLI is still `trove`.
+The macOS release asset is now `Trove_<version>_universal.dmg`.
+
 ## v0.9.0 — 2026-09-06
 
 **Unlocking in the desktop app no longer freezes the window.** Every
