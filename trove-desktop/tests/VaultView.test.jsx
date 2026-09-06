@@ -7,6 +7,24 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
+// overlays.jsx listens for unlock progress events. There is no Tauri IPC in a
+// test process, so stub the bridge rather than letting the real one reject
+// asynchronously in the middle of an unlock assertion.
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve()) }));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}));
+
+// The titlebar starts window drags through this; there is no window to drag in
+// a test process.
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    startDragging: () => Promise.resolve(),
+    toggleMaximize: () => Promise.resolve(),
+  }),
+}));
+
 vi.mock('../src/api.js', () => ({
   listVaults: vi.fn(),
   registerVault: vi.fn(),
@@ -20,6 +38,7 @@ vi.mock('../src/api.js', () => ({
   deleteEntry: vi.fn(),
   setFavorite: vi.fn(),
   getSettings: vi.fn(),
+  buildInfo: vi.fn(),
   setAgentKey: vi.fn(),
   setSettings: vi.fn(),
 }));
@@ -43,6 +62,7 @@ async function mountUnlocked() {
 }
 
 beforeEach(() => {
+  api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
   api.setSettings.mockResolvedValue(undefined);
   vi.clearAllMocks();

@@ -35,3 +35,21 @@ trove-core = { path = "../../crates/trove-core" }
 # it. Same arrangement trove-cli already uses; it pulls in tokio, which Tauri
 # is running anyway.
 troved = { path = "../../crates/troved" }
+
+# Argon2 is deliberately CPU-heavy, and unoptimised it is ~10x slower still: a
+# debug build took 11.4s to open a vault the release CLI opens in ~1.5s. That
+# is a dev-experience trap, not a vault problem — so optimise the crates that
+# actually do the KDF work.
+#
+# Deliberately NOT `package."*"`: optimising every dependency cost minutes on
+# each rebuild (and `troved` is a path dep, so editing it rebuilt the lot),
+# which traded a slow unlock for a slow edit-run loop. Only these three are on
+# the hot path.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.trove-core]
+opt-level = 3
+
+[profile.dev.package.troved]
+opt-level = 3

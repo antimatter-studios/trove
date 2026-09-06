@@ -57,6 +57,22 @@ function ResizeHandle({ onDelta, onReset, label }) {
 
 // Placeholder so the chrome renders before any vault is registered (fresh
 // install with no persisted recents). It reads as a locked, empty vault.
+// Countdown text. Coarse while it is far away (nobody reads "1:04:59" as
+// anything but "about an hour") and precise under a minute, when it does start
+// to matter.
+function fmtLeft(ms) {
+  const s = Math.ceil(ms / 1000);
+  if (s >= 3600) {
+    // Floor, not round: rounding the remainder produces "24h60m" at 90000s
+    // instead of carrying into "25h".
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return m ? `${h}h${m}m` : `${h}h`;
+  }
+  if (s >= 60) return `${Math.floor(s / 60)}m`;
+  return `${s}s`;
+}
+
 const NO_VAULT = { id: null, name: "No vault", file: "—", path: "", locked: true, entries: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
 
 // Give a fetched VaultDto the per-vault view state the UI layers on top.
@@ -90,6 +106,9 @@ function App() {
   const [themeMenu, setThemeMenu] = useState(false);
   const [switcher, setSwitcher] = useState(false);
   const [openVault, setOpenVault] = useState(false);
+  // Which build this is. A dev window and an installed one look identical
+  // otherwise, which makes "is this even my change?" a guess.
+  const [build, setBuild] = useState(null);
   const [newVaultPath, setNewVaultPath] = useState(null);
   const [revealed, setRevealed] = useState(false);
   // Secret detail for the selected entry, fetched on selection (get_entry_detail).
@@ -114,6 +133,51 @@ function App() {
   // nothing on the main screen needs them, and a promise resolving at mount
   // lands a state update in the middle of whatever else is starting up — which
   // made the unlock tests flaky on a loaded machine.
+  useEffect(() => {
+    api.buildInfo().then(setBuild).catch(() => {});
+    api.getSettings().then(setSettings).catch(() => {});
+  }, []);
+
+  // A production build is just its version; anything else carries the mode and
+  // the commit, so "which build is this?" is answerable from the title bar.
+  const buildLabel = !build
+    ? ""
+    : build.mode
+      ? `${build.version}-${build.mode}${build.commit ? ` · ${build.commit}` : ""}`
+      : build.version;
+
+  // The pill says what the timer actually does, so changing the setting is
+  // visible without opening the panel again.
+  // One second-tick drives both countdowns; two intervals would drift apart.
+  const appLockAt = useRef(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (vault.locked) return undefined;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [vault.locked]);
+
+  const openCount = vaults.filter((v) => !v.locked).length;
+  const agentKeys = vaults.reduce((n, v) => n + (v.agentKeys || 0), 0);
+  const idleMins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
+  // Counts down to the window locking; resets on every interaction, so it also
+  // shows that trove noticed you are still here.
+  const appLockLeft = idleMins > 0 && !locked && appLockAt.current
+    ? Math.max(0, appLockAt.current - now)
+    : null;
+  const idleLabel = idleMins > 0
+    ? `App lock ${appLockLeft == null ? `${idleMins}m` : fmtLeft(appLockLeft)}`
+    : "No app lock";
+
+  // Counts down to the first forwarded key dropping out of the agent. Not a
+  // "data lock" timer — a data lock is something you do, not something that
+  // happens — this is the expiry those keys were given.
+  const expireAt = vaults.reduce(
+    (soonest, v) => (v.keysExpireAt && (!soonest || v.keysExpireAt < soonest) ? v.keysExpireAt : soonest),
+    null
+  );
+  const keysLeft = expireAt ? Math.max(0, expireAt * 1000 - now) : null;
+
   const openSettings = useCallback(() => {
     setSettingsOpen(true);
     if (settings) return;
@@ -249,20 +313,47 @@ function App() {
   }, [selected, copyPassword]);
 
   // ---- vault actions ----
-  const lock = useCallback(async () => {
+  // `retractKeys` decides whether forwarded keys come back out of the OS agent.
+  // An explicit lock says yes; the idle timer says no — see the auto-lock below.
+  // Lock ONE vault. `retractKeys` false is the app-lock case: hide it, leave
+  // what it handed the machine alone.
+  const lockOne = useCallback(async (id, retractKeys) => {
+    if (id == null) return;
+    try { await api.lockVault(id, retractKeys); } catch (e) {}
+    setVaults((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], loaded: false, selId: null } : v));
+  }, []);
+
+  // Data lock: this database only. Its keys come out of the agent and its files
+  // go, and if another vault is still open you land on that one rather than at
+  // a login screen — you have not finished with the app, only with this vault.
+  const dataLock = useCallback(async () => {
     stopClip();
     setPalette(false); setForm(null); setDel(null);
     const id = activeId;
-    if (id == null) return;
-    try { await api.lockVault(id); } catch (e) {}
-    setVaults((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], loaded: false, selId: null } : v));
-  }, [activeId, stopClip]);
+    await lockOne(id, true);
+    const next = vaults.find((v) => v.id !== id && !v.locked);
+    if (next) setActiveId(next.id);
+  }, [activeId, vaults, lockOne, stopClip]);
+
+  // App lock: the whole app steps away, so every open vault hides. Nothing is
+  // taken back from the machine — that is what the data lock is for.
+  const appLock = useCallback(async () => {
+    stopClip();
+    setPalette(false); setForm(null); setDel(null);
+    const open = vaults.filter((v) => !v.locked).map((v) => v.id);
+    for (const id of open) await lockOne(id, false);
+  }, [vaults, lockOne, stopClip]);
+
+  // Kept for callers that just mean "lock what I am looking at".
+  const lock = useCallback((retractKeys = true) => (retractKeys ? dataLock() : appLock()), [dataLock, appLock]);
   // Async: decrypt via the backend. Resolves on success (parent unmounts Unlock),
   // rejects (bad password) so <Unlock> can surface the error.
-  const unlock = async (pw) => {
-    const list = await api.unlockVault(vault.id, pw);
+  // Resolves with the entry list and deliberately does NOT flip the view:
+  // <Unlock> shows a progress checklist while the backend works, and flipping
+  // here would unmount it mid-list. It calls `unlockReady` when it's finished.
+  const unlock = async (pw) => await api.unlockVault(vault.id, pw);
+  const unlockReady = (list) =>
     patch({ locked: false, entries: list, loaded: true, group: "__all", selId: list[0] ? list[0].id : null });
-  };
   const switchVault = (id) => {
     setActiveId(id); setSwitcher(false);
     setPalette(false); setForm(null); setDel(null); setRevealed(false);
@@ -316,9 +407,9 @@ function App() {
 
   // Per-key opt-in. The backend writes KeeAgent.settings into the vault and
   // adds/removes the key in the running agent, then hands back a fresh list.
-  const toggleAgentKey = async (entryId, enabled) => {
+  const toggleAgentKey = async (entryId, enabled, policy) => {
     try {
-      const list = await api.setAgentKey(vault.id, entryId, enabled);
+      const list = await api.setAgentKey(vault.id, entryId, enabled, policy);
       patch({ entries: list });
     } catch (e) {
       console.error("agent key toggle failed", e);
@@ -350,21 +441,31 @@ function App() {
     setDel(null); setForm(null); flashPlain("Entry deleted");
   };
 
-  // ---- idle auto-lock (5 minutes) ----
+  // ---- app lock (idle) ----
+  // Locks the APP: closes the vault view and drops the decrypted database. It
+  // deliberately leaves keys in the OS agent. Those are machine-wide credentials with their own expiry;
+  // yanking them because nobody clicked this window for five minutes would kill
+  // a `git push` running in a terminal. An explicit Lock still retracts them.
   useEffect(() => {
     if (vault.locked || vault.id == null) return;
     let t;
-    const reset = () => { clearTimeout(t); t = setTimeout(() => { lock(); }, 5 * 60 * 1000); };
+    const mins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
+    if (mins <= 0) return undefined; // 0 = never lock on idle
+    const reset = () => {
+      clearTimeout(t);
+      appLockAt.current = Date.now() + mins * 60 * 1000;
+      t = setTimeout(() => { appLock(); }, mins * 60 * 1000);
+    };
     const evs = ["mousemove", "mousedown", "keydown", "wheel", "touchstart"];
     evs.forEach((ev) => window.addEventListener(ev, reset, { passive: true }));
     reset();
     return () => { clearTimeout(t); evs.forEach((ev) => window.removeEventListener(ev, reset)); };
-  }, [vault.locked, vault.id, lock]);
+  }, [vault.locked, vault.id, appLock, settings]);
 
   const paletteActions = [
     { label: "New entry", icon: "plus", kbd: "⌘N", run: openNew },
     { label: "Copy password", icon: "key", kbd: "⌘C", run: () => copy(null, null, "password") },
-    { label: "Lock vault", icon: "lock", kbd: "⌘L", run: lock },
+    { label: "Data lock — remove keys + files", icon: "lock", kbd: "⌘L", run: dataLock },
     ...vaults.filter((v) => v.id !== activeId).map((v) => ({
       label: "Switch to " + v.name + (v.locked ? " (locked)" : ""), icon: "shield",
       kbd: "⌘" + (vaults.indexOf(v) + 1), run: () => switchVault(v.id),
@@ -373,7 +474,7 @@ function App() {
     { label: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", icon: theme === "dark" ? "sun" : "moon", kbd: "⌘J", run: toggleTheme },
     { label: "Change color theme…", icon: "droplet", run: () => setThemeMenu(true) },
     { label: "Keyboard shortcuts", icon: "command", kbd: "?", run: () => setHelp(true) },
-    { label: "Settings…", icon: "key", run: openSettings },
+    { label: "Settings…", icon: "gear", run: openSettings },
     { label: "New vault…", icon: "plus", run: () => newVault() },
   ];
 
@@ -405,7 +506,7 @@ function App() {
       if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); if (!locked) setPalette((p) => !p); return; }
       if (locked) return;
 
-      if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); return lock(); }
+      if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); return dataLock(); }
       if (mod && e.key.toLowerCase() === "n") { e.preventDefault(); return openNew(); }
       if (anyOverlay || switcher || themeMenu) return;
       if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); if (selected) copy(null, null, "password"); return; }
@@ -434,54 +535,66 @@ function App() {
   const groupSub = (query ? filtered.length + " of " + entries.length + " match “" + query + "”" : filtered.length + (filtered.length === 1 ? " entry" : " entries"))
     + (group !== "__all" && group !== "__fav" ? " · " + group : "");
 
+
+  // The old toolbar row held these; they sit at the top of the detail column now.
+  const appActions = (
+    <>
+      <button className="icon-btn" onClick={() => setPalette(true)} title="Command palette (⌘K)"><Icon name="command" size={17} /></button>
+      <div className="divider-v" />
+      <button className="icon-btn" onClick={toggleTheme} title="Toggle theme (⌘J)"><Icon name={theme === "dark" ? "sun" : "moon"} size={17} /></button>
+      <button className={"icon-btn" + (themeMenu ? " active" : "")} onClick={() => setThemeMenu((m) => !m)} title="Appearance"><Icon name="droplet" size={17} /></button>
+      <button className="icon-btn" onClick={openSettings} title="Settings"><Icon name="gear" size={17} /></button>
+      <button className="icon-btn" onClick={() => setHelp(true)} title="Shortcuts (?)" style={{ fontWeight: 700, fontSize: 15 }}>?</button>
+    </>
+  );
+
   return (
     <div className="desk">
       <div className="window">
         {/* titlebar */}
+        {/* The OS draws the window buttons and owns dragging. An overlay title
+            bar was tried and reverted: it hands the drag region to the webview,
+            and every variant either dragged once per focus or turned the press
+            into a text selection. This strip carries the build stamp and vault
+            name only. */}
         <div className="titlebar">
-          <div className="traffic"><span className="tl r" /><span className="tl y" /><span className="tl g" /></div>
-          <div className="win-title"><span className={"dot" + (locked ? " locked" : "")} /> Trove — {vault.file}</div>
-          <div className="rgt" />
-        </div>
-
-        {/* toolbar */}
-        <div className="toolbar">
-          <div className="status-pill">
-            <Icon name={locked ? "lock" : "unlock"} size={15} className={"lk" + (locked ? " amber" : "")} />
-            <span>{locked ? "Locked" : "Unlocked"}</span>
-            {!locked && <span className="sub">· auto‑lock 5m</span>}
+          {/* Left: who this is. */}
+          <div className="win-brand">
+            <img src="/favicon.svg" alt="" width="15" height="15" />
+            <span>Trove</span>
           </div>
-          {!locked ? (
-            <div className="search" onClick={() => searchRef.current && searchRef.current.focus()}>
-              <Icon name="search" size={16} className="si" />
-              <input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={"Search " + vault.name.toLowerCase() + "…"} spellCheck="false" />
-              {query ? (
-                <button className="icon-btn" style={{ width: 24, height: 24 }} onClick={(e) => { e.stopPropagation(); setQuery(""); }}><Icon name="x" size={14} /></button>
-              ) : (
-                <span className="kbd">/</span>
-              )}
-            </div>
-          ) : (
-            <div style={{ flex: 1 }} />
-          )}
-          <div className="tbar-actions">
-            {!locked && <button className="btn-accent" onClick={openNew}><Icon name="plus" size={16} />New</button>}
-            {!locked && <button className="icon-btn" onClick={() => setPalette(true)} title="Command palette (⌘K)"><Icon name="command" size={17} /></button>}
-            <div className="divider-v" />
-            <button className="icon-btn" onClick={toggleTheme} title="Toggle theme (⌘J)"><Icon name={theme === "dark" ? "sun" : "moon"} size={17} /></button>
-            <button className={"icon-btn" + (themeMenu ? " active" : "")} onClick={() => setThemeMenu((m) => !m)} title="Appearance"><Icon name="droplet" size={17} /></button>
-            <button className="icon-btn" onClick={openSettings} title="Settings"><Icon name="key" size={17} /></button>
-            <button className="icon-btn" onClick={() => setHelp(true)} title="Shortcuts (?)" style={{ fontWeight: 700, fontSize: 15 }}>?</button>
-            {!locked && <button className="icon-btn" onClick={lock} title="Lock (⌘L)"><Icon name="lock" size={17} /></button>}
+          {/* Centre: which vault you are looking at, of possibly several. */}
+          <div className="win-title">
+            <span className={"dot" + (locked ? " locked" : "")} />
+            {vault.file}
+            {openCount > 1 && <span className="win-of"> · {openCount} open</span>}
+          </div>
+          {/* Right: what trove is currently doing to the machine, then which
+              build is doing it. The key count is the only view anyone has of
+              the system agent without opening a terminal. */}
+          <div className="rgt">
+            {agentKeys > 0 && (
+              <span
+                className="win-keys"
+                title={
+                  `${agentKeys} key${agentKeys === 1 ? "" : "s"} in the system agent` +
+                  (keysLeft == null ? " · no expiry" : ` · expires in ${fmtLeft(keysLeft)}`)
+                }
+              >
+                <Icon name="key" size={12} /> {agentKeys}
+                {keysLeft != null && <span className="win-keys-left">{fmtLeft(keysLeft)}</span>}
+              </span>
+            )}
+            <span className="win-ver">{buildLabel}</span>
           </div>
         </div>
 
         {/* body */}
         {locked ? (
-          <Unlock vault={vault} onUnlock={unlock} onChange={() => setSwitcher(true)} />
+          <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} />
         ) : (
           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
-            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} />
+            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
             <ResizeHandle
               label="Resize sidebar"
               onDelta={(inc) => setSidebarW((w) => clampW(w + inc, SIDEBAR_MIN, SIDEBAR_MAX))}
@@ -490,6 +603,7 @@ function App() {
             <EntryList
               entries={filtered} selectedId={selId} onSelect={setSelId}
               title={groupTitle} subtitle={groupSub} sort={sort} onCycleSort={cycleSort}
+              query={query} onQuery={setQuery} searchRef={searchRef} vaultName={vault.name}
             />
             <ResizeHandle
               label="Resize entry list"
@@ -497,6 +611,7 @@ function App() {
               onReset={() => setListW(DEFAULT_LIST_W)}
             />
             <Detail
+              appActions={appActions}
               entry={selected} notes={detail.notes} fields={detail.fields} password={detail.password}
               onCopy={copy} copiedKey={copiedKey}
               onEdit={openEdit} onDelete={(e) => setDel(e)} onToggleFav={toggleFav}

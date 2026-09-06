@@ -20,10 +20,10 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter as _, Manager, State};
 use trove_core::{EntryId, Vault};
 use troved::materialize::{self, MaterializedFile, MaterializedStore};
-use troved::ssh_agent::{self, ForwardedKey, LoadedKey};
+use troved::ssh_agent::{self, keeagent, ForwardedKey, LoadedKey};
 use zxcvbn::zxcvbn;
 
 /// Basename of the JSON file (in the app config dir) that persists the
@@ -48,6 +48,10 @@ pub struct RegisteredVault {
     /// Files this vault materialized, wiped on lock. Shares the daemon's
     /// store type so `materialize::wipe_all` does the removal.
     pub materialized: MaterializedStore,
+    /// Unix seconds at which the first forwarded key expires, or `None` when
+    /// nothing was forwarded or nothing expires. The agent keeps its own clock
+    /// and never reports it, so this is trove's record of what it asked for.
+    pub keys_expire_at: Option<u64>,
 }
 
 impl RegisteredVault {
@@ -58,6 +62,7 @@ impl RegisteredVault {
             vault: None,
             exported_keys: Vec::new(),
             materialized: MaterializedStore::default(),
+            keys_expire_at: None,
         }
     }
 }
@@ -81,6 +86,13 @@ pub struct Settings {
     /// Write `Materialize.*` entries to their target paths on unlock, and wipe
     /// them on lock.
     pub materialize: bool,
+    /// Minutes of no interaction before the vault view locks itself. `0`
+    /// disables it.
+    ///
+    /// This closes the window and drops the decrypted database; it does NOT
+    /// retract keys from the OS agent, which have their own expiry. Locking a
+    /// UI and revoking machine-wide credentials are different decisions.
+    pub idle_lock_minutes: u32,
 }
 
 impl Default for Settings {
@@ -94,6 +106,7 @@ impl Default for Settings {
             system_agent: true,
             system_agent_lifetime: 900,
             materialize: false,
+            idle_lock_minutes: 5,
         }
     }
 }
@@ -126,6 +139,13 @@ pub struct VaultDto {
     pub file: String,
     pub path: String,
     pub locked: bool,
+    /// How many of this vault's keys are currently sitting in the system
+    /// agent. The whole point of forwarding is invisible otherwise — this is
+    /// what makes "are my keys actually loaded?" answerable without a terminal.
+    pub agent_keys: usize,
+    /// When the soonest-expiring forwarded key drops out of the agent, in unix
+    /// seconds. `null` when nothing expires — the UI shows a countdown from it.
+    pub keys_expire_at: Option<u64>,
 }
 
 /// Non-secret view of an entry, safe to render in a list. Carries a strength
@@ -164,6 +184,14 @@ pub struct EntryDto {
     /// unlocking adds it to the system agent. Backed by `KeeAgent.settings`,
     /// the same bytes KeePassXC reads and writes.
     pub agent_key: bool,
+    /// Per-entry expiry in seconds, or `null` to use the app's default. This is
+    /// KeeAgent's `UseLifetimeConstraintWhenAdding` + `LifetimeConstraintDuration`
+    /// folded into one value, the same way the loader reads it.
+    pub agent_lifetime: Option<u32>,
+    /// Ask the agent to confirm before every use of this key.
+    pub agent_confirm: bool,
+    /// Take this key back out of the agent when the vault is locked.
+    pub agent_remove_on_close: bool,
 }
 
 /// One custom string field (`k` = name, `v` = value).
@@ -266,6 +294,8 @@ fn vault_dto(id: &str, rv: &RegisteredVault) -> VaultDto {
         file: vault_file(&rv.path),
         path: rv.path.to_string_lossy().into_owned(),
         locked: rv.vault.is_none(),
+        agent_keys: rv.exported_keys.len(),
+        keys_expire_at: rv.keys_expire_at,
     }
 }
 
@@ -350,6 +380,67 @@ fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("writing settings: {e}"))
 }
 
+/// What build this is, for the title bar.
+///
+/// Two parts: the version, which every build has, and an optional mode. A
+/// production build has an empty mode, so its version stands alone and nothing
+/// has to be stripped back off for display; anything else carries the mode and
+/// the commit, because "which build am I looking at" is otherwise guesswork
+/// when a dev window and an installed one look identical.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildInfo {
+    pub version: String,
+    /// Empty in production; otherwise "dev", "rc", "nightly"… Set at compile
+    /// time from `TROVE_BUILD_MODE`.
+    pub mode: String,
+    /// Short commit, or empty outside a git checkout. Only interesting
+    /// alongside a mode — a release is identified by its version.
+    pub commit: String,
+}
+
+#[tauri::command]
+pub fn build_info() -> BuildInfo {
+    BuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: env!("TROVE_BUILD_MODE").to_string(),
+        commit: env!("TROVE_DESKTOP_GIT").to_string(),
+    }
+}
+
+// --- unlock progress -------------------------------------------------------
+
+/// One step of an unlock, reported to the UI as it happens.
+///
+/// Unlock is slow by construction — the KDF is deliberately expensive, and the
+/// agent hand-off is a round trip per key — so a silent dialog reads as a
+/// hang. The frontend renders these as a checklist and ticks them off.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockStep {
+    /// Stable id the UI matches on: `open`, `entries`, `agent`, `files`.
+    pub step: &'static str,
+    /// `pending` while running, `done` when finished, `skipped` when the
+    /// setting is off, `failed` when it did not work (never fatal).
+    pub state: &'static str,
+    /// Human detail, e.g. "4 keys" — shown beside the step.
+    pub detail: String,
+}
+
+const UNLOCK_PROGRESS_EVENT: &str = "unlock-progress";
+
+fn step(app: &AppHandle, step: &'static str, state: &'static str, detail: impl Into<String>) {
+    // Best-effort: a UI that isn't listening must never fail an unlock.
+    let _ = app.emit(
+        UNLOCK_PROGRESS_EVENT,
+        UnlockStep {
+            step,
+            state,
+            detail: detail.into(),
+        },
+    );
+}
+
 // --- unlock/lock side effects ----------------------------------------------
 
 /// Push this vault's SSH keys into the system agent, returning what went in so
@@ -362,23 +453,47 @@ fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 /// windowed app has no shell.
 ///
 /// Best-effort by design: a vault still opens if the agent is unreachable.
-fn export_keys(vault: &Vault, settings: &Settings) -> Vec<ForwardedKey> {
+async fn export_keys(vault: &Vault, settings: &Settings) -> (Vec<ForwardedKey>, Option<u64>) {
     if !settings.system_agent {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let keys: Vec<LoadedKey> = troved::handler::load_ssh_keys_from_vault(vault);
     if keys.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
-    let warnings = tauri::async_runtime::block_on(ssh_agent::forward_on_unlock_when(
-        true,
-        &keys,
-        u64::from(settings.system_agent_lifetime),
-    ));
-    for w in warnings {
-        eprintln!("trove: ssh-agent: {w}");
+    // Awaited, not `block_on`: this is socket I/O with a per-key timeout, and
+    // blocking a thread on it is what made the window freeze.
+    let forward =
+        ssh_agent::forward_on_unlock_when(true, &keys, u64::from(settings.system_agent_lifetime))
+            .await;
+    for w in forward.warnings {
+        eprintln!("trove: ssh-agent: warning: {w}");
     }
-    ssh_agent::keys_to_unforward(&keys)
+    // A healed `SSH_AUTH_SOCK` is worth saying once. The app cannot pass the
+    // corrected socket on the way the CLI does — there is no shell to put it in
+    // — but the keys did reach the live agent, which is what matters here.
+    for n in forward.notes {
+        eprintln!("trove: ssh-agent: {n}");
+    }
+    (
+        ssh_agent::keys_to_unforward(&keys),
+        soonest_expiry(&keys, settings.system_agent_lifetime),
+    )
+}
+
+/// When the soonest of `keys` expires, given the app default for any key that
+/// doesn't state its own. Mirrors the rule in `forward::on_unlock_when`: the
+/// entry's lifetime wins, otherwise the default, and 0 anywhere means never.
+fn soonest_expiry(keys: &[LoadedKey], default_secs: u32) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    keys.iter()
+        .map(|k| k.forward.lifetime_secs.unwrap_or(default_secs))
+        .filter(|secs| *secs > 0)
+        .min()
+        .map(|secs| now + u64::from(secs))
 }
 
 /// Materialize every entry whose `Materialize.*` fields validate. Plan errors
@@ -412,14 +527,11 @@ fn materialize_all(
 
 /// Undo both side effects, in the daemon's order: files off disk first, then
 /// keys out of the agent.
-fn undo_side_effects(rv: &mut RegisteredVault) {
-    tauri::async_runtime::block_on(async {
-        materialize::wipe_all(&rv.materialized).await;
-        if !rv.exported_keys.is_empty() {
-            ssh_agent::unforward_on_lock(&rv.exported_keys).await;
-        }
-    });
-    rv.exported_keys.clear();
+async fn undo_side_effects(exported: Vec<ForwardedKey>, materialized: MaterializedStore) {
+    materialize::wipe_all(&materialized).await;
+    if !exported.is_empty() {
+        ssh_agent::unforward_on_lock(&exported).await;
+    }
 }
 
 /// Add-or-update one recent by canonical path, then persist the whole list.
@@ -438,6 +550,55 @@ fn persist_recent(app: &AppHandle, canonical: &Path, name: &str) -> Result<(), S
 }
 
 // --- open-vault access helpers ---------------------------------------------
+
+/// Run `f` against an open vault, off the main thread.
+///
+/// EVERY command that touches a vault must go through this. A synchronous
+/// `#[tauri::command]` runs on the MAIN thread, and these commands hold a
+/// `std::sync::Mutex` over the whole app state while doing kdbx work — so a
+/// sync command is a frozen window and a queue of everything behind it. The
+/// lock is taken and released inside the blocking task, never across an await.
+///
+/// `AppHandle` is `Send`, which is what lets the state be reached from there;
+/// `State` itself cannot cross the boundary.
+async fn on_vault<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&Vault) -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<VaultState>();
+        with_open(&state, &id, f)
+    })
+    .await
+    .map_err(|e| format!("vault task panicked: {e}"))?
+}
+
+/// [`on_vault`] for the mutating half.
+async fn on_vault_mut<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Vault) -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<VaultState>();
+        with_open_mut(&state, &id, f)
+    })
+    .await
+    .map_err(|e| format!("vault task panicked: {e}"))?
+}
+
+/// Run any state-touching work off the main thread, for commands that need the
+/// registry rather than an open vault.
+async fn off_main<T, F>(app: AppHandle, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || f(&app))
+        .await
+        .map_err(|e| format!("task panicked: {e}"))?
+}
 
 fn with_open<T>(
     state: &State<'_, VaultState>,
@@ -539,7 +700,8 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
     };
     let pw_len = u16::try_from(password.chars().count()).unwrap_or(u16::MAX);
     let strength = strength(&password);
-    let (ssh_key_attachment, agent_key) = agent_key_state(vault, &s.id, &s.attachment_names);
+    let (ssh_key_attachment, agent_key, policy) =
+        agent_key_state(vault, &s.id, &s.attachment_names);
 
     EntryDto {
         id,
@@ -558,6 +720,9 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
         attachment_names: s.attachment_names,
         ssh_key_attachment,
         agent_key,
+        agent_lifetime: policy.lifetime_secs,
+        agent_confirm: policy.confirm,
+        agent_remove_on_close: policy.remove_at_close,
     }
 }
 
@@ -568,25 +733,45 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
 /// and carries the opt-in. Without it we look for a parseable key so the UI can
 /// still offer the toggle, and report it as not declared (which is exactly how
 /// the export path treats it).
-fn agent_key_state(vault: &Vault, id: &EntryId, attachment_names: &[String]) -> (String, bool) {
+fn agent_key_state(
+    vault: &Vault,
+    id: &EntryId,
+    attachment_names: &[String],
+) -> (String, bool, keeagent::AgentPolicy) {
     if attachment_names
         .iter()
-        .any(|a| a == troved::ssh_agent::keeagent::ATTACHMENT_NAME)
+        .any(|a| a == keeagent::ATTACHMENT_NAME)
     {
-        if let Ok(Some(bytes)) = vault.read_binary(id, troved::ssh_agent::keeagent::ATTACHMENT_NAME)
-        {
+        if let Ok(Some(bytes)) = vault.read_binary(id, keeagent::ATTACHMENT_NAME) {
             // A declared entry names its attachment and is opted in; an entry
-            // that opted out still tells us which attachment it was about, so
-            // read that out of the blob either way.
+            // that opted out still says which attachment it was about, so read
+            // that out of the blob either way. The policy comes back for both,
+            // so the editor shows what is stored rather than a default.
             let named = keeagent_attachment_name(&bytes);
-            return match troved::ssh_agent::keeagent::parse(&bytes, "") {
-                troved::ssh_agent::keeagent::Decision::Load { attachment, .. } => {
-                    (attachment, true)
-                }
-                troved::ssh_agent::keeagent::Decision::Skip => (named.unwrap_or_default(), false),
+            return match keeagent::parse(&bytes, "") {
+                keeagent::Decision::Load {
+                    attachment,
+                    forward,
+                } => (
+                    attachment,
+                    true,
+                    keeagent::AgentPolicy {
+                        allow: true,
+                        lifetime_secs: forward.lifetime_secs,
+                        confirm: forward.confirm,
+                        remove_at_close: forward.remove_at_close,
+                    },
+                ),
+                keeagent::Decision::Skip => (
+                    named.unwrap_or_default(),
+                    false,
+                    stored_policy(&bytes).unwrap_or_default(),
+                ),
             };
         }
     }
+    // No settings at all: the key is found by content scan, so it is not
+    // declared and carries the defaults an editor would start from.
     let found = attachment_names
         .iter()
         .find(|name| {
@@ -598,12 +783,44 @@ fn agent_key_state(vault: &Vault, id: &EntryId, attachment_names: &[String]) -> 
         })
         .cloned()
         .unwrap_or_default();
-    (found, false)
+    (found, false, keeagent::AgentPolicy::default())
+}
+
+/// Decode a settings blob to text, handling UTF-16 the way the loader does.
+fn keeagent_text(bytes: &[u8]) -> Option<String> {
+    troved::ssh_agent::keeagent::decode(bytes)
+}
+
+/// Read the stored policy out of a blob the loader decided to Skip, so an entry
+/// that is switched off still shows the lifetime/confirm it had.
+fn stored_policy(bytes: &[u8]) -> Option<keeagent::AgentPolicy> {
+    let text = keeagent_text(bytes)?;
+    let tag = |k: &str| -> Option<String> {
+        let open = format!("<{k}>");
+        let close = format!("</{k}>");
+        let start = text.find(&open)? + open.len();
+        let rest = &text[start..];
+        Some(rest[..rest.find(&close)?].trim().to_string())
+    };
+    let flag = |k: &str| tag(k).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    Some(keeagent::AgentPolicy {
+        allow: false,
+        lifetime_secs: (flag("UseLifetimeConstraintWhenAdding")
+            || flag("UseLifetimeConstraintWhenSigning"))
+        .then(|| tag("LifetimeConstraintDuration").and_then(|d| d.parse().ok()))
+        .flatten(),
+        confirm: flag("UseConfirmConstraintWhenAdding") || flag("UseConfirmConstraintWhenSigning"),
+        remove_at_close: tag("RemoveAtDatabaseClose")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true),
+    })
 }
 
 /// Pull `<AttachmentName>` out of a settings blob without judging the opt-in.
 fn keeagent_attachment_name(bytes: &[u8]) -> Option<String> {
-    let xml = std::str::from_utf8(bytes).ok()?;
+    // Through the shared decoder: KeePassXC writes UTF-16, and `from_utf8`
+    // accepts those bytes while matching no tags.
+    let xml = &keeagent_text(bytes)?;
     let start = xml.find("<AttachmentName>")? + "<AttachmentName>".len();
     let rest = &xml[start..];
     let end = rest.find("</AttachmentName>")?;
@@ -853,244 +1070,383 @@ pub fn create_vault(
 
 /// Decrypt a registered vault, store the open `Vault`, return its entry list.
 #[tauri::command]
-pub fn unlock_vault(
+pub async fn unlock_vault(
     app: AppHandle,
     id: String,
     password: String,
     state: State<'_, VaultState>,
 ) -> Result<Vec<EntryDto>, String> {
-    let mut guard = state.lock().map_err(poisoned)?;
-    let rv = guard
-        .vaults
-        .get_mut(&id)
-        .ok_or_else(|| "vault is not registered".to_string())?;
-    let vault = Vault::open(&rv.path, &password).map_err(|e| e.to_string())?;
+    // ASYNC ON PURPOSE. A synchronous #[tauri::command] runs on the MAIN
+    // thread, and unlock is the heaviest thing this app does: an Argon2 KDF by
+    // design, then socket round-trips to the OS agent (one per key, each with
+    // its own timeout) and file writes. Doing that on the main thread freezes
+    // the window; doing it while holding the state mutex freezes every other
+    // command behind it too. So: never hold the lock across an await, and keep
+    // the CPU-bound open off the runtime's own threads.
+    let path = {
+        let guard = state.lock().map_err(poisoned)?;
+        guard
+            .vaults
+            .get(&id)
+            .ok_or_else(|| "vault is not registered".to_string())?
+            .path
+            .clone()
+    };
+
+    step(&app, "open", "pending", "decrypting");
+    let open_path = path.clone();
+    let vault = tauri::async_runtime::spawn_blocking(move || Vault::open(&open_path, &password))
+        .await
+        .map_err(|e| format!("unlock task panicked: {e}"))?
+        .map_err(|e| {
+            step(&app, "open", "failed", "wrong password");
+            e.to_string()
+        })?;
+    step(&app, "open", "done", "");
+
+    step(&app, "entries", "pending", "");
     let entries = build_entry_dtos(&vault);
+    step(
+        &app,
+        "entries",
+        "done",
+        format!("{} entries", entries.len()),
+    );
 
     // Unlocking here does what unlocking in the daemon does: keys into the
-    // system agent (the only route to applications and terminals that can't
-    // be pointed at our own socket) and materialized files onto disk. Both
-    // are settings-gated and both are undone by `lock_vault`.
+    // system agent (the only route to applications and terminals that can't be
+    // pointed at our own socket) and materialized files onto disk. Both are
+    // settings-gated and both are undone by `lock_vault`.
     let settings = load_settings(&app);
-    rv.exported_keys = export_keys(&vault, &settings);
-    materialize_all(&vault, &rv.path.clone(), &rv.materialized, &settings);
 
-    rv.vault = Some(vault);
+    if settings.system_agent {
+        step(&app, "agent", "pending", "");
+    } else {
+        step(&app, "agent", "skipped", "turned off");
+    }
+    let (exported, keys_expire_at) = export_keys(&vault, &settings).await;
+    if settings.system_agent {
+        step(
+            &app,
+            "agent",
+            "done",
+            match exported.len() {
+                0 => "no keys marked for the agent".to_string(),
+                1 => "1 key".to_string(),
+                n => format!("{n} keys"),
+            },
+        );
+    }
+
+    let materialized = MaterializedStore::default();
+    if settings.materialize {
+        step(&app, "files", "pending", "");
+    } else {
+        step(&app, "files", "skipped", "turned off");
+    }
+    materialize_all(&vault, &path, &materialized, &settings);
+    if settings.materialize {
+        let n = materialized.read().await.len();
+        step(&app, "files", "done", format!("{n} written"));
+    }
+
+    {
+        let mut guard = state.lock().map_err(poisoned)?;
+        let rv = guard
+            .vaults
+            .get_mut(&id)
+            .ok_or_else(|| "vault vanished while unlocking".to_string())?;
+        rv.exported_keys = exported;
+        rv.keys_expire_at = keys_expire_at;
+        rv.materialized = materialized;
+        rv.vault = Some(vault);
+    }
     Ok(entries)
 }
 
 /// Drop the decrypted vault (keep it registered), marking it locked.
 #[tauri::command]
-pub fn lock_vault(id: String, state: State<'_, VaultState>) -> Result<(), String> {
-    let mut guard = state.lock().map_err(poisoned)?;
-    let rv = guard
-        .vaults
-        .get_mut(&id)
-        .ok_or_else(|| "vault is not registered".to_string())?;
-    undo_side_effects(rv);
-    rv.vault = None;
+/// `retract_keys` decides whether what trove handed the machine comes back:
+/// keys out of the OS agent, materialized files off disk.
+/// An EXPLICIT lock does (KeePassXC parity, honouring each entry's
+/// `RemoveAtDatabaseClose`). The idle timer does NOT: it exists to blank a
+/// window left untouched, and revoking machine-wide credentials because nobody
+/// clicked the app for five minutes pulls keys out from under a running
+/// `git push`. Absent ⇒ true, so an older caller keeps the safer behaviour.
+pub async fn lock_vault(
+    id: String,
+    retract_keys: Option<bool>,
+    state: State<'_, VaultState>,
+) -> Result<(), String> {
+    // Same reasoning as `unlock_vault`: retracting keys from the OS agent and
+    // wiping files is I/O, and a sync command would do it on the main thread.
+    // Take what has to be undone out under a short lock, drop the vault so it
+    // reads as locked immediately, then do the undoing without the lock held.
+    // One rule, both kinds of handover: an app lock HIDES (window locks, vault
+    // forgotten, nothing outside the app is touched); an explicit lock PUTS
+    // EVERYTHING BACK (keys retracted, files wiped). Wiping files on an idle
+    // timer while leaving keys was the inconsistency — the timer says nobody
+    // clicked the window, which says nothing about what the terminal is doing,
+    // and a kubeconfig yanked mid-`kubectl` fails the same way a key does.
+    // Both handovers have their own expiry for the "after a while" case.
+    let put_back = retract_keys.unwrap_or(true);
+    let (exported, materialized) = {
+        let mut guard = state.lock().map_err(poisoned)?;
+        let rv = guard
+            .vaults
+            .get_mut(&id)
+            .ok_or_else(|| "vault is not registered".to_string())?;
+        rv.vault = None;
+        if put_back {
+            rv.keys_expire_at = None;
+            (
+                std::mem::take(&mut rv.exported_keys),
+                std::mem::take(&mut rv.materialized),
+            )
+        } else {
+            (Vec::new(), MaterializedStore::default())
+        }
+    };
+    undo_side_effects(exported, materialized).await;
     Ok(())
 }
 
 /// Current app settings, for the settings UI.
 #[tauri::command]
-pub fn get_settings(app: AppHandle) -> Settings {
-    load_settings(&app)
+pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
+    off_main(app, |a| Ok(load_settings(a))).await
 }
 
 /// Persist app settings. Takes effect on the next unlock; already-exported
 /// keys stay in the agent until the vault locks.
 #[tauri::command]
-pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
-    save_settings(&app, &settings)
+pub async fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+    off_main(app, move |a| save_settings(a, &settings)).await
 }
 
 /// Re-read the entry list for an unlocked vault.
 #[tauri::command]
-pub fn list_entries(id: String, state: State<'_, VaultState>) -> Result<Vec<EntryDto>, String> {
-    with_open(&state, &id, |v| Ok(build_entry_dtos(v)))
+pub async fn list_entries(app: AppHandle, id: String) -> Result<Vec<EntryDto>, String> {
+    on_vault(app, id, |v| Ok(build_entry_dtos(v))).await
 }
 
 // --- commands: reading one entry -------------------------------------------
 
 /// Read a single field (e.g. `Password`) for one entry, on demand.
 #[tauri::command]
-pub fn get_field(
+pub async fn get_field(
+    app: AppHandle,
     id: String,
     entry_id: String,
     field: String,
-    state: State<'_, VaultState>,
 ) -> Result<Option<String>, String> {
-    let eid = EntryId::from_str(&entry_id).unwrap();
-    with_open(&state, &id, |v| {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault(app, id, move |v| {
         v.get_field(&eid, &field).map_err(|e| e.to_string())
     })
+    .await
 }
 
 /// Notes + custom fields + password for the selected entry.
 #[tauri::command]
-pub fn get_entry_detail(
+pub async fn get_entry_detail(
+    app: AppHandle,
     id: String,
     entry_id: String,
-    state: State<'_, VaultState>,
 ) -> Result<EntryDetailDto, String> {
-    let eid = EntryId::from_str(&entry_id).unwrap();
-    with_open(&state, &id, |v| entry_detail(v, &eid))
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault(app, id, move |v| entry_detail(v, &eid)).await
 }
 
 // --- commands: mutations ----------------------------------------------------
 
 /// Create or update an entry, save the vault, return the fresh list + saved id.
 #[tauri::command]
-pub fn save_entry(
+pub async fn save_entry(
+    app: AppHandle,
     id: String,
     input: EntryInput,
-    state: State<'_, VaultState>,
 ) -> Result<SaveResult, String> {
-    with_open_mut(&state, &id, |vault| {
+    on_vault_mut(app, id, move |vault| {
         let entry_id = apply_save_entry(vault, &input)?;
         Ok(SaveResult {
             entries: build_entry_dtos(vault),
             id: entry_id.as_str().to_string(),
         })
     })
+    .await
 }
 
 /// Move an entry to the recycle bin, save, return the fresh list.
 #[tauri::command]
-pub fn delete_entry(
+pub async fn delete_entry(
+    app: AppHandle,
     id: String,
     entry_id: String,
-    state: State<'_, VaultState>,
 ) -> Result<Vec<EntryDto>, String> {
-    let eid = EntryId::from_str(&entry_id).unwrap();
-    with_open_mut(&state, &id, |vault| {
+    // Not `unwrap`: a malformed id would panic the command, and a panic inside
+    // the blocking task surfaces as an unhelpful "task panicked".
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault_mut(app, id, move |vault| {
         apply_delete(vault, &eid)?;
         Ok(build_entry_dtos(vault))
     })
+    .await
 }
 
 /// Set/clear the favorite flag, save, return the fresh list.
 #[tauri::command]
-pub fn set_favorite(
+pub async fn set_favorite(
+    app: AppHandle,
     id: String,
     entry_id: String,
     fav: bool,
-    state: State<'_, VaultState>,
 ) -> Result<Vec<EntryDto>, String> {
-    let eid = EntryId::from_str(&entry_id).unwrap();
-    with_open_mut(&state, &id, |vault| {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault_mut(app, id, move |vault| {
         apply_set_favorite(vault, &eid, fav)?;
         Ok(build_entry_dtos(vault))
     })
+    .await
 }
 
-/// Pick whether this entry's SSH key is added to the system agent on unlock.
+/// Set this entry's SSH-agent policy: whether the key is added on unlock, how
+/// long the agent should keep it, whether to confirm each use, and whether a
+/// lock takes it back.
 ///
 /// Writes the same `KeeAgent.settings` bytes KeePassXC reads, so the choice
 /// travels with the vault file and both tools agree. Applies immediately as
-/// well as on the next unlock: enabling exports the key now, disabling takes
-/// it back out of the agent.
+/// well as on the next unlock.
+///
+/// `lifetime` is seconds, or `null` for "use the app default" — the same
+/// meaning `UseLifetimeConstraintWhenAdding=false` has in the file.
 #[tauri::command]
-pub fn set_agent_key(
+pub async fn set_agent_key(
     app: AppHandle,
     id: String,
     entry_id: String,
     enabled: bool,
-    state: State<'_, VaultState>,
+    lifetime: Option<u32>,
+    confirm: Option<bool>,
+    remove_on_close: Option<bool>,
 ) -> Result<Vec<EntryDto>, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
     let settings = load_settings(&app);
+    let policy = keeagent::AgentPolicy {
+        allow: enabled,
+        lifetime_secs: lifetime.filter(|n| *n > 0),
+        confirm: confirm.unwrap_or(false),
+        remove_at_close: remove_on_close.unwrap_or(true),
+    };
 
-    let mut guard = state.lock().map_err(poisoned)?;
-    let rv = guard
-        .vaults
-        .get_mut(&id)
-        .ok_or_else(|| "vault is not registered".to_string())?;
-    let vault = rv
-        .vault
-        .as_mut()
-        .ok_or_else(|| "vault is locked".to_string())?;
-
-    let summary = vault
-        .list_entries()
-        .into_iter()
-        .find(|s| s.id == eid)
-        .ok_or_else(|| "entry not found".to_string())?;
-    let (attachment, _) = agent_key_state(vault, &eid, &summary.attachment_names);
-    if attachment.is_empty() {
-        return Err("this entry has no SSH private key attachment".to_string());
-    }
-
-    let key_bytes = vault
-        .read_binary(&eid, &attachment)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("attachment '{attachment}' is missing"))?;
-    // Parsed once up front, purely to learn this entry's public blob — it's how
-    // we find the same key again after the write, and how the agent addresses
-    // it. Refuse early if the attachment isn't a key we can serve.
-    let probe = troved::ssh_agent::keys::parse_private_key(&key_bytes, &summary.title)
-        .map_err(|e| format!("attachment '{attachment}' is not a usable SSH key: {e}"))?;
-
-    vault
-        .attach_binary(
-            &eid,
-            troved::ssh_agent::keeagent::ATTACHMENT_NAME,
-            &troved::ssh_agent::keeagent::settings_xml_with(&attachment, enabled),
-        )
-        .map_err(|e| e.to_string())?;
-    vault.save().map_err(|e| e.to_string())?;
-
-    // Reflect the change in the running agent, so the toggle does what it says
-    // without waiting for a lock/unlock cycle.
-    if settings.system_agent {
-        // Re-read the entry so the key carries the policy we just wrote, then
-        // apply it to the live agent — the toggle should do what it says
-        // without waiting for a lock/unlock cycle.
-        // On enable the reloaded key carries the settings we just wrote; on
-        // disable the loader no longer returns it at all, so fall back to the
-        // probe — we still have to tell the agent to drop it.
-        let key = troved::handler::load_ssh_keys_from_vault(vault)
-            .into_iter()
-            .find(|k| k.public_blob == probe.public_blob)
-            .unwrap_or(probe);
-        {
-            let forwarded = ssh_agent::keys_to_unforward(std::slice::from_ref(&key));
-            tauri::async_runtime::block_on(async {
-                if enabled {
-                    for w in ssh_agent::forward_on_unlock_when(
-                        true,
-                        std::slice::from_ref(&key),
-                        u64::from(settings.system_agent_lifetime),
+    // Phase 1 — vault write, under the lock, on a blocking thread. Returns the
+    // key so the agent work can happen with the lock released.
+    let write = {
+        let app = app.clone();
+        let id = id.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<VaultState>();
+            with_open_mut(&state, &id, move |vault| {
+                let summary = vault
+                    .list_entries()
+                    .into_iter()
+                    .find(|s| s.id == eid)
+                    .ok_or_else(|| "entry not found".to_string())?;
+                let (attachment, _, _) = agent_key_state(vault, &eid, &summary.attachment_names);
+                if attachment.is_empty() {
+                    return Err("this entry has no SSH private key attachment".to_string());
+                }
+                let key_bytes = vault
+                    .read_binary(&eid, &attachment)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("attachment '{attachment}' is missing"))?;
+                // Parsed up front to learn the public blob — how the agent
+                // addresses this key — and to refuse early if it isn't usable.
+                let probe = troved::ssh_agent::keys::parse_private_key(&key_bytes, &summary.title)
+                    .map_err(|e| {
+                        format!("attachment '{attachment}' is not a usable SSH key: {e}")
+                    })?;
+                vault
+                    .attach_binary(
+                        &eid,
+                        keeagent::ATTACHMENT_NAME,
+                        &keeagent::settings_xml_policy(
+                            &attachment,
+                            policy,
+                            keeagent::Encoding::Utf8,
+                        ),
                     )
-                    .await
-                    {
-                        eprintln!("trove: ssh-agent: {w}");
-                    }
-                } else {
-                    // Not keys_to_unforward: that honours RemoveAtDatabaseClose,
-                    // and this is an explicit "take it out now" regardless.
-                    ssh_agent::unforward_on_lock(&[ForwardedKey::from(&key)]).await;
-                }
-            });
-            if enabled {
-                for f in forwarded {
-                    if !rv
-                        .exported_keys
-                        .iter()
-                        .any(|k| k.public_blob == f.public_blob)
-                    {
-                        rv.exported_keys.push(f);
-                    }
-                }
-            } else {
-                rv.exported_keys
-                    .retain(|k| k.public_blob != key.public_blob);
+                    .map_err(|e| e.to_string())?;
+                vault.save().map_err(|e| e.to_string())?;
+                // Re-read so the key carries the policy just written. On
+                // disable the loader no longer returns it, so fall back to the
+                // probe — the agent still has to be told to drop it.
+                let key = troved::handler::load_ssh_keys_from_vault(vault)
+                    .into_iter()
+                    .find(|k| k.public_blob == probe.public_blob)
+                    .unwrap_or(probe);
+                Ok(key)
+            })
+        })
+        .await
+        .map_err(|e| format!("vault task panicked: {e}"))??
+    };
+
+    // Phase 2 — agent I/O with NO lock held. A round trip per key with its own
+    // timeout; holding the state mutex across it would block every other
+    // command, which is what the sync version did.
+    if settings.system_agent {
+        if enabled {
+            let forward = ssh_agent::forward_on_unlock_when(
+                true,
+                std::slice::from_ref(&write),
+                u64::from(settings.system_agent_lifetime),
+            )
+            .await;
+            for w in forward.warnings {
+                eprintln!("trove: ssh-agent: warning: {w}");
             }
+            for n in forward.notes {
+                eprintln!("trove: ssh-agent: {n}");
+            }
+        } else {
+            // Not `keys_to_unforward`: that honours RemoveAtDatabaseClose, and
+            // this is an explicit "take it out now" regardless.
+            ssh_agent::unforward_on_lock(&[ForwardedKey::from(&write)]).await;
         }
     }
 
-    Ok(build_entry_dtos(vault))
+    // Phase 3 — bookkeeping + the fresh list, under the lock again.
+    let blob = write.public_blob.clone();
+    let forwarded = ssh_agent::keys_to_unforward(std::slice::from_ref(&write));
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<VaultState>();
+        let mut guard = state.lock().map_err(poisoned)?;
+        let rv = guard
+            .vaults
+            .get_mut(&id)
+            .ok_or_else(|| "vault is not registered".to_string())?;
+        if enabled {
+            for f in forwarded {
+                if !rv
+                    .exported_keys
+                    .iter()
+                    .any(|k| k.public_blob == f.public_blob)
+                {
+                    rv.exported_keys.push(f);
+                }
+            }
+        } else {
+            rv.exported_keys.retain(|k| k.public_blob != blob);
+        }
+        let vault = rv
+            .vault
+            .as_ref()
+            .ok_or_else(|| "vault is locked".to_string())?;
+        Ok(build_entry_dtos(vault))
+    })
+    .await
+    .map_err(|e| format!("vault task panicked: {e}"))?
 }
 
 // --- tests -----------------------------------------------------------------

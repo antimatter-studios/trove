@@ -1,5 +1,6 @@
 import React from 'react';
 import { Icon, TYPE_ICON } from './icons.jsx';
+import { Switch } from './overlays.jsx';
 import { buildTree } from './tree.js';
 // Trove — helpers + three-pane views
 
@@ -60,17 +61,31 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect }) {
   );
 }
 
-function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, onSwitcher }) {
+function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel }) {
   const [open, setOpenState] = React.useState({ inpace: true, personal: true, infra: false });
   const setOpen = (p) => setOpenState((o) => ({ ...o, [p]: !o[p] }));
   return (
     <div className="pane sidebar">
       <div className="sb-scroll">
-        <button className="sb-vault" onClick={onSwitcher} title="Switch vault">
-          <div className="vbadge"><Icon name="shield" size={17} /></div>
+        {/* The vault chip carries its own lock state: green unlocked, amber
+            locked. State belongs on the thing it describes, not in a separate
+            pill across the window — and with several vaults registered, "which
+            one is unlocked" is a per-vault fact. */}
+        <button
+          className={"sb-vault" + (vault.locked ? " is-locked" : " is-unlocked")}
+          onClick={onSwitcher}
+          title={(vault.locked ? "Locked" : "Unlocked") + " — click to switch vault"}
+        >
+          <div className="vbadge">
+            <Icon name={vault.locked ? "lock" : "unlock"} size={16} />
+          </div>
           <div style={{ minWidth: 0, flex: 1, textAlign: "left" }}>
             <div className="vname">{vault.name}</div>
-            <div className="vmeta">{vault.file}</div>
+            <div className="vmeta">
+              {vault.locked ? "Locked" : "Unlocked"}
+              {/* Countdown on its own line: mid-phrase wrapping read badly. */}
+              {!vault.locked && idleLabel ? <span className="vsub">{idleLabel}</span> : null}
+            </div>
           </div>
           <Icon name="chevronDown" size={15} className="vchev" />
         </button>
@@ -94,6 +109,22 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, o
           <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} />
         ))}
       </div>
+      {/* Pinned to the bottom of the sidebar: a new entry goes into the vault
+          this pane belongs to, so the action lives with its target rather than
+          floating in a global toolbar. */}
+      {/* Both act on the vault this pane represents: put its keys and files
+          back, or add something to it. Neither is a global toolbar concern. */}
+      <div className="sb-new">
+        {!vault.locked && (
+          <button className="btn-lock" onClick={onDataLock}
+                  title="Removes keys from the system agent and dematerializes files (⌘L)">
+            <Icon name="lock" size={15} /> Data lock
+          </button>
+        )}
+        <button className="btn-accent" onClick={onNew}>
+          <Icon name="plus" size={16} />New entry
+        </button>
+      </div>
       <div className="sb-foot">
         <Icon name="lock" size={13} />
         <span>AES‑256 · Argon2id</span>
@@ -103,7 +134,7 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, o
 }
 
 /* ============ ENTRY LIST ============ */
-function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort }) {
+function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort, query, onQuery, searchRef, vaultName }) {
   const listRef = React.useRef(null);
   React.useEffect(() => {
     const el = listRef.current && listRef.current.querySelector(".erow.sel");
@@ -121,6 +152,23 @@ function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCyc
   const sortLabel = { title: "Title", modified: "Recently modified", strength: "Weakest first" }[sort];
   return (
     <div className="pane list">
+      {/* Search sits above the list it filters — in the toolbar it was a global
+          control that happened to change this pane. */}
+      <div className="list-search" onClick={() => searchRef && searchRef.current && searchRef.current.focus()}>
+        <Icon name="search" size={15} className="si" />
+        <input
+          ref={searchRef} value={query} spellCheck="false"
+          onChange={(e) => onQuery(e.target.value)}
+          placeholder={"Search " + (vaultName || "vault").toLowerCase() + "…"}
+        />
+        {query ? (
+          <button className="icon-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); onQuery(""); }}>
+            <Icon name="x" size={13} />
+          </button>
+        ) : (
+          <span className="kbd">/</span>
+        )}
+      </div>
       <div className="list-head">
         <div>
           <div className="lh-title">{title}</div>
@@ -191,10 +239,90 @@ function Field({ k, value, secret, revealed, onReveal, link, onCopy, copiedKey, 
   );
 }
 
-function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey }) {
+// Per-key agent policy. These write KeeAgent.settings, the same bytes
+// KeePassXC reads, so a key configured here behaves identically in both tools.
+// Expiry left blank means "use the app default" — which is what
+// UseLifetimeConstraintWhenAdding=false means in the file.
+function AgentSection({ entry, onChange }) {
+  const on = !!entry.agentKey;
+  const [lifetime, setLifetime] = React.useState(
+    entry.agentLifetime == null ? "" : String(entry.agentLifetime)
+  );
+  // Re-sync when a different entry is selected, or the backend hands back new
+  // values after a save.
+  React.useEffect(() => {
+    setLifetime(entry.agentLifetime == null ? "" : String(entry.agentLifetime));
+  }, [entry.id, entry.agentLifetime]);
+
+  const push = (patch) =>
+    onChange(entry.id, patch.enabled ?? on, {
+      lifetime: patch.lifetime !== undefined ? patch.lifetime : (lifetime === "" ? null : Number(lifetime)),
+      confirm: patch.confirm ?? !!entry.agentConfirm,
+      removeOnClose: patch.removeOnClose ?? entry.agentRemoveOnClose !== false,
+    });
+
+  return (
+    <div className="dt-section">
+      <div className="dt-sec-label">SSH agent</div>
+      <div className="set-group">
+        <div className="set-row">
+          <div className="srb">
+            <div className="srt">Add this key to the system agent</div>
+            <div className="srd">
+              Unlocking loads <code>{entry.sshKeyAttachment}</code> into your SSH agent,
+              so every application can use it.
+            </div>
+          </div>
+          <Switch checked={on} onChange={(v) => push({ enabled: v })} />
+        </div>
+
+        <div className={"set-row set-sub" + (on ? "" : " off")}>
+          <div className="srb">
+            <div className="srt">Expire after</div>
+            <div className="srd">
+              The agent drops this key once this long has passed. Leave blank to use
+              the app default from Settings.
+            </div>
+          </div>
+          <span className="set-num">
+            <input className="inp" type="number" min="0" step="60" disabled={!on}
+                   placeholder="default" value={lifetime}
+                   onChange={(e) => setLifetime(e.target.value)}
+                   onBlur={() => push({ lifetime: lifetime === "" ? null : Math.max(0, Number(lifetime) || 0) })} />
+            <span className="unit">sec</span>
+          </span>
+        </div>
+
+        <div className={"set-row set-sub" + (on ? "" : " off")}>
+          <div className="srb">
+            <div className="srt">Confirm before each use</div>
+            <div className="srd">The agent asks before every signature. Needs an askpass helper.</div>
+          </div>
+          <Switch checked={!!entry.agentConfirm} disabled={!on}
+                  onChange={(v) => push({ confirm: v })} />
+        </div>
+
+        <div className={"set-row set-sub" + (on ? "" : " off")}>
+          <div className="srb">
+            <div className="srt">Remove on data lock</div>
+            <div className="srd">
+              Off keeps this key in the agent even after a data lock, until it
+              expires.
+            </div>
+          </div>
+          <Switch checked={entry.agentRemoveOnClose !== false} disabled={!on}
+                  onChange={(v) => push({ removeOnClose: v })} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, appActions }) {
   if (!entry) {
     return (
       <div className="pane detail">
+        <div className="detail-bar">{appActions}</div>
         <div className="empty">
           <div className="eglyph"><Icon name="key" size={30} /></div>
           <h3>No entry selected</h3>
@@ -206,6 +334,9 @@ function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onD
   const si = strengthInfo(entry.strength);
   return (
     <div className="pane detail">
+      {/* App-level controls live at the top of this column now; there is no
+          global toolbar row above the three panes. */}
+      <div className="detail-bar">{appActions}</div>
       <div className="detail-scroll">
         <div className="dt-hero">
           <div className="dt-crumb">
@@ -231,20 +362,7 @@ function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onD
         </div>
 
         {entry.sshKeyAttachment && (
-          <div className="dt-section">
-            <div className="dt-sec-label">SSH agent</div>
-            <label className="set-row">
-              <input type="checkbox" checked={!!entry.agentKey}
-                     onChange={(e) => onToggleAgentKey(entry.id, e.target.checked)} />
-              <span>
-                <b>Add this key to the system agent</b>
-                <em>
-                  Unlocking loads <code>{entry.sshKeyAttachment}</code> into your SSH
-                  agent, so every app can use it. Removed again when the vault locks.
-                </em>
-              </span>
-            </label>
-          </div>
+          <AgentSection entry={entry} onChange={onToggleAgentKey} />
         )}
 
         <div className="dt-section">

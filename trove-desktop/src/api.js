@@ -38,8 +38,11 @@ export function unlockVault(id, password) {
 }
 
 // lock_vault(id) -> ()
-export function lockVault(id) {
-  return invoke('lock_vault', { id });
+// lock_vault(id, retractKeys) -> ()
+// retractKeys=false leaves forwarded keys in the OS agent — used by the idle
+// timer, which should blank the window without revoking credentials.
+export function lockVault(id, retractKeys = true) {
+  return invoke('lock_vault', { id, retractKeys });
 }
 
 // list_entries(id) -> Vec<EntryDto>  (re-read an already-unlocked vault)
@@ -95,6 +98,18 @@ export function setSettings(settings) {
 
 // set_agent_key(id, entryId, enabled) -> Vec<EntryDto>
 // Picks whether this entry's SSH key is added to the system agent on unlock.
-export function setAgentKey(id, entryId, enabled) {
-  return invoke('set_agent_key', { id, entryId, enabled }).then(normEntries);
+// policy = { lifetime: number|null, confirm: bool, removeOnClose: bool }
+// lifetime null (or 0) means "use the app default" — the same thing
+// UseLifetimeConstraintWhenAdding=false means in the file.
+export function setAgentKey(id, entryId, enabled, policy = {}) {
+  const { lifetime = null, confirm = false, removeOnClose = true } = policy;
+  return invoke('set_agent_key', { id, entryId, enabled, lifetime, confirm, removeOnClose })
+    .then(normEntries);
+}
+
+/* ---- Build identity ---- */
+
+// build_info() -> { version, commit, dev }
+export function buildInfo() {
+  return invoke('build_info');
 }
