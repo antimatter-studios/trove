@@ -2,13 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- productName is "TroveDesktop" (no space) so the bundle/app files and the
-       release assets stay clean and un-sanitized. These keys make macOS DISPLAY
-       the app as "Trove Desktop" (Finder, Dock, menu bar) without spaces in any
-       filename. Merged into the generated Info.plist by the Tauri macOS bundler. -->
+  <!-- The Dock and Finder label an app by its BUNDLE FILENAME, not by these
+       keys, so `productName` has to be "Trove" for a person to read "Trove" —
+       which it now is, making these two agree with it rather than override it.
+       They still earn their place: they are what macOS shows for a running app
+       (menu bar, About) and what LaunchServices records. -->
   <key>CFBundleDisplayName</key>
-  <string>Trove Desktop</string>
+  <string>Trove</string>
   <key>CFBundleName</key>
-  <string>Trove Desktop</string>
+  <string>Trove</string>
 </dict>
 </plist>
