@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.9.1
+The desktop app is called Trove — the Dock read "TroveDesktop", which is a repository name rather than an application's. The bundle is now `Trove.app`; its identifier is unchanged, so it upgrades in place and keeps its preferences and permissions, and the Homebrew cask is still installed as `trove-desktop` to keep it separate from `trove-cli`.
+
 ### v0.9.0
 Unlocking in the desktop app no longer freezes the window — every command ran on the main thread and blocked the event loop for the whole Argon2 derivation; they now run off it, and the unlock shows each step as it happens. Locking is split into two ideas that were previously one confusing button: *App lock* hides the window and takes nothing back from the machine (this is what the idle timer fires), while *Data lock* removes one vault's keys from the system agent and dematerializes its files. Every SSH entry carries its own agent policy — load or not, lifetime, confirm-each-signature, remove-on-data-lock — written where KeePassXC reads it. On the CLI side, a stale `SSH_AUTH_SOCK` no longer breaks forwarding: macOS restarts its ssh-agent on a new socket and every older process keeps the dead path, so trove now verifies the socket by protocol, asks launchd where the live agent is, and hands the working path to the session shell so `ssh` and `git` can follow. `--no-shell` is an alias for `--export`, for automation that cannot exit a subshell.
 
