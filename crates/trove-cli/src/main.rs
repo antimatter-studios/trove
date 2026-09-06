@@ -208,7 +208,11 @@ enum Command {
         timeout: Option<u64>,
         /// Print `export TROVE_SESSION=…` for `eval "$(…)"` instead of opening a
         /// session subshell. Implied when stdout is not a terminal.
-        #[arg(long = "export")]
+        ///
+        /// `--no-shell` is the same thing said the other way round, for callers
+        /// who want to say what they are avoiding: a subshell an automation
+        /// harness has no way to exit.
+        #[arg(long = "export", visible_alias = "no-shell")]
         export: bool,
         /// Open a session subshell even when stdout is not a terminal.
         #[arg(long = "shell", conflicts_with = "export")]
@@ -3920,6 +3924,14 @@ fn cmd_unlock(
         }
     }
 
+    // Forwarding worked, but not the way the environment said it would — trove
+    // healed something. Worth saying once; not a failure.
+    if let Some(notes) = resp.get("ssh_forward_notes").and_then(Value::as_array) {
+        for n in notes.iter().filter_map(Value::as_str) {
+            eprintln!("trove: ssh-agent: {n}");
+        }
+    }
+
     // Two delivery modes, so the operator never has to type `eval`:
     //   * subshell — set $TROVE_SESSION and exec the operator's own $SHELL, so
     //     they land in a session shell where `add`/`get` work immediately. The
@@ -3930,13 +3942,28 @@ fn cmd_unlock(
     // Pick by context: an interactive terminal → subshell; piped stdout (an
     // `eval "$(…)"` or a script) → export, so those keep working unchanged.
     // `--shell` / `--export` force a mode.
+    // The daemon tells us when it had to forward the keys somewhere other than
+    // this shell's `SSH_AUTH_SOCK` — because that socket is dead. Putting the
+    // keys in the live agent is only half the repair: `ssh`, `git` and
+    // `ssh-add` read that variable for themselves, so without this they would
+    // keep talking to the socket with nothing behind it. Hand the working path
+    // on the same way the session code travels.
+    let agent_sock = resp
+        .get("ssh_forward_socket")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
     let spawn_shell = shell || (!export && std::io::stdout().is_terminal());
     if spawn_shell {
         eprintln!(
             "trove: unlocked {} · session active in this shell — run add/get here, `exit` to end",
             vault.display()
         );
-        return exec_session_shell(code);
+        return exec_session_shell(code, agent_sock.as_deref());
+    }
+    if let Some(sock) = &agent_sock {
+        println!("export SSH_AUTH_SOCK={sock}");
     }
     println!("export TROVE_SESSION={code}");
     eprintln!(
@@ -3951,11 +3978,16 @@ fn cmd_unlock(
 /// On Unix we `exec` (replace this process) so no stray `trove` lingers; on
 /// other platforms we spawn and wait, forwarding the shell's exit status. The
 /// code is passed only via the child's environment — never written to disk.
-fn exec_session_shell(code: &str) -> Result<()> {
+fn exec_session_shell(code: &str, agent_sock: Option<&str>) -> Result<()> {
     // The user's login shell (zsh, bash, fish, …); fall back to /bin/sh.
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| std::ffi::OsString::from("/bin/sh"));
     let mut cmd = std::process::Command::new(&shell);
     cmd.env("TROVE_SESSION", code);
+    // Only set when the daemon had to correct it, so a working environment is
+    // left exactly as the operator had it.
+    if let Some(sock) = agent_sock {
+        cmd.env("SSH_AUTH_SOCK", sock);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
