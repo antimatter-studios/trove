@@ -64,11 +64,57 @@ pub enum Encoding {
 /// The declared `encoding=` always matches the bytes — a file that lies about
 /// its encoding is exactly the trap this module had to be fixed for.
 pub fn settings_xml_encoded(key_attachment: &str, allow: bool, encoding: Encoding) -> Vec<u8> {
-    let text = settings_xml_text(key_attachment, allow, encoding);
+    settings_xml_policy(
+        key_attachment,
+        AgentPolicy {
+            allow,
+            ..AgentPolicy::default()
+        },
+        encoding,
+    )
+}
+
+/// The per-entry agent policy, as the file expresses it.
+///
+/// This is what an editor writes; [`ForwardPolicy`] is what the loader reads
+/// back out. `lifetime_secs: None` means "no lifetime constraint" — the entry
+/// defers to whatever default the caller applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentPolicy {
+    pub allow: bool,
+    pub lifetime_secs: Option<u32>,
+    pub confirm: bool,
+    pub remove_at_close: bool,
+}
+
+impl Default for AgentPolicy {
+    fn default() -> Self {
+        Self {
+            allow: true,
+            lifetime_secs: None,
+            confirm: false,
+            // KeePassXC's own default, and the safer one: a key that outlived
+            // the database it came from would surprise anyone who locked.
+            remove_at_close: true,
+        }
+    }
+}
+
+/// Write settings expressing `policy`, in `encoding`.
+pub fn settings_xml_policy(
+    key_attachment: &str,
+    policy: AgentPolicy,
+    encoding: Encoding,
+) -> Vec<u8> {
+    let declared = match encoding {
+        Encoding::Utf8 => "utf-8",
+        Encoding::Utf16Le => "UTF-16",
+    };
+    let text = settings_xml_body(key_attachment, policy, declared);
     match encoding {
         Encoding::Utf8 => text.into_bytes(),
         Encoding::Utf16Le => {
-            let mut out = vec![0xFF, 0xFE]; // BOM, as KeePassXC writes it
+            let mut out = vec![0xFF, 0xFE];
             for unit in text.encode_utf16() {
                 out.extend_from_slice(&unit.to_le_bytes());
             }
@@ -77,25 +123,26 @@ pub fn settings_xml_encoded(key_attachment: &str, allow: bool, encoding: Encodin
     }
 }
 
-fn settings_xml_text(key_attachment: &str, allow: bool, encoding: Encoding) -> String {
-    let declared = match encoding {
-        Encoding::Utf8 => "utf-8",
-        Encoding::Utf16Le => "UTF-16",
-    };
-    settings_xml_body(key_attachment, allow, declared)
-}
-
-fn settings_xml_body(key_attachment: &str, allow: bool, declared: &str) -> String {
-    let _ = declared;
+fn settings_xml_body(key_attachment: &str, policy: AgentPolicy, declared: &str) -> String {
+    let AgentPolicy {
+        allow,
+        lifetime_secs,
+        confirm,
+        remove_at_close,
+    } = policy;
+    // The duration is written even when unused, because that is what KeePassXC
+    // does — it keeps the number you last chose while the flag is off.
+    let use_lifetime = lifetime_secs.is_some();
+    let duration = lifetime_secs.unwrap_or(DEFAULT_LIFETIME_SECS);
     format!(
         "<?xml version=\"1.0\" encoding=\"{declared}\"?>\n\
          <EntrySettings>\n\
          \x20 <AllowUseOfSshKey>{allow}</AllowUseOfSshKey>\n\
          \x20 <AddAtDatabaseOpen>{allow}</AddAtDatabaseOpen>\n\
-         \x20 <RemoveAtDatabaseClose>true</RemoveAtDatabaseClose>\n\
-         \x20 <UseConfirmConstraintWhenAdding>false</UseConfirmConstraintWhenAdding>\n\
-         \x20 <UseLifetimeConstraintWhenAdding>false</UseLifetimeConstraintWhenAdding>\n\
-         \x20 <LifetimeConstraintDuration>{DEFAULT_LIFETIME_SECS}</LifetimeConstraintDuration>\n\
+         \x20 <RemoveAtDatabaseClose>{remove_at_close}</RemoveAtDatabaseClose>\n\
+         \x20 <UseConfirmConstraintWhenAdding>{confirm}</UseConfirmConstraintWhenAdding>\n\
+         \x20 <UseLifetimeConstraintWhenAdding>{use_lifetime}</UseLifetimeConstraintWhenAdding>\n\
+         \x20 <LifetimeConstraintDuration>{duration}</LifetimeConstraintDuration>\n\
          \x20 <Location>\n\
          \x20   <SelectedType>Attachment</SelectedType>\n\
          \x20   <AttachmentName>{key_attachment}</AttachmentName>\n\
@@ -155,6 +202,10 @@ pub enum Decision {
     Skip,
 }
 
+/// Decode the attachment to text. Public because anything reading these
+/// settings needs the same UTF-16 handling — a second reader that forgets it
+/// is the exact bug this module was fixed for.
+///
 /// Decode the attachment to text.
 ///
 /// KeePassXC writes this file as **UTF-16** (its own exports declare
@@ -162,7 +213,7 @@ pub enum Decision {
 /// user has marked — which is the opposite of the intent, and silently. We
 /// accept UTF-8 (what trove itself writes), and UTF-16 in either byte order,
 /// with or without a BOM.
-fn decode(bytes: &[u8]) -> Option<String> {
+pub fn decode(bytes: &[u8]) -> Option<String> {
     // UTF-16 MUST be detected before trying UTF-8: NUL is a valid UTF-8
     // character, so `from_utf8` happily accepts UTF-16LE ASCII text and returns
     // "<\0A\0l\0l\0o\0w...". Every tag lookup then misses and the entry is

@@ -38,6 +38,7 @@ pub fn run() {
             commands::register_vault,
             commands::create_vault,
             commands::unlock_vault,
+            commands::build_info,
             commands::get_settings,
             commands::set_agent_key,
             commands::set_settings,

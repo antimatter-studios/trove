@@ -124,24 +124,32 @@ input { font-family: inherit; }
   padding: 0 14px;
   border-bottom: 1px solid var(--border-soft);
   background: linear-gradient(var(--raise), var(--raise)), var(--bg-1);
-  -webkit-app-region: drag;
+  /* The OS title bar above this strip owns dragging. Nothing here needs
+     -webkit-app-region (a Chromium property WKWebView ignores anyway), but the
+     strip is still chrome, so it should not be selectable text. */
+  -webkit-user-select: none; user-select: none; cursor: default;
 }
-.traffic { display: flex; gap: 8px; align-items: center; }
-.tl { width: 12px; height: 12px; border-radius: 50%; }
-.tl.r { background: #ff5f57; } .tl.y { background: #febc2e; } .tl.g { background: #28c840; }
+/* Build stamp beside the app name: quiet, monospaced, and never the widest
+   thing in the bar — it is for identification, not decoration. */
+/* Title-bar text is chrome, but it still has to be READABLE: --text-ghost is
+   0.44 lightness on a 0.185 ground, roughly 2:1, which is unreadable rather
+   than subtle. Hierarchy comes from size and weight here, not from fading the
+   text into the background. */
+.win-ver { font-family: var(--font-mono); font-size: 11px; color: var(--text); letter-spacing: -.01em; }
 [data-theme="light"] .tl { box-shadow: inset 0 0 0 1px oklch(0 0 0 / 0.12); }
-.win-title { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim); font-weight: 500; }
+.win-title { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text); font-weight: 500; }
 .win-title .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
-.titlebar .rgt { justify-self: end; display: flex; gap: 6px; }
+.titlebar .rgt { justify-self: end; display: flex; gap: 10px; align-items: center; }
+/* Left: logo + wordmark. Quiet — it identifies the window, it is not a banner. */
+.win-brand { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--text); }
+.win-brand img { opacity: .9; border-radius: 3px; }
+/* Centre: the vault in view, and how many others are open. */
+.win-of { color: var(--text-dim); font-weight: 400; }
+/* Right: live count of this app's keys in the system agent. */
+.win-keys-left { font-variant-numeric: tabular-nums; margin-left: 1px; }
+.win-keys { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--accent-strong); background: var(--accent-dim); border: 1px solid var(--accent-line); border-radius: 999px; padding: 1px 7px 1px 6px; }
 
 /* ============ TOOLBAR ============ */
-.toolbar {
-  height: 54px; flex: none;
-  display: flex; align-items: center; gap: 12px;
-  padding: 0 12px 0 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-0);
-}
 .status-pill {
   display: flex; align-items: center; gap: 8px;
   height: 32px; padding: 0 12px 0 10px;
@@ -152,10 +160,10 @@ input { font-family: inherit; }
   font-size: 12.5px; font-weight: 500;
 }
 .status-pill .lk { color: var(--green); }
-.status-pill .sub { color: var(--text-faint); font-size: 11px; }
+.status-pill .sub { font-variant-numeric: tabular-nums; color: var(--text-dim); font-size: 11px; }
 
 .search {
-  flex: 1; max-width: 620px; margin: 0 auto;
+  flex: 1; max-width: 520px;
   position: relative; display: flex; align-items: center;
   height: 34px; padding: 0 10px 0 34px;
   border-radius: 9px;
@@ -179,7 +187,6 @@ input { font-family: inherit; }
 }
 .kbd.solo { min-width: 20px; justify-content: center; }
 
-.tbar-actions { display: flex; align-items: center; gap: 6px; }
 .icon-btn {
   width: 34px; height: 34px; display: grid; place-items: center;
   border-radius: 8px; border: 1px solid transparent; background: transparent;
@@ -244,6 +251,32 @@ input { font-family: inherit; }
 .tree-row.sel .tfic { color: var(--accent); }
 .tr-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
 .tr-count { font-size: 11px; color: var(--text-ghost); font-variant-numeric: tabular-nums; }
+/* New entry, pinned above the sidebar footer: it acts on the vault this pane
+   represents, so it lives here rather than in a global toolbar. */
+/* Lock state on the vault chip: the badge carries the colour, so the state is
+   legible at a glance without reading anything. */
+.sb-vault.is-unlocked .vbadge { color: var(--green); border-color: oklch(0.78 0.14 150 / 0.35); background: oklch(0.78 0.14 150 / 0.12); }
+.sb-vault.is-locked .vbadge { color: var(--amber); border-color: oklch(0.80 0.13 78 / 0.35); background: oklch(0.80 0.13 78 / 0.12); }
+.sb-vault .vsub { display: block; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.sb-vault .vmeta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
+
+.sb-new { padding: 10px 12px; border-top: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 8px; }
+.sb-new .btn-accent, .sb-new .btn-lock { width: 100%; justify-content: center; height: 34px; }
+
+/* Search at the head of the list it filters. */
+.list-search {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  margin: 10px 12px 0; height: 32px; padding: 0 8px 0 30px;
+  border-radius: 8px; background: var(--bg-0); border: 1px solid var(--border);
+}
+.list-search:focus-within { border-color: var(--accent-line); }
+.list-search .si { position: absolute; left: 9px; color: var(--text-faint); }
+.list-search input {
+  flex: 1; min-width: 0; background: none; border: none; outline: none;
+  color: var(--text); font-size: 12.5px; font-family: inherit;
+}
+.list-search input::placeholder { color: var(--text-faint); }
+
 .sb-foot { flex: none; border-top: 1px solid var(--border-soft); padding: 10px 14px; display: flex; align-items: center; gap: 8px; color: var(--text-faint); font-size: 11px; font-family: var(--font-mono); }
 
 /* ---- entry list ---- */
@@ -285,6 +318,12 @@ input { font-family: inherit; }
 
 /* ---- detail ---- */
 .detail { background: linear-gradient(var(--raise), var(--raise)), var(--bg-0); }
+.detail-bar {
+  height: 46px; flex: none;
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+}
 .detail-scroll { flex: 1; overflow-y: auto; }
 .dt-hero { padding: 22px 24px 18px; border-bottom: 1px solid var(--border); }
 .dt-crumb { display: flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); margin-bottom: 12px; flex-wrap: wrap; }
@@ -382,6 +421,11 @@ input { font-family: inherit; }
 .modal-head h2 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .modal-head p { font-size: 12px; color: var(--text-faint); margin-top: 1px; }
 .modal-body { padding: 18px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+/* Flex children shrink by default, and `.set-group` clips what it cannot fit —
+   so a tall panel silently guillotined its rows (a description cut mid-sentence,
+   a whole control gone) instead of scrolling. Keep every child its natural
+   height and let the body scroll, which is what `overflow-y: auto` is for. */
+.modal-body > * { flex-shrink: 0; }
 .fld { display: flex; flex-direction: column; gap: 6px; }
 .fld > label { font-size: 11.5px; font-weight: 600; color: var(--text-dim); letter-spacing: .01em; }
 .inp {
@@ -401,6 +445,16 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
    their intrinsic width instead of being squeezed until the text wraps. */
 .modal-foot > button { flex-shrink: 0; }
 .modal-foot .grow { flex: 1; }
+/* The data-lock action carries its name. The app lock is a countdown in the
+   status pill; this one is a thing you press, and the two need to be told
+   apart at a glance rather than by hovering. */
+.btn-lock {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--bg-2);
+  color: var(--text); font-size: 12.5px; font-weight: 500; white-space: nowrap;
+}
+.btn-lock:hover { border-color: var(--border-strong); background: var(--bg-3); }
+
 .btn-ghost { height: 36px; padding: 0 15px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); font-size: 13px; font-weight: 500; }
 .btn-ghost:hover { color: var(--text); border-color: var(--border-strong); }
 .btn-primary { height: 36px; padding: 0 18px; border-radius: 8px; border: 1px solid var(--accent-line); background: var(--accent); color: var(--accent-ink); font-size: 13px; font-weight: 600; }
@@ -477,6 +531,40 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
 .toast-check { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--teal-dim); color: var(--teal); }
 
 /* shortcuts help */
+/* ---- unlock progress -----------------------------------------------------
+   Unlock is slow on purpose (the KDF) and then talks to the OS agent per key,
+   so the dialog has to say what it is doing or it reads as a hang. Steps are
+   listed up front and tick over in place — the list never grows or reflows. */
+.unlock-steps {
+  list-style: none; margin: 14px 0 2px; padding: 12px 14px; text-align: left;
+  display: flex; flex-direction: column; gap: 9px;
+  background: var(--bg-0); border: 1px solid var(--border-soft); border-radius: 11px;
+}
+.ustep { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text-ghost); transition: color .15s; }
+.ustep .umark { width: 15px; height: 15px; display: grid; place-items: center; flex-shrink: 0; color: inherit; }
+.ustep .ulabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ustep .udetail { margin-left: auto; font-size: 11.5px; color: var(--text-ghost); flex-shrink: 0; }
+.ustep.pending { color: var(--text); }
+.ustep.done { color: var(--text-dim); }
+.ustep.done .umark { color: var(--green); }
+.ustep.failed { color: var(--red); }
+.ustep.failed .umark { color: var(--red); }
+.ustep.skipped { opacity: .45; }
+
+/* A waiting step still shows a mark, so the list reads as a checklist before
+   anything has happened rather than as four lines of grey text. */
+.udot { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
+.udash { width: 8px; height: 1.5px; background: var(--text-ghost); border-radius: 1px; }
+
+/* The one moving part: a ring on the step currently running. */
+.uspin {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 1.6px solid var(--accent-line); border-top-color: var(--accent);
+  animation: uspin .7s linear infinite;
+}
+@keyframes uspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .uspin { animation: none; } }
+
 /* ---- settings ------------------------------------------------------------
    A settings row is a switch, a name, and the sentence explaining what turning
    it on actually does to your machine — these settings hand private keys to
@@ -495,8 +583,10 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
 .set-row .srd { font-size: 12px; color: var(--text-faint); line-height: 1.55; margin-top: 3px; }
 .set-row .srd code { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dim); }
 
-/* Dependent rows: indented under their parent, dimmed and inert when off. */
-.set-sub { padding-left: 30px; background: var(--bg-desk); }
+/* Dependent rows share the parent's left edge — stepping them inwards made the
+   panel look ragged for no gain, since the dimming already says what depends on
+   what. Only the background and the inert state distinguish them. */
+.set-sub { background: var(--bg-desk); }
 .set-sub.off { opacity: .42; pointer-events: none; }
 
 /* Numeric setting: the input sits with its unit, right-aligned to the switches

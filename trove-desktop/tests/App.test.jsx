@@ -8,6 +8,24 @@ import { render, fireEvent, waitFor } from '@testing-library/react';
 // The native file dialog is unavailable under happy-dom; stub it.
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 // api.js is the ONLY module that talks to the backend — mock the whole surface.
+// overlays.jsx listens for unlock progress events. There is no Tauri IPC in a
+// test process, so stub the bridge rather than letting the real one reject
+// asynchronously in the middle of an unlock assertion.
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve()) }));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}));
+
+// The titlebar starts window drags through this; there is no window to drag in
+// a test process.
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    startDragging: () => Promise.resolve(),
+    toggleMaximize: () => Promise.resolve(),
+  }),
+}));
+
 vi.mock('../src/api.js', () => ({
   listVaults: vi.fn(),
   registerVault: vi.fn(),
@@ -21,6 +39,7 @@ vi.mock('../src/api.js', () => ({
   deleteEntry: vi.fn(),
   setFavorite: vi.fn(),
   getSettings: vi.fn(),
+  buildInfo: vi.fn(),
   setAgentKey: vi.fn(),
   setSettings: vi.fn(),
 }));
@@ -36,6 +55,7 @@ const DETAIL = { notes: 'primary db', fields: [{ k: 'Host', v: 'db.prod' }], pas
 const LOCKED_VAULT = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/vaults/personal.kdbx', locked: true };
 
 beforeEach(() => {
+  api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
   api.setSettings.mockResolvedValue(undefined);
   vi.clearAllMocks();
@@ -56,12 +76,17 @@ describe('app chrome + theme', () => {
     expect(document.documentElement.dataset.accent).toBe('brass');
   });
 
-  it('renders the windowed chrome: titlebar with three traffic lights + status pill', async () => {
+  it('renders the windowed chrome: titlebar without drawn window buttons, and no toolbar row', async () => {
     const { container: c } = render(<App />);
     await waitFor(() => expect(c.querySelector('.window')).toBeTruthy());
     expect(c.querySelector('.titlebar')).toBeTruthy();
-    expect(c.querySelectorAll('.titlebar .traffic .tl')).toHaveLength(3);
-    expect(c.querySelector('.toolbar .status-pill')).toBeTruthy();
+    // No drawn traffic lights: the OS draws the window buttons, and our own
+    // put a second, dead set below the working ones.
+    expect(c.querySelectorAll('.titlebar .tl')).toHaveLength(0);
+    // The toolbar row is gone: lock state moved onto the vault chip, search
+    // above the list it filters, and the app controls to the detail column.
+    expect(c.querySelector('.toolbar')).toBeFalsy();
+    expect(c.querySelector('.status-pill')).toBeFalsy();
   });
 
   it('a fresh boot with no registered vaults opens the Open-vault modal', async () => {

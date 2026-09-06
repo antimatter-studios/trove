@@ -1,14 +1,103 @@
 import React from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { Icon, TYPE_ICON } from './icons.jsx';
 // Trove — overlays: unlock, command palette, entry form, toast, help
 
 /* ============ UNLOCK ============ */
-function Unlock({ vault, onUnlock, onChange }) {
+// The steps an unlock goes through, in the order the backend reports them.
+// Listed up front so the checklist appears complete from the first frame
+// rather than growing as events arrive.
+// Floor on how long each step stays visible. Below roughly this, a change
+// isn't perceived as a change — the list just blinks.
+const MIN_STEP_MS = 220;
+
+const UNLOCK_STEPS = [
+  { step: "open", label: "Decrypting the vault" },
+  { step: "entries", label: "Reading entries" },
+  { step: "agent", label: "Adding keys to the system agent" },
+  { step: "files", label: "Writing materialized files" },
+];
+
+function UnlockProgress({ progress }) {
+  return (
+    <ul className="unlock-steps">
+      {UNLOCK_STEPS.map(({ step, label }) => {
+        const st = progress[step];
+        const state = st ? st.state : "waiting";
+        return (
+          <li key={step} className={"ustep " + state}>
+            <span className="umark">
+              {state === "done" ? <Icon name="check" size={13} />
+                : state === "failed" ? <Icon name="x" size={13} />
+                : state === "skipped" ? <span className="udash" />
+                : state === "pending" ? <span className="uspin" />
+                : <span className="udot" />}
+            </span>
+            <span className="ulabel">{label}</span>
+            {st && st.detail ? <span className="udetail">{st.detail}</span> : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function Unlock({ vault, onUnlock, onReady, onChange }) {
   const [pw, setPw] = React.useState("");
   const [show, setShow] = React.useState(false);
   const [err, setErr] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  // step id → { state, detail }, filled in by `unlock-progress` events.
+  const [progress, setProgress] = React.useState({});
   const ref = React.useRef(null);
+
+  // Only listen while an unlock is actually running: the backend emits to the
+  // whole window, and a stale listener would repaint a card nobody is looking
+  // at. `listen` resolves to its own unlisten function.
+  // Events are applied through a queue with a floor on how fast the list may
+  // advance. Without it a fast unlock paints every step in one frame and reads
+  // as "nothing happened, then it vanished" — which is exactly what it looked
+  // like when the backend blocked and flushed all its events at once.
+  const queue = React.useRef([]);
+  const draining = React.useRef(false);
+  // Registered on MOUNT, not when `busy` flips. `listen` is itself an async IPC
+  // round trip, and unlock starts emitting immediately — registering at submit
+  // time loses every step that fires before the registration lands, which
+  // looked exactly like "nothing happens, then it vanishes".
+  React.useEffect(() => {
+    let stop = null, dead = false;
+
+    const drain = () => {
+      if (dead) return;
+      const next = queue.current.shift();
+      if (!next) { draining.current = false; return; }
+      setProgress((p) => ({ ...p, [next.step]: { state: next.state, detail: next.detail } }));
+      setTimeout(drain, MIN_STEP_MS);
+    };
+
+    listen("unlock-progress", (e) => {
+      const { step, state, detail } = e.payload || {};
+      if (!step) return;
+      queue.current.push({ step, state, detail });
+      if (!draining.current) { draining.current = true; drain(); }
+    }).then((fn) => { if (dead) fn(); else stop = fn; }).catch(() => {});
+
+    return () => { dead = true; stop && stop(); };
+  }, []);
+
+  // Resolves once every queued step has been applied, plus a beat so the last
+  // tick is on screen rather than replaced in the same frame.
+  const drained = React.useCallback(
+    () =>
+      new Promise((resolve) => {
+        const check = () => {
+          if (!queue.current.length && !draining.current) setTimeout(resolve, MIN_STEP_MS);
+          else setTimeout(check, MIN_STEP_MS / 2);
+        };
+        check();
+      }),
+    []
+  );
   React.useEffect(() => { ref.current && ref.current.focus(); }, [vault.id]);
   // Reset transient state when the target vault changes.
   React.useEffect(() => { setPw(""); setErr(false); setBusy(false); }, [vault.id]);
@@ -16,12 +105,17 @@ function Unlock({ vault, onUnlock, onChange }) {
   const submit = async (e) => {
     e && e.preventDefault();
     if (!pw || busy) return;
-    setBusy(true); setErr(false);
+    setBusy(true); setErr(false); setProgress({});
+    queue.current = []; draining.current = false;
     try {
-      // onUnlock decrypts the vault via the backend; it rejects on a bad
-      // password. On success the parent flips to the unlocked body and this
-      // component unmounts, so there is nothing more to do here.
-      await onUnlock(pw);
+      // onUnlock decrypts the vault and RESOLVES WITH THE ENTRY LIST — it does
+      // not flip the parent itself. Deliberate: the backend has finished by the
+      // time it resolves, but the checklist may still be draining, and an
+      // immediate unmount would bin the last few ticks.
+      const list = await onUnlock(pw);
+      await drained();
+      onReady(list);
+      return;
     } catch (e2) {
       setErr(e2 && typeof e2 === "string" ? e2 : (e2 && e2.message) || true);
       setBusy(false);
@@ -37,6 +131,22 @@ function Unlock({ vault, onUnlock, onChange }) {
   const lastSlash = fullPath.lastIndexOf("/");
   const pathDir = lastSlash > 0 ? fullPath.slice(0, lastSlash) : "";
   const pathFile = lastSlash >= 0 ? fullPath.slice(lastSlash) : fullPath;
+
+  // Once the password is accepted the form has done its job, so the card
+  // becomes the progress view outright rather than growing a list underneath a
+  // dead password field. A rejected password is the only way back.
+  if (busy) {
+    return (
+      <div className="unlock-desk embed">
+        <div className="unlock-card">
+          <div className="ul-lock working"><Icon name="unlock" size={28} /></div>
+          <div className="ul-h">Unlocking {vault.name}</div>
+          <div className="ul-sub">Decrypting and handing your keys to the machine.</div>
+          <UnlockProgress progress={progress} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="unlock-desk embed">
@@ -69,8 +179,8 @@ function Unlock({ vault, onUnlock, onChange }) {
         </div>
         <div className="ul-err">{err && (<><Icon name="x" size={13} /> {typeof err === "string" ? err : "Incorrect master password. Try again."}</>)}</div>
 
-        <button type="submit" className="ul-unlock" disabled={busy}>
-          {busy ? <><Icon name="refresh" size={17} /> Decrypting…</> : <><Icon name="unlock" size={17} /> Unlock</>}
+        <button type="submit" className="ul-unlock">
+          <Icon name="unlock" size={17} /> Unlock
         </button>
 
         <div className="ul-foot"><Icon name="shield" size={13} /> Local‑only · never leaves this device</div>
@@ -412,18 +522,27 @@ function SettingsModal({ settings, onChange, onClose }) {
     <div className="scrim center" onMouseDown={onClose}>
       <div className="modal" style={{ width: "min(560px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <div className="mh-badge"><Icon name="key" size={18} /></div>
+          <div className="mh-badge"><Icon name="gear" size={18} /></div>
           <div><h2>Settings</h2><p>What unlocking a vault does to the rest of your machine.</p></div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
 
         <div className="modal-body">
+          {/* The one rule worth stating outright, because two different locks
+              with two different scopes is exactly what confused this before. */}
+          <p className="set-note" style={{ margin: "0 2px 4px" }}>
+            <b>App lock</b> locks this window and forgets the decrypted vault.
+            Your data stays where it is. <b>Data lock</b> is the padlock button:
+            it removes the keys from the system agent and dematerializes the
+            files.
+          </p>
+
           <div className="set-group">
             <div className="set-group-head"><div className="sgt">SSH keys</div></div>
 
             <SetRow
               title="Add keys to the system agent on unlock"
-              desc="Your terminal, your editor and anything launched from the Dock can then use them. Trove takes them back out when the vault locks.">
+              desc="Your terminal, your editor and anything launched from the Dock can then use them. A data lock takes them back out.">
               <Switch checked={agent} onChange={(v) => set({ systemAgent: v })} />
             </SetRow>
 
@@ -435,6 +554,20 @@ function SettingsModal({ settings, onChange, onClose }) {
                        value={settings.systemAgentLifetime}
                        onChange={(e) => set({ systemAgentLifetime: Math.max(0, Number(e.target.value) || 0) })} />
                 <span className="unit">sec</span>
+              </span>
+            </SetRow>
+          </div>
+
+          <div className="set-group">
+            <div className="set-group-head"><div className="sgt">App lock</div></div>
+            <SetRow
+              title="Lock the app after"
+              desc="Minutes of no interaction before the window locks and the decrypted vault is forgotten. Keys and materialized files are left alone — they expire on their own clocks. 0 never locks.">
+              <span className="set-num">
+                <input className="inp" type="number" min="0" step="1"
+                       value={settings.idleLockMinutes ?? 5}
+                       onChange={(e) => set({ idleLockMinutes: Math.max(0, Number(e.target.value) || 0) })} />
+                <span className="unit">min</span>
               </span>
             </SetRow>
           </div>
@@ -452,7 +585,7 @@ function SettingsModal({ settings, onChange, onClose }) {
           <p className="set-note">
             Which keys are eligible is decided per entry — open a key and use
             “Add this key to the system agent”. Changes here apply at the next
-            unlock; keys already handed to the agent stay until the vault locks.
+            unlock; keys already handed to the agent stay until a data lock.
           </p>
         </div>
       </div>
@@ -596,4 +729,4 @@ function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
   );
 }
 
-export { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal};
+export { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };
