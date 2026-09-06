@@ -4,6 +4,56 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.9.0 — 2026-09-06
+
+**Unlocking in the desktop app no longer freezes the window.** Every
+`#[tauri::command]` was synchronous, so it ran on the main thread and blocked
+the event loop for the whole Argon2 derivation — on a vault tuned to 50 rounds
+and 64 MB that is seconds of a dead window and a spinning cursor. All sixteen
+commands now run off the main thread, and the unlock reports each step as it
+happens rather than going dark and finishing all at once.
+
+**Locking is two ideas now, because one button was doing both.** *App lock*
+hides the window and takes nothing back from the machine; it is what the idle
+timer fires. *Data lock* removes that vault's keys from the system agent and
+dematerializes its files. Data lock applies to one database, so with several
+open you land on the next open vault rather than at a login screen — you have
+finished with that vault, not with the app. The old single "lock" left people
+guessing which of those it meant.
+
+**Every SSH entry carries its own agent policy.** Whether to load it at all, how
+long it lives, whether the agent confirms each signature, and whether a data
+lock takes it back — written to `KeeAgent.settings` in the encoding KeePassXC
+reads, so the two applications agree about the same vault.
+
+**`SSH_AUTH_SOCK` is a snapshot, and trove now copes when it goes stale.** macOS
+restarts its launchd ssh-agent on a fresh socket directory, and from that moment
+every shell, daemon and GUI app started earlier still exports the old path.
+Forwarding failed with `Connection refused` once per key, which reads as trove
+being broken and left the user diagnosing a variable they never set. Trove now
+probes the socket by asking for the identity list and requiring a real
+`SSH_AGENT_IDENTITIES_ANSWER` — a socket file with nothing behind it proves
+nothing — and if that fails it asks launchd where the agent is listening now.
+Every candidate is verified the same way before a key is sent to it, so a wrong
+guess costs a connection attempt rather than a leaked key.
+
+Forwarding into the live agent is only half of it: `ssh`, `git` and `ssh-add`
+read the variable for themselves, so a caller still holding the stale one cannot
+reach the keys that were just forwarded. The daemon returns the socket it used
+and `unlock` puts it in the session shell, or prints it beside
+`export TROVE_SESSION=…` — but only when it had to correct it, so a working
+environment is left exactly as it was. `TROVE_SSH_HEAL=0` switches this off for
+anyone who pinned an agent deliberately and would rather see it fail than have
+keys go elsewhere; `TROVE_SSH_AGENT_SOCK` names one outright.
+
+**`--no-shell`** is an alias for `--export`: automation wants to say what it is
+avoiding, and a subshell is the thing a harness has no way to exit.
+
+The window title bar carries the vault name, the forwarded-key count and their
+expiry, and the build stamp. The toolbar row is gone — search sits above the
+list it filters, lock state on the vault chip it describes, the app controls at
+the top of the detail column, and Data lock above New entry in the sidebar.
+
 ## v0.8.0 — 2026-09-05
 
 **Unlocking in the desktop app now does what unlocking in the daemon does.** The
