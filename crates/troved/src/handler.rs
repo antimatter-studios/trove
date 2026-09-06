@@ -191,7 +191,7 @@ pub async fn handle(
                     // nothing else would ever remove it.
                     let before_unlock = ssh_agent::keys_to_unforward(&key_store.read().await);
 
-                    let forward_warnings = ssh_agent::forward_on_unlock(&ssh, timeout_secs).await;
+                    let forward = ssh_agent::forward_on_unlock(&ssh, timeout_secs).await;
 
                     {
                         let mut keys = key_store.write().await;
@@ -232,7 +232,9 @@ pub async fn handle(
                         response: Response::ok_unlocked(
                             code,
                             materialize_warnings,
-                            forward_warnings,
+                            forward.warnings,
+                            forward.notes,
+                            forward.socket,
                         ),
                         shutdown: false,
                     }

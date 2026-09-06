@@ -260,6 +260,12 @@ fn vault_with_key(path: &Path, title: &str, key: &[u8], entry_settings: Option<V
 fn point_at(agent: Option<&Path>, tmp: &Path) {
     std::env::set_var("TROVE_SSH_SOCK", tmp.join("trove.sock"));
     std::env::remove_var("TROVE_SSH_FORWARD");
+    // These tests pin one agent on purpose and assert what happens with *it*.
+    // Healing exists to find a different agent when the named one is gone,
+    // which on a machine that has a real agent would silently answer the
+    // question they are asking. `heals_...` opts back in.
+    std::env::set_var("TROVE_SSH_HEAL", "0");
+    std::env::remove_var("TROVE_SSH_AGENT_SOCK");
     match agent {
         Some(p) => std::env::set_var("SSH_AUTH_SOCK", p),
         None => std::env::remove_var("SSH_AUTH_SOCK"),
@@ -270,6 +276,8 @@ fn clear_env() {
     std::env::remove_var("SSH_AUTH_SOCK");
     std::env::remove_var("TROVE_SSH_SOCK");
     std::env::remove_var("TROVE_SSH_FORWARD");
+    std::env::remove_var("TROVE_SSH_HEAL");
+    std::env::remove_var("TROVE_SSH_AGENT_SOCK");
 }
 
 fn warnings(resp: &Response) -> Vec<String> {
@@ -596,6 +604,57 @@ fn askpass_present() -> bool {
     ]
     .iter()
     .any(|p| std::path::Path::new(p).is_file())
+}
+
+/// `SSH_AUTH_SOCK` outlives the agent it names: macOS restarts its launchd
+/// ssh-agent on a fresh socket, and every process started earlier keeps the old
+/// path. Forwarding must find the live agent rather than fail six times, and it
+/// must hand the working path back so the caller's `ssh` can reach the keys too.
+#[tokio::test]
+async fn forwarding_heals_a_stale_ssh_auth_sock() {
+    let _guard = env_lock().await;
+    let Some(agent) = RealAgent::start() else {
+        return;
+    };
+    let tmp = short_tempdir();
+    let vault = tmp.path().join("v.kdbx");
+    vault_with_key(&vault, "fwd-heal", KEY_A, None);
+
+    // What the caller holds: a socket whose agent has gone.
+    let stale = tmp.path().join("stale.sock");
+    point_at(Some(&stale), tmp.path());
+    std::env::remove_var("TROVE_SSH_HEAL");
+    std::env::set_var("TROVE_SSH_AGENT_SOCK", &agent.sock);
+
+    let h = Harness::new();
+    let resp = h.unlock(&vault).await;
+    assert!(matches!(resp, Response::Ok(_)), "unlock must succeed");
+
+    let w = warnings(&resp);
+    assert!(w.is_empty(), "a repair is not a failure: {w:?}");
+
+    let v = serde_json::to_value(&resp).expect("serialize");
+    let notes = v
+        .get("ssh_forward_notes")
+        .and_then(|n| n.as_array().cloned())
+        .unwrap_or_default();
+    assert_eq!(notes.len(), 1, "the repair must be explained: {notes:?}");
+
+    // The caller is told where the keys really went, so its own `ssh` can
+    // follow — forwarding into an agent nobody can find helps no one.
+    assert_eq!(
+        v.get("ssh_forward_socket").and_then(|s| s.as_str()),
+        Some(agent.sock.to_str().expect("utf8")),
+        "the working socket must come back to the caller"
+    );
+
+    let (ok, listed) = agent.ssh_add(&["-l"]);
+    assert!(ok, "listing the live agent: {listed}");
+    assert!(
+        listed.contains("fwd-heal"),
+        "the key must be in the live agent: {listed}"
+    );
+    clear_env();
 }
 
 #[tokio::test]

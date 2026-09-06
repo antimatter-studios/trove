@@ -91,6 +91,157 @@ pub fn system_agent_socket(our_socket: &std::path::Path) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Does a live ssh-agent answer on this path?
+///
+/// A socket *file* proves nothing: macOS leaves the old one on disk when the
+/// agent behind it goes away, so `connect` gets ECONNREFUSED. Even a successful
+/// connect proves only that something listens, and these paths are handed to us
+/// by the environment — so ask for the identity list and require the reply an
+/// agent would give. Anything else is not an agent and must never be sent a
+/// private key.
+async fn is_live_agent(path: &std::path::Path) -> bool {
+    matches!(
+        request(path, wire::SSH_AGENTC_REQUEST_IDENTITIES, &[]).await,
+        Ok(wire::SSH_AGENT_IDENTITIES_ANSWER)
+    )
+}
+
+/// Daemon-wide off switch for healing a stale `SSH_AUTH_SOCK`:
+/// `TROVE_SSH_HEAL=0` (also `false`/`no`/`off`).
+///
+/// Healing means forwarding to an agent the caller did not name. That is what
+/// the caller wants when the path is stale through no fault of theirs, and not
+/// what they want if they deliberately pinned one agent and would rather see it
+/// fail than have keys go somewhere else.
+pub fn healing_enabled() -> bool {
+    match std::env::var("TROVE_SSH_HEAL") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Sockets that might hold the user's agent when `$SSH_AUTH_SOCK` is wrong.
+///
+/// Every candidate is verified with [`is_live_agent`] before it is used, so a
+/// wrong guess here costs a connection attempt, not a leaked key.
+fn agent_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    // An explicit answer beats any search: what a caller that knows where the
+    // agent lives — a desktop app, a test — can say instead of exporting
+    // SSH_AUTH_SOCK into a process it does not own.
+    if let Some(p) = std::env::var_os("TROVE_SSH_AGENT_SOCK") {
+        if !p.is_empty() {
+            out.push(PathBuf::from(p));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // launchd owns the agent and names a *fresh* socket directory for each
+        // instance, so it is the only authority on where the current one is.
+        if let Some(p) = launchd_agent_socket() {
+            out.push(p);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let dir = PathBuf::from(dir);
+            out.push(dir.join("ssh-agent.socket"));
+            out.push(dir.join("keyring/ssh"));
+            out.push(dir.join("gcr/ssh"));
+        }
+    }
+    out
+}
+
+/// Ask launchd where `com.openssh.ssh-agent` is listening right now.
+///
+/// The socket path appears in `launchctl print` as a `path = …/Listeners` line
+/// under the job's socket entry. Parsing a human-readable dump is unlovely, but
+/// launchd exposes no API for this and the alternative — guessing at
+/// `/var/run/com.apple.launchd.*/Listeners` — would have us connecting to
+/// whatever other service happens to own one of those directories.
+#[cfg(target_os = "macos")]
+fn launchd_agent_socket() -> Option<PathBuf> {
+    // troved does not link libc, and this path only runs when forwarding has
+    // already failed, so a subprocess for the uid is cheap enough.
+    let uid = std::process::Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|u| !u.is_empty() && u.bytes().all(|b| b.is_ascii_digit()))?;
+    let out = std::process::Command::new("/bin/launchctl")
+        .arg("print")
+        .arg(format!("gui/{uid}/com.openssh.ssh-agent"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("path = "))
+        .find(|p| p.ends_with("/Listeners"))
+        .map(PathBuf::from)
+}
+
+/// Where to forward to, healing a stale `$SSH_AUTH_SOCK` if we can.
+///
+/// The variable is a *snapshot*: every shell, daemon and GUI app that started
+/// before the agent last restarted still exports the path the agent used then.
+/// On macOS that happens on its own — launchd restarts `ssh-agent` with a new
+/// socket directory — and afterwards forwarding fails with `Connection refused`
+/// for every key, which reads to the user as trove being broken. They cannot
+/// reasonably be expected to diagnose an environment variable, so trove finds
+/// the live agent itself and says what it did.
+///
+/// Returns the socket to use, plus one note to show the user when the answer
+/// was not simply what the environment said.
+async fn forward_target(our_socket: &std::path::Path) -> (Option<PathBuf>, Option<String>) {
+    let from_env = system_agent_socket(our_socket);
+    if !healing_enabled() {
+        return (from_env, None);
+    }
+    if let Some(path) = &from_env {
+        if is_live_agent(path).await {
+            return (from_env, None);
+        }
+    }
+    for cand in agent_candidates() {
+        if Some(&cand) == from_env.as_ref() {
+            continue;
+        }
+        if cand == our_socket {
+            continue;
+        }
+        if is_live_agent(&cand).await {
+            let note = match &from_env {
+                Some(stale) => format!(
+                    "SSH_AUTH_SOCK names {}, where no agent is listening — the agent \
+                     it belonged to went away and was restarted on a new socket. Keys \
+                     were forwarded to the live agent at {} instead. Shells started \
+                     before the restart still hold the old path: open a new terminal, \
+                     or run `export SSH_AUTH_SOCK={}`.",
+                    stale.display(),
+                    cand.display(),
+                    cand.display()
+                ),
+                None => format!("forwarded to the ssh-agent at {}", cand.display()),
+            };
+            return (Some(cand), Some(note));
+        }
+    }
+    // Nothing better exists. Hand back what the caller named and let the
+    // per-key attempts fail and report themselves: a warning that names the key
+    // it could not forward is more use than one that names a socket.
+    (from_env, None)
+}
+
 /// Is there an askpass program for the receiving agent to prompt with?
 ///
 /// `SSH_AGENT_CONSTRAIN_CONFIRM` asks the agent to confirm every use — but the
@@ -133,6 +284,16 @@ pub struct ForwardReport {
     /// user rather than swallowed — a key silently missing from the agent is
     /// exactly the failure that wastes an afternoon.
     pub warnings: Vec<String>,
+    /// Things that went *right* but not as asked — trove healed a stale
+    /// `SSH_AUTH_SOCK`, say. Kept apart from `warnings` so a repair is not
+    /// announced as a failure.
+    pub notes: Vec<String>,
+    /// The agent these keys actually went to, when it is not what
+    /// `$SSH_AUTH_SOCK` names. Forwarding into the live agent only solves half
+    /// the problem: `ssh`, `git` and `ssh-add` read that variable themselves,
+    /// so a caller holding a stale one still cannot reach the keys. Handing the
+    /// path back lets the CLI put it in the session shell.
+    pub socket: Option<PathBuf>,
 }
 
 impl ForwardReport {
@@ -142,6 +303,10 @@ impl ForwardReport {
         self.added += other.added;
         self.removed += other.removed;
         self.warnings.extend(other.warnings);
+        self.notes.extend(other.notes);
+        if self.socket.is_none() {
+            self.socket = other.socket;
+        }
     }
 }
 
@@ -251,9 +416,15 @@ pub async fn on_unlock_when(
     if keys.is_empty() || !enabled {
         return report;
     }
-    let Some(sock) = system_agent_socket(&super::resolve_ssh_socket_path()) else {
+    let (sock, note) = forward_target(&super::resolve_ssh_socket_path()).await;
+    let Some(sock) = sock else {
         return report;
     };
+    let healed = note.is_some();
+    report.notes.extend(note);
+    if healed {
+        report.socket = Some(sock.clone());
+    }
     for key in keys {
         // Per-key, because the constraints are per-entry: `add_all` applies one
         // pair of constraints to everything it's given.
@@ -293,10 +464,15 @@ pub async fn on_lock(keys: &[ForwardedKey]) -> ForwardReport {
     if keys.is_empty() {
         return ForwardReport::default();
     }
-    let Some(sock) = system_agent_socket(&super::resolve_ssh_socket_path()) else {
+    let (sock, note) = forward_target(&super::resolve_ssh_socket_path()).await;
+    let Some(sock) = sock else {
+        // A dead agent at lock time is not worth a warning: the keys we would
+        // have removed are gone with the agent that held them.
         return ForwardReport::default();
     };
-    remove_forwarded(&sock, keys).await
+    let mut report = remove_forwarded(&sock, keys).await;
+    report.notes.extend(note);
+    report
 }
 
 /// Ask the agent to drop every one of these keys. Best-effort by nature: we
@@ -418,6 +594,38 @@ mod tests {
         );
 
         std::env::remove_var("SSH_AUTH_SOCK");
+    }
+
+    /// A socket file with no agent behind it must not be forwarded to, and a
+    /// listener that does not speak the agent protocol must not either — that
+    /// check is what makes discovery safe to attempt at all.
+    #[tokio::test]
+    async fn is_live_agent_rejects_dead_and_non_agent_sockets() {
+        let dir = std::env::temp_dir().join(format!("trove-live-agent-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Nothing listening at all.
+        let missing = dir.join("missing.sock");
+        assert!(!is_live_agent(&missing).await, "no socket is not an agent");
+
+        // A listener that answers with something other than IDENTITIES_ANSWER.
+        let impostor = dir.join("impostor.sock");
+        let _ = std::fs::remove_file(&impostor);
+        let listener = tokio::net::UnixListener::bind(&impostor).unwrap();
+        let task = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = stream
+                    .write_all(&wire::frame_message(wire::SSH_AGENT_FAILURE, &[]))
+                    .await;
+            }
+        });
+        assert!(
+            !is_live_agent(&impostor).await,
+            "a listener that refuses is not an agent we may send keys to"
+        );
+        task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

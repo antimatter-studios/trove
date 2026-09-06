@@ -40,16 +40,32 @@ pub use keys::{ForwardedKey, LoadedKey};
 /// The whole point is that this cannot fail an unlock: an absent, wedged or
 /// hostile agent produces warnings and nothing else. On native Windows there is
 /// no `SSH_AUTH_SOCK`-style agent to forward to, so it's a no-op.
-pub async fn forward_on_unlock(keys: &[LoadedKey], idle_timeout_secs: u64) -> Vec<String> {
+pub async fn forward_on_unlock(keys: &[LoadedKey], idle_timeout_secs: u64) -> ForwardOutcome {
     #[cfg(unix)]
     {
-        forward::on_unlock(keys, idle_timeout_secs).await.warnings
+        let r = forward::on_unlock(keys, idle_timeout_secs).await;
+        ForwardOutcome {
+            warnings: r.warnings,
+            notes: r.notes,
+            socket: r.socket.map(|p| p.display().to_string()),
+        }
     }
     #[cfg(not(unix))]
     {
         let _ = (keys, idle_timeout_secs);
-        Vec::new()
+        ForwardOutcome::default()
     }
+}
+
+/// What forwarding has to tell the user: what went wrong, and what went right
+/// but differently. They travel together because they are produced together
+/// and reported in the same place.
+#[derive(Debug, Default)]
+pub struct ForwardOutcome {
+    pub warnings: Vec<String>,
+    pub notes: Vec<String>,
+    /// The agent socket used, when it differs from `$SSH_AUTH_SOCK`.
+    pub socket: Option<String>,
 }
 
 /// [`forward_on_unlock`] for a caller that decides for itself whether to
@@ -59,17 +75,20 @@ pub async fn forward_on_unlock_when(
     enabled: bool,
     keys: &[LoadedKey],
     idle_timeout_secs: u64,
-) -> Vec<String> {
+) -> ForwardOutcome {
     #[cfg(unix)]
     {
-        forward::on_unlock_when(enabled, keys, idle_timeout_secs)
-            .await
-            .warnings
+        let r = forward::on_unlock_when(enabled, keys, idle_timeout_secs).await;
+        ForwardOutcome {
+            warnings: r.warnings,
+            notes: r.notes,
+            socket: r.socket.map(|p| p.display().to_string()),
+        }
     }
     #[cfg(not(unix))]
     {
         let _ = (enabled, keys, idle_timeout_secs);
-        Vec::new()
+        ForwardOutcome::default()
     }
 }
 
@@ -93,8 +112,12 @@ pub fn keys_to_unforward(keys: &[LoadedKey]) -> Vec<ForwardedKey> {
 pub async fn unforward_on_lock(keys: &[ForwardedKey]) {
     #[cfg(unix)]
     {
-        for w in forward::on_lock(keys).await.warnings {
+        let report = forward::on_lock(keys).await;
+        for w in report.warnings {
             eprintln!("ssh-agent: warning: {w}");
+        }
+        for n in report.notes {
+            eprintln!("ssh-agent: {n}");
         }
     }
     #[cfg(not(unix))]

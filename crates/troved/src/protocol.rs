@@ -507,6 +507,18 @@ pub enum OkBody {
         /// must be visible rather than discovered later by a failing `git push`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ssh_forward_warnings: Vec<String>,
+        /// Things forwarding did differently but successfully — healing a
+        /// stale `SSH_AUTH_SOCK`, say. Separate from the warnings because
+        /// reporting a repair as a failure is how a working unlock ends up
+        /// looking broken. Wire-optional for back-compat.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ssh_forward_notes: Vec<String>,
+        /// The ssh-agent the keys actually went into, when that is not what the
+        /// caller's `SSH_AUTH_SOCK` names. The CLI puts this in the session
+        /// shell, so `ssh` and `git` there reach the keys that were just
+        /// forwarded. Wire-optional for back-compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh_forward_socket: Option<String>,
     },
     /// Response to `Get`: the requested secret's bytes, base64-encoded.
     Secret {
@@ -593,12 +605,16 @@ impl Response {
         code: String,
         materialize_warnings: Vec<String>,
         ssh_forward_warnings: Vec<String>,
+        ssh_forward_notes: Vec<String>,
+        ssh_forward_socket: Option<String>,
     ) -> Self {
         Response::Ok(OkBody::Unlocked {
             code,
             daemon_version: env!("TROVE_BUILD_VERSION").to_string(),
             materialize_warnings,
             ssh_forward_warnings,
+            ssh_forward_notes,
+            ssh_forward_socket,
         })
     }
     pub fn ok_ssh_agent_list(ssh_keys: Vec<SshKeyDto>) -> Self {
