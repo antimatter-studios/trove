@@ -59,7 +59,8 @@ struct Cli {
 
     /// Load environment variables from a `.env.trove` file before running.
     ///
-    /// Bare `--env` reads `./.env.trove`; pass a path to read a different file.
+    /// Bare `--env` looks for `.env.trove` in the working directory and then
+    /// beside the vault being opened; pass a path to read a specific file.
     /// Lines are `KEY=VALUE`, with `#` comments, an optional `export ` prefix
     /// and optional quotes. A variable already set in the environment wins, so
     /// the file supplies defaults rather than overriding the caller.
@@ -71,11 +72,13 @@ struct Cli {
         long = "env",
         global = true,
         num_args = 0..=1,
-        default_missing_value = DEFAULT_ENV_FILE,
         conflicts_with = "password_stdin",
         value_name = "PATH"
     )]
-    env_file: Option<PathBuf>,
+    // Three states, which one Option cannot express: absent (no --env at all),
+    // bare `--env` (Some(None) — search for the file), and `--env <PATH>`
+    // (Some(Some(p)) — use exactly that).
+    env_file: Option<Option<PathBuf>>,
 
     /// Operate directly on this .kdbx file (offline mode), bypassing the daemon.
     ///
@@ -999,8 +1002,28 @@ fn run(cli: Cli) -> Result<()> {
     ENV_OPT_IN
         .set(cli.env_file.is_some())
         .expect("run() is called once");
-    if let Some(given) = cli.env_file.as_deref() {
-        let path = resolve_env_file(given);
+    if let Some(given) = cli.env_file.clone() {
+        let path = match given {
+            Some(p) => resolve_env_file(&p),
+            None => {
+                let candidates = env_file_candidates(vault_for_env_lookup(&cli));
+                candidates
+                    .iter()
+                    .find(|p| p.is_file())
+                    .cloned()
+                    .ok_or_else(|| {
+                        // Name every place looked in: "no such file" about a
+                        // path the user never typed is a riddle.
+                        let looked: Vec<String> =
+                            candidates.iter().map(|p| p.display().to_string()).collect();
+                        anyhow!(
+                            "no {DEFAULT_ENV_FILE} found — looked in: {}. \
+                             Pass `--env <PATH>` to name one.",
+                            looked.join(", ")
+                        )
+                    })?
+            }
+        };
         let n = load_env_file(&path)?;
         eprintln!("trove: loaded {n} variable(s) from {}", path.display());
     }
@@ -2430,6 +2453,40 @@ fn resolve_env_file(given: &Path) -> PathBuf {
         given.join(DEFAULT_ENV_FILE)
     } else {
         given.to_path_buf()
+    }
+}
+
+/// Where a bare `--env` looks, in order: the working directory, then the
+/// directory holding the vault being opened.
+///
+/// Beside the vault matters because that is where the file belongs when you
+/// keep a vault and its settings together — `~/vaults/work.kdbx` and
+/// `~/vaults/.env.trove` — and running `trove unlock ~/vaults/work.kdbx` from
+/// somewhere else should still find it. The working directory comes first so a
+/// project checkout can override with its own.
+///
+/// Deliberately NOT a user-wide config directory: those get committed to
+/// dotfile repositories, and this file holds a vault password.
+fn env_file_candidates(vault: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = vec![PathBuf::from(DEFAULT_ENV_FILE)];
+    if let Some(dir) = vault.and_then(Path::parent) {
+        let beside = dir.join(DEFAULT_ENV_FILE);
+        if !out.contains(&beside) {
+            out.push(beside);
+        }
+    }
+    out
+}
+
+/// The vault a bare `--env` should look next to: the global `--vault` when it
+/// is offline mode, or the one `unlock` was pointed at.
+fn vault_for_env_lookup(cli: &Cli) -> Option<&Path> {
+    if let Some(v) = cli.vault.as_deref() {
+        return Some(v);
+    }
+    match &cli.command {
+        Command::Unlock { vault, .. } => Some(vault.as_path()),
+        _ => None,
     }
 }
 

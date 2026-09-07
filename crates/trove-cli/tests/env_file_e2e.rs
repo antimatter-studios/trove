@@ -252,3 +252,97 @@ fn other_trove_variables_load_from_the_file_too() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Bare `--env` falls back to the vault's own directory.
+///
+/// Keeping `work.kdbx` and `.env.trove` together is the natural layout, and
+/// `trove unlock ~/vaults/work.kdbx` run from anywhere else must still find it —
+/// otherwise the flag only works when you happen to be standing in the right
+/// directory.
+#[test]
+fn bare_env_falls_back_to_the_directory_holding_the_vault() {
+    let Some(trove) = find_trove() else { return };
+    let vault_dir = TempDir::new().expect("tempdir");
+    let elsewhere = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, vault_dir.path());
+    assert!(
+        !elsewhere.path().join(".env.trove").exists(),
+        "the working directory must NOT have one, or this proves nothing"
+    );
+
+    let out = run_in(
+        &trove,
+        elsewhere.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "should find the vault's own .env.trove: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("loaded 1 variable"),
+        "and say which file it used: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The working directory wins, so a checkout can override the vault's own file.
+#[test]
+fn the_working_directory_beats_the_vaults_directory() {
+    let Some(trove) = find_trove() else { return };
+    let vault_dir = TempDir::new().expect("tempdir");
+    let cwd = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, vault_dir.path());
+
+    // A local file that names the WRONG password: if it is the one used, the
+    // unlock fails, which is what proves precedence rather than a lucky pass.
+    std::fs::write(
+        cwd.path().join(".env.trove"),
+        "TROVE_DB_PASSWORD=not-the-vault-password\n",
+    )
+    .expect("write local .env.trove");
+
+    let out = run_in(
+        &trove,
+        cwd.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(
+        !out.status.success(),
+        "the working directory's file must be preferred, wrong password and all"
+    );
+}
+
+/// With no file anywhere, the error names every place that was tried — a bare
+/// "No such file or directory" about a path the user never typed is a riddle.
+#[test]
+fn a_missing_env_file_reports_where_it_looked() {
+    let Some(trove) = find_trove() else { return };
+    let vault_dir = TempDir::new().expect("tempdir");
+    let cwd = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, vault_dir.path());
+    std::fs::remove_file(vault_dir.path().join(".env.trove")).expect("remove fixture env file");
+
+    let out = run_in(
+        &trove,
+        cwd.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(!out.status.success(), "no file anywhere should fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("looked in"),
+        "the error should say where it looked: {err}"
+    );
+    assert!(
+        err.contains(vault_dir.path().to_str().expect("utf8")),
+        "including the vault's directory: {err}"
+    );
+}
