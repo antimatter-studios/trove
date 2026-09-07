@@ -29,6 +29,10 @@ keepass = { package = "keepass", version = "=0.12.5", features = ["save_kdbx4"] 
 
 [dev-dependencies]
 tempfile = "3"
+# `trove list --json` is the machine-readable interface; the human format is
+# not one, and parsing it is what this harness used to do. Version pinned
+# rather than inherited: this crate is outside the workspace, on purpose.
+serde_json = "1"
 rand = "0.8"
 hex = "0.4"
 base64 = "0.22"

@@ -148,6 +148,11 @@ enum Command {
         /// Machine-readable output: a JSON array of entry summaries.
         #[arg(long)]
         json: bool,
+        /// Show each entry's UUID. Off by default: no trove command takes
+        /// one — entries are addressed by title or path — so it was 36
+        /// characters of noise per line. `--json` always carries it.
+        #[arg(long = "show-id")]
+        show_id: bool,
     },
 
     /// Add a resource (SSH key, password, ...) to a vault.
@@ -311,6 +316,11 @@ enum Command {
         /// Machine-readable output: a JSON array of entry summaries.
         #[arg(long)]
         json: bool,
+        /// Show each entry's UUID. Off by default: no trove command takes
+        /// one — entries are addressed by title or path — so it was 36
+        /// characters of noise per line. `--json` always carries it.
+        #[arg(long = "show-id")]
+        show_id: bool,
     },
 
     /// Edit an existing entry: standard fields via flags, custom fields via
@@ -1056,7 +1066,7 @@ fn run(cli: Cli) -> Result<()> {
     let vault = cli.vault.as_deref();
     match cli.command {
         Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
-        Command::List { json } => cmd_list(vault, pw_stdin, json),
+        Command::List { json, show_id } => cmd_list(vault, pw_stdin, json, show_id),
         Command::Add {
             resource:
                 AddResource::Ssh {
@@ -1254,7 +1264,11 @@ fn run(cli: Cli) -> Result<()> {
                 cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin, json)
             }
         }
-        Command::Search { term, json } => cmd_search(vault, &term, pw_stdin, json),
+        Command::Search {
+            term,
+            json,
+            show_id,
+        } => cmd_search(vault, &term, pw_stdin, json, show_id),
         Command::Edit {
             entry_path,
             title,
@@ -1760,7 +1774,7 @@ fn entry_summary_json(e: &trove_core::EntrySummary) -> Value {
     })
 }
 
-fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool) -> Result<()> {
+fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool, show_id: bool) -> Result<()> {
     match vault_path {
         Some(path) => {
             let vault = open_vault(path, pw_stdin)?;
@@ -1773,16 +1787,20 @@ fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool) -> Result<()>
                 println!("{}", serde_json::to_string_pretty(&arr)?);
                 return Ok(());
             }
-            for entry in vault.list_entries() {
-                print_list_row(
-                    &entry.id.to_string(),
-                    &entry.display_path(),
-                    &entry.attachment_names,
-                );
-            }
+            let rows = vault
+                .list_entries()
+                .iter()
+                .map(|e| ListRow {
+                    id: e.id.to_string(),
+                    group_path: e.group_path.clone(),
+                    title: e.title.clone(),
+                    attachments: e.attachment_names.clone(),
+                })
+                .collect();
+            print_list_grouped(rows, show_id);
             Ok(())
         }
-        None => cmd_list_via_daemon(json),
+        None => cmd_list_via_daemon(json, show_id),
     }
 }
 
@@ -1792,7 +1810,7 @@ fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool) -> Result<()>
 /// `daemon::send_autospawn` — if no daemon is running we spawn one, but it
 /// will come up with no vault unlocked, so the user gets the same friendly
 /// "no vault unlocked" message and a hint to run `trove unlock`.
-fn cmd_list_via_daemon(json: bool) -> Result<()> {
+fn cmd_list_via_daemon(json: bool, show_id: bool) -> Result<()> {
     let resp = match daemon::send_autospawn(&daemon::Request::List) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
@@ -1825,44 +1843,209 @@ fn cmd_list_via_daemon(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
-    print_entry_rows_from_json(&entries);
+    print_list_grouped(rows_from_json(&entries), show_id);
     Ok(())
 }
 
-/// Render daemon `List`/`Search`-shaped entry summaries with
-/// [`print_list_row`], reconstructing each `Group/Sub/Title` display path.
-fn print_entry_rows_from_json(entries: &[Value]) {
-    for entry in entries {
-        let id = entry.get("id").and_then(Value::as_str).unwrap_or("?");
-        let title = entry.get("title").and_then(Value::as_str).unwrap_or("?");
-        let group_path: Vec<&str> = entry
-            .get("group_path")
-            .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        let display = if group_path.is_empty() {
-            title.to_string()
-        } else {
-            format!("{}/{title}", group_path.join("/"))
-        };
-        let attachments: Vec<String> = entry
-            .get("attachments")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        print_list_row(id, &display, &attachments);
+/// Daemon `List`/`Search` summaries as [`ListRow`]s.
+fn rows_from_json(entries: &[Value]) -> Vec<ListRow> {
+    entries
+        .iter()
+        .map(|entry| {
+            let strs = |k: &str| -> Vec<String> {
+                entry
+                    .get(k)
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            ListRow {
+                id: entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+                group_path: strs("group_path"),
+                title: entry
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+                attachments: strs("attachments"),
+            }
+        })
+        .collect()
+}
+
+/// KeePassXC's per-entry agent policy. It rides along on every SSH entry and
+/// is not something the user put there, so it is never counted or named.
+const KEEAGENT_SETTINGS: &str = "KeeAgent.settings";
+
+/// One entry as `list` and `search` render it.
+struct ListRow {
+    id: String,
+    group_path: Vec<String>,
+    title: String,
+    attachments: Vec<String>,
+}
+
+/// What an entry's attachments amount to, in one short column.
+///
+/// An SSH entry is recognised by its own contents rather than by a naming
+/// convention: a private key is an attachment whose name plus `.pub` is also
+/// attached. That is true of `id_rsa`/`id_rsa.pub` and of
+/// `00000.inpace.build.id_ed25519`, which no pattern would have caught.
+fn attachment_note(names: &[String]) -> Option<String> {
+    let real: Vec<&String> = names.iter().filter(|n| *n != KEEAGENT_SETTINGS).collect();
+    if real.is_empty() {
+        return None;
+    }
+    // A private key paired with its own `.pub`.
+    if let Some(key) = real
+        .iter()
+        .find(|n| real.iter().any(|o| o.as_str() == format!("{n}.pub")))
+    {
+        return Some(format!("ssh  {key}"));
+    }
+    // No pair, but KeePassXC attached its agent settings — which it only does
+    // for an entry it treats as an SSH key. The key is then whichever
+    // attachment is not a public half.
+    if names.iter().any(|n| n == KEEAGENT_SETTINGS) {
+        if let Some(key) = real.iter().find(|n| !n.ends_with(".pub")) {
+            return Some(format!("ssh  {key}"));
+        }
+    }
+    match real.as_slice() {
+        [one] => Some(format!("1 file  {one}")),
+        many => Some(format!("{} files", many.len())),
     }
 }
 
-fn print_list_row(id: &str, title: &str, attachments: &[String]) {
-    if attachments.is_empty() {
-        println!("{id}  {title}");
+/// Case-insensitive, digit-aware ordering: "item2" before "item10", and case
+/// never splits names that belong together.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (x.peek().copied(), y.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(ca), Some(cb)) => {
+                if ca.is_ascii_digit() && cb.is_ascii_digit() {
+                    let na: String =
+                        std::iter::from_fn(|| x.next_if(char::is_ascii_digit)).collect();
+                    let nb: String =
+                        std::iter::from_fn(|| y.next_if(char::is_ascii_digit)).collect();
+                    let ord = na
+                        .trim_start_matches('0')
+                        .len()
+                        .cmp(&nb.trim_start_matches('0').len())
+                        .then_with(|| na.trim_start_matches('0').cmp(nb.trim_start_matches('0')));
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                } else {
+                    let ord = ca
+                        .to_lowercase()
+                        .cmp(cb.to_lowercase())
+                        .then_with(|| ca.cmp(&cb));
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                    x.next();
+                    y.next();
+                }
+            }
+        }
+    }
+}
+
+/// Print entries grouped by folder, sorted, with a short column saying what
+/// each one carries.
+///
+/// The id is behind `--show-id` because nothing takes one: every command
+/// resolves entries by title or path, so 36 characters of UUID on every line
+/// were pushing the part you read off to the right. `--json` still carries it
+/// for programs.
+fn print_list_grouped(mut rows: Vec<ListRow>, show_id: bool) {
+    rows.sort_by(|a, b| {
+        natural_cmp(&a.group_path.join("/"), &b.group_path.join("/"))
+            .then_with(|| natural_cmp(&a.title, &b.title))
+    });
+
+    let notes: Vec<Option<String>> = rows
+        .iter()
+        .map(|r| attachment_note(&r.attachments))
+        .collect();
+    // Align the note column to the longest title that has one, so entries
+    // without a note cost nothing.
+    let width = rows
+        .iter()
+        .zip(&notes)
+        .filter(|(_, n)| n.is_some())
+        .map(|(r, _)| r.title.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut current: Option<&[String]> = None;
+    for (row, note) in rows.iter().zip(&notes) {
+        if current != Some(row.group_path.as_slice()) {
+            if current.is_some() {
+                println!();
+            }
+            let group = if row.group_path.is_empty() {
+                "(root)".to_string()
+            } else {
+                row.group_path.join("/")
+            };
+            println!("{group}");
+            current = Some(row.group_path.as_slice());
+        }
+        let id = if show_id {
+            format!("{}  ", row.id)
+        } else {
+            String::new()
+        };
+        match note {
+            Some(n) => println!("  {id}{:<width$}   {n}", row.title),
+            None => println!("  {id}{}", row.title),
+        }
+    }
+
+    let keys = notes
+        .iter()
+        .filter(|n| n.as_deref().is_some_and(|n| n.starts_with("ssh")))
+        .count();
+    let plural = if rows.len() == 1 { "entry" } else { "entries" };
+    if keys > 0 {
+        println!("\n{} {plural} · {keys} with SSH keys", rows.len());
     } else {
-        println!("{id}  {title}  [attachments: {}]", attachments.join(", "));
+        println!("\n{} {plural}", rows.len());
+    }
+}
+
+/// Flat one-line-per-entry rendering, for `search`: results cross folders, so
+/// grouping them would bury the full path that says where each hit lives.
+fn print_list_flat(rows: &[ListRow], show_id: bool) {
+    for row in rows {
+        let path = if row.group_path.is_empty() {
+            row.title.clone()
+        } else {
+            format!("{}/{}", row.group_path.join("/"), row.title)
+        };
+        let id = if show_id {
+            format!("{}  ", row.id)
+        } else {
+            String::new()
+        };
+        match attachment_note(&row.attachments) {
+            Some(n) => println!("{id}{path}   {n}"),
+            None => println!("{id}{path}"),
+        }
     }
 }
 
@@ -3149,7 +3332,13 @@ fn cmd_show(
     Ok(())
 }
 
-fn cmd_search(vault: Option<&Path>, term: &str, pw_stdin: bool, json: bool) -> Result<()> {
+fn cmd_search(
+    vault: Option<&Path>,
+    term: &str,
+    pw_stdin: bool,
+    json: bool,
+    show_id: bool,
+) -> Result<()> {
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
@@ -3162,13 +3351,17 @@ fn cmd_search(vault: Option<&Path>, term: &str, pw_stdin: bool, json: bool) -> R
                 println!("{}", serde_json::to_string_pretty(&arr)?);
                 return Ok(());
             }
-            for entry in v.search_entries(term) {
-                print_list_row(
-                    &entry.id.to_string(),
-                    &entry.display_path(),
-                    &entry.attachment_names,
-                );
-            }
+            let rows: Vec<ListRow> = v
+                .search_entries(term)
+                .iter()
+                .map(|e| ListRow {
+                    id: e.id.to_string(),
+                    group_path: e.group_path.clone(),
+                    title: e.title.clone(),
+                    attachments: e.attachment_names.clone(),
+                })
+                .collect();
+            print_list_flat(&rows, show_id);
         }
         None => {
             let resp = daemon_call(&daemon::Request::Search {
@@ -3183,7 +3376,7 @@ fn cmd_search(vault: Option<&Path>, term: &str, pw_stdin: bool, json: bool) -> R
                 println!("{}", serde_json::to_string_pretty(&entries)?);
                 return Ok(());
             }
-            print_entry_rows_from_json(&entries);
+            print_list_flat(&rows_from_json(&entries), show_id);
         }
     }
     Ok(())

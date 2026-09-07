@@ -170,9 +170,15 @@ fn offline_round_trip_no_daemon() {
     );
     assert_ok(&out, "list");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // Grouped output: the folder is a header, the entry sits under it, and an
+    // SSH entry is named by the key it carries.
     assert!(
-        stdout.contains("work/github"),
-        "list should show the entry path 'work/github'\nstdout: {stdout}"
+        stdout.contains("work"),
+        "list should show the group:\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("  github"),
+        "with the entry under it:\nstdout: {stdout}"
     );
 }
 

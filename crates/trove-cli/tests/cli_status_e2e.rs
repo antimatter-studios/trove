@@ -261,13 +261,15 @@ async fn trove_status_round_trip_against_real_daemon() {
         stdout.contains("e2e-entry"),
         "expected root entry title in list output:\n{stdout}"
     );
+    // `list` summarises attachments rather than dumping every name: one file
+    // is named, several are counted, and an SSH pair is named by its key.
     assert!(
-        stdout.contains("attachments: blob"),
-        "expected attachment to be listed:\n{stdout}"
+        stdout.contains("1 file  blob"),
+        "expected the attachment to be named:\n{stdout}"
     );
     assert!(
-        stdout.contains("Work/SSH/github"),
-        "expected nested entry to render with its full group path:\n{stdout}"
+        stdout.contains("Work/SSH") && stdout.contains("  github"),
+        "expected the nested entry under its group header:\n{stdout}"
     );
 
     // trove status (vault unlocked) — expect the vault path AND remaining time.
