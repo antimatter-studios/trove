@@ -4,6 +4,33 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.10.0 — 2026-09-07
+
+**`trove show --json`.** `list` and `search` already had it; `show` did not, so
+anything reading one entry was parsing a display format — slicing the label off
+an `Attachments:` line and splitting on commas, which breaks on the first
+attachment whose name contains one. `--json` prints an object instead:
+attachments as an array, custom fields as an object of values rather than a list
+of names, and absent scalars as `null` so "empty" and "unset" are
+distinguishable. Protected values keep the rule the human output already has —
+a password is an *absent key* unless `--show-protected`, never an empty string,
+so a caller can tell "you did not ask" from "there is none".
+
+In daemon mode custom fields come back as names mapped to `null`: the summary
+RPC carries names only and each value is a separate code-gated round trip, so
+populating them would mean `--json` quietly pulling every secret in an entry
+across the wire. `--attr` remains the way to read one deliberately.
+
+**Bare `--env` looks beside the vault.** It meant one hardcoded relative path,
+so `trove unlock ~/vaults/work.kdbx --env` failed with `No such file or
+directory` while `.env.trove` sat next to the vault that command named — and the
+error quoted a path the user never typed. It now looks in the working directory
+first, so a checkout can override, then in the directory holding the vault,
+which is where the file belongs when a vault and its settings are kept together.
+With neither present the error lists every place tried. Deliberately not a
+user-wide config directory: `~/.config` gets committed to dotfile repositories,
+and this file holds a vault password.
+
 ## v0.9.1 — 2026-09-06
 
 **The app is called Trove.** The Dock read "TroveDesktop" — the name of the
