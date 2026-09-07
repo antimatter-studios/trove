@@ -474,3 +474,130 @@ fn daemon_mode_requires_session_code() {
         );
     }
 }
+
+/// `show --json` is an interface for programs, so the properties a program
+/// depends on are asserted rather than the text: attachments arrive as an
+/// array (not a comma-joined line that breaks on a filename containing a
+/// comma), custom fields as an object of values, and the password is an
+/// ABSENT KEY until `--show-protected` — never an empty string, so a caller
+/// can tell "not asked for" from "empty".
+#[test]
+fn show_json_is_structured_and_hides_protected_values() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("json.kdbx");
+    let vault = vault.to_str().expect("utf8 path");
+    let pw_line = format!("{PASSWORD}\n");
+    let two_lines = format!("{PASSWORD}\n{SECRET}\n");
+
+    assert_ok(
+        &run_trove(
+            &trove,
+            &["--vault", vault, "--password-stdin", "init"],
+            &pw_line,
+        ),
+        "init",
+    );
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                vault,
+                "--password-stdin",
+                "add",
+                "password",
+                "svc/api",
+                "--username",
+                "svc",
+                "--url",
+                "https://example.invalid",
+                "--secret-stdin",
+            ],
+            &two_lines,
+        ),
+        "add",
+    );
+
+    // A comma in the name is the case the display format cannot express.
+    let attach = dir.path().join("odd,name.txt");
+    std::fs::write(&attach, b"payload").expect("write attachment");
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                vault,
+                "--password-stdin",
+                "add",
+                "file",
+                "svc/api",
+                "--src",
+                attach.to_str().expect("utf8"),
+                "--target",
+                "/tmp/unused-by-this-test",
+                "--name",
+                "odd,name.txt",
+            ],
+            &pw_line,
+        ),
+        "add file",
+    );
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "show",
+            "--json",
+            "svc/api",
+        ],
+        &pw_line,
+    );
+    assert_ok(&out, "show --json");
+    let v: serde_json::Value = serde_json::from_str(&stdout_str(&out)).expect("valid JSON");
+
+    assert_eq!(v["title"], "api");
+    assert_eq!(v["username"], "svc");
+    assert_eq!(v["url"], "https://example.invalid");
+    assert!(v["notes"].is_null(), "unset scalars are null, not empty");
+    assert!(v["fields"].is_object(), "custom fields are an object");
+
+    let names: Vec<&str> = v["attachments"]
+        .as_array()
+        .expect("attachments is an array")
+        .iter()
+        .map(|n| n.as_str().expect("string"))
+        .collect();
+    assert!(
+        names.contains(&"odd,name.txt"),
+        "a comma in a filename must survive: {names:?}"
+    );
+
+    assert!(
+        v.get("password").is_none(),
+        "password must be absent without --show-protected, not empty: {v}"
+    );
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "show",
+            "--json",
+            "--show-protected",
+            "svc/api",
+        ],
+        &pw_line,
+    );
+    assert_ok(&out, "show --json --show-protected");
+    let v: serde_json::Value = serde_json::from_str(&stdout_str(&out)).expect("valid JSON");
+    assert_eq!(v["password"], SECRET, "revealed on request");
+}

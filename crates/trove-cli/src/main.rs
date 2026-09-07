@@ -289,6 +289,14 @@ enum Command {
         /// ephemeral code crosses the wire — never the shared secret.
         #[arg(long, conflicts_with = "attrs")]
         totp: bool,
+        /// Machine-readable output: one JSON object for the entry.
+        ///
+        /// Attachments and custom fields come back as an array and an object,
+        /// so a caller never has to split a display line on commas. Protected
+        /// values follow the same rule as the human output — absent unless
+        /// --show-protected is given.
+        #[arg(long, conflicts_with_all = ["attrs", "totp"])]
+        json: bool,
     },
 
     /// Search entries: case-insensitive substring match over title, username,
@@ -1215,11 +1223,12 @@ fn run(cli: Cli) -> Result<()> {
             attrs,
             show_protected,
             totp,
+            json,
         } => {
             if totp {
                 cmd_show_totp(vault, &entry_path, pw_stdin)
             } else {
-                cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin)
+                cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin, json)
             }
         }
         Command::Search { term, json } => cmd_search(vault, &term, pw_stdin, json),
@@ -2863,12 +2872,55 @@ fn print_show_summary(
     }
 }
 
+/// One entry as the JSON shape `show --json` prints.
+///
+/// Deliberately not the display format with different punctuation: attachments
+/// are an array and custom fields are an object, because the caller is a program
+/// and the alternative is splitting a comma-joined line — which breaks on the
+/// first attachment whose name contains a comma.
+///
+/// `password` is present only when it was asked for, and a protected custom
+/// field is omitted rather than emitted empty, so a consumer can tell "no such
+/// field" from "you did not ask to see it".
+/// The parts of an entry `show --json` prints, gathered so the two modes can
+/// hand them over the same way.
+struct ShowJson<'a> {
+    display_path: &'a str,
+    title: &'a str,
+    username: Option<&'a str>,
+    url: Option<&'a str>,
+    notes: Option<&'a str>,
+    /// `None` means "not asked for" and omits the key entirely.
+    password: Option<&'a str>,
+    fields: serde_json::Map<String, Value>,
+    attachments: &'a [String],
+}
+
+fn entry_show_json(e: ShowJson<'_>) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("path".into(), Value::from(e.display_path));
+    out.insert("title".into(), Value::from(e.title));
+    out.insert(
+        "username".into(),
+        e.username.map_or(Value::Null, Value::from),
+    );
+    out.insert("url".into(), e.url.map_or(Value::Null, Value::from));
+    out.insert("notes".into(), e.notes.map_or(Value::Null, Value::from));
+    if let Some(p) = e.password {
+        out.insert("password".into(), Value::from(p));
+    }
+    out.insert("fields".into(), Value::Object(e.fields));
+    out.insert("attachments".into(), Value::from(e.attachments.to_vec()));
+    Value::Object(out)
+}
+
 fn cmd_show(
     vault: Option<&Path>,
     entry_path: &str,
     attrs: &[String],
     show_protected: bool,
     pw_stdin: bool,
+    json: bool,
 ) -> Result<()> {
     // Refuse protected --attr without --show-protected up front, in both modes.
     if let Some(p) = attrs.iter().find(|a| is_protected_field(a)) {
@@ -2902,6 +2954,34 @@ fn cmd_show(
                 None
             };
             let custom = v.custom_field_names(&id).unwrap_or_default();
+            if json {
+                // Custom fields carry VALUES here, unlike the human listing
+                // which only names them — a program asking for an entry wants
+                // what is in it. Protected ones stay behind --show-protected.
+                let mut fields = serde_json::Map::new();
+                for name in &custom {
+                    if is_protected_field(name) && !show_protected {
+                        continue;
+                    }
+                    if let Ok(Some(value)) = v.get_field(&id, name) {
+                        fields.insert(name.clone(), Value::from(value));
+                    }
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&entry_show_json(ShowJson {
+                        display_path: &summary.display_path(),
+                        title: &summary.title,
+                        username: summary.username.as_deref(),
+                        url: summary.url.as_deref(),
+                        notes: notes.as_deref(),
+                        password: password.as_deref(),
+                        fields,
+                        attachments: &summary.attachment_names,
+                    }))?
+                );
+                return Ok(());
+            }
             print_show_summary(
                 &summary.display_path(),
                 &summary.title,
@@ -2971,6 +3051,32 @@ fn cmd_show(
             } else {
                 None
             };
+            if json {
+                // The daemon's summary carries custom field NAMES only, and
+                // fetching each value is a code-gated round trip per field. So
+                // the object is emitted with the names mapped to null: the
+                // caller learns which fields exist and reads the ones it wants
+                // with `--attr`, rather than this silently pulling every secret
+                // in the entry across the wire.
+                let mut fields = serde_json::Map::new();
+                for name in list("custom_fields") {
+                    fields.insert(name, Value::Null);
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&entry_show_json(ShowJson {
+                        display_path: &display,
+                        title: &title,
+                        username: s("username").as_deref(),
+                        url: s("url").as_deref(),
+                        notes: s("notes").as_deref(),
+                        password: password.as_deref(),
+                        fields,
+                        attachments: &list("attachments"),
+                    }))?
+                );
+                return Ok(());
+            }
             print_show_summary(
                 &display,
                 &title,
