@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.10.0
+`trove show --json` prints one entry as an object — attachments as an array, custom fields as an object of values, unset scalars as `null` — so a program never has to parse the human format. Protected values keep the same rule: a password is an absent key unless `--show-protected`. Bare `--env` now looks in the working directory and then beside the vault being opened, instead of only at `./.env.trove`, and says where it looked when it finds nothing.
+
 ### v0.9.1
 The desktop app is called Trove — the Dock read "TroveDesktop", which is a repository name rather than an application's. The bundle is now `Trove.app`; its identifier is unchanged, so it upgrades in place and keeps its preferences and permissions, and the Homebrew cask is still installed as `trove-desktop` to keep it separate from `trove-cli`.
 
@@ -436,6 +439,3 @@ Daemon-default `add file` / `add gpg` (with `--vault` as the global offline sele
 
 ### v0.3.0
 Global `--vault` offline selector, required `<comment>` for `add ssh`, `Root` default group, KDBX 4.0→4.1 heal + daemon lifecycle + ssh/gpg CLI wrappers, `keepass 0.13.10` (KeePassXC-readable) with a cross-tool conformance suite, and Windows (named-pipe IPC) + the cross-platform release pipeline.
-
-### v0.2.0
-`KeeAgent.settings` export, nested groups, daemon auto-spawn, RSA PEM import, an idle-lock fix, and the Install section.
