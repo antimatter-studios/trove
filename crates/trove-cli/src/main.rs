@@ -2680,7 +2680,67 @@ fn vault_for_env_lookup(cli: &Cli) -> Option<&Path> {
 /// Deliberately minimal: `#` comments, blank lines, an optional `export `
 /// prefix, and optionally quoted values. No interpolation and no multi-line
 /// values — this holds configuration and a password, not a shell script.
+/// Refuse a group/world-readable env file instead of warning about it:
+/// `TROVE_ENV_STRICT=1` (also `true`/`yes`/`on`).
+///
+/// Unix-gated with its only caller: Windows has no mode bits to check, so the
+/// switch would be dead code there.
+#[cfg(unix)]
+fn env_strict() -> bool {
+    matches!(
+        std::env::var("TROVE_ENV_STRICT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Complain when an env file is readable by anyone but its owner.
+///
+/// It holds a vault password, so ssh's reasoning applies — ssh refuses a
+/// private key at 0644 outright. trove only warns by default, because the two
+/// files do not live in the same world. `~/.ssh` is local, owned, on a real
+/// filesystem; an env file may sit in a synced folder (iCloud Drive does not
+/// guarantee POSIX modes survive a sync, so 0600 here can arrive 0644 there) or
+/// on a volume mounted `noowners`, where the bits mean nothing at all. Refusing
+/// on that evidence would break unlocks for reasons the user did not cause and
+/// cannot fix. `TROVE_ENV_STRICT=1` opts into ssh's behaviour for anyone whose
+/// file is somewhere the bits can be trusted.
+///
+/// Unix only: Windows has no comparable mode bits.
+#[cfg(unix)]
+fn check_env_file_perms(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(()); // the read that follows will report this properly
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 == 0 {
+        return Ok(());
+    }
+    let complaint = format!(
+        "{} is mode {:04o} — readable by more than its owner, and it holds a \
+         vault password. Fix with: chmod 600 {}",
+        path.display(),
+        mode,
+        path.display()
+    );
+    if env_strict() {
+        return Err(anyhow!("{complaint} (refused: TROVE_ENV_STRICT=1)"));
+    }
+    eprintln!("trove: warning: {complaint}");
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_env_file_perms(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn load_env_file(path: &Path) -> Result<usize> {
+    check_env_file_perms(path)?;
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading env file {}", path.display()))?;
     let mut set = 0usize;
