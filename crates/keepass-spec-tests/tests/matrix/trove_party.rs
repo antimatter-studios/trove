@@ -191,12 +191,18 @@ pub fn resave_with_added_ssh(
     std::fs::read(&vault).map_err(|e| format!("read resaved vault: {e}"))
 }
 
-/// Open a vault with `trove list` and recover entry PATHS + attachment NAMES.
+/// Open a vault with `trove list --json` and recover entry PATHS +
+/// attachment NAMES.
 ///
-/// `trove list` reports nothing else, so each [`EntryRepr`] maps attachment
+/// `--json`, not the human format: that one groups, aligns and summarises for a
+/// reader, and a test that parsed it would fail every time it improved — which
+/// is exactly what happened when it did. The JSON shape is the stable one,
+/// shared with `search --json` and the daemon's wire summaries.
+///
+/// `list` reports nothing else, so each [`EntryRepr`] maps attachment
 /// `name -> ""` (trove doesn't surface the byte hash) and leaves the standard
 /// fields, custom fields and tags empty. The returned [`VaultRepr`] is keyed by
-/// the group/title path exactly as trove prints it (root entries => bare title).
+/// the group/title path (root entries => bare title).
 pub fn consume(trove: &Trove, bytes: &[u8], password: &str) -> Result<VaultRepr, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
     let vault = dir.path().join("v.kdbx");
@@ -209,64 +215,39 @@ pub fn consume(trove: &Trove, bytes: &[u8], password: &str) -> Result<VaultRepr,
             vault.as_os_str(),
             "--password-stdin".as_ref(),
             "list".as_ref(),
+            "--json".as_ref(),
         ],
         password,
     )?;
 
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_str(&out).map_err(|e| format!("parse `trove list --json`: {e}"))?;
+
     let mut repr = VaultRepr::new();
-    for line in out.lines() {
-        if let Some((path, atts)) = parse_list_line(line) {
-            let attachments = atts.into_iter().map(|name| (name, String::new())).collect();
-            repr.insert(
-                path,
-                EntryRepr {
-                    attachments,
-                    ..EntryRepr::default()
-                },
-            );
-        }
+    for entry in entries {
+        let Some(path) = entry.get("path").and_then(|p| p.as_str()) else {
+            return Err(format!("entry without a path: {entry}"));
+        };
+        let attachments = entry
+            .get("attachments")
+            .and_then(|a| a.as_array())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|n| n.as_str())
+                    .map(|n| (n.to_string(), String::new()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        repr.insert(
+            path.to_string(),
+            EntryRepr {
+                attachments,
+                ..EntryRepr::default()
+            },
+        );
     }
     Ok(repr)
-}
-
-/// Parse one `trove list` line into `(path, attachment_names)`.
-///
-/// Format: `<uuid>  <group/path/title>  [attachments: a, b]`, or
-/// `<uuid>  <group/path/title>` when the entry has no attachments. The path may
-/// contain `/` separators but never the literal `  [attachments: ` marker, so we
-/// split the optional suffix off first, then peel the leading uuid token.
-fn parse_list_line(line: &str) -> Option<(String, Vec<String>)> {
-    let line = line.trim_end();
-    if line.is_empty() {
-        return None;
-    }
-
-    const MARKER: &str = "  [attachments: ";
-    let (head, attachments) = match line.find(MARKER) {
-        Some(pos) => {
-            let head = &line[..pos];
-            let rest = &line[pos + MARKER.len()..];
-            let inner = rest.strip_suffix(']').unwrap_or(rest);
-            let names: Vec<String> = inner
-                .split(", ")
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-            (head, names)
-        }
-        None => (line, Vec::new()),
-    };
-
-    // Peel the leading uuid: the first whitespace-delimited token. The path is
-    // everything after the (two-space) gap that follows it.
-    let head = head.trim_start();
-    let (_uuid, after_uuid) = head.split_once(char::is_whitespace)?;
-    let path = after_uuid.trim();
-    if path.is_empty() {
-        return None;
-    }
-    Some((path.to_string(), attachments))
 }
 
 /// Spawn `trove <args>`, feed `"{password}\n"` on stdin, wait, and return stdout

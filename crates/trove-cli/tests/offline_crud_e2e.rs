@@ -314,7 +314,17 @@ fn offline_crud_lifecycle() {
         &pw_line,
     );
     assert_ok(&out, "list after mv");
-    assert!(stdout_str(&out).contains("Work/Infra/github"));
+    // `list` groups now: the folder is a header and the entry sits under it,
+    // rather than every line repeating the full path.
+    let listed = stdout_str(&out);
+    assert!(
+        listed.contains("Work/Infra"),
+        "the destination group is a header: {listed}"
+    );
+    assert!(
+        listed.contains("  github"),
+        "and the entry is listed under it: {listed}"
+    );
 
     // rm: first recycles (entry survives under "Recycle Bin"), second destroys.
     let out = run_trove(
@@ -335,7 +345,15 @@ fn offline_crud_lifecycle() {
         &["--vault", vault, "--password-stdin", "list"],
         &pw_line,
     );
-    assert!(stdout_str(&out).contains("Recycle Bin/github"));
+    let recycled = stdout_str(&out);
+    assert!(
+        recycled.contains("Recycle Bin"),
+        "the bin is a group header: {recycled}"
+    );
+    assert!(
+        recycled.contains("  github"),
+        "with the recycled entry under it: {recycled}"
+    );
     let out = run_trove(
         &trove,
         &[
@@ -404,7 +422,15 @@ fn offline_crud_lifecycle() {
         &["--vault", vault, "--password-stdin", "list"],
         &pw_line,
     );
-    assert!(stdout_str(&out).contains("Recycle Bin/Old/Project/token"));
+    let after_rmdir = stdout_str(&out);
+    assert!(
+        after_rmdir.contains("Recycle Bin/Old/Project"),
+        "the whole group path is the header: {after_rmdir}"
+    );
+    assert!(
+        after_rmdir.contains("  token"),
+        "with the entry under it: {after_rmdir}"
+    );
 
     // add password --generate prints the minted secret and stores it.
     let out = run_trove(
@@ -600,4 +626,157 @@ fn show_json_is_structured_and_hides_protected_values() {
     assert_ok(&out, "show --json --show-protected");
     let v: serde_json::Value = serde_json::from_str(&stdout_str(&out)).expect("valid JSON");
     assert_eq!(v["password"], SECRET, "revealed on request");
+}
+
+/// `list` is read by people, so it groups, sorts, and says what each entry
+/// carries — rather than leading with a UUID no command accepts.
+#[test]
+fn list_groups_sorts_and_hides_the_uuid() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("list.kdbx");
+    let vault = vault.to_str().expect("utf8 path");
+    let pw_line = format!("{PASSWORD}\n");
+    let two_lines = format!("{PASSWORD}\n{SECRET}\n");
+
+    assert_ok(
+        &run_trove(
+            &trove,
+            &["--vault", vault, "--password-stdin", "init"],
+            &pw_line,
+        ),
+        "init",
+    );
+    // Added out of order, and mixed case, so sorting has something to do.
+    for path in ["Work/zeta", "Work/Alpha", "Home/router"] {
+        assert_ok(
+            &run_trove(
+                &trove,
+                &[
+                    "--vault",
+                    vault,
+                    "--password-stdin",
+                    "add",
+                    "password",
+                    path,
+                    "--secret-stdin",
+                ],
+                &two_lines,
+            ),
+            "add",
+        );
+    }
+
+    let out = run_trove(
+        &trove,
+        &["--vault", vault, "--password-stdin", "list"],
+        &pw_line,
+    );
+    assert_ok(&out, "list");
+    let text = stdout_str(&out);
+
+    let home = text.find("Home").expect("Home group header");
+    let work = text.find("Work").expect("Work group header");
+    assert!(home < work, "groups are sorted:\n{text}");
+
+    let alpha = text.find("Alpha").expect("Alpha");
+    let zeta = text.find("zeta").expect("zeta");
+    assert!(
+        alpha < zeta,
+        "titles sort case-insensitively within a group:\n{text}"
+    );
+
+    assert!(
+        !text.contains('-')
+            || !text
+                .lines()
+                .any(|l| l.trim().len() > 36 && l.contains("    ")),
+        "sanity: no obvious UUID column"
+    );
+    assert!(text.contains("3 entries"), "counts entries:\n{text}");
+
+    // The id is still available when explicitly asked for.
+    let out = run_trove(
+        &trove,
+        &["--vault", vault, "--password-stdin", "list", "--show-id"],
+        &pw_line,
+    );
+    assert_ok(&out, "list --show-id");
+    let with_id = stdout_str(&out);
+    assert!(
+        with_id.len() > text.len(),
+        "--show-id adds the UUIDs back:\n{with_id}"
+    );
+}
+
+/// An SSH entry is named by its key, and KeePassXC's own settings blob is not
+/// something the user attached, so it is never shown or counted.
+#[test]
+fn list_names_the_ssh_key_and_ignores_keeagent_settings() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("keys.kdbx");
+    let vault = vault.to_str().expect("utf8 path");
+    let pw_line = format!("{PASSWORD}\n");
+
+    assert_ok(
+        &run_trove(
+            &trove,
+            &["--vault", vault, "--password-stdin", "init"],
+            &pw_line,
+        ),
+        "init",
+    );
+
+    let key = dir.path().join("id_ed25519");
+    std::fs::write(&key, b"-----BEGIN OPENSSH PRIVATE KEY-----\n").expect("write key");
+    for (name, src) in [("id_ed25519", &key), ("id_ed25519.pub", &key)] {
+        assert_ok(
+            &run_trove(
+                &trove,
+                &[
+                    "--vault",
+                    vault,
+                    "--password-stdin",
+                    "add",
+                    "file",
+                    "Keys/server",
+                    "--src",
+                    src.to_str().expect("utf8"),
+                    "--target",
+                    "/tmp/unused-by-this-test",
+                    "--name",
+                    name,
+                ],
+                &pw_line,
+            ),
+            "add file",
+        );
+    }
+
+    let out = run_trove(
+        &trove,
+        &["--vault", vault, "--password-stdin", "list"],
+        &pw_line,
+    );
+    assert_ok(&out, "list");
+    let text = stdout_str(&out);
+    assert!(
+        text.contains("ssh  id_ed25519"),
+        "the private key names the entry:\n{text}"
+    );
+    assert!(
+        !text.contains("KeeAgent"),
+        "KeePassXC's settings blob is never shown:\n{text}"
+    );
+    assert!(
+        text.contains("1 with SSH keys"),
+        "and it counts as a key:\n{text}"
+    );
 }
