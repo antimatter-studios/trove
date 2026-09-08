@@ -314,17 +314,7 @@ fn offline_crud_lifecycle() {
         &pw_line,
     );
     assert_ok(&out, "list after mv");
-    // `list` groups now: the folder is a header and the entry sits under it,
-    // rather than every line repeating the full path.
-    let listed = stdout_str(&out);
-    assert!(
-        listed.contains("Work/Infra"),
-        "the destination group is a header: {listed}"
-    );
-    assert!(
-        listed.contains("  github"),
-        "and the entry is listed under it: {listed}"
-    );
+    assert!(stdout_str(&out).contains("Work/Infra/github"));
 
     // rm: first recycles (entry survives under "Recycle Bin"), second destroys.
     let out = run_trove(
@@ -345,15 +335,7 @@ fn offline_crud_lifecycle() {
         &["--vault", vault, "--password-stdin", "list"],
         &pw_line,
     );
-    let recycled = stdout_str(&out);
-    assert!(
-        recycled.contains("Recycle Bin"),
-        "the bin is a group header: {recycled}"
-    );
-    assert!(
-        recycled.contains("  github"),
-        "with the recycled entry under it: {recycled}"
-    );
+    assert!(stdout_str(&out).contains("Recycle Bin/github"));
     let out = run_trove(
         &trove,
         &[
@@ -422,15 +404,7 @@ fn offline_crud_lifecycle() {
         &["--vault", vault, "--password-stdin", "list"],
         &pw_line,
     );
-    let after_rmdir = stdout_str(&out);
-    assert!(
-        after_rmdir.contains("Recycle Bin/Old/Project"),
-        "the whole group path is the header: {after_rmdir}"
-    );
-    assert!(
-        after_rmdir.contains("  token"),
-        "with the entry under it: {after_rmdir}"
-    );
+    assert!(stdout_str(&out).contains("Recycle Bin/Old/Project/token"));
 
     // add password --generate prints the minted secret and stores it.
     let out = run_trove(
@@ -628,10 +602,11 @@ fn show_json_is_structured_and_hides_protected_values() {
     assert_eq!(v["password"], SECRET, "revealed on request");
 }
 
-/// `list` is read by people, so it groups, sorts, and says what each entry
-/// carries — rather than leading with a UUID no command accepts.
+/// `list` is read by people, so it sorts and says what each entry carries —
+/// rather than leading with a UUID no command accepts. Every line stays a
+/// complete path, which is what makes it greppable and paste-able.
 #[test]
-fn list_groups_sorts_and_hides_the_uuid() {
+fn list_sorts_and_hides_the_uuid() {
     let Some(trove) = find_trove() else {
         eprintln!("skipping: trove binary not built");
         return;
@@ -678,15 +653,19 @@ fn list_groups_sorts_and_hides_the_uuid() {
     assert_ok(&out, "list");
     let text = stdout_str(&out);
 
-    let home = text.find("Home").expect("Home group header");
-    let work = text.find("Work").expect("Work group header");
-    assert!(home < work, "groups are sorted:\n{text}");
-
-    let alpha = text.find("Alpha").expect("Alpha");
-    let zeta = text.find("zeta").expect("zeta");
+    for path in ["Home/router", "Work/Alpha", "Work/zeta"] {
+        assert!(
+            text.contains(path),
+            "every line is a full path: {path} missing from\n{text}"
+        );
+    }
+    let home = text.find("Home/router").expect("Home/router");
+    let alpha = text.find("Work/Alpha").expect("Work/Alpha");
+    let zeta = text.find("Work/zeta").expect("Work/zeta");
+    assert!(home < alpha, "sorted by path:\n{text}");
     assert!(
         alpha < zeta,
-        "titles sort case-insensitively within a group:\n{text}"
+        "and case-insensitively, so Alpha precedes zeta:\n{text}"
     );
 
     assert!(

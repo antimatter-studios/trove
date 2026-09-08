@@ -1797,7 +1797,7 @@ fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool, show_id: bool
                     attachments: e.attachment_names.clone(),
                 })
                 .collect();
-            print_list_grouped(rows, show_id);
+            print_entry_rows(rows, show_id, true);
             Ok(())
         }
         None => cmd_list_via_daemon(json, show_id),
@@ -1843,7 +1843,7 @@ fn cmd_list_via_daemon(json: bool, show_id: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
-    print_list_grouped(rows_from_json(&entries), show_id);
+    print_entry_rows(rows_from_json(&entries), show_id, true);
     Ok(())
 }
 
@@ -1964,88 +1964,67 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Print entries grouped by folder, sorted, with a short column saying what
-/// each one carries.
+/// Print entries one per line, `group/sub/title`, sorted, with a short column
+/// saying what each carries.
+///
+/// One shape for `list` and `search` both. Grouping was tried and dropped: a
+/// header per folder buys vertical space and costs the property that matters
+/// more — every line being a complete, greppable path you can paste straight
+/// into `trove show`.
 ///
 /// The id is behind `--show-id` because nothing takes one: every command
-/// resolves entries by title or path, so 36 characters of UUID on every line
-/// were pushing the part you read off to the right. `--json` still carries it
-/// for programs.
-fn print_list_grouped(mut rows: Vec<ListRow>, show_id: bool) {
-    rows.sort_by(|a, b| {
-        natural_cmp(&a.group_path.join("/"), &b.group_path.join("/"))
-            .then_with(|| natural_cmp(&a.title, &b.title))
-    });
+/// resolves entries by title or path, so 36 characters of UUID per line were
+/// pushing the readable part rightward. `--json` still carries it.
+fn print_entry_rows(mut rows: Vec<ListRow>, show_id: bool, summary: bool) {
+    rows.sort_by(|a, b| natural_cmp(&row_path(a), &row_path(b)));
 
     let notes: Vec<Option<String>> = rows
         .iter()
         .map(|r| attachment_note(&r.attachments))
         .collect();
-    // Align the note column to the longest title that has one, so entries
-    // without a note cost nothing.
+    // Align to the longest path that has a note, so entries without one cost
+    // nothing and a single long path cannot push the column off the screen for
+    // rows that would not have used it.
     let width = rows
         .iter()
         .zip(&notes)
         .filter(|(_, n)| n.is_some())
-        .map(|(r, _)| r.title.chars().count())
+        .map(|(r, _)| row_path(r).chars().count())
         .max()
         .unwrap_or(0);
 
-    let mut current: Option<&[String]> = None;
     for (row, note) in rows.iter().zip(&notes) {
-        if current != Some(row.group_path.as_slice()) {
-            if current.is_some() {
-                println!();
-            }
-            let group = if row.group_path.is_empty() {
-                "(root)".to_string()
-            } else {
-                row.group_path.join("/")
-            };
-            println!("{group}");
-            current = Some(row.group_path.as_slice());
-        }
         let id = if show_id {
             format!("{}  ", row.id)
         } else {
             String::new()
         };
         match note {
-            Some(n) => println!("  {id}{:<width$}   {n}", row.title),
-            None => println!("  {id}{}", row.title),
+            Some(n) => println!("{id}{:<width$}   {n}", row_path(row)),
+            None => println!("{id}{}", row_path(row)),
         }
     }
 
-    let keys = notes
-        .iter()
-        .filter(|n| n.as_deref().is_some_and(|n| n.starts_with("ssh")))
-        .count();
-    let plural = if rows.len() == 1 { "entry" } else { "entries" };
-    if keys > 0 {
-        println!("\n{} {plural} · {keys} with SSH keys", rows.len());
-    } else {
-        println!("\n{} {plural}", rows.len());
+    if summary {
+        let keys = notes
+            .iter()
+            .filter(|n| n.as_deref().is_some_and(|n| n.starts_with("ssh")))
+            .count();
+        let plural = if rows.len() == 1 { "entry" } else { "entries" };
+        if keys > 0 {
+            println!("\n{} {plural} · {keys} with SSH keys", rows.len());
+        } else {
+            println!("\n{} {plural}", rows.len());
+        }
     }
 }
 
-/// Flat one-line-per-entry rendering, for `search`: results cross folders, so
-/// grouping them would bury the full path that says where each hit lives.
-fn print_list_flat(rows: &[ListRow], show_id: bool) {
-    for row in rows {
-        let path = if row.group_path.is_empty() {
-            row.title.clone()
-        } else {
-            format!("{}/{}", row.group_path.join("/"), row.title)
-        };
-        let id = if show_id {
-            format!("{}  ", row.id)
-        } else {
-            String::new()
-        };
-        match attachment_note(&row.attachments) {
-            Some(n) => println!("{id}{path}   {n}"),
-            None => println!("{id}{path}"),
-        }
+/// `group/sub/title`, or the bare title for an entry in no group.
+fn row_path(row: &ListRow) -> String {
+    if row.group_path.is_empty() {
+        row.title.clone()
+    } else {
+        format!("{}/{}", row.group_path.join("/"), row.title)
     }
 }
 
@@ -3421,7 +3400,7 @@ fn cmd_search(
                     attachments: e.attachment_names.clone(),
                 })
                 .collect();
-            print_list_flat(&rows, show_id);
+            print_entry_rows(rows, show_id, false);
         }
         None => {
             let resp = daemon_call(&daemon::Request::Search {
@@ -3436,7 +3415,7 @@ fn cmd_search(
                 println!("{}", serde_json::to_string_pretty(&entries)?);
                 return Ok(());
             }
-            print_list_flat(&rows_from_json(&entries), show_id);
+            print_entry_rows(rows_from_json(&entries), show_id, false);
         }
     }
     Ok(())
