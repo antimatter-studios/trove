@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.11.0
+`trove list` is grouped by folder, sorted, and no longer led by a UUID that no command accepts (it moved behind `--show-id`; `--json` still carries it). Each entry gets one short column saying what it holds — an SSH entry is named by its private key, and KeePassXC's `KeeAgent.settings` blob is never shown or counted. `search` gained the same column but stays flat, since its hits cross folders.
+
 ### v0.10.0
 `trove show --json` prints one entry as an object — attachments as an array, custom fields as an object of values, unset scalars as `null` — so a program never has to parse the human format. Protected values keep the same rule: a password is an absent key unless `--show-protected`. Bare `--env` now looks in the working directory and then beside the vault being opened, instead of only at `./.env.trove`, and says where it looked when it finds nothing.
 
@@ -436,6 +439,3 @@ Full `keepassxc-cli` command parity — generic entry CRUD, keyfile + YubiKey co
 
 ### v0.4.0
 Daemon-default `add file` / `add gpg` (with `--vault` as the global offline selector), and a `troved` singleton-socket flock that makes orphaned agent sockets impossible.
-
-### v0.3.0
-Global `--vault` offline selector, required `<comment>` for `add ssh`, `Root` default group, KDBX 4.0→4.1 heal + daemon lifecycle + ssh/gpg CLI wrappers, `keepass 0.13.10` (KeePassXC-readable) with a cross-tool conformance suite, and Windows (named-pipe IPC) + the cross-platform release pipeline.

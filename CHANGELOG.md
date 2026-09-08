@@ -4,6 +4,36 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.11.0 — 2026-09-08
+
+**`trove list` is readable.** It led with 36 characters nobody reads, in
+insertion order, with every line repeating its folder and the one attachment
+name worth seeing buried under its `.pub` half and KeePassXC's settings blob:
+
+    d45b1785-cc74-43c9-adfc-7523e4a1a0d9  Semdatex/ssh christhomas@100.101.102.187  [attachments: semdatex.id_ed25519.pub, KeeAgent.settings, semdatex.id_ed25519]
+
+Entries are now grouped by folder and sorted naturally and case-insensitively,
+with one short column saying what each carries: an SSH entry is named by its
+private key, a single attachment by its name, several by a count.
+`KeeAgent.settings` is never shown or counted — it is KeePassXC's per-entry
+agent policy, not something anyone attached.
+
+An SSH entry is recognised from its contents rather than a naming convention: a
+private key is an attachment whose name plus `.pub` is also attached, or — when
+KeePassXC left its settings blob — whichever attachment is not a public half.
+That catches `00000.inpace.build.id_ed25519` and `id_ed25519.sandbox.staging`,
+which no pattern would have.
+
+The UUID moved behind `--show-id`. Nothing takes one — every command resolves
+entries by title or path — so it was noise pushing the readable part rightward.
+`--json` still carries it. `search` gained the same contents column but stays
+flat: its results cross folders, so grouping would bury the path that says where
+each hit lives.
+
+The conformance harness was itself parsing that display format, UUID and
+`[attachments: …]` marker and all. It reads `list --json` now, which is the
+interface — and cannot break again the next time the human output improves.
+
 ## v0.10.0 — 2026-09-07
 
 **`trove show --json`.** `list` and `search` already had it; `show` did not, so
