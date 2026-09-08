@@ -346,3 +346,85 @@ fn a_missing_env_file_reports_where_it_looked() {
         "including the vault's directory: {err}"
     );
 }
+
+/// An env file holds a vault password, so a group/world-readable one is worth
+/// saying out loud — but only saying, by default. See `check_env_file_perms`:
+/// the file may live in a synced folder or on a `noowners` volume, where the
+/// mode bits are not the user's doing and not theirs to fix.
+#[cfg(unix)]
+#[test]
+fn a_world_readable_env_file_warns_but_still_works() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    std::fs::set_permissions(
+        tmp.path().join(".env.trove"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .expect("chmod 644");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "a warning must not fail the unlock: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("0644"), "names the mode: {err}");
+    assert!(err.contains("chmod 600"), "and the fix: {err}");
+}
+
+/// `TROVE_ENV_STRICT=1` opts into ssh's behaviour — refuse rather than warn.
+#[cfg(unix)]
+#[test]
+fn strict_mode_refuses_a_world_readable_env_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    std::fs::set_permissions(
+        tmp.path().join(".env.trove"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .expect("chmod 644");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[("TROVE_ENV_STRICT", "1")],
+    );
+    assert!(!out.status.success(), "strict mode must refuse");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("TROVE_ENV_STRICT"),
+        "and say why it refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 0600 is accepted in strict mode, so the gate is the mode and nothing else.
+    std::fs::set_permissions(
+        tmp.path().join(".env.trove"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("chmod 600");
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[("TROVE_ENV_STRICT", "1")],
+    );
+    assert!(
+        out.status.success(),
+        "0600 passes strict mode: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
