@@ -268,8 +268,8 @@ async fn trove_status_round_trip_against_real_daemon() {
         "expected the attachment to be named:\n{stdout}"
     );
     assert!(
-        stdout.contains("Work/SSH") && stdout.contains("  github"),
-        "expected the nested entry under its group header:\n{stdout}"
+        stdout.contains("Work/SSH/github"),
+        "expected the nested entry to render with its full group path:\n{stdout}"
     );
 
     // trove status (vault unlocked) — expect the vault path AND remaining time.
