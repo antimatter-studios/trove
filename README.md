@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.12.0
+`list` and `search` print the same shape again: one entry per line as `group/sub/title`, sorted, with a column naming the SSH key or attachments it carries. The folder grouping added in 0.11.0 is gone — a complete path per line greps and pastes, a header does not. `--env` also warns when its file is readable by more than its owner, since it holds a vault password; `TROVE_ENV_STRICT=1` turns that warning into a refusal.
+
 ### v0.11.0
 `trove list` is grouped by folder, sorted, and no longer led by a UUID that no command accepts (it moved behind `--show-id`; `--json` still carries it). Each entry gets one short column saying what it holds — an SSH entry is named by its private key, and KeePassXC's `KeeAgent.settings` blob is never shown or counted. `search` gained the same column but stays flat, since its hits cross folders.
 
@@ -436,6 +439,3 @@ The Trove desktop app graduates from a design prototype to a working KeePass man
 
 ### v0.5.0
 Full `keepassxc-cli` command parity — generic entry CRUD, keyfile + YubiKey composite keys, TOTP, password generation + breach audit, clipboard, and vault `merge`/`export`/`db-edit` — plus beyond-parity features `keepassxc-cli` has no equivalent for: `exec` (secrets scoped to a process tree), `--json` output, a `git-credential` helper, and `trove://` secret references. Also introduces the **Trove desktop app**: a Tauri 2 GUI, shipped as macOS, Linux, and Windows bundles alongside the CLI.
-
-### v0.4.0
-Daemon-default `add file` / `add gpg` (with `--vault` as the global offline selector), and a `troved` singleton-socket flock that makes orphaned agent sockets impossible.
