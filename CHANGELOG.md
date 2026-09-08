@@ -4,6 +4,31 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.12.0 — 2026-09-08
+
+**One listing shape.** 0.11.0 grouped `list` by folder; in use that is not worth
+it. A header per folder saves horizontal repetition and costs the property that
+matters more — every line being a complete path you can grep for and paste
+straight into `trove show` — and it left `list` and `search` printing the same
+data two different ways. Both now print one entry per line as
+`group/sub/title`, sorted by full path, with the same column saying what each
+entry carries. `list` keeps a trailing count; `search` does not, since a hit
+count belongs to a query rather than to a vault.
+
+**An env file anyone can read now says so.** `--env` loads a vault password from
+a file, and a real one was sitting at mode 0644 with nothing said about it. ssh
+refuses a private key at 0644 outright and this file is worse — it opens the
+whole vault, not one key.
+
+trove warns rather than refuses, because the two files do not live in the same
+world. `~/.ssh` is local, owned, on a real filesystem. An env file may sit in a
+synced folder — iCloud Drive does not guarantee POSIX modes survive a sync, so
+0600 on one Mac can arrive 0644 on the next — or on a volume mounted
+`noowners`, where the bits mean nothing at all. Refusing on that evidence would
+break unlocks for a reason the user did not cause and cannot fix from there.
+`TROVE_ENV_STRICT=1` opts into ssh's behaviour where the bits can be trusted.
+Unix only: Windows has no comparable modes.
+
 ## v0.11.0 — 2026-09-08
 
 **`trove list` is readable.** It led with 36 characters nobody reads, in
