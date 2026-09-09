@@ -1,5 +1,8 @@
 import React from 'react';
 import { Icon, TYPE_ICON } from './icons.jsx';
+import * as api from './api.js';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 import { Switch } from './overlays.jsx';
 import { buildTree } from './tree.js';
 // Trove — helpers + three-pane views
@@ -318,7 +321,338 @@ function AgentSection({ entry, onChange }) {
   );
 }
 
-function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, appActions }) {
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+/// A bar for a vault write, which takes seconds and cannot be made not to.
+///
+/// KDBX rotates the master seed on every save, so every save re-runs Argon2 at
+/// whatever cost the vault is configured for. `estimateMs` is what the LAST
+/// write on this vault actually took, measured by the backend — so the bar
+/// tracks the real thing rather than an invented duration. It stops at 95% and
+/// waits there: the remainder is the file landing, and a bar that hits 100%
+/// before the work is done is worse than one that pauses.
+function WriteBar({ estimateMs, label }) {
+  const [pct, setPct] = React.useState(0);
+  React.useEffect(() => {
+    if (!estimateMs) return undefined;          // nothing measured yet
+    const started = Date.now();
+    const t = setInterval(() => {
+      setPct(Math.min(95, ((Date.now() - started) / estimateMs) * 100));
+    }, 40);
+    return () => clearInterval(t);
+  }, [estimateMs]);
+
+  return (
+    <div className="write-bar" role="progressbar" aria-label={label}>
+      <div className="write-bar-label">{label}</div>
+      <div className="write-track">
+        {estimateMs ? (
+          <div className="write-fill" style={{ width: pct + "%" }} />
+        ) : (
+          // No measurement to go on — say "working" honestly instead of
+          // drawing a percentage out of thin air.
+          <div className="write-fill indet" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/// The files an entry carries, and where each one lands on disk.
+///
+/// One entry holds several — an SSH key and its `.pub`, a certificate and the
+/// key that matches it — so this is a list you pick from rather than a single
+/// slot. Selecting one opens its content and its materialize settings together,
+/// because "what is this file" and "where does it go" are the same question.
+function AttachmentsSection({ vaultId, entry }) {
+  const [items, setItems] = React.useState([]);
+  const [sel, setSel] = React.useState(null);
+  const [text, setText] = React.useState("");
+  const [dirty, setDirty] = React.useState(false);
+  const [err, setErr] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [adding, setAdding] = React.useState(false);
+  const [newName, setNewName] = React.useState("");
+  // Materialize fields are edited locally and applied on Save, so a half-typed
+  // path is never written to the vault.
+  const [mat, setMat] = React.useState({ target: "", mode: "", ttl: "", allowDiskBacked: false });
+  // A picked file shows in the list the moment it is picked. The write behind
+  // it is seconds of Argon2, and a list that stays empty until it lands reads
+  // as "nothing happened" — which is what it looked like.
+  const [pending, setPending] = React.useState(null);
+  // The selection as a picture, when it is one, and whether the reader asked
+  // to see an SVG's source instead.
+  const [img, setImg] = React.useState(null);
+  const [asText, setAsText] = React.useState(false);
+  // `{ estimateMs }` while a vault write is in flight, `null` otherwise.
+  const [write, setWrite] = React.useState(null);
+
+  // The backend emits this around every save, in any part of the app. Only
+  // listen while mounted — a stale listener would drive a bar nobody can see.
+  React.useEffect(() => {
+    let stop;
+    listen("vault-write", (e) => {
+      const { phase, estimateMs } = e.payload || {};
+      setWrite(phase === "start" ? { estimateMs: estimateMs || 0 } : null);
+    }).then((f) => { stop = f; });
+    return () => { if (stop) stop(); };
+  }, []);
+
+  const load = React.useCallback(async () => {
+    try {
+      const list = await api.listAttachments(vaultId, entry.id);
+      setItems(list);
+      return list;
+    } catch (e) { setErr(String(e)); return []; }
+  }, [vaultId, entry.id]);
+
+  // Reload whenever the entry changes, and drop any selection from the last one.
+  React.useEffect(() => {
+    setSel(null); setText(""); setDirty(false); setErr(""); setAdding(false);
+    setImg(null); setAsText(false); setPending(null);
+    load();
+  }, [load]);
+
+  const open = async (a) => {
+    setSel(a.name); setErr(""); setDirty(false); setAdding(false);
+    setMat({ target: a.target, mode: a.mode, ttl: a.ttl, allowDiskBacked: a.allowDiskBacked });
+    setImg(null); setAsText(false);
+    if (a.isImage) {
+      try { setImg(await api.readAttachmentImage(vaultId, entry.id, a.name)); }
+      catch (e) { setErr(String(e)); }
+    }
+    if (!a.isText) { setText(""); return; }
+    try { setText(await api.readAttachment(vaultId, entry.id, a.name)); }
+    catch (e) { setText(""); setErr(String(e)); }
+  };
+
+  const current = items.find((a) => a.name === sel);
+
+  const saveContent = async () => {
+    if (!sel || busy) return;
+    setBusy(true); setErr("");
+    try { setItems(await api.saveAttachment(vaultId, entry.id, sel, text)); setDirty(false); }
+    catch (e) { setErr(String(e)); }
+    setBusy(false);
+  };
+
+  const saveMaterialize = async () => {
+    if (!sel || busy) return;
+    setBusy(true); setErr("");
+    try { setItems(await api.setAttachmentMaterialize(vaultId, entry.id, sel, mat)); }
+    catch (e) { setErr(String(e)); }
+    setBusy(false);
+  };
+
+  const remove = async (name) => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      setItems(await api.deleteAttachment(vaultId, entry.id, name));
+      if (sel === name) { setSel(null); setText(""); }
+    } catch (e) { setErr(String(e)); }
+    setBusy(false);
+  };
+
+  // Pick a real file off disk. Its bytes are attached verbatim, so a binary —
+  // a .p12, a DER certificate — survives intact.
+  const pickFile = async () => {
+    if (busy) return;
+    let picked;
+    try { picked = await openDialog({ multiple: false, directory: false }); }
+    catch (e) { setErr(String(e)); return; }
+    if (!picked) return;
+    const base = String(picked).split("/").pop();
+    setPending(base);
+    setBusy(true); setErr(""); setAdding(false);
+    try {
+      const list = await api.attachFile(vaultId, entry.id, picked);
+      setItems(list);
+      const made = list.find((a) => a.name === base);
+      if (made) await open(made);
+    } catch (e) { setErr(String(e)); }
+    setPending(null);
+    setBusy(false);
+  };
+
+  const add = async () => {
+    const name = newName.trim();
+    if (!name || busy) return;
+    setBusy(true); setErr(""); setPending(name);
+    try {
+      const list = await api.saveAttachment(vaultId, entry.id, name, "");
+      setItems(list); setAdding(false); setNewName("");
+      const made = list.find((a) => a.name === name);
+      if (made) await open(made);
+    } catch (e) { setErr(String(e)); }
+    setPending(null);
+    setBusy(false);
+  };
+
+  return (
+    <div className="dt-section">
+      <div className="dt-sec-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Attachments{items.length ? ` · ${items.length}` : ""}</span>
+        <span className="att-addgroup">
+          <button className="att-add" onClick={pickFile} disabled={busy}>
+            <Icon name="plus" size={13} /> Add file…
+          </button>
+          {/* NOT a second Add button. One takes a file that already exists,
+              the other makes an empty one to type into — as two matching
+              buttons ("Add file…" / "New") they read as the same action
+              twice. A quiet link says which is the ordinary one. */}
+          <button
+            className="att-blank" disabled={busy}
+            title="Create an empty file and type its contents here"
+            onClick={() => { setAdding((a) => !a); setNewName(""); }}
+          >
+            or start a blank one
+          </button>
+        </span>
+      </div>
+
+      {write && <WriteBar estimateMs={write.estimateMs} label="Encrypting the vault…" />}
+
+      {adding && (
+        <div className="att-new">
+          <input
+            autoFocus value={newName} spellCheck="false"
+            placeholder="file name, e.g. id_ed25519.pub"
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") add(); if (e.key === "Escape") setAdding(false); }}
+          />
+          <button className="btn-accent" onClick={add} disabled={!newName.trim()}>Create</button>
+        </div>
+      )}
+
+      {items.length === 0 && !adding && (
+        <div className="att-empty">No files on this entry.</div>
+      )}
+
+      <div className="att-list">
+        {items.map((a) => (
+          <div
+            key={a.name}
+            className={"att-row" + (a.name === sel ? " sel" : "")}
+            onClick={() => (a.name === sel ? setSel(null) : open(a))}
+          >
+            <Icon name={a.isText ? "file" : "lock"} size={15} />
+            <span className="att-name">{a.name}</span>
+            {a.target && <span className="att-badge" title={a.target}>→ {a.target}</span>}
+            <span className="att-kind">{a.kind}</span>
+            <span className="att-size">{fmtBytes(a.size)}</span>
+            <button
+              className="icon-btn" title="Remove this file"
+              onClick={(e) => { e.stopPropagation(); remove(a.name); }}
+            >
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
+        ))}
+        {pending && !items.some((a) => a.name === pending) && (
+          <div className="att-row pending">
+            <Icon name="file" size={15} />
+            <span className="att-name">{pending}</span>
+            <span className="att-kind">saving…</span>
+          </div>
+        )}
+      </div>
+
+      {err && <div className="att-err">{err}</div>}
+
+      {current && (
+        <div className="att-editor">
+          {current.isImage && !asText ? (
+            <>
+              <div className="att-sub">
+                <span>{current.kind} · {fmtBytes(current.size)}</span>
+                {/* SVG is both — a picture and something a person may want to
+                    read. Offer the source rather than choosing for them. */}
+                {current.isText && (
+                  <button className="att-blank" onClick={() => setAsText(true)}>show the source</button>
+                )}
+              </div>
+              {img ? (
+                <div className="att-preview">
+                  <img alt={current.name} src={`data:${img.mime};base64,${img.base64}`} />
+                </div>
+              ) : (
+                <div className="att-binary">Reading the picture…</div>
+              )}
+            </>
+          ) : current.isText ? (
+            <>
+              <div className="att-sub">
+                <span>Content</span>
+                {current.isImage && (
+                  <button className="att-blank" onClick={() => setAsText(false)}>show the picture</button>
+                )}
+              </div>
+              <textarea
+                value={text} spellCheck="false"
+                onChange={(e) => { setText(e.target.value); setDirty(true); }}
+              />
+              <div className="att-actions">
+                <button className="btn-accent" onClick={saveContent} disabled={!dirty || busy}>
+                  {dirty ? "Save changes" : "Saved"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="att-binary">
+              <Icon name="lock" size={14} /> {current.kind} · {fmtBytes(current.size)} — not shown
+              as text, because saving a re-encoded copy over it would corrupt it.
+            </div>
+          )}
+
+          <div className="att-sub">Materializes to</div>
+          <div className="att-mat">
+            <label>
+              <span>Path</span>
+              <input
+                value={mat.target} spellCheck="false"
+                placeholder="leave empty to write nothing on unlock"
+                onChange={(e) => setMat((m) => ({ ...m, target: e.target.value }))}
+              />
+            </label>
+            <label>
+              <span>Mode</span>
+              <input
+                value={mat.mode} placeholder="0600" spellCheck="false"
+                onChange={(e) => setMat((m) => ({ ...m, mode: e.target.value }))}
+              />
+            </label>
+            <label>
+              <span>TTL</span>
+              <input
+                value={mat.ttl} placeholder="seconds, optional" spellCheck="false"
+                onChange={(e) => setMat((m) => ({ ...m, ttl: e.target.value }))}
+              />
+            </label>
+            <label className="att-check">
+              <input
+                type="checkbox" checked={mat.allowDiskBacked}
+                onChange={(e) => setMat((m) => ({ ...m, allowDiskBacked: e.target.checked }))}
+              />
+              <span>Allow a target that is not memory-backed</span>
+            </label>
+          </div>
+          <div className="att-actions">
+            <button className="btn-accent" onClick={saveMaterialize} disabled={busy}>
+              Apply
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, appActions }) {
   if (!entry) {
     return (
       <div className="pane detail">
@@ -361,10 +695,6 @@ function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onD
           </div>
         </div>
 
-        {entry.sshKeyAttachment && (
-          <AgentSection entry={entry} onChange={onToggleAgentKey} />
-        )}
-
         <div className="dt-section">
           <div className="dt-sec-label">Credentials</div>
           <Field k="Username" value={entry.username} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":user"} />
@@ -379,6 +709,12 @@ function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onD
           {entry.url && <div style={{ height: 8 }} />}
           {entry.url && <Field k="URL" value={entry.url} link onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":url"} />}
         </div>
+
+        {entry.sshKeyAttachment && (
+          <AgentSection entry={entry} onChange={onToggleAgentKey} />
+        )}
+
+        <AttachmentsSection vaultId={vaultId} entry={entry} />
 
         {fields && fields.length > 0 && (
           <div className="dt-section">

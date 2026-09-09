@@ -20,6 +20,9 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# An image attachment reaches the webview as a data URL, which means base64.
+# Same version the CLI and the daemon already use.
+base64 = "0.22"
 # Server-side password-strength scoring for the entry list (the DTO carries a
 # 0..=100 score, never the password itself).
 zxcvbn = "3"
@@ -45,7 +48,14 @@ troved = { path = "../../crates/troved" }
 # each rebuild (and `troved` is a path dep, so editing it rebuilt the lot),
 # which traded a slow unlock for a slow edit-run loop. Only these three are on
 # the hot path.
-[profile.dev.package.argon2]
+# The KDF crate is `rust-argon2`, not `argon2` — the wrong name here was
+# silently ignored ("did not match any packages"), which is why a debug build
+# took 10+ seconds per save: kdbx rotates the master seed on every write, so
+# every save re-derives the key.
+[profile.dev.package.rust-argon2]
+opt-level = 3
+
+[profile.dev.package.blake2b_simd]
 opt-level = 3
 
 [profile.dev.package.trove-core]
