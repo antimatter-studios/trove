@@ -4,6 +4,40 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.15.0 — 2026-09-10
+
+**Desktop attachments reach the file.** Adding, replacing, renaming or deleting
+an attachment in the app changed the vault in memory and stopped there, so the
+work survived exactly as long as the window stayed open. Every mutating command
+now goes through one path that mutates and then saves — entry save, delete and
+favourite included.
+
+**A save says how long it is going to take.** KDBX rotates the master seed on
+every write, so every write re-derives the key with Argon2; at KeePassXC's own
+defaults that is seconds, and it cannot be cached without encrypting two
+versions of a vault under one key. The app now measures its own unlock, re-times
+each save, and draws the progress bar against that measurement rather than an
+invented duration. A picked file appears in the list immediately, marked
+*saving*, instead of the list sitting empty and looking broken.
+
+**Attachments are identified by their bytes, not their names.** KDBX stores a
+name and a blob and no content type, and the name is whatever someone typed.
+PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, AVIF, HEIC and SVG are recognised and
+shown as pictures — over a checkerboard, so a transparent image reads as
+transparent — and PDF, Zip, gzip, SQLite, ELF, Mach-O and DER are at least named
+rather than reported as an opaque blob. SVG offers the picture and the source.
+
+**Adding a file is one action.** "Add file…" and "New" were two matching buttons
+for what read as the same thing. One button picks a file that exists; a quiet
+link beside it starts a blank one to type into.
+
+Also here: the attachment file picker itself (bytes stored verbatim, so a
+`.p12` or a DER certificate survives the round trip), Credentials moved to the
+top of an entry, section headings and minor labels lifted from 2.5:1 to 6.4:1
+and 4.6:1 contrast, `Materialize.*` no longer duplicated in Attributes, and the
+debug-build KDF override corrected to `rust-argon2` — the misnamed override was
+silently ignored, which is what made a debug save take ten seconds.
+
 ## v0.14.0 — 2026-09-09
 
 **Saving no longer overwrites another writer's changes.** `Vault::save()` wrote
