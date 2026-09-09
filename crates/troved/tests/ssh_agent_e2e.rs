@@ -178,8 +178,11 @@ async fn run_e2e_for(
         let _ = ssh_agent::run(sock_for_task, store_for_task, idle_for_task).await;
     });
 
-    for _ in 0..100 {
-        if sock_path.exists() {
+    // Wait until the socket ACCEPTS, not until the path exists: a Unix socket
+    // appears on disk at `bind()`, before `listen()`, and a connect in that gap
+    // is refused. Passes either way on a fast machine; fails on a loaded runner.
+    for _ in 0..200 {
+        if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
