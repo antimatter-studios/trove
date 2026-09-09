@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.15.0
+Attachments added or edited in the desktop app are written to the vault file — they were changed in memory only, and lasted as long as the window stayed open. Because a KDBX write re-derives the key with Argon2 every time, a save now shows a progress bar sized by what this vault's own writes actually cost, and a picked file appears in the list immediately rather than after the write. Attachments are identified by their bytes rather than their file names: images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, AVIF, HEIC, SVG) are shown as pictures, and PDF, Zip, gzip, SQLite, ELF, Mach-O and DER are named. Adding a file is one button plus a link for a blank one, where it used to be two buttons that read alike.
+
 ### v0.14.0
 Saving a vault no longer overwrites changes another writer made — the CLI, KeePassXC, or the same file synced from another Mac — and the desktop app notices an outside change and reloads instead of showing a list that stopped being true. Materialization is described per attachment (`Materialize.<attachment>.Target`), so one entry can write several files each with its own mode, and `trove rename-attachment` moves an attachment together with the settings and agent config that name it. The desktop app gains Touch ID unlock, and its bundle identifier becomes `com.antimatterstudios.trove` (settings and registered vaults are migrated).
 
