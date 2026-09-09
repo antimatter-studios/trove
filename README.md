@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.14.0
+Saving a vault no longer overwrites changes another writer made — the CLI, KeePassXC, or the same file synced from another Mac — and the desktop app notices an outside change and reloads instead of showing a list that stopped being true. Materialization is described per attachment (`Materialize.<attachment>.Target`), so one entry can write several files each with its own mode, and `trove rename-attachment` moves an attachment together with the settings and agent config that name it. The desktop app gains Touch ID unlock, and its bundle identifier becomes `com.antimatterstudios.trove` (settings and registered vaults are migrated).
+
 ### v0.13.0
 **Breaking:** the env-file password variable is `TROVE_VAULT_PASSWORD`, not `TROVE_DB_PASSWORD` — rename it in your `.env.trove`, there is no fallback. New `--keychain` reads the password from the macOS login keychain (`trove keychain save|forget|status`); it is opt-in, always loses to `--env` and `--password-stdin`, and refuses without an interactive terminal, because a keychain dialog on a machine nobody is sitting at is a command that never returns. No biometry yet — Touch ID needs an entitlement only an `.app` bundle can carry, so it belongs to Trove.app. `docs/cli-reference.md` now documents the `.env.trove` file, its search order, permissions, and where a password may come from.
 
@@ -436,6 +439,3 @@ The desktop app's sidebar folder tree now lists groups alphabetically at every l
 
 ### v0.7.0
 The Trove desktop app graduates from a design prototype to a working KeePass manager backed by real `.kdbx` files: open/create/unlock/lock, entry CRUD, on-demand secret reveal behind an auto-clearing clipboard, five-minute idle auto-lock, remembered recent vaults, and a native file picker. Ships the Trove app + menu-bar/tray icon (with a Show / Quit menu) and a web favicon, plus a resizable three-pane layout (drag to size, double-click to reset, widths persisted) and unlock-screen polish. `trove-core`'s `EntrySummary` gains created/modified timestamps; the `trove` and `troved` CLIs are unchanged.
-
-### v0.6.0
-`trove daemons` (Unix) to see and reap orphaned daemons — a wedged one, or a stray from an old build, that the single-path `status` misses. A CLI↔daemon version-drift warning that flags a stale sibling `troved`. Materialize now creates a target's missing parent directories (`0700`) and surfaces failures loudly instead of a silent no-op. Plus docs for using two accounts on one host (work + personal GitHub) via `~/.ssh/config` host aliases.

@@ -181,6 +181,10 @@ describe('real unlock flow', () => {
       return el;
     });
     fireEvent.change(input, { target: { value: 'nope' } });
+    // Submitted in the same tick as the change on purpose: that used to race
+    // the re-render and be dropped silently, and `submit` reads the field
+    // directly now so it cannot be. Asserting the field's value here would race
+    // the other way — a rejected unlock clears it.
     fireEvent.submit(c.querySelector('.unlock-card'));
     await waitFor(() => expect(c.querySelector('.ul-err').textContent).toContain('Incorrect master password'));
     expect(c.querySelector('.body .pane.sidebar')).toBeFalsy();

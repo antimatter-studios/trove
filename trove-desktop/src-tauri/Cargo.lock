@@ -4552,7 +4552,7 @@ dependencies = [
 
 [[package]]
 name = "trove-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "keepass",
  "thiserror 1.0.69",
@@ -4561,7 +4561,7 @@ dependencies = [
 
 [[package]]
 name = "trove-desktop"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "block2",
  "objc2",
@@ -4580,7 +4580,7 @@ dependencies = [
 
 [[package]]
 name = "troved"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "aes 0.8.4",
  "aes-kw",

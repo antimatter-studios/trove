@@ -172,13 +172,19 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
     let listener_handle = tokio::spawn(async move {
         let _ = ssh_agent::run(sock_for_task, store_for_task, idle_for_task).await;
     });
-    for _ in 0..100 {
-        if sock_path.exists() {
+    // Wait until the socket ACCEPTS, not until the path exists. A Unix socket
+    // appears on disk at `bind()`, before `listen()`, so a connect in that gap
+    // is refused — which is what this test did on a loaded CI runner while
+    // passing every time on a fast machine.
+    let mut ready = false;
+    for _ in 0..200 {
+        if UnixStream::connect(&sock_path).is_ok() {
+            ready = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(sock_path.exists());
+    assert!(ready, "agent socket never started accepting: {sock_path:?}");
 
     let message = b"trove-sign-and-verify-payload";
     let sig_blob = agent_sign(&sock_path, &pub_blob, message, rsa_flags);
