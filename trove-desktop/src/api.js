@@ -113,3 +113,14 @@ export function setAgentKey(id, entryId, enabled, policy = {}) {
 export function buildInfo() {
   return invoke('build_info');
 }
+
+/* ---- external changes ---- */
+
+// vault_changed_on_disk(id) -> bool
+// True when something else wrote the file since this window read it: the CLI,
+// KeePassXC, or the same vault synced from another Mac.
+export const vaultChangedOnDisk = (id) =>
+  invoke('vault_changed_on_disk', { id }).catch(() => false);
+
+// reload_vault(id) -> entries
+export const reloadVault = (id) => invoke('reload_vault', { id }).then(normEntries);

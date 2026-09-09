@@ -165,7 +165,43 @@ pub(crate) struct VaultInner {
     /// again on each write.
     #[cfg(feature = "yubikey")]
     pub(crate) challenge_response: Option<ChallengeResponseKey>,
+    /// What the file looked like when we last read or wrote it.
+    ///
+    /// A vault is a single file that several programs write — the CLI, the
+    /// desktop app, KeePassXC, and the same vault synced onto another machine.
+    /// Without this, `save()` writes whatever is in memory over whatever is on
+    /// disk, and the other side's changes are gone with nothing said. `None`
+    /// only for a vault created in memory that has never touched disk.
+    pub(crate) stamp: Option<FileStamp>,
     pub(crate) db: keepass::Database,
+}
+
+/// A cheap identity for the vault file, used to notice that something else
+/// wrote it.
+///
+/// Length plus modification time rather than a hash: it costs one `stat` on a
+/// path already being opened, and the failure mode is the safe one. A content
+/// change that preserved both would be missed, which needs a writer to produce
+/// an identical-length file within the filesystem's timestamp resolution; a
+/// touched-but-unchanged file is reported as changed, which costs a reopen
+/// rather than data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileStamp {
+    /// The stamp for `path`, or `None` when it cannot be read — a missing file
+    /// is not a conflict, it is a vault that no longer exists, and `save()`
+    /// recreating it is the reasonable outcome.
+    fn read(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
 }
 
 impl Drop for VaultInner {
@@ -227,6 +263,7 @@ impl Vault {
         let mut vault = Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
+                stamp: FileStamp::read(path),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 #[cfg(feature = "yubikey")]
@@ -255,6 +292,7 @@ impl Vault {
         let mut vault = Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
+                stamp: FileStamp::read(path),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 challenge_response: Some(challenge_response),
@@ -286,6 +324,7 @@ impl Vault {
         Ok(Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
+                stamp: FileStamp::read(path),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 challenge_response: Some(challenge_response),
@@ -313,6 +352,7 @@ impl Vault {
         Ok(Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
+                stamp: FileStamp::read(path),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 #[cfg(feature = "yubikey")]
@@ -320,6 +360,49 @@ impl Vault {
                 db,
             },
         })
+    }
+
+    /// Re-read the vault from disk, discarding whatever this handle held.
+    ///
+    /// For a caller that has noticed [`changed_on_disk`](Self::changed_on_disk)
+    /// and has nothing of its own to lose — a GUI showing a list it did not
+    /// edit. The password and keyfile are reused, so the caller does not have
+    /// to ask for them again; anything unsaved in memory is gone, which is why
+    /// this is never automatic.
+    pub fn reload(&mut self) -> Result<()> {
+        let mut fresh = Self::open_with_key(
+            &self.inner.path,
+            &self.inner.password,
+            self.inner.keyfile.as_deref(),
+        )?;
+        // Swap rather than move: `VaultInner` implements `Drop` to wipe key
+        // material, so its fields cannot be moved out. `fresh` then carries our
+        // old database away and zeroizes on the way.
+        std::mem::swap(&mut self.inner.db, &mut fresh.inner.db);
+        self.inner.stamp = fresh.inner.stamp.clone();
+        Ok(())
+    }
+
+    /// Has the vault file changed since this handle read it?
+    ///
+    /// For a caller that would rather ask than have `save()` fail — a GUI
+    /// reloading quietly when nothing local is dirty, say.
+    pub fn changed_on_disk(&self) -> bool {
+        match &self.inner.stamp {
+            // A vault we have never seen on disk cannot have been changed by
+            // anyone else; the first save creates it.
+            None => false,
+            Some(known) => {
+                FileStamp::read(&self.inner.path).is_some_and(|current| &current != known)
+            }
+        }
+    }
+
+    fn check_not_stale(&self) -> Result<()> {
+        if self.changed_on_disk() {
+            return Err(Error::StaleWrite(self.inner.path.clone()));
+        }
+        Ok(())
     }
 
     /// Persist in-memory state back to the original path (atomic replace).
@@ -347,6 +430,13 @@ impl Vault {
                 .root_mut()
                 .edit(|g| g.name = DEFAULT_GROUP.to_string());
         }
+
+        // Refuse to overwrite a file something else has written since we read
+        // it. A vault is one file with several writers — the CLI, the desktop
+        // app, KeePassXC, and the same file synced onto another machine — and
+        // without this the last writer wins silently, taking the other's
+        // changes with it.
+        self.check_not_stale()?;
 
         let dir = self
             .inner
@@ -396,6 +486,9 @@ impl Vault {
             return Err(Error::Io(e));
         }
 
+        // Our own write is the new baseline; without this a second save in the
+        // same session would see the file as changed by someone else.
+        self.inner.stamp = FileStamp::read(&self.inner.path);
         Ok(())
     }
 

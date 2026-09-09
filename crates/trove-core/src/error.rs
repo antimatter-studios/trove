@@ -20,6 +20,12 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error(
+        "the vault file changed on disk since it was opened: {0}. \
+         Saving would discard whatever changed it — reopen the vault, or save elsewhere."
+    )]
+    StaleWrite(PathBuf),
+
     #[error("invalid entry path: {0}")]
     InvalidPath(String),
 

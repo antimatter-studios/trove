@@ -262,6 +262,43 @@ function App() {
     return () => { cancelled = true; };
   }, [activeId, vaults]);
 
+  // ---- notice when something else writes the vault file ----
+  // A vault is one file with several writers: the CLI, KeePassXC, and the same
+  // file synced onto another Mac. Without this the window shows a list that
+  // stopped being true, and — before the core refused it — saving over it threw
+  // the other writer's work away.
+  //
+  // Polled rather than watched. It is one `stat` per interval, it only runs
+  // while a vault is actually open and this window is visible, and there is no
+  // watcher to unregister when a vault closes or the app hides.
+  useEffect(() => {
+    if (!vault || vault.locked || !vault.loaded) return;
+    const id = vault.id;
+    let stopped = false;
+
+    const check = async () => {
+      if (stopped || document.hidden) return;
+      try {
+        if (!(await api.vaultChangedOnDisk(id))) return;
+        const list = await api.reloadVault(id);
+        if (stopped) return;
+        setVaults((vs) => vs.map((x) => x.id === id
+          // Keep the selection if that entry still exists, so a reload does not
+          // yank the reader somewhere else; fall back to the first entry.
+          ? { ...x, entries: list,
+              selId: list.some((e) => e.id === x.selId) ? x.selId : (list[0] ? list[0].id : null) }
+          : x));
+        flashPlain("Reloaded — the vault changed outside this window");
+      } catch (e) { /* transient: a half-written file, a lock — try again next tick */ }
+    };
+
+    const t = setInterval(check, 3000);
+    // Also on regaining focus: coming back to the window is exactly when a
+    // stale list is most likely and most annoying.
+    window.addEventListener("focus", check);
+    return () => { stopped = true; clearInterval(t); window.removeEventListener("focus", check); };
+  }, [vault]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ---- clipboard ----
   const clearCopiedSoon = () => {
     clearTimeout(copiedTimer.current);

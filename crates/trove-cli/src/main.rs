@@ -4946,7 +4946,12 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
         }
         if let Some(core) = cause.downcast_ref::<CoreError>() {
             return match core {
-                CoreError::BadPassword | CoreError::Kdbx(_) => EXIT_VAULT_ERROR,
+                // A stale write is a vault-state problem, not something the
+                // user typed wrong: the file is fine, it just moved on without
+                // us. Same class as a corrupt or unreadable vault.
+                CoreError::BadPassword | CoreError::Kdbx(_) | CoreError::StaleWrite(_) => {
+                    EXIT_VAULT_ERROR
+                }
                 CoreError::AlreadyExists(_)
                 | CoreError::NotFound(_)
                 | CoreError::EntryNotFound(_)

@@ -41,6 +41,8 @@ vi.mock('../src/api.js', () => ({
   buildInfo: vi.fn(),
   setAgentKey: vi.fn(),
   setSettings: vi.fn(),
+  vaultChangedOnDisk: vi.fn(),
+  reloadVault: vi.fn(),
 }));
 
 import * as api from '../src/api.js';
@@ -65,6 +67,8 @@ beforeEach(() => {
   api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
   api.setSettings.mockResolvedValue(undefined);
+  // Nothing has touched the file unless a test says so.
+  api.vaultChangedOnDisk.mockResolvedValue(false);
   vi.clearAllMocks();
   try { localStorage.clear(); } catch { /* ignore */ }
   api.listVaults.mockResolvedValue([OPEN_VAULT]);
@@ -81,6 +85,35 @@ describe('unlocked vault interactions', () => {
     expect(c.querySelector('.body .pane.detail')).toBeTruthy();
     expect(c.textContent).toContain('All entries');
     expect(api.listEntries).toHaveBeenCalledWith('v1');
+  });
+
+  it('reloads when the vault file is changed by something else', async () => {
+    const c = await mountUnlocked();
+    expect(c.querySelectorAll('.list .erow').length).toBe(ENTRIES.length);
+
+    // The CLI (or KeePassXC, or another Mac via iCloud) writes the file.
+    const AFTER = [...ENTRIES, { ...ENTRIES[0], id: 'e-new', title: 'added-elsewhere',
+      path: 'Work/added-elsewhere', groupPath: 'Work' }];
+    api.vaultChangedOnDisk.mockResolvedValue(true);
+    api.reloadVault.mockResolvedValue(AFTER);
+
+    // Regaining focus is one of the two triggers (the other is a 3s poll,
+    // which a test should not have to wait for).
+    fireEvent.focus(window);
+
+    await waitFor(() => expect(api.reloadVault).toHaveBeenCalledWith('v1'));
+    await waitFor(() =>
+      expect(c.querySelectorAll('.list .erow').length).toBe(AFTER.length));
+    expect(c.textContent).toContain('added-elsewhere');
+  });
+
+  it('does not reload when nothing has touched the file', async () => {
+    const c = await mountUnlocked();
+    api.vaultChangedOnDisk.mockResolvedValue(false);
+    fireEvent.focus(window);
+    await waitFor(() => expect(api.vaultChangedOnDisk).toHaveBeenCalled());
+    expect(api.reloadVault).not.toHaveBeenCalled();
+    expect(c.querySelectorAll('.list .erow').length).toBe(ENTRIES.length);
   });
 
   it('selecting a different entry updates the detail title (via get_entry_detail)', async () => {
