@@ -116,7 +116,12 @@ function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
 
   const submit = async (e) => {
     e && e.preventDefault();
-    if (!pw || busy) return;
+    // Read the field, not the state. `submit` closes over the render that made
+    // it, so a submit arriving in the same tick as the last keystroke sees the
+    // previous value — and the empty-password guard below then drops it
+    // silently. The DOM always has what was actually typed.
+    const password = (ref.current && ref.current.value) || pw;
+    if (!password || busy) return;
     setBusy(true); setErr(false); setProgress({});
     queue.current = []; draining.current = false;
     try {
@@ -124,13 +129,13 @@ function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
       // not flip the parent itself. Deliberate: the backend has finished by the
       // time it resolves, but the checklist may still be draining, and an
       // immediate unmount would bin the last few ticks.
-      const list = await onUnlock(pw);
+      const list = await onUnlock(password);
       // Enrol only now, with a password the vault has just accepted. Failing
       // here must not fail the unlock — the vault is open either way, and the
       // worst case is that the offer comes back next time.
       if (remember && bio.available && !bio.enrolled) {
         try {
-          await onRemember(pw);
+          await onRemember(password);
         } catch (e3) {
           console.warn("could not remember this password for Touch ID", e3);
         }
