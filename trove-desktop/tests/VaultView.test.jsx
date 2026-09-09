@@ -43,6 +43,10 @@ vi.mock('../src/api.js', () => ({
   setSettings: vi.fn(),
   vaultChangedOnDisk: vi.fn(),
   reloadVault: vi.fn(),
+  biometricStatus: vi.fn(),
+  biometricUnlock: vi.fn(),
+  biometricEnroll: vi.fn(),
+  biometricForget: vi.fn(),
 }));
 
 import * as api from '../src/api.js';
@@ -69,6 +73,8 @@ beforeEach(() => {
   api.setSettings.mockResolvedValue(undefined);
   // Nothing has touched the file unless a test says so.
   api.vaultChangedOnDisk.mockResolvedValue(false);
+  // Touch ID absent by default; the tests that care set it themselves.
+  api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
   vi.clearAllMocks();
   try { localStorage.clear(); } catch { /* ignore */ }
   api.listVaults.mockResolvedValue([OPEN_VAULT]);

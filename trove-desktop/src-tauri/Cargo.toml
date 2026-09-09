@@ -53,3 +53,13 @@ opt-level = 3
 
 [profile.dev.package.troved]
 opt-level = 3
+
+# macOS only: Touch ID (LocalAuthentication) plus the login keychain that holds
+# the password it gates. `LAContext` needs no entitlement — verified from an
+# unsigned binary — so the prompt works without a provisioning profile.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
+objc2 = "0.6"
+block2 = "0.6"
+security-framework = "3"

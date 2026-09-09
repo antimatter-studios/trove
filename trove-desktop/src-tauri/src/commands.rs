@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
 
+use crate::biometric;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, Manager, State};
 use trove_core::{EntryId, Vault};
@@ -130,6 +131,15 @@ struct RecentEntry {
 // --- DTOs (serialized names are what the frontend sees) --------------------
 
 /// A registered vault as the switcher sees it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiometricDto {
+    /// A fingerprint reader with an enrolled finger, usable right now.
+    pub available: bool,
+    /// This vault has a password stored for Touch ID to release.
+    pub enrolled: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultDto {
@@ -323,6 +333,48 @@ fn ensure_no_id_collision(state: &AppState, id: &str, cpath: &Path) -> Result<bo
 }
 
 // --- persistence -----------------------------------------------------------
+
+/// What the bundle identifier used to be, and therefore what the app's config
+/// directory used to be called.
+const LEGACY_BUNDLE_ID: &str = "com.trove.desktop";
+
+/// Move settings and the vault list over from the old identifier's directory,
+/// once.
+///
+/// macOS keys an app's data directory by bundle identifier, so renaming the
+/// bundle orphans everything the app had written — for trove that is the list
+/// of registered vaults and the agent settings, i.e. the app comes up looking
+/// factory-new with the user's vaults apparently gone. Copying rather than
+/// moving leaves the old directory intact, so an older build still works and
+/// nothing is destroyed if this goes wrong.
+///
+/// Only runs when the new directory has no file of that name yet, so it can
+/// never overwrite newer state, and it is safe to call on every start.
+pub fn migrate_legacy_config(app: &AppHandle) {
+    let Ok(new_dir) = app.path().app_config_dir() else {
+        return;
+    };
+    let Some(old_dir) = new_dir.parent().map(|parent| parent.join(LEGACY_BUNDLE_ID)) else {
+        return;
+    };
+    if !old_dir.is_dir() || old_dir == new_dir {
+        return;
+    }
+    for name in [RECENTS_FILE, SETTINGS_FILE] {
+        let (from, to) = (old_dir.join(name), new_dir.join(name));
+        if !from.is_file() || to.exists() {
+            continue;
+        }
+        if std::fs::create_dir_all(&new_dir).is_err() {
+            return;
+        }
+        match std::fs::copy(&from, &to) {
+            Ok(_) => eprintln!("trove: carried {name} over from {LEGACY_BUNDLE_ID}"),
+            // Not fatal: the app still opens, the user re-adds their vaults.
+            Err(e) => eprintln!("trove: could not carry {name} over: {e}"),
+        }
+    }
+}
 
 fn recents_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -1069,6 +1121,106 @@ pub fn create_vault(
 }
 
 /// Decrypt a registered vault, store the open `Vault`, return its entry list.
+/// The registered vault's path, or an error naming the id that is not known.
+///
+/// The lock is taken and released here rather than held across the work that
+/// follows: every command in this file learned that lesson when holding it
+/// across an unlock froze the window.
+fn vault_path(id: &str, state: &State<'_, VaultState>) -> Result<PathBuf, String> {
+    let guard = state.lock().map_err(poisoned)?;
+    guard
+        .vaults
+        .get(id)
+        .map(|v| v.path.clone())
+        .ok_or_else(|| format!("vault is not registered: {id}"))
+}
+
+/// Whether this Mac can do Touch ID at all, and whether THIS vault has a
+/// password stored for it.
+///
+/// Both are asked at the moment the unlock screen draws, because both change
+/// underneath you: biometry goes away when the lid is shut on a clamshell
+/// setup or after too many failed attempts, and the entry can be removed from
+/// Keychain Access or by the CLI at any time.
+#[tauri::command]
+pub async fn biometric_status(
+    id: String,
+    state: State<'_, VaultState>,
+) -> Result<BiometricDto, String> {
+    let path = vault_path(&id, &state)?;
+    let enrolled = tauri::async_runtime::spawn_blocking(move || biometric::is_enrolled(&path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(BiometricDto {
+        available: biometric::available(),
+        enrolled,
+    })
+}
+
+/// Unlock with a fingerprint instead of a typed password.
+///
+/// Returns `Ok(None)` when the prompt was cancelled or nothing is stored —
+/// both are ordinary outcomes that leave the password field waiting, not
+/// errors to put in front of someone.
+#[tauri::command]
+pub async fn biometric_unlock(
+    app: AppHandle,
+    id: String,
+    state: State<'_, VaultState>,
+) -> Result<Option<Vec<EntryDto>>, String> {
+    let path = vault_path(&id, &state)?;
+    let name = path
+        .file_stem()
+        .map(|s: &std::ffi::OsStr| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "your vault".to_string());
+    let reason = format!("unlock {name}");
+
+    // Off the main thread: the prompt blocks until the user answers it, and
+    // that is exactly the freeze this app was fixed for.
+    let password = {
+        let path = path.clone();
+        tauri::async_runtime::spawn_blocking(move || biometric::unlock(&path, &reason))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+    };
+    let Some(password) = password else {
+        return Ok(None);
+    };
+    unlock_vault(app, id, password, state).await.map(Some)
+}
+
+/// Remember this vault's password for Touch ID.
+///
+/// The password is proved against the vault first: an entry that does not open
+/// it is worse than none, because it fails later and somewhere else.
+#[tauri::command]
+pub async fn biometric_enroll(
+    id: String,
+    password: String,
+    state: State<'_, VaultState>,
+) -> Result<(), String> {
+    let path = vault_path(&id, &state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        trove_core::Vault::open(&path, &password)
+            .map_err(|e| format!("that password does not open this vault: {e}"))?;
+        biometric::enroll(&path, &password).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Forget this vault's stored password.
+#[tauri::command]
+pub async fn biometric_forget(id: String, state: State<'_, VaultState>) -> Result<bool, String> {
+    let path = vault_path(&id, &state)?;
+    tauri::async_runtime::spawn_blocking(move || biometric::forget(&path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn unlock_vault(
     app: AppHandle,

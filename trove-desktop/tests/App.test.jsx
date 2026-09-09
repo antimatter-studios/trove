@@ -44,6 +44,10 @@ vi.mock('../src/api.js', () => ({
   setSettings: vi.fn(),
   vaultChangedOnDisk: vi.fn(),
   reloadVault: vi.fn(),
+  biometricStatus: vi.fn(),
+  biometricUnlock: vi.fn(),
+  biometricEnroll: vi.fn(),
+  biometricForget: vi.fn(),
 }));
 
 import * as api from '../src/api.js';
@@ -62,6 +66,8 @@ beforeEach(() => {
   api.setSettings.mockResolvedValue(undefined);
   // Nothing has touched the file unless a test says so.
   api.vaultChangedOnDisk.mockResolvedValue(false);
+  // Touch ID absent by default; the tests that care set it themselves.
+  api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
   vi.clearAllMocks();
   document.documentElement.removeAttribute('data-theme');
   document.documentElement.removeAttribute('data-accent');
@@ -118,6 +124,51 @@ describe('real unlock flow', () => {
     expect(c.querySelector('.body .pane.list')).toBeTruthy();
     expect(c.querySelector('.body .pane.detail')).toBeTruthy();
     expect(c.querySelectorAll('.list .erow').length).toBe(2);
+  });
+
+  it('offers Touch ID only when the Mac can do it AND this vault is enrolled', async () => {
+    api.listVaults.mockResolvedValue([LOCKED_VAULT]);
+
+    // Neither: no button. A machine without a reader must not advertise one.
+    api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
+    const { container: a, unmount } = render(<App />);
+    await waitFor(() => expect(a.querySelector('.unlock-card')).toBeTruthy());
+    expect(a.querySelector('.ul-touchid')).toBeFalsy();
+    unmount();
+
+    // Available but nothing stored: still no button — prompting for a finger
+    // and then admitting there is no password would read as a bug.
+    api.biometricStatus.mockResolvedValue({ available: true, enrolled: false });
+    const { container: b, unmount: unmountB } = render(<App />);
+    await waitFor(() => expect(b.querySelector('.unlock-card')).toBeTruthy());
+    expect(b.querySelector('.ul-touchid')).toBeFalsy();
+    unmountB();
+
+    // Both: the button appears.
+    api.biometricStatus.mockResolvedValue({ available: true, enrolled: true });
+    const { container: c } = render(<App />);
+    await waitFor(() => expect(c.querySelector('.ul-touchid')).toBeTruthy());
+  });
+
+  it('a cancelled Touch ID prompt leaves the password field, not an error', async () => {
+    api.listVaults.mockResolvedValue([LOCKED_VAULT]);
+    api.biometricStatus.mockResolvedValue({ available: true, enrolled: true });
+    // null is the cancel signal — a decision, not a failure.
+    api.biometricUnlock.mockResolvedValue(null);
+
+    const { container: c } = render(<App />);
+    const button = await waitFor(() => {
+      const el = c.querySelector('.ul-touchid');
+      if (!el) throw new Error('no touch id button yet');
+      return el;
+    });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(api.biometricUnlock).toHaveBeenCalledWith('v1'));
+    // Still locked, still asking for a password, and nothing red.
+    await waitFor(() => expect(c.querySelector('.unlock-card .ul-field input')).toBeTruthy());
+    expect(c.querySelector('.ul-err').textContent.trim()).toBe('');
+    expect(c.querySelector('.body .pane.sidebar')).toBeFalsy();
   });
 
   it('a wrong password surfaces the backend error and stays locked', async () => {
