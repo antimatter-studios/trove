@@ -4,6 +4,61 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.14.0 — 2026-09-09
+
+**Saving no longer overwrites another writer's changes.** `Vault::save()` wrote
+memory over disk unconditionally — no comparison of any kind — so with the
+desktop app open and the CLI editing the same file, whichever saved last threw
+the other's work away silently. That is one file with several writers: the CLI,
+the app, KeePassXC, and the same vault synced onto a second Mac.
+
+`save()` now records what the file looked like when it was read and refuses to
+write over a file that changed since. The desktop app checks every three
+seconds while a vault is open and the window visible, and again on regaining
+focus, then reloads and says so — a list that stopped being true is worse than
+one that jumps, and the selection survives when its entry still exists.
+
+**Materialization describes an attachment, not an entry.** An entry holds
+several — an SSH key and its `.pub`, a certificate and the key that matches it
+— but there was one `Materialize.Target` per entry, with `Materialize.Source`
+naming which single attachment it applied to. The settings are now keyed by the
+attachment:
+
+    Materialize.<attachment>.Target
+    Materialize.<attachment>.Mode
+    Materialize.<attachment>.TTL
+    Materialize.<attachment>.AllowDiskBacked
+
+One entry writes as many files as ask, each with its own mode — which matters
+immediately, since a private key wants `0600` and its public half does not.
+`Source` is gone: the name in the key is the attachment. The entry-level form
+is removed rather than kept alongside, and an entry still carrying it is
+reported as an error naming what to rename — an entry that asked for a file and
+silently got none is the worst outcome available.
+
+**`trove rename-attachment`** renames an attachment and everything that names
+it: the `Materialize.<name>.*` settings follow, and `KeeAgent.settings` is
+rewritten to point at the new file while keeping the lifetime, confirm and
+remove-at-close it already said.
+
+**Touch ID unlocks the desktop app.** The unlock screen offers a fingerprint
+when the vault has a password stored for it, and "Remember with Touch ID"
+enrols after a password the vault has just accepted — never from what someone
+typed into a box. Cancelling returns to the password field rather than showing
+an error, because cancelling is a decision.
+
+Worth being plain about what this is: the fingerprint is a gate in the
+application's own code, not a cryptographic binding, so anything that can
+already read your login keychain can reach the password without a prompt. The
+stronger form needs an entitlement that only a bundle carrying a provisioning
+profile may claim — measured, not assumed — and will replace only the storage
+layer when it lands.
+
+**The app's bundle identifier is `com.antimatterstudios.trove`**, matching the
+other applications in this account. macOS keys an app's config directory by
+that identifier, so the registered-vault list and settings are copied across on
+first run rather than being orphaned.
+
 ## v0.13.0 — 2026-09-09
 
 **Breaking: `TROVE_DB_PASSWORD` is now `TROVE_VAULT_PASSWORD`.** Rename it in
