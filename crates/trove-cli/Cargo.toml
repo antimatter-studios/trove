@@ -66,3 +66,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "io-util", "sync", "process"] }
+
+# macOS only: `--keychain` stores a vault password in the login keychain. Not a
+# hard dependency of anything else, and absent on other platforms — the module
+# compiles to a clear "macOS only" error there.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"

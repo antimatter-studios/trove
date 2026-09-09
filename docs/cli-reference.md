@@ -628,17 +628,94 @@ Long-running. Listens on three Unix sockets; serves clients until `shutdown` RPC
 
 Permission model: every socket is bound by the daemon, then `chmod 0600` so only the same UID can connect.
 
+## The `.env.trove` file
+
+A `KEY=VALUE` file that supplies trove's environment, loaded only when `--env` is
+passed. Nothing is read without that flag: an exported `TROVE_VAULT_PASSWORD` must
+never silently open a vault for a command that didn't ask for one.
+
+### Where it is found
+
+| form | reads |
+| --- | --- |
+| `--env` | `./.env.trove`, then `<vault dir>/.env.trove` |
+| `--env <dir>` | `<dir>/.env.trove` |
+| `--env <file>` | exactly that file |
+
+Bare `--env` tries the working directory first, so a project checkout can override,
+then the directory holding the vault being opened — which is where the file belongs
+when a vault and its settings are kept together (`~/vaults/work.kdbx` beside
+`~/vaults/.env.trove`). When neither exists, the error names both places it looked.
+
+`--env <file>` naming a file that does not exist is a **hard error**, never a silent
+fallback: you named that path, so a typo must not be papered over by prompting or by
+reading something else.
+
+There is deliberately no user-wide config location. `~/.config` ends up committed to
+dotfile repositories, and this file holds a vault password.
+
+### Syntax
+
+```sh
+# comments and blank lines are ignored
+TROVE_VAULT_PASSWORD=correct horse battery staple
+export TROVE_VAULT=/Users/me/vaults/work.kdbx   # an `export ` prefix is allowed
+TROVE_IDLE_TIMEOUT="900"                        # quotes are optional
+```
+
+No interpolation, no multi-line values — this holds configuration and a password, not a
+shell script. A variable **already set in the environment wins**, so the file supplies
+defaults rather than overriding its caller.
+
+Every trove variable can live here, not just the password: `TROVE_VAULT`,
+`TROVE_IDLE_TIMEOUT`, the socket paths. One file can carry a whole configuration.
+
+### Permissions
+
+The file holds a vault password, so trove warns when it is readable by more than its
+owner:
+
+```
+trove: warning: .env.trove is mode 0644 — readable by more than its owner,
+and it holds a vault password. Fix with: chmod 600 .env.trove
+```
+
+`TROVE_ENV_STRICT=1` turns that warning into a refusal, which is what `ssh` does with a
+private key at 0644. It is not the default because an env file need not live where mode
+bits mean anything: iCloud Drive does not guarantee POSIX modes survive a sync, so 0600
+on one Mac can arrive 0644 on the next, and a volume mounted `noowners` ignores them
+entirely. Refusing on that evidence would break unlocks for something the user did not
+cause and cannot fix from that machine.
+
+Keep it `0600`, and do not export the password into your shell — an exported variable is
+inherited by every child process.
+
+### Where the password comes from
+
+More than one source can supply a vault password. They are tried in this order:
+
+| order | source | can it block? |
+| --- | --- | --- |
+| 1 | `--env` file | no |
+| 2 | `--password-stdin` | no |
+| 3 | `--keychain` (macOS login keychain) | yes — needs a terminal |
+| 4 | interactive prompt | yes — needs a terminal |
+
+`--env` and `--password-stdin` are safe to give together: passing both is probably a
+mistake, but the file simply wins and stdin is there if it yields nothing.
+
+`--keychain` always loses to both, and refuses outright when there is no interactive
+terminal. Reading the keychain can raise a system dialog — `brew upgrade` replaces the
+binary, and an unfamiliar binary asking for an item prompts — and a dialog on a Mac you
+are not sitting at is a command that never returns. When `--keychain` is combined with a
+higher-priority source, trove says which one won rather than leaving it ambiguous.
+
+
 ### troved environment variables
 
 All env vars are read at process start.
 
-`--env` loads them from a file first: bare `--env` reads `./.env.trove`, `--env <dir>`
-reads `<dir>/.env.trove`, and `--env <file>` reads that file. Lines are `KEY=VALUE`,
-with `#` comments, an optional `export ` prefix and optional quotes. A variable already
-set in the environment wins, so the file supplies defaults rather than overriding the
-caller. `TROVE_DB_PASSWORD` in such a file unlocks the vault without a prompt — and is
-only consulted when `--env` was passed, so an exported password never silently opens a
-vault for a command that didn't ask for one.
+`--env` loads them from a file first — see [The `.env.trove` file](#the-envtrove-file).
 
 | Env var | Default | Effect |
 | --- | --- | --- |
@@ -647,7 +724,8 @@ vault for a command that didn't ask for one.
 | `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |
 | `TROVE_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. Also the default lifetime constraint on forwarded SSH keys. |
 | `TROVE_SSH_FORWARD` | (on) | Set to `0` / `false` / `no` / `off` to stop pushing unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`. Read on every unlock, not just at start. Forwarding is already inert when `$SSH_AUTH_SOCK` is unset or points at trove's own socket. |
-| `TROVE_DB_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above). Prefer keeping it in a `0600` `.env.trove` that is never exported — an exported variable is inherited by every child process. |
+| `TROVE_VAULT_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above). Prefer keeping it in a `0600` `.env.trove` that is never exported — an exported variable is inherited by every child process. |
+| `TROVE_ENV_STRICT` | (off) | Set to `1` / `true` / `yes` / `on` to make `--env` **refuse** a file readable by more than its owner, instead of warning. macOS/Unix only. |
 | `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
 | `TMPDIR` | `/tmp` | Used as fallback when `XDG_RUNTIME_DIR` is unset/empty. |
