@@ -89,7 +89,7 @@ fn sample_adds() -> Vec<TroveAdd> {
 
 /// 1. trove writes a valid KDBX that the keepass crate reads, carrying both of
 ///    trove's extension-field families: the SSH entry's `id` + `KeeAgent.settings`
-///    attachments, and the file entry's source attachment + `Materialize.*`
+///    attachments, and the file entry's attachment + its `Materialize.*`
 ///    custom fields.
 #[test]
 fn trove_output_is_readable_by_keepass_crate() {
@@ -118,7 +118,7 @@ fn trove_output_is_readable_by_keepass_crate() {
         ssh.attachments.keys().collect::<Vec<_>>()
     );
 
-    // File entry: source attachment named after the basename + Materialize.* fields.
+    // File entry: attachment named after the basename, with its own settings.
     let file = repr
         .get("kubeconfig-prod")
         .expect("entry 'kubeconfig-prod' should exist");
@@ -127,26 +127,29 @@ fn trove_output_is_readable_by_keepass_crate() {
         "file entry should carry the `kubeconfig` attachment; got {:?}",
         file.attachments.keys().collect::<Vec<_>>()
     );
+    // Settings are keyed by the attachment they describe, so one entry can
+    // materialize several files. There is no `Source` field: the attachment
+    // name in the key is the source.
     assert_eq!(
         file.custom_fields
             .get("Materialize.Source")
             .map(String::as_str),
-        Some("kubeconfig"),
-        "Materialize.Source"
+        None,
+        "the entry-level Source field is no longer written"
     );
     assert_eq!(
         file.custom_fields
-            .get("Materialize.Target")
+            .get("Materialize.kubeconfig.Target")
             .map(String::as_str),
         Some("/tmp/kubeconfig"),
-        "Materialize.Target"
+        "Materialize.<attachment>.Target"
     );
     assert_eq!(
         file.custom_fields
-            .get("Materialize.Mode")
+            .get("Materialize.kubeconfig.Mode")
             .map(String::as_str),
         Some("0600"),
-        "Materialize.Mode"
+        "Materialize.<attachment>.Mode"
     );
 }
 
