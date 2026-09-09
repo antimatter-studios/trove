@@ -124,3 +124,23 @@ export const vaultChangedOnDisk = (id) =>
 
 // reload_vault(id) -> entries
 export const reloadVault = (id) => invoke('reload_vault', { id }).then(normEntries);
+/* ---- Touch ID (macOS) ---- */
+
+// biometric_status(id) -> { available, enrolled }
+// Asked when the unlock screen draws rather than cached: biometry disappears
+// when the lid is shut on a clamshell setup or after too many failed attempts,
+// and the stored password can be removed from Keychain Access or the CLI.
+export const biometricStatus = (id) =>
+  invoke('biometric_status', { id }).catch(() => ({ available: false, enrolled: false }));
+
+// biometric_unlock(id) -> entries | null
+// `null` means the prompt was cancelled or nothing is stored — ordinary
+// outcomes that leave the password field waiting, not errors to shout about.
+export const biometricUnlock = (id) =>
+  invoke('biometric_unlock', { id }).then((list) => (list ? normEntries(list) : null));
+
+// biometric_enroll(id, password) — proves the password opens the vault first.
+export const biometricEnroll = (id, password) => invoke('biometric_enroll', { id, password });
+
+// biometric_forget(id) -> bool (false when there was nothing stored)
+export const biometricForget = (id) => invoke('biometric_forget', { id });

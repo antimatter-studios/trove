@@ -3,6 +3,9 @@ import React from 'react';
 const ICON_PATHS = {
   shield: 'M12 3l7 3v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3z',
   lock: 'M6 10V8a6 6 0 0 1 12 0v2 M5 10h14v10H5z M12 14v3',
+  // Concentric arcs, widest at the bottom — reads as a fingerprint at 17px
+  // without trying to draw actual ridges, which turn to mud at this size.
+  fingerprint: 'M12 11v4 M9 9.5a3.5 3.5 0 0 1 6 0v3a6 6 0 0 1-.6 2.6 M6.2 8.2a7 7 0 0 1 11.6 0 M15 15.5a9 9 0 0 1-.5 3 M9 12.5v2.5a9 9 0 0 0 .6 3.2 M4.4 12a8 8 0 0 1 .5-3.4',
   unlock: 'M7 10V8a5 5 0 0 1 9.6-2 M5 10h14v10H5z M12 14v3',
   search: 'M11 11m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0 M20 20l-4-4',
   plus: 'M12 5v14 M5 12h14',

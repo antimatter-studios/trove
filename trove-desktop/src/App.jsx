@@ -389,6 +389,12 @@ function App() {
   // <Unlock> shows a progress checklist while the backend works, and flipping
   // here would unmount it mid-list. It calls `unlockReady` when it's finished.
   const unlock = async (pw) => await api.unlockVault(vault.id, pw);
+  // Same contract as `unlock`, except it can resolve with null: a cancelled
+  // fingerprint prompt is a decision, not a failure, and <Unlock> puts the
+  // password field back rather than showing an error.
+  const touchIdUnlock = async () => await api.biometricUnlock(vault.id);
+  // Called after a successful password unlock, with the password that worked.
+  const touchIdRemember = async (pw) => await api.biometricEnroll(vault.id, pw);
   const unlockReady = (list) =>
     patch({ locked: false, entries: list, loaded: true, group: "__all", selId: list[0] ? list[0].id : null });
   const switchVault = (id) => {
@@ -628,7 +634,7 @@ function App() {
 
         {/* body */}
         {locked ? (
-          <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} />
+          <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} onTouchId={touchIdUnlock} onRemember={touchIdRemember} />
         ) : (
           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
             <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />

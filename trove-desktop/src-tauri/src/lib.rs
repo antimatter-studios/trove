@@ -1,3 +1,4 @@
+mod biometric;
 mod commands;
 
 use commands::{AppState, VaultState};
@@ -13,6 +14,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(VaultState::new(AppState::default()))
         .setup(|app| {
+            // Before anything reads settings or the vault list: the bundle
+            // identifier changed, and macOS keys the config directory by it.
+            commands::migrate_legacy_config(app.handle());
+
             // System tray: the Trove icon in the menu bar / system tray, with a
             // small menu. Additive — it does not change the window's close
             // behavior. Uses the app's own window icon so it tracks the bundle.
@@ -51,6 +56,10 @@ pub fn run() {
             commands::save_entry,
             commands::delete_entry,
             commands::set_favorite,
+            commands::biometric_status,
+            commands::biometric_unlock,
+            commands::biometric_enroll,
+            commands::biometric_forget,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

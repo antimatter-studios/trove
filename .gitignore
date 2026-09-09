@@ -17,3 +17,9 @@
 
 # gpg writes these next to the cwd when a signing test goes sideways.
 dbgmd-*
+
+# Apple provisioning profiles. Not secret in the way a .p12 is — they carry no
+# private key — but they are per-machine, they expire, and a stale one in the
+# tree is worse than none. Keep them out.
+*.provisionprofile
+*.mobileprovision

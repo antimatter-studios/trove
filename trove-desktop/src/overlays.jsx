@@ -1,6 +1,7 @@
 import React from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { Icon, TYPE_ICON } from './icons.jsx';
+import * as api from './api.js';
 // Trove — overlays: unlock, command palette, entry form, toast, help
 
 /* ============ UNLOCK ============ */
@@ -42,8 +43,14 @@ function UnlockProgress({ progress }) {
   );
 }
 
-function Unlock({ vault, onUnlock, onReady, onChange }) {
+function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
   const [pw, setPw] = React.useState("");
+  // { available, enrolled } — asked per vault, and again whenever this screen
+  // is shown, because both halves change without the app being told.
+  const [bio, setBio] = React.useState({ available: false, enrolled: false });
+  // Ticked before typing the password: enrolment needs a password that is
+  // known to work, and the only moment we have one is a successful unlock.
+  const [remember, setRemember] = React.useState(false);
   const [show, setShow] = React.useState(false);
   const [err, setErr] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
@@ -98,6 +105,11 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
       }),
     []
   );
+  React.useEffect(() => {
+    let dead = false;
+    api.biometricStatus(vault.id).then((b) => { if (!dead) setBio(b); });
+    return () => { dead = true; };
+  }, [vault.id]);
   React.useEffect(() => { ref.current && ref.current.focus(); }, [vault.id]);
   // Reset transient state when the target vault changes.
   React.useEffect(() => { setPw(""); setErr(false); setBusy(false); }, [vault.id]);
@@ -113,6 +125,16 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
       // time it resolves, but the checklist may still be draining, and an
       // immediate unmount would bin the last few ticks.
       const list = await onUnlock(pw);
+      // Enrol only now, with a password the vault has just accepted. Failing
+      // here must not fail the unlock — the vault is open either way, and the
+      // worst case is that the offer comes back next time.
+      if (remember && bio.available && !bio.enrolled) {
+        try {
+          await onRemember(pw);
+        } catch (e3) {
+          console.warn("could not remember this password for Touch ID", e3);
+        }
+      }
       await drained();
       onReady(list);
       return;
@@ -120,6 +142,25 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
       setErr(e2 && typeof e2 === "string" ? e2 : (e2 && e2.message) || true);
       setBusy(false);
       setPw("");
+      ref.current && ref.current.focus();
+    }
+  };
+
+  // Touch ID: the fingerprint releases a password kept in the login keychain,
+  // and from there this is an ordinary unlock. A cancelled prompt is not an
+  // error — it returns null and leaves the password field exactly as it was.
+  const touchId = async () => {
+    if (busy) return;
+    setBusy(true); setErr(false); setProgress({});
+    queue.current = []; draining.current = false;
+    try {
+      const list = await onTouchId();
+      if (!list) { setBusy(false); ref.current && ref.current.focus(); return; }
+      await drained();
+      onReady(list);
+    } catch (e2) {
+      setErr(e2 && typeof e2 === "string" ? e2 : (e2 && e2.message) || true);
+      setBusy(false);
       ref.current && ref.current.focus();
     }
   };
@@ -182,6 +223,22 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
         <button type="submit" className="ul-unlock">
           <Icon name="unlock" size={17} /> Unlock
         </button>
+
+        {bio.available && !bio.enrolled && (
+          <label className="ul-remember">
+            <input
+              type="checkbox" checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+            />
+            <span><Icon name="fingerprint" size={14} /> Remember with Touch ID</span>
+          </label>
+        )}
+
+        {bio.available && bio.enrolled && (
+          <button type="button" className="ul-touchid" onClick={touchId}>
+            <Icon name="fingerprint" size={17} /> Unlock with Touch ID
+          </button>
+        )}
 
         <div className="ul-foot"><Icon name="shield" size={13} /> Local‑only · never leaves this device</div>
       </form>
