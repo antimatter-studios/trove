@@ -1224,6 +1224,31 @@ pub async fn set_settings(app: AppHandle, settings: Settings) -> Result<(), Stri
     off_main(app, move |a| save_settings(a, &settings)).await
 }
 
+/// Has this vault's file been written by something else since we read it?
+///
+/// Polled by the window rather than pushed from a file watcher: it is one
+/// `stat` on a path we already know, it only matters while somebody is looking
+/// at the list, and there is no watcher to leak when a vault closes.
+#[tauri::command]
+pub async fn vault_changed_on_disk(app: AppHandle, id: String) -> Result<bool, String> {
+    on_vault(app, id, |v| Ok(v.changed_on_disk())).await
+}
+
+/// Re-read a vault whose file was changed by something else, returning the
+/// entry list as it now stands.
+///
+/// Safe to call unprompted because this app writes every change through
+/// immediately — there is no unsaved state to lose, and a list that no longer
+/// matches the file is worse than a list that jumps.
+#[tauri::command]
+pub async fn reload_vault(app: AppHandle, id: String) -> Result<Vec<EntryDto>, String> {
+    on_vault_mut(app, id, |v| {
+        v.reload().map_err(|e| e.to_string())?;
+        Ok(build_entry_dtos(v))
+    })
+    .await
+}
+
 /// Re-read the entry list for an unlocked vault.
 #[tauri::command]
 pub async fn list_entries(app: AppHandle, id: String) -> Result<Vec<EntryDto>, String> {

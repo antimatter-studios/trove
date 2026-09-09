@@ -1024,41 +1024,27 @@ async fn add_file(
                 shutdown: false,
             };
         }
-        if let Err(e) = vault.set_field(&id, "Materialize.Source", name) {
-            return Handled {
-                response: Response::err(format!("setting Materialize.Source: {e}")),
-                shutdown: false,
-            };
-        }
-        if let Err(e) = vault.set_field(&id, "Materialize.Target", target) {
-            return Handled {
-                response: Response::err(format!("setting Materialize.Target: {e}")),
-                shutdown: false,
-            };
-        }
-        if let Err(e) = vault.set_field(&id, "Materialize.Mode", mode) {
-            return Handled {
-                response: Response::err(format!("setting Materialize.Mode: {e}")),
-                shutdown: false,
-            };
-        }
+        // Keyed by attachment name, so an entry with several attachments can
+        // describe a destination for each. No `Source` field: the name in the
+        // key is the attachment this describes.
+        let mut settings = vec![
+            (format!("Materialize.{name}.Target"), target.to_string()),
+            (format!("Materialize.{name}.Mode"), mode.to_string()),
+            (
+                format!("Materialize.{name}.AllowDiskBacked"),
+                if allow_disk_backed { "true" } else { "false" }.to_string(),
+            ),
+        ];
         if let Some(ttl) = ttl {
-            if let Err(e) = vault.set_field(&id, "Materialize.TTL", &ttl.to_string()) {
+            settings.push((format!("Materialize.{name}.TTL"), ttl.to_string()));
+        }
+        for (field, value) in settings {
+            if let Err(e) = vault.set_field(&id, &field, &value) {
                 return Handled {
-                    response: Response::err(format!("setting Materialize.TTL: {e}")),
+                    response: Response::err(format!("setting {field}: {e}")),
                     shutdown: false,
                 };
             }
-        }
-        if let Err(e) = vault.set_field(
-            &id,
-            "Materialize.AllowDiskBacked",
-            if allow_disk_backed { "true" } else { "false" },
-        ) {
-            return Handled {
-                response: Response::err(format!("setting Materialize.AllowDiskBacked: {e}")),
-                shutdown: false,
-            };
         }
         if let Err(e) = vault.save() {
             return Handled {

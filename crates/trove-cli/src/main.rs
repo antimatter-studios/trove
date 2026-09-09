@@ -550,6 +550,21 @@ enum Command {
         json: bool,
     },
 
+    /// Rename an attachment, taking everything that names it along.
+    ///
+    /// An attachment's name is a join key: `Materialize.<name>.Target` and
+    /// friends are keyed by it, and `KeeAgent.settings` names its key file
+    /// inside. Renaming the file alone would leave both describing something
+    /// that no longer exists, so all three move together.
+    RenameAttachment {
+        /// Entry path or title holding the attachment.
+        entry_path: String,
+        /// Current attachment name.
+        old_name: String,
+        /// New attachment name.
+        new_name: String,
+    },
+
     /// Manage the macOS login-keychain entry that `--keychain` reads.
     ///
     /// One entry per vault, filed under its absolute path. No biometry here —
@@ -1312,6 +1327,12 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::RenameAttachment {
+            entry_path,
+            old_name,
+            new_name,
+        } => cmd_rename_attachment(vault, &entry_path, &old_name, &new_name, pw_stdin),
+
         Command::Keychain { action } => cmd_keychain(&action, pw_stdin),
 
         Command::Show {
@@ -2937,30 +2958,32 @@ fn cmd_add_file(
             vault
                 .attach_binary(&id, &attachment_name, &bytes)
                 .context("attaching file bytes")?;
-            vault
-                .set_field(&id, "Materialize.Source", &attachment_name)
-                .context("setting Materialize.Source")?;
+            // Keyed by attachment name, so one entry can materialize several
+            // files — an SSH key and its `.pub`, a certificate and its key.
+            // There is no separate `Source` field: the name in the key IS the
+            // attachment this describes.
             let target_str = target
                 .to_str()
                 .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
+            let field = |setting: &str| format!("Materialize.{attachment_name}.{setting}");
             vault
-                .set_field(&id, "Materialize.Target", target_str)
-                .context("setting Materialize.Target")?;
+                .set_field(&id, &field("Target"), target_str)
+                .context("setting the materialize target")?;
             vault
-                .set_field(&id, "Materialize.Mode", mode)
-                .context("setting Materialize.Mode")?;
+                .set_field(&id, &field("Mode"), mode)
+                .context("setting the materialize mode")?;
             if let Some(ttl) = ttl {
                 vault
-                    .set_field(&id, "Materialize.TTL", &ttl.to_string())
-                    .context("setting Materialize.TTL")?;
+                    .set_field(&id, &field("TTL"), &ttl.to_string())
+                    .context("setting the materialize TTL")?;
             }
             vault
                 .set_field(
                     &id,
-                    "Materialize.AllowDiskBacked",
+                    &field("AllowDiskBacked"),
                     if allow_disk_backed { "true" } else { "false" },
                 )
-                .context("setting Materialize.AllowDiskBacked")?;
+                .context("setting the materialize disk-backed flag")?;
 
             vault.save().context("saving vault")?;
             println!(
@@ -3288,6 +3311,59 @@ fn entry_show_json(e: ShowJson<'_>) -> Value {
     out.insert("fields".into(), Value::Object(e.fields));
     out.insert("attachments".into(), Value::from(e.attachments.to_vec()));
     Value::Object(out)
+}
+
+fn cmd_rename_attachment(
+    vault_path: Option<&Path>,
+    entry_path: &str,
+    old_name: &str,
+    new_name: &str,
+    pw_stdin: bool,
+) -> Result<()> {
+    let Some(path) = vault_path else {
+        return Err(anyhow!(
+            "rename-attachment needs --vault <PATH>: it rewrites the file, and \
+             the daemon serves an already-open vault"
+        ));
+    };
+    let mut vault = open_vault(path, pw_stdin)?;
+    let id = vault
+        .find_by_title(entry_path)
+        .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+
+    let renamed = vault
+        .rename_attachment(&id, old_name, new_name)
+        .with_context(|| format!("renaming attachment {old_name:?} to {new_name:?}"))?;
+
+    // The settings name their key inside XML that trove-core does not parse,
+    // so finishing the job belongs here, where the format is understood.
+    let mut agent_updated = false;
+    if renamed.has_keeagent_settings {
+        if let Some(bytes) = vault.read_binary(&id, "KeeAgent.settings")? {
+            if let Some(updated) =
+                troved::ssh_agent::keeagent::rewrite_key_attachment(&bytes, new_name)
+            {
+                vault.attach_binary(&id, "KeeAgent.settings", &updated)?;
+                agent_updated = true;
+            }
+        }
+    }
+
+    vault.save().context("saving vault")?;
+
+    println!("renamed attachment {old_name} → {new_name}");
+    for field in &renamed.moved_fields {
+        println!("  moved {field}");
+    }
+    if agent_updated {
+        println!("  updated KeeAgent.settings to name the new file");
+    } else if renamed.has_keeagent_settings {
+        eprintln!(
+            "note: this entry has KeeAgent.settings, but they do not load a key \
+             (or are not in a form trove understands), so they were left alone"
+        );
+    }
+    Ok(())
 }
 
 fn cmd_keychain(action: &KeychainAction, pw_stdin: bool) -> Result<()> {
@@ -4946,7 +5022,12 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
         }
         if let Some(core) = cause.downcast_ref::<CoreError>() {
             return match core {
-                CoreError::BadPassword | CoreError::Kdbx(_) => EXIT_VAULT_ERROR,
+                // A stale write is a vault-state problem, not something the
+                // user typed wrong: the file is fine, it just moved on without
+                // us. Same class as a corrupt or unreadable vault.
+                CoreError::BadPassword | CoreError::Kdbx(_) | CoreError::StaleWrite(_) => {
+                    EXIT_VAULT_ERROR
+                }
                 CoreError::AlreadyExists(_)
                 | CoreError::NotFound(_)
                 | CoreError::EntryNotFound(_)
@@ -4954,6 +5035,8 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
                 | CoreError::GroupNotFound(_)
                 | CoreError::GroupExists(_)
                 | CoreError::GroupNotEmpty(_)
+                | CoreError::AttachmentNotFound(_)
+                | CoreError::AttachmentExists(_)
                 | CoreError::NoTotp(_)
                 | CoreError::Totp(_)
                 | CoreError::Io(_) => EXIT_USER_ERROR,

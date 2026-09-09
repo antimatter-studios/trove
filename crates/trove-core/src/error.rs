@@ -20,6 +20,18 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error(
+        "the vault file changed on disk since it was opened: {0}. \
+         Saving would discard whatever changed it — reopen the vault, or save elsewhere."
+    )]
+    StaleWrite(PathBuf),
+
+    #[error("entry has no attachment named {0:?}")]
+    AttachmentNotFound(String),
+
+    #[error("entry already has an attachment named {0:?}")]
+    AttachmentExists(String),
+
     #[error("invalid entry path: {0}")]
     InvalidPath(String),
 

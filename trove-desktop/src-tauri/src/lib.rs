@@ -44,6 +44,8 @@ pub fn run() {
             commands::set_settings,
             commands::lock_vault,
             commands::list_entries,
+            commands::vault_changed_on_disk,
+            commands::reload_vault,
             commands::get_field,
             commands::get_entry_detail,
             commands::save_entry,

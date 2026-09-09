@@ -123,16 +123,14 @@ fn vault_with_materialize(path: &Path, entry: &str, bytes: &[u8], target: &Path)
     let mut v = Vault::create(path, PASSWORD).expect("create vault");
     let id = v.add_entry(entry).expect("add entry");
     v.attach_binary(&id, "blob", bytes).expect("attach");
-    v.set_field(&id, "Materialize.Source", "blob")
-        .expect("set Source");
     v.set_field(
         &id,
-        "Materialize.Target",
+        "Materialize.blob.Target",
         target.to_str().expect("utf8 target"),
     )
     .expect("set Target");
     // Tempdirs are not tmpfs on macOS or Linux CI, so opt in explicitly.
-    v.set_field(&id, "Materialize.AllowDiskBacked", "true")
+    v.set_field(&id, "Materialize.blob.AllowDiskBacked", "true")
         .expect("set AllowDiskBacked");
     v.save().expect("save");
 }

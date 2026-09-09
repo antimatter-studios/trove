@@ -45,13 +45,20 @@ pub fn locate() -> Option<Trove> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // CARGO_MANIFEST_DIR = <workspace>/crates/keepass-spec-tests
     let workspace = manifest.parent().and_then(Path::parent)?;
-    for profile in ["release", "debug"] {
-        let cand = workspace.join("target").join(profile).join("trove");
-        if cand.is_file() {
-            return Some(Trove { path: cand });
-        }
-    }
-    None
+    // The NEWER of the two, not a fixed preference. Preferring `release`
+    // meant a months-old binary silently won over the one just built, and the
+    // harness then reported conformance failures about behaviour that had
+    // already changed. CI sets `TROVE_BIN` and never reaches this.
+    ["release", "debug"]
+        .iter()
+        .map(|profile| workspace.join("target").join(profile).join("trove"))
+        .filter(|p| p.is_file())
+        .max_by_key(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
+        .map(|path| Trove { path })
 }
 
 /// A resource trove can add via its subcommands.

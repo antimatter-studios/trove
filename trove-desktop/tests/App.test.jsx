@@ -42,6 +42,8 @@ vi.mock('../src/api.js', () => ({
   buildInfo: vi.fn(),
   setAgentKey: vi.fn(),
   setSettings: vi.fn(),
+  vaultChangedOnDisk: vi.fn(),
+  reloadVault: vi.fn(),
 }));
 
 import * as api from '../src/api.js';
@@ -58,6 +60,8 @@ beforeEach(() => {
   api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
   api.setSettings.mockResolvedValue(undefined);
+  // Nothing has touched the file unless a test says so.
+  api.vaultChangedOnDisk.mockResolvedValue(false);
   vi.clearAllMocks();
   document.documentElement.removeAttribute('data-theme');
   document.documentElement.removeAttribute('data-accent');
