@@ -9,7 +9,7 @@
 //!   * A variable already set in the environment WINS over the file, so the
 //!     file supplies defaults and never overrides an explicit caller.
 //!   * The password is taken from the environment ONLY when `--env` was passed.
-//!     An exported `TROVE_DB_PASSWORD` must never silently unlock a vault for a
+//!     An exported `TROVE_VAULT_PASSWORD` must never silently unlock a vault for a
 //!     command that didn't ask for it.
 //!
 //! Skips gracefully when the `trove` binary is missing.
@@ -41,7 +41,7 @@ fn run_in(
     cmd.args(args)
         .current_dir(cwd)
         .env_remove("TROVE_SESSION")
-        .env_remove("TROVE_DB_PASSWORD")
+        .env_remove("TROVE_VAULT_PASSWORD")
         .env_remove("TROVE_VAULT")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -77,7 +77,7 @@ fn fixture(trove: &Path, dir: &Path) -> PathBuf {
     assert!(out.status.success(), "init should succeed");
     std::fs::write(
         dir.join(".env.trove"),
-        format!("# vault credentials\nTROVE_DB_PASSWORD={PASSWORD}\n"),
+        format!("# vault credentials\nTROVE_VAULT_PASSWORD={PASSWORD}\n"),
     )
     .expect("write .env.trove");
     vault
@@ -174,7 +174,7 @@ fn the_environment_wins_over_the_file() {
         tmp.path(),
         &["list", "--vault", vault.to_str().unwrap(), "--env"],
         "",
-        &[("TROVE_DB_PASSWORD", "not-the-password")],
+        &[("TROVE_VAULT_PASSWORD", "not-the-password")],
     );
     assert!(
         !out.status.success(),
@@ -195,11 +195,11 @@ fn the_password_is_only_used_when_env_was_asked_for() {
         tmp.path(),
         &["list", "--vault", vault.to_str().unwrap()],
         "",
-        &[("TROVE_DB_PASSWORD", PASSWORD)],
+        &[("TROVE_VAULT_PASSWORD", PASSWORD)],
     );
     assert!(
         !out.status.success(),
-        "TROVE_DB_PASSWORD must not unlock a vault unless --env opted in"
+        "TROVE_VAULT_PASSWORD must not unlock a vault unless --env opted in"
     );
 }
 
@@ -235,7 +235,7 @@ fn other_trove_variables_load_from_the_file_too() {
     // the path argument unnecessary for other tooling.
     std::fs::write(
         tmp.path().join(".env.trove"),
-        format!("export TROVE_DB_PASSWORD=\"{PASSWORD}\"\nTROVE_NO_VERSION_WARN=1\n"),
+        format!("export TROVE_VAULT_PASSWORD=\"{PASSWORD}\"\nTROVE_NO_VERSION_WARN=1\n"),
     )
     .expect("write");
 
@@ -301,7 +301,7 @@ fn the_working_directory_beats_the_vaults_directory() {
     // unlock fails, which is what proves precedence rather than a lucky pass.
     std::fs::write(
         cwd.path().join(".env.trove"),
-        "TROVE_DB_PASSWORD=not-the-vault-password\n",
+        "TROVE_VAULT_PASSWORD=not-the-vault-password\n",
     )
     .expect("write local .env.trove");
 
@@ -426,5 +426,60 @@ fn strict_mode_refuses_a_world_readable_env_file() {
         out.status.success(),
         "0600 passes strict mode: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `--keychain` can raise a system dialog, and a dialog in a shell with no
+/// terminal is a hang that costs someone their remote session. So it refuses
+/// there, and it loses to every source that cannot hang.
+#[cfg(target_os = "macos")]
+#[test]
+fn keychain_refuses_without_a_terminal_and_never_outranks_the_others() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+
+    // `run_in` gives the child pipes, not a tty — exactly the agent case.
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--keychain"],
+        "",
+        &[],
+    );
+    assert!(!out.status.success(), "must refuse without a terminal");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("interactive terminal"),
+        "explaining why: {err}"
+    );
+    assert!(
+        err.contains("--env") && err.contains("--password-stdin"),
+        "and what to use instead: {err}"
+    );
+
+    // With --env alongside it, the file wins and the run succeeds — the
+    // keychain is not consulted at all, so its terminal requirement is moot.
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &[
+            "list",
+            "--vault",
+            vault.to_str().unwrap(),
+            "--env",
+            "--keychain",
+        ],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "--env outranks --keychain: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--keychain ignored"),
+        "and says which source won"
     );
 }

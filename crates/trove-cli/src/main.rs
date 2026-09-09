@@ -11,6 +11,7 @@ mod exec;
 mod gitcred;
 mod hibp;
 mod ipc;
+mod keychain;
 mod pwgen;
 mod xml_export;
 
@@ -65,7 +66,7 @@ struct Cli {
     /// and optional quotes. A variable already set in the environment wins, so
     /// the file supplies defaults rather than overriding the caller.
     ///
-    /// Its main use is `TROVE_DB_PASSWORD`, which unlocks the vault without a
+    /// Its main use is `TROVE_VAULT_PASSWORD`, which unlocks the vault without a
     /// prompt. Nothing is read unless this flag is given — trove never picks up
     /// a password file just because one happens to exist next to it.
     #[arg(
@@ -79,6 +80,18 @@ struct Cli {
     // bare `--env` (Some(None) — search for the file), and `--env <PATH>`
     // (Some(Some(p)) — use exactly that).
     env_file: Option<Option<PathBuf>>,
+
+    /// Take the vault password from the macOS login keychain (see
+    /// `trove keychain save`).
+    ///
+    /// Opt-in only, and the LOWEST-priority source: `--env` and
+    /// `--password-stdin` both outrank it, because both are statements of
+    /// intent and neither can hang, while a keychain read can raise a system
+    /// dialog that a script cannot answer. Reading also requires an
+    /// interactive terminal for the same reason. macOS only; no biometry here
+    /// — that is `Trove.app`.
+    #[arg(long = "keychain", global = true)]
+    keychain: bool,
 
     /// Operate directly on this .kdbx file (offline mode), bypassing the daemon.
     ///
@@ -537,6 +550,17 @@ enum Command {
         json: bool,
     },
 
+    /// Manage the macOS login-keychain entry that `--keychain` reads.
+    ///
+    /// One entry per vault, filed under its absolute path. No biometry here —
+    /// the entry is gated by your login session, and by a keychain prompt when
+    /// an unfamiliar binary asks (which `brew upgrade` causes again, since it
+    /// replaces the binary).
+    Keychain {
+        #[command(subcommand)]
+        action: KeychainAction,
+    },
+
     /// Print, install, or check a shell completion script.
     ///
     /// With no flags, prints the script to stdout for SHELL. Without an
@@ -664,6 +688,27 @@ enum SshKeyType {
     /// ECDSA NIST P-384.
     #[value(name = "ecdsa-p384")]
     EcdsaP384,
+}
+
+#[derive(Debug, Subcommand)]
+enum KeychainAction {
+    /// Store a vault's password, prompting for it (or reading it with
+    /// `--password-stdin`). Replaces any entry already there.
+    Save {
+        /// The .kdbx whose password this is.
+        vault: PathBuf,
+    },
+    /// Remove a vault's stored password.
+    Forget {
+        /// The .kdbx to forget.
+        vault: PathBuf,
+    },
+    /// Say whether a vault has a stored password. Reads it to find out, so it
+    /// needs a terminal like any other keychain read.
+    Status {
+        /// The .kdbx to check.
+        vault: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1012,6 +1057,22 @@ fn run(cli: Cli) -> Result<()> {
     ENV_OPT_IN
         .set(cli.env_file.is_some())
         .expect("run() is called once");
+    KEYCHAIN_OPT_IN
+        .set(cli.keychain)
+        .expect("run() is called once");
+    if cli.keychain && (cli.env_file.is_some() || cli.password_stdin) {
+        // Not an error: giving both is a mistake, but not one worth failing a
+        // command over. Saying which source won beats leaving it ambiguous.
+        eprintln!(
+            "trove: warning: --keychain ignored — {} takes precedence, because it cannot \
+             raise a dialog that blocks the terminal",
+            if cli.env_file.is_some() {
+                "--env"
+            } else {
+                "--password-stdin"
+            }
+        );
+    }
     if let Some(given) = cli.env_file.clone() {
         let path = match given {
             Some(p) => resolve_env_file(&p),
@@ -1251,6 +1312,8 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::Keychain { action } => cmd_keychain(&action, pw_stdin),
+
         Command::Show {
             entry_path,
             attrs,
@@ -2567,10 +2630,18 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     if !path.exists() {
         return Err(CoreError::NotFound(path.to_path_buf()).into());
     }
+    // Password sources in priority order, and the order is deliberate: `--env`
+    // and `--password-stdin` are statements of intent that cannot block, so
+    // they come first and are safe to combine (giving both is a mistake, not a
+    // disaster — the file wins and stdin is there if it yields nothing). The
+    // keychain comes last because reading it can raise a system dialog, and a
+    // dialog in a terminal that cannot answer costs you the session.
     let password = if let Some(p) = password_from_env() {
         p
     } else if pw_stdin {
         read_password_from_stdin().context("reading vault password from stdin")?
+    } else if let Some(p) = password_from_keychain(Some(path))? {
+        p
     } else {
         rpassword::prompt_password("Vault password: ").context("reading vault password")?
     };
@@ -2601,12 +2672,38 @@ const DEFAULT_ENV_FILE: &str = ".env.trove";
 /// The variable that supplies the vault password. Everything else in the file
 /// is loaded too — `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths — so
 /// one file can carry a whole trove configuration, not just a secret.
-const PASSWORD_VAR: &str = "TROVE_DB_PASSWORD";
+const PASSWORD_VAR: &str = "TROVE_VAULT_PASSWORD";
 
 /// Whether `--env` was given. Only then will a password be taken from the
-/// environment: an exported `TROVE_DB_PASSWORD` must never silently unlock a
+/// environment: an exported `TROVE_VAULT_PASSWORD` must never silently unlock a
 /// vault for a command that didn't ask for it.
 static ENV_OPT_IN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether `--keychain` was given. Like [`ENV_OPT_IN`], the point is that the
+/// source is never consulted on a hunch: a keychain read can raise a dialog,
+/// and a dialog in a script is a dead terminal.
+static KEYCHAIN_OPT_IN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The vault password from the keychain, if `--keychain` opted in and there is
+/// an entry for `vault`.
+fn password_from_keychain(vault: Option<&Path>) -> Result<Option<String>> {
+    if !KEYCHAIN_OPT_IN.get().copied().unwrap_or(false) {
+        return Ok(None);
+    }
+    let Some(vault) = vault else {
+        return Err(anyhow!(
+            "--keychain needs to know which vault: pass the vault path (or --vault <PATH>)"
+        ));
+    };
+    match keychain::load(vault)? {
+        Some(p) => Ok(Some(p)),
+        None => Err(anyhow!(
+            "no keychain entry for {} — run `trove keychain save {}` first",
+            vault.display(),
+            vault.display()
+        )),
+    }
+}
 
 /// Resolve what `--env` was given to an actual file: a directory gets
 /// `.env.trove` appended, a file is taken as-is.
@@ -3191,6 +3288,47 @@ fn entry_show_json(e: ShowJson<'_>) -> Value {
     out.insert("fields".into(), Value::Object(e.fields));
     out.insert("attachments".into(), Value::from(e.attachments.to_vec()));
     Value::Object(out)
+}
+
+fn cmd_keychain(action: &KeychainAction, pw_stdin: bool) -> Result<()> {
+    match action {
+        KeychainAction::Save { vault } => {
+            if !vault.exists() {
+                return Err(anyhow!("vault file does not exist: {}", vault.display()));
+            }
+            let password = if pw_stdin {
+                read_password_from_stdin().context("reading vault password from stdin")?
+            } else {
+                rpassword::prompt_password("Vault password: ").context("reading vault password")?
+            };
+            // Prove the password opens the vault before storing it: an entry
+            // that does not work is worse than no entry, because it fails
+            // later and somewhere else.
+            Vault::open_with_key(vault, &password, global_keyfile())
+                .with_context(|| format!("opening vault {}", vault.display()))?;
+            keychain::save(vault, &password)?;
+            eprintln!(
+                "trove: saved the password for {} — unlock with `--keychain`",
+                keychain::describe(vault)?
+            );
+            Ok(())
+        }
+        KeychainAction::Forget { vault } => {
+            if keychain::forget(vault)? {
+                eprintln!("trove: removed the keychain entry for {}", vault.display());
+            } else {
+                eprintln!("trove: no keychain entry for {}", vault.display());
+            }
+            Ok(())
+        }
+        KeychainAction::Status { vault } => {
+            match keychain::load(vault)? {
+                Some(_) => println!("stored: {}", keychain::describe(vault)?),
+                None => println!("not stored: {}", keychain::describe(vault)?),
+            }
+            Ok(())
+        }
+    }
 }
 
 fn cmd_show(
@@ -4220,10 +4358,13 @@ fn cmd_unlock(
         .to_str()
         .ok_or_else(|| anyhow!("vault path is not valid utf-8"))?
         .to_string();
+    // Same order as `open_vault`: the sources that cannot block come first.
     let password = if let Some(p) = password_from_env() {
         p
     } else if pw_stdin {
         read_password_from_stdin().context("reading vault password from stdin")?
+    } else if let Some(p) = password_from_keychain(Some(&vault_abs))? {
+        p
     } else {
         rpassword::prompt_password("Vault password: ").context("reading vault password")?
     };
