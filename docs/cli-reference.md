@@ -231,11 +231,17 @@ trove [--vault <PATH>] add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
 
 Stores file bytes as a real KDBX `<Binary>` attachment and sets the following entry custom fields (read by troved's [materialize](../crates/troved/src/materialize/mod.rs) module):
 
-- `Materialize.Source` — the attachment name (`<NAME>` or `--src` basename).
-- `Materialize.Target` — `<TARGET>` (literal string; the daemon expands `~`, `$HOME`, `$XDG_RUNTIME_DIR`).
-- `Materialize.Mode` — `<MODE>`.
-- `Materialize.TTL` — seconds, only set if `--ttl` is given.
-- `Materialize.AllowDiskBacked` — `"true"` or `"false"`.
+Each field is keyed by the attachment it describes, so one entry can materialize
+several files — an SSH key and its `.pub`, a certificate and the key that
+matches it:
+
+- `Materialize.<attachment>.Target` — `<TARGET>` (literal string; the daemon expands `~`, `$HOME`, `$XDG_RUNTIME_DIR`).
+- `Materialize.<attachment>.Mode` — `<MODE>`.
+- `Materialize.<attachment>.TTL` — seconds, only set if `--ttl` is given.
+- `Materialize.<attachment>.AllowDiskBacked` — `"true"` or `"false"`.
+
+There is no `Source` field: the attachment name in the key is the source. An
+attachment with no `Target` is simply not materialized.
 
 ## trove get
 
@@ -288,12 +294,12 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 | Argument / flag | Description |
 | --- | --- |
 | `<TITLE>` | Entry path or title to look up. |
-| `--name <NAME>` | Attachment name to read (e.g. `id.pub`). Default: `"blob"`. In daemon mode `Materialize.Source` is not resolved; pass `--name` for a non-`blob` slot. |
+| `--name <NAME>` | Attachment name to read (e.g. `id.pub`). Default: `"blob"`. Pass it for any entry that does not use the conventional `blob` slot. |
 | `--out <OUT>` | Write to this path. Stdout if omitted. |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
-Reads any attachment by name. **Ignores** `Materialize.Target` / `Mode` / etc. — `--out` controls where the bytes land. One-shot equivalent of full materialization.
+Reads any attachment by name. **Ignores** the `Materialize.*` fields — `--out` controls where the bytes land. One-shot equivalent of full materialization.
 
 ## trove git-credential
 
@@ -730,7 +736,7 @@ All env vars are read at process start.
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
 | `TMPDIR` | `/tmp` | Used as fallback when `XDG_RUNTIME_DIR` is unset/empty. |
 | `UID` | `0` | Used in the `$TMPDIR` fallback path only. (`UID` is rarely set by login shells; the fallback path is essentially "/tmp/trove-0.sock" in practice — set `TROVE_SOCK` explicitly if running multi-user on a shared machine.) |
-| `HOME` | (system) | Used by the materialize path resolver to expand `~` / `$HOME` in `Materialize.Target`. |
+| `HOME` | (system) | Used by the materialize path resolver to expand `~` / `$HOME` in a materialize target. |
 
 The CLI's `ssh-agent socket` / `gpg-agent socket` subcommands resolve the same way as the daemon, so they always agree (no need to pass `TROVE_*` to both).
 
@@ -776,11 +782,18 @@ The materialize feature is wholly expressed as kdbx custom string fields, so the
 
 | Field | Required | Type | Effect |
 | --- | --- | --- | --- |
-| `Materialize.Source` | yes | string | Attachment name to read bytes from. Must exist on the entry. |
-| `Materialize.Target` | yes | string | Path to materialize to. `~`, `$HOME`, `$XDG_RUNTIME_DIR` are expanded against the daemon's environment. |
-| `Materialize.Mode` | no | octal string (3 or 4 digits) | File mode. Default `0600`. |
-| `Materialize.TTL` | no | positive integer seconds | Wipe the file after N seconds even if vault stays unlocked. |
-| `Materialize.AllowDiskBacked` | no | `"true"` / `"false"` (case-insensitive; `"yes"` / `"1"` also accepted) | Allow non-tmpfs target. Default `false`. |
+| `Materialize.<attachment>.Target` | yes | string | Path to materialize that attachment to. `~`, `$HOME`, `$XDG_RUNTIME_DIR` are expanded against the daemon's environment. The attachment must exist on the entry. |
+| `Materialize.<attachment>.Mode` | no | octal string (3 or 4 digits) | File mode. Default `0600`. |
+| `Materialize.<attachment>.TTL` | no | positive integer seconds | Wipe the file after N seconds even if the vault stays unlocked. |
+| `Materialize.<attachment>.AllowDiskBacked` | no | `"true"` / `"false"` (case-insensitive; `"yes"` / `"1"` also accepted) | Allow a non-tmpfs target. Default `false`. |
+
+`<attachment>` is the attachment's name, dots and all:
+`Materialize.id_ed25519.pub.Target` describes the attachment `id_ed25519.pub`.
+
+The entry-level `Materialize.Source` / `Materialize.Target` form was removed:
+materialization describes a file, and an entry holds several. An entry still
+carrying those fields is reported as an error on unlock rather than ignored,
+naming what to rename them to.
 
 Plus the implicit attachment slots used by SSH and GPG:
 

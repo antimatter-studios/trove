@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
+use troved::materialize;
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
 
@@ -91,29 +92,28 @@ fn add_materialize_entry(
     vault
         .attach_binary(&id, "blob", bytes)
         .expect("attach binary");
-    vault
-        .set_field(&id, "Materialize.Source", "blob")
-        .expect("set Source");
+    // Fields are keyed by attachment name, so one entry can describe several
+    // files rather than the single one an entry-level target allowed.
     vault
         .set_field(
             &id,
-            "Materialize.Target",
+            "Materialize.blob.Target",
             target.to_str().expect("utf8 target"),
         )
         .expect("set Target");
     if let Some(m) = mode {
         vault
-            .set_field(&id, "Materialize.Mode", m)
+            .set_field(&id, "Materialize.blob.Mode", m)
             .expect("set Mode");
     }
     if let Some(t) = ttl_seconds {
         vault
-            .set_field(&id, "Materialize.TTL", &t.to_string())
+            .set_field(&id, "Materialize.blob.TTL", &t.to_string())
             .expect("set TTL");
     }
     // Tempdirs aren't tmpfs on either macOS or Linux CI, so opt in explicitly.
     vault
-        .set_field(&id, "Materialize.AllowDiskBacked", "true")
+        .set_field(&id, "Materialize.blob.AllowDiskBacked", "true")
         .expect("set AllowDiskBacked");
 }
 
@@ -172,11 +172,7 @@ async fn unlock_writes_file_lock_wipes_it() {
     assert!(target.exists(), "target file should exist after unlock");
     let actual = std::fs::read(&target).expect("read materialized");
     assert_eq!(actual, payload, "materialized bytes must match attachment");
-    assert_eq!(
-        file_mode(&target),
-        0o640,
-        "mode must match Materialize.Mode"
-    );
+    assert_eq!(file_mode(&target), 0o640, "mode must match the Mode field");
 
     // Status must show the entry as live.
     let resp = d.handle(Request::MaterializeStatus).await;
@@ -292,14 +288,13 @@ async fn one_bad_entry_does_not_block_others() {
         // Bad entry: target with `..` segment — must be rejected by validation.
         let bad_id = v.add_entry("bad").expect("add bad");
         v.attach_binary(&bad_id, "blob", b"never written").unwrap();
-        v.set_field(&bad_id, "Materialize.Source", "blob").unwrap();
         v.set_field(
             &bad_id,
-            "Materialize.Target",
+            "Materialize.blob.Target",
             &format!("{}/../escape", good.display()),
         )
         .unwrap();
-        v.set_field(&bad_id, "Materialize.AllowDiskBacked", "true")
+        v.set_field(&bad_id, "Materialize.blob.AllowDiskBacked", "true")
             .unwrap();
         v.save().expect("save");
     }
@@ -483,4 +478,90 @@ async fn relock_after_lock_is_idempotent() {
     assert!(matches!(resp, Response::Ok(_)));
     let resp = d.handle(Request::Lock { vault: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
+}
+
+/// The whole point of keying on the attachment: one entry, several files.
+///
+/// An SSH key and its `.pub`, a certificate and the key that matches it — these
+/// belong on one entry, and each needs its own destination. The entry-level
+/// form could only ever name one of them.
+#[cfg(unix)]
+#[test]
+fn one_entry_materializes_every_attachment_that_asks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("multi.kdbx");
+    let key_target = dir.path().join("out/id_ed25519");
+    let pub_target = dir.path().join("out/id_ed25519.pub");
+
+    {
+        let mut v = Vault::create(&vault_path, PASSWORD).expect("create");
+        let id = v.add_entry("Work/server").expect("add entry");
+        v.attach_binary(&id, "id_ed25519", b"PRIVATE")
+            .expect("attach");
+        v.attach_binary(&id, "id_ed25519.pub", b"PUBLIC")
+            .expect("attach");
+
+        for (name, target, mode) in [
+            ("id_ed25519", &key_target, "0600"),
+            ("id_ed25519.pub", &pub_target, "0644"),
+        ] {
+            v.set_field(
+                &id,
+                &format!("Materialize.{name}.Target"),
+                target.to_str().unwrap(),
+            )
+            .expect("set target");
+            v.set_field(&id, &format!("Materialize.{name}.Mode"), mode)
+                .expect("set mode");
+            v.set_field(&id, &format!("Materialize.{name}.AllowDiskBacked"), "true")
+                .expect("set allow");
+        }
+        v.save().expect("save");
+    }
+
+    let v = Vault::open(&vault_path, PASSWORD).expect("open");
+    let (plans, errors) = materialize::build_plans(&v);
+    assert!(errors.is_empty(), "no plan errors: {errors:?}");
+    assert_eq!(plans.len(), 2, "one plan per attachment that asked");
+
+    let store = materialize::MaterializedStore::default();
+    for p in &plans {
+        materialize::materialize_one(&v, &vault_path, p, store.clone()).expect("write");
+    }
+
+    assert_eq!(std::fs::read(&key_target).expect("private"), b"PRIVATE");
+    assert_eq!(std::fs::read(&pub_target).expect("public"), b"PUBLIC");
+
+    // Each attachment carries its own mode, which is the other half of the
+    // point: a private key and its public half do not want the same one.
+    use std::os::unix::fs::PermissionsExt;
+    let m = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(m(&key_target), 0o600);
+    assert_eq!(m(&pub_target), 0o644);
+}
+
+/// The removed entry-level form must be reported, not ignored: an entry that
+/// asked for a file and silently got none is the worst outcome available.
+#[test]
+fn the_removed_entry_level_form_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_path = dir.path().join("legacy.kdbx");
+    {
+        let mut v = Vault::create(&vault_path, PASSWORD).expect("create");
+        let id = v.add_entry("Old/style").expect("add entry");
+        v.attach_binary(&id, "blob", b"x").expect("attach");
+        v.set_field(&id, "Materialize.Source", "blob").expect("set");
+        v.set_field(&id, "Materialize.Target", "/tmp/whatever")
+            .expect("set");
+        v.save().expect("save");
+    }
+    let v = Vault::open(&vault_path, PASSWORD).expect("open");
+    let (plans, errors) = materialize::build_plans(&v);
+    assert!(plans.is_empty(), "nothing should be written");
+    assert_eq!(errors.len(), 1, "and the entry must be named: {errors:?}");
+    let msg = errors[0].1.to_string();
+    assert!(
+        msg.contains("<attachment>.Target"),
+        "the error should say what to rename it to: {msg}"
+    );
 }

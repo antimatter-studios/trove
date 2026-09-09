@@ -2937,30 +2937,32 @@ fn cmd_add_file(
             vault
                 .attach_binary(&id, &attachment_name, &bytes)
                 .context("attaching file bytes")?;
-            vault
-                .set_field(&id, "Materialize.Source", &attachment_name)
-                .context("setting Materialize.Source")?;
+            // Keyed by attachment name, so one entry can materialize several
+            // files — an SSH key and its `.pub`, a certificate and its key.
+            // There is no separate `Source` field: the name in the key IS the
+            // attachment this describes.
             let target_str = target
                 .to_str()
                 .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
+            let field = |setting: &str| format!("Materialize.{attachment_name}.{setting}");
             vault
-                .set_field(&id, "Materialize.Target", target_str)
-                .context("setting Materialize.Target")?;
+                .set_field(&id, &field("Target"), target_str)
+                .context("setting the materialize target")?;
             vault
-                .set_field(&id, "Materialize.Mode", mode)
-                .context("setting Materialize.Mode")?;
+                .set_field(&id, &field("Mode"), mode)
+                .context("setting the materialize mode")?;
             if let Some(ttl) = ttl {
                 vault
-                    .set_field(&id, "Materialize.TTL", &ttl.to_string())
-                    .context("setting Materialize.TTL")?;
+                    .set_field(&id, &field("TTL"), &ttl.to_string())
+                    .context("setting the materialize TTL")?;
             }
             vault
                 .set_field(
                     &id,
-                    "Materialize.AllowDiskBacked",
+                    &field("AllowDiskBacked"),
                     if allow_disk_backed { "true" } else { "false" },
                 )
-                .context("setting Materialize.AllowDiskBacked")?;
+                .context("setting the materialize disk-backed flag")?;
 
             vault.save().context("saving vault")?;
             println!(

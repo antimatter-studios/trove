@@ -127,11 +127,9 @@ fn create_vault_with_materialize(vault_path: &Path, target: &Path) {
     let id = v.add_entry("idle-test-entry").expect("add entry");
     v.attach_binary(&id, "blob", b"idle-test-payload\n")
         .expect("attach");
-    v.set_field(&id, "Materialize.Source", "blob")
-        .expect("set Source");
-    v.set_field(&id, "Materialize.Target", target.to_str().unwrap())
+    v.set_field(&id, "Materialize.blob.Target", target.to_str().unwrap())
         .expect("set Target");
-    v.set_field(&id, "Materialize.AllowDiskBacked", "true")
+    v.set_field(&id, "Materialize.blob.AllowDiskBacked", "true")
         .expect("set AllowDiskBacked");
     v.save().expect("save");
 }

@@ -73,11 +73,23 @@ pub const DEFAULT_MODE: u32 = 0o600;
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
     #[error(
-        "entry has '{}' but no '{}' (or vice versa); both are required",
-        FIELD_SOURCE,
-        FIELD_TARGET
+        "entry has '{}.' fields but none of them names a file to write; \
+         each attachment needs '{}<attachment>.Target'",
+        MATERIALIZE_FIELD_PREFIX,
+        MATERIALIZE_FIELD_PREFIX
     )]
     PartialOptIn,
+
+    #[error(
+        "entry uses the removed entry-level materialize fields ('{}', '{}'). \
+         Materialization belongs to an attachment, not to an entry, so an entry \
+         with several attachments can write several files: rename them to \
+         '{}<attachment>.Target' (and .Mode / .TTL / .AllowDiskBacked)",
+        FIELD_SOURCE,
+        FIELD_TARGET,
+        MATERIALIZE_FIELD_PREFIX
+    )]
+    EntryLevelFields,
 
     #[error("attachment '{0}' not found on entry")]
     AttachmentMissing(String),
@@ -145,75 +157,6 @@ pub type MaterializedStore = Arc<RwLock<Vec<MaterializedFile>>>;
 
 /// Build a [`MaterializationPlan`] for one entry, given its summary. Returns
 /// `Ok(None)` if the entry doesn't opt in (no `Materialize.*` fields at all);
-/// returns `Err` if it opts in but the configuration is invalid.
-pub fn plan_for_entry(
-    vault: &Vault,
-    entry: &EntrySummary,
-) -> Result<Option<MaterializationPlan>, PlanError> {
-    // Cheap pre-filter: any field at all under our prefix?
-    let opted_fields = vault.fields_with_prefix(&entry.id, MATERIALIZE_FIELD_PREFIX)?;
-    if opted_fields.is_empty() {
-        return Ok(None);
-    }
-
-    let source = vault.get_field(&entry.id, FIELD_SOURCE)?;
-    let target = vault.get_field(&entry.id, FIELD_TARGET)?;
-    let (source, target) = match (source, target) {
-        (Some(s), Some(t)) => (s, t),
-        _ => return Err(PlanError::PartialOptIn),
-    };
-
-    // Source attachment must actually exist on the entry — fail early so we
-    // don't validate paths for a misspelled source name.
-    if !entry.attachment_names.iter().any(|n| n == &source) {
-        return Err(PlanError::AttachmentMissing(source));
-    }
-
-    let mode = match vault.get_field(&entry.id, FIELD_MODE)? {
-        Some(s) => parse_mode(&s)?,
-        None => DEFAULT_MODE,
-    };
-    let ttl = match vault.get_field(&entry.id, FIELD_TTL)? {
-        Some(s) => Some(parse_ttl(&s)?),
-        None => None,
-    };
-    let allow_disk_backed = match vault.get_field(&entry.id, FIELD_ALLOW_DISK)? {
-        Some(s) => parse_bool(&s)?,
-        None => false,
-    };
-
-    let resolved = paths::resolve_and_validate_target(&target)?;
-
-    if !allow_disk_backed {
-        // Best-effort tmpfs check. macOS will always say "false" — and the
-        // soft-allowlist `is_ephemeral_macos_path` is the most we can offer.
-        if cfg!(target_os = "linux") {
-            if !paths::is_tmpfs_backed(&resolved) {
-                return Err(PlanError::NotTmpfs(resolved));
-            }
-        } else if cfg!(target_os = "macos") {
-            // On macOS: accept paths the OS conventionally treats as
-            // ephemeral. This is NOT a real tmpfs guarantee — see the
-            // module-level comment in paths.rs. Without this, `AllowDiskBacked
-            // =false` would refuse to materialize anywhere on macOS, which
-            // makes the feature unusable.
-            if !paths::is_ephemeral_macos_path(&resolved) {
-                return Err(PlanError::NotTmpfs(resolved));
-            }
-        }
-    }
-
-    Ok(Some(MaterializationPlan {
-        entry_id: entry.id.clone(),
-        entry_title: entry.title.clone(),
-        source_attachment: source,
-        resolved_target: resolved,
-        mode,
-        ttl,
-        allow_disk_backed,
-    }))
-}
-
 /// Walk every entry and produce one plan per opted-in entry. Errors are
 /// collected per-entry and returned alongside the successful plans, so the
 /// caller can log per-entry failures without aborting unlock.
@@ -221,13 +164,159 @@ pub fn build_plans(vault: &Vault) -> (Vec<MaterializationPlan>, Vec<(String, Pla
     let mut plans = Vec::new();
     let mut errors = Vec::new();
     for entry in vault.list_entries() {
-        match plan_for_entry(vault, &entry) {
-            Ok(Some(p)) => plans.push(p),
-            Ok(None) => {}
+        match plans_for_entry(vault, &entry) {
+            Ok(p) => plans.extend(p),
             Err(e) => errors.push((entry.title, e)),
         }
     }
     (plans, errors)
+}
+
+/// The settings that can follow an attachment name, longest first so that a
+/// name ending in one of them cannot be mistaken for the setting itself.
+const NAMESPACED_SETTINGS: [&str; 4] = ["AllowDiskBacked", "Target", "Mode", "TTL"];
+
+/// Split `Materialize.<attachment>.<Setting>` into its two halves.
+///
+/// `None` for the un-namespaced `Materialize.Target` form, which names its
+/// attachment separately in `Materialize.Source`.
+///
+/// Attachment names contain dots — `app_distribution.cer.pem` — so this cannot
+/// split on the separator. It works from the end instead: the setting is one of
+/// a known few, and everything between the prefix and it is the name.
+fn split_namespaced(key: &str) -> Option<(&str, &str)> {
+    let rest = key.strip_prefix(MATERIALIZE_FIELD_PREFIX)?;
+    for setting in NAMESPACED_SETTINGS {
+        if rest == setting {
+            return None; // the legacy, entry-level form
+        }
+        if let Some(name) = rest.strip_suffix(setting).and_then(|r| r.strip_suffix('.')) {
+            if !name.is_empty() {
+                return Some((name, setting));
+            }
+        }
+    }
+    None
+}
+
+/// Every file this entry asks to have written, not just one.
+///
+/// An entry holds many attachments — an SSH key and its `.pub`, a certificate
+/// and the key that matches it — so materialization belongs to the attachment
+/// rather than to the entry. `Materialize.<attachment>.Target` says so directly;
+/// the older `Materialize.Target` plus `Materialize.Source` names one
+/// attachment out of the several an entry may have, and is still read so
+/// existing vaults keep working.
+///
+/// The two forms may appear together: the older one describes its named
+/// attachment, and namespaced keys describe theirs.
+pub fn plans_for_entry(
+    vault: &Vault,
+    entry: &EntrySummary,
+) -> Result<Vec<MaterializationPlan>, PlanError> {
+    let opted = vault.fields_with_prefix(&entry.id, MATERIALIZE_FIELD_PREFIX)?;
+    if opted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Which attachments have a namespaced target, in the order the fields came.
+    let mut named: Vec<String> = Vec::new();
+    for key in &opted {
+        if let Some((attachment, setting)) = split_namespaced(key) {
+            if setting == "Target" && !named.iter().any(|n| n == attachment) {
+                named.push(attachment.to_string());
+            }
+        }
+    }
+
+    let mut plans = Vec::new();
+
+    // The entry-level form is gone. Say so rather than ignoring it: the field
+    // was documented, and a silent no-op on an entry that asked for a file
+    // would be the worst of the available outcomes.
+    for legacy in [
+        FIELD_SOURCE,
+        FIELD_TARGET,
+        FIELD_MODE,
+        FIELD_TTL,
+        FIELD_ALLOW_DISK,
+    ] {
+        if vault.get_field(&entry.id, legacy)?.is_some() {
+            return Err(PlanError::EntryLevelFields);
+        }
+    }
+    if named.is_empty() {
+        // Opted in with some `Materialize.` field, but nothing that names a
+        // file to write.
+        return Err(PlanError::PartialOptIn);
+    }
+
+    for attachment in named {
+        let key = format!("{MATERIALIZE_FIELD_PREFIX}{attachment}.Target");
+        let Some(target) = vault.get_field(&entry.id, &key)? else {
+            continue;
+        };
+        plans.push(build_plan(vault, entry, &attachment, &target)?);
+    }
+
+    Ok(plans)
+}
+
+/// Read one attachment's settings and validate its target.
+fn build_plan(
+    vault: &Vault,
+    entry: &EntrySummary,
+    source: &str,
+    target: &str,
+) -> Result<MaterializationPlan, PlanError> {
+    if !entry.attachment_names.iter().any(|n| n == source) {
+        return Err(PlanError::AttachmentMissing(source.to_string()));
+    }
+
+    let field = |setting: &str| format!("{MATERIALIZE_FIELD_PREFIX}{source}.{setting}");
+
+    let mode = match vault.get_field(&entry.id, &field("Mode"))? {
+        Some(s) => parse_mode(&s)?,
+        None => DEFAULT_MODE,
+    };
+    let ttl = match vault.get_field(&entry.id, &field("TTL"))? {
+        Some(s) => Some(parse_ttl(&s)?),
+        None => None,
+    };
+    let allow_disk_backed = match vault.get_field(&entry.id, &field("AllowDiskBacked"))? {
+        Some(s) => parse_bool(&s)?,
+        None => false,
+    };
+
+    let resolved = paths::resolve_and_validate_target(target)?;
+    check_ephemeral(&resolved, allow_disk_backed)?;
+
+    Ok(MaterializationPlan {
+        entry_id: entry.id.clone(),
+        entry_title: entry.title.clone(),
+        source_attachment: source.to_string(),
+        resolved_target: resolved,
+        mode,
+        ttl,
+        allow_disk_backed,
+    })
+}
+
+/// A target that is not memory-backed needs saying so explicitly.
+fn check_ephemeral(resolved: &std::path::Path, allow_disk_backed: bool) -> Result<(), PlanError> {
+    if allow_disk_backed {
+        return Ok(());
+    }
+    // Best-effort. macOS has no real tmpfs, so the allowlist in paths.rs is the
+    // most that can be offered there.
+    if cfg!(target_os = "linux") {
+        if !paths::is_tmpfs_backed(resolved) {
+            return Err(PlanError::NotTmpfs(resolved.to_path_buf()));
+        }
+    } else if cfg!(target_os = "macos") && !paths::is_ephemeral_macos_path(resolved) {
+        return Err(PlanError::NotTmpfs(resolved.to_path_buf()));
+    }
+    Ok(())
 }
 
 /// Materialize a single plan: read the attachment bytes from `vault`, write

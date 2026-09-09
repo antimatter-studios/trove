@@ -151,32 +151,34 @@ async fn add_file_writes_attachment_and_materialize_fields_then_round_trips() {
         "stored attachment bytes must match the blob"
     );
 
-    // The Materialize.* plan fields are written exactly as the offline CLI does.
+    // The Materialize.* plan fields are written exactly as the offline CLI
+    // does: keyed by attachment name, with no separate Source field — the name
+    // in the key is the source.
     assert_eq!(
         reopened
             .get_field(&id, "Materialize.Source")
-            .expect("read Materialize.Source"),
-        Some(NAME.to_string()),
-        "Materialize.Source must be the attachment name"
+            .expect("read the removed entry-level field"),
+        None,
+        "the entry-level Source field must not be written any more"
     );
     assert_eq!(
         reopened
-            .get_field(&id, "Materialize.Target")
-            .expect("read Materialize.Target"),
+            .get_field(&id, &format!("Materialize.{NAME}.Target"))
+            .expect("read the target"),
         Some(TARGET.to_string()),
-        "Materialize.Target must be the requested target path"
+        "the target must be keyed by the attachment it describes"
     );
     assert_eq!(
         reopened
-            .get_field(&id, "Materialize.Mode")
-            .expect("read Materialize.Mode"),
+            .get_field(&id, &format!("Materialize.{NAME}.Mode"))
+            .expect("read the Mode field"),
         Some(MODE.to_string()),
-        "Materialize.Mode must be the requested mode"
+        "the Mode field must be the requested mode"
     );
     assert_eq!(
         reopened
-            .get_field(&id, "Materialize.AllowDiskBacked")
-            .expect("read Materialize.AllowDiskBacked"),
+            .get_field(&id, &format!("Materialize.{NAME}.AllowDiskBacked"))
+            .expect("read the AllowDiskBacked field"),
         Some("false".to_string()),
         "Materialize.AllowDiskBacked must reflect allow_disk_backed=false"
     );
