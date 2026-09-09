@@ -202,6 +202,43 @@ pub enum Decision {
     Skip,
 }
 
+/// Point existing settings at a renamed key attachment, preserving everything
+/// else they say.
+///
+/// The settings name their key file, so renaming the attachment without this
+/// leaves KeePassXC and trove both looking for a file that is gone. Re-emitted
+/// rather than string-replaced so the result is a document this module wrote:
+/// the encoding stays whatever the original declared, since KeePassXC writes
+/// UTF-16 and a vault that round-trips between the two should not flip about.
+///
+/// `None` when the bytes are not settings we understand, or say not to load —
+/// there is then no key name in them to update.
+pub fn rewrite_key_attachment(bytes: &[u8], new_name: &str) -> Option<Vec<u8>> {
+    let ForwardPolicy {
+        lifetime_secs,
+        confirm,
+        remove_at_close,
+    } = match parse(bytes, "") {
+        Decision::Load { forward, .. } => forward,
+        Decision::Skip => return None,
+    };
+    let encoding = if decode(bytes).is_some() && bytes.starts_with(&[0xFF, 0xFE]) {
+        Encoding::Utf16Le
+    } else {
+        Encoding::Utf8
+    };
+    Some(settings_xml_policy(
+        new_name,
+        AgentPolicy {
+            allow: true,
+            lifetime_secs,
+            confirm,
+            remove_at_close,
+        },
+        encoding,
+    ))
+}
+
 /// Decode the attachment to text. Public because anything reading these
 /// settings needs the same UTF-16 handling — a second reader that forgets it
 /// is the exact bug this module was fixed for.

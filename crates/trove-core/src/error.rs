@@ -26,6 +26,12 @@ pub enum Error {
     )]
     StaleWrite(PathBuf),
 
+    #[error("entry has no attachment named {0:?}")]
+    AttachmentNotFound(String),
+
+    #[error("entry already has an attachment named {0:?}")]
+    AttachmentExists(String),
+
     #[error("invalid entry path: {0}")]
     InvalidPath(String),
 

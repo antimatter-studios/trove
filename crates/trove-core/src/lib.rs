@@ -151,6 +151,17 @@ pub struct Vault {
 #[cfg(feature = "yubikey")]
 pub use keepass::ChallengeResponseKey;
 
+/// What a [`Vault::rename_attachment`] moved, so a caller can finish the job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenamedAttachment {
+    /// The settings that followed the attachment, by their new names.
+    pub moved_fields: Vec<String>,
+    /// The entry has a `KeeAgent.settings` attachment, which names its key
+    /// inside XML this crate does not parse. A caller that understands SSH
+    /// should rewrite it; one that does not can ignore this.
+    pub has_keeagent_settings: bool,
+}
+
 pub(crate) struct VaultInner {
     pub(crate) path: PathBuf,
     pub(crate) password: String,
@@ -650,6 +661,76 @@ impl Vault {
         Ok(entry
             .attachment_by_name(name)
             .map(|att| att.data.get().clone()))
+    }
+
+    /// Rename an attachment, taking everything that names it along.
+    ///
+    /// An attachment's name is not just a label: `Materialize.<name>.Target`
+    /// and friends are keyed by it, so renaming the file alone would leave
+    /// settings describing something that no longer exists. Those move too.
+    ///
+    /// `KeeAgent.settings` also names its key attachment, but it does so inside
+    /// an XML document this layer does not parse — [`crate::Vault`] knows
+    /// nothing about SSH. Callers that deal in agent keys rewrite it after
+    /// this, which is why the returned value says whether one is present.
+    ///
+    /// Errors when `old_name` is not attached, or when `new_name` already is —
+    /// silently replacing a different file would be worse than refusing.
+    pub fn rename_attachment(
+        &mut self,
+        id: &EntryId,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<RenamedAttachment> {
+        if old_name == new_name {
+            return Ok(RenamedAttachment {
+                moved_fields: Vec::new(),
+                has_keeagent_settings: false,
+            });
+        }
+        let bytes = self
+            .read_binary(id, old_name)?
+            .ok_or_else(|| Error::AttachmentNotFound(old_name.to_string()))?;
+        if self.read_binary(id, new_name)?.is_some() {
+            return Err(Error::AttachmentExists(new_name.to_string()));
+        }
+
+        // Settings that name the old attachment, so they can follow it.
+        let prefix = format!("Materialize.{old_name}.");
+        let mut moved_fields = Vec::new();
+        for key in self.fields_with_prefix(id, &prefix)? {
+            let Some(setting) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            if let Some(value) = self.get_field(id, &key)? {
+                moved_fields.push((
+                    key.clone(),
+                    format!("Materialize.{new_name}.{setting}"),
+                    value,
+                ));
+            }
+        }
+
+        // Remove BEFORE adding, and never let both names exist at once.
+        //
+        // Attachments live in a shared pool, and identical bytes dedupe to one
+        // pooled entry. The crate's removal then retains that pool entry's
+        // back-references by entry id alone, discarding the name — so removing
+        // one of an entry's two names for the same bytes drops the other's
+        // reference too, and the pooled attachment with it. Adding second means
+        // there is only ever one name in flight.
+        self.remove_binary(id, old_name)?;
+        self.attach_binary(id, new_name, &bytes)?;
+        for (old_key, new_key, value) in &moved_fields {
+            self.set_field(id, new_key, value)?;
+            self.remove_field(id, old_key)?;
+        }
+
+        let has_keeagent_settings = self.read_binary(id, "KeeAgent.settings")?.is_some();
+        Ok(RenamedAttachment {
+            moved_fields: moved_fields.into_iter().map(|(_, k, _)| k).collect(),
+            has_keeagent_settings,
+        })
     }
 
     /// Remove an attachment from an entry. No-op if the attachment is missing.

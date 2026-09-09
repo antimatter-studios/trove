@@ -194,3 +194,40 @@ fn trove_loads_a_key_whose_settings_keepassxc_stored_as_utf16() {
         "the forward policy must be parsed from the UTF-16 settings"
     );
 }
+
+/// Renaming a key attachment has to update the settings that name it, or both
+/// trove and KeePassXC go looking for a file that is gone.
+#[test]
+fn rewriting_the_key_name_keeps_the_rest_of_the_policy() {
+    use troved::ssh_agent::keeagent::{self, AgentPolicy, Decision, Encoding};
+
+    let original = keeagent::settings_xml_policy(
+        "id_rsa",
+        AgentPolicy {
+            allow: true,
+            lifetime_secs: Some(600),
+            confirm: true,
+            remove_at_close: false,
+        },
+        Encoding::Utf16Le,
+    );
+
+    let rewritten = keeagent::rewrite_key_attachment(&original, "id_ed25519")
+        .expect("settings that load a key can be repointed");
+
+    match keeagent::parse(&rewritten, "entry") {
+        Decision::Load {
+            attachment,
+            forward,
+        } => {
+            assert_eq!(attachment, "id_ed25519", "points at the new name");
+            assert_eq!(forward.lifetime_secs, Some(600), "lifetime survives");
+            assert!(forward.confirm, "confirm survives");
+            assert!(!forward.remove_at_close, "remove-at-close survives");
+        }
+        Decision::Skip => panic!("rewritten settings should still load the key"),
+    }
+
+    // KeePassXC writes UTF-16; a round trip through trove should not flip it.
+    assert_eq!(&rewritten[..2], &[0xFF, 0xFE], "still UTF-16 with a BOM");
+}

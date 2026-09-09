@@ -243,6 +243,38 @@ matches it:
 There is no `Source` field: the attachment name in the key is the source. An
 attachment with no `Target` is simply not materialized.
 
+## trove rename-attachment
+
+```
+trove rename-attachment <ENTRY_PATH> <OLD_NAME> <NEW_NAME> --vault <PATH>
+```
+
+Renames an attachment and everything that names it:
+
+- the attachment itself
+- `Materialize.<name>.*` — the settings are keyed by the name, so they follow it
+- `KeeAgent.settings` — rewritten to name the new file, keeping the rest of the
+  policy (lifetime, confirm, remove-at-close) and its original encoding
+
+Offline only (`--vault`): it rewrites the file, while the daemon serves a vault
+that is already open.
+
+```
+$ trove rename-attachment "Work/server" id_rsa id_ed25519 --vault v.kdbx --env
+renamed attachment id_rsa → id_ed25519
+  moved Materialize.id_ed25519.AllowDiskBacked
+  moved Materialize.id_ed25519.Mode
+  moved Materialize.id_ed25519.Target
+  updated KeeAgent.settings to name the new file
+```
+
+Refused when the entry has no such attachment, or already has one under the new
+name — silently replacing a different file would be worse than stopping.
+
+The *values* are left alone: a target still points where it did, since where a
+file lands is a separate question from what the attachment is called.
+
+
 ## trove get
 
 ```
@@ -789,6 +821,8 @@ The materialize feature is wholly expressed as kdbx custom string fields, so the
 
 `<attachment>` is the attachment's name, dots and all:
 `Materialize.id_ed25519.pub.Target` describes the attachment `id_ed25519.pub`.
+
+Renaming an attachment moves these with it — see `trove rename-attachment`.
 
 The entry-level `Materialize.Source` / `Materialize.Target` form was removed:
 materialization describes a file, and an entry holds several. An entry still
