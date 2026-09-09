@@ -144,3 +144,45 @@ export const biometricEnroll = (id, password) => invoke('biometric_enroll', { id
 
 // biometric_forget(id) -> bool (false when there was nothing stored)
 export const biometricForget = (id) => invoke('biometric_forget', { id });
+
+/* ---- attachments ---- */
+
+// list_attachments(id, entryId) -> [{ name, size, isText, target, mode, ttl, allowDiskBacked }]
+export const listAttachments = (id, entryId) => invoke('list_attachments', { id, entryId });
+
+// read_attachment(id, entryId, name) -> string (rejects for binary content)
+export const readAttachment = (id, entryId, name) => invoke('read_attachment', { id, entryId, name });
+
+// read_attachment_image(id, entryId, name) -> { mime, base64 }. Images only:
+// the backend decides from the magic number, and refuses anything it cannot
+// draw rather than handing the webview bytes to guess at.
+export const readAttachmentImage = (id, entryId, name) =>
+  invoke('read_attachment_image', { id, entryId, name });
+
+// save_attachment(id, entryId, name, content) -> the refreshed attachment list
+export const saveAttachment = (id, entryId, name, content) =>
+  invoke('save_attachment', { id, entryId, name, content });
+
+// attach_file(id, entryId, path, name?) -> refreshed list. Bytes are read from
+// disk verbatim — unlike saveAttachment, which carries text.
+export const attachFile = (id, entryId, path, name) =>
+  invoke('attach_file', { id, entryId, path, name: name || null });
+
+export const deleteAttachment = (id, entryId, name) =>
+  invoke('delete_attachment', { id, entryId, name });
+
+export const renameAttachment = (id, entryId, oldName, newName) =>
+  invoke('rename_attachment', { id, entryId, oldName, newName });
+
+// An empty target clears every setting: "write this nowhere" is the absence of
+// a target, not a blank one.
+export const setAttachmentMaterialize = (id, entryId, name, m) =>
+  invoke('set_attachment_materialize', {
+    id, entryId, name,
+    settings: {
+      target: m.target || '',
+      mode: m.mode || '',
+      ttl: m.ttl || '',
+      allowDiskBacked: !!m.allowDiskBacked,
+    },
+  });

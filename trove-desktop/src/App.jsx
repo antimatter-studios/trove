@@ -654,6 +654,7 @@ function App() {
               onReset={() => setListW(DEFAULT_LIST_W)}
             />
             <Detail
+              vaultId={vault.id}
               appActions={appActions}
               entry={selected} notes={detail.notes} fields={detail.fields} password={detail.password}
               onCopy={copy} copiedKey={copiedKey}

@@ -18,6 +18,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::Instant;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 use crate::biometric;
 use serde::{Deserialize, Serialize};
@@ -53,6 +57,13 @@ pub struct RegisteredVault {
     /// nothing was forwarded or nothing expires. The agent keeps its own clock
     /// and never reports it, so this is trove's record of what it asked for.
     pub keys_expire_at: Option<u64>,
+    /// How long this vault's last KDF-bearing operation took, in milliseconds:
+    /// seeded by the unlock, replaced by each save. Writing a KDBX is not
+    /// instant — a fresh master seed per save means a fresh Argon2 derivation
+    /// — and the cost is a property of THIS vault's KDF settings, so a
+    /// measurement beats any constant we could pick. The UI sizes its progress
+    /// bar with it.
+    pub write_ms: Option<u64>,
 }
 
 impl RegisteredVault {
@@ -64,6 +75,7 @@ impl RegisteredVault {
             exported_keys: Vec::new(),
             materialized: MaterializedStore::default(),
             keys_expire_at: None,
+            write_ms: None,
         }
     }
 }
@@ -626,7 +638,8 @@ where
     .map_err(|e| format!("vault task panicked: {e}"))?
 }
 
-/// [`on_vault`] for the mutating half.
+/// [`on_vault`] for the mutating half. In-memory only — see
+/// [`on_vault_write`] for the mutations that have to reach the file.
 async fn on_vault_mut<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -638,6 +651,92 @@ where
     })
     .await
     .map_err(|e| format!("vault task panicked: {e}"))?
+}
+
+/// Progress for a vault write, emitted to the whole window.
+///
+/// A KDBX save is NOT instant and cannot be made so: the format rotates the
+/// master seed on every write, so every write re-derives the key with Argon2
+/// — at KeePassXC's own defaults, seconds. (That rotation is the point: it
+/// stops two versions of a vault being encrypted under the same key.) Without
+/// something on screen the window looks hung and people click again.
+const VAULT_WRITE_EVENT: &str = "vault-write";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteStep {
+    /// `start`, `done` or `failed`.
+    phase: &'static str,
+    /// What the last write on this vault actually cost, in milliseconds, so
+    /// the bar is drawn against a measurement rather than a guess. `0` before
+    /// anything has been measured — draw an indeterminate bar for that.
+    estimate_ms: u64,
+    detail: String,
+}
+
+fn write_step(app: &AppHandle, phase: &'static str, estimate_ms: u64, detail: impl Into<String>) {
+    // Best-effort: a UI that isn't listening must never fail a save.
+    let _ = app.emit(
+        VAULT_WRITE_EVENT,
+        WriteStep {
+            phase,
+            estimate_ms,
+            detail: detail.into(),
+        },
+    );
+}
+
+/// What the next write on this vault is likely to cost, from the last one.
+fn write_estimate_ms(app: &AppHandle, id: &str) -> u64 {
+    let state = app.state::<VaultState>();
+    state
+        .lock()
+        .ok()
+        .and_then(|g| g.vaults.get(id).and_then(|rv| rv.write_ms))
+        .unwrap_or(0)
+}
+
+/// Mutate an open vault AND persist it, reporting progress while it happens.
+///
+/// Every mutation that must survive a lock or a quit goes through here.
+/// `on_vault_mut` alone changes memory only — a vault edited that way looks
+/// saved and isn't.
+async fn on_vault_write<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Vault) -> Result<T, String> + Send + 'static,
+{
+    let estimate = write_estimate_ms(&app, &id);
+    write_step(&app, "start", estimate, "");
+
+    let task_app = app.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let state = task_app.state::<VaultState>();
+        let mut guard = state.lock().map_err(poisoned)?;
+        let rv = guard
+            .vaults
+            .get_mut(&id)
+            .ok_or_else(|| "vault is not registered".to_string())?;
+        let vault = rv
+            .vault
+            .as_mut()
+            .ok_or_else(|| "vault is locked".to_string())?;
+        let out = f(vault)?;
+        // Measure the save alone. The mutation before it is memory work and
+        // costs nothing worth reporting; the KDF is the whole of the wait.
+        let started = Instant::now();
+        vault.save().map_err(|e| e.to_string())?;
+        rv.write_ms = Some(started.elapsed().as_millis() as u64);
+        Ok::<T, String>(out)
+    })
+    .await
+    .map_err(|e| format!("vault task panicked: {e}"))?;
+
+    match &out {
+        Ok(_) => write_step(&app, "done", 0, ""),
+        Err(e) => write_step(&app, "failed", 0, e.clone()),
+    }
+    out
 }
 
 /// Run any state-touching work off the main thread, for commands that need the
@@ -937,7 +1036,9 @@ fn update_entry_path(vault: &mut Vault, id: &EntryId, path: &str) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
-/// Create or update an entry from `input`, save the vault, return its id.
+/// Create or update an entry from `input`, returning its id. The caller saves
+/// — every command that mutates goes through [`on_vault_write`], which is
+/// where the save, its progress events and its timing live.
 fn apply_save_entry(vault: &mut Vault, input: &EntryInput) -> Result<EntryId, String> {
     let entry_id = match &input.entry_id {
         None => vault.add_entry(&input.path).map_err(|e| e.to_string())?,
@@ -953,7 +1054,6 @@ fn apply_save_entry(vault: &mut Vault, input: &EntryInput) -> Result<EntryId, St
     set_or_clear(vault, &entry_id, "URL", &input.url)?;
     set_or_clear(vault, &entry_id, "Notes", &input.notes)?;
     set_or_clear(vault, &entry_id, "_TroveType", &input.entry_type)?;
-    vault.save().map_err(|e| e.to_string())?;
     Ok(entry_id)
 }
 
@@ -971,7 +1071,13 @@ fn entry_detail(vault: &Vault, eid: &EntryId) -> Result<EntryDetailDto, String> 
     for k in vault.custom_field_names(eid).map_err(|e| e.to_string())? {
         // custom_field_names already excludes the five standard fields; drop
         // the reserved _Trove* keys too — they are never user attributes.
-        if k.starts_with("_Trove") {
+        //
+        // `Materialize.*` is excluded for a different reason: it is not an
+        // attribute of the entry, it describes an attachment, and the
+        // Attachments section presents it as such. Listed here as well it is
+        // duplicate noise, and worse, editable in a place where a typo would
+        // silently stop a file being written.
+        if k.starts_with("_Trove") || k.starts_with("Materialize.") {
             continue;
         }
         let v = vault
@@ -987,7 +1093,7 @@ fn entry_detail(vault: &Vault, eid: &EntryId) -> Result<EntryDetailDto, String> 
     })
 }
 
-/// Set/clear `_TroveFav` and save.
+/// Set/clear `_TroveFav`. Saved by the caller.
 fn apply_set_favorite(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), String> {
     if fav {
         vault
@@ -998,13 +1104,17 @@ fn apply_set_favorite(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(),
             .remove_field(eid, "_TroveFav")
             .map_err(|e| e.to_string())?;
     }
-    vault.save().map_err(|e| e.to_string())
+    Ok(())
 }
 
-/// Move an entry to the recycle bin and save.
+/// Move an entry to the recycle bin. Saved by the caller.
 fn apply_delete(vault: &mut Vault, eid: &EntryId) -> Result<(), String> {
-    vault.recycle_entry(eid, false).map_err(|e| e.to_string())?;
-    vault.save().map_err(|e| e.to_string())
+    // `recycle_entry` reports whether it recycled or deleted outright; the
+    // caller here does not branch on that.
+    vault
+        .recycle_entry(eid, false)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 // --- commands: vault lifecycle ---------------------------------------------
@@ -1247,6 +1357,10 @@ pub async fn unlock_vault(
 
     step(&app, "open", "pending", "decrypting");
     let open_path = path.clone();
+    // Timed, because opening and saving pay the same Argon2 bill: the UI has
+    // no other way to know that a save on THIS vault takes two seconds rather
+    // than fifty milliseconds, and a progress bar that guesses is a lie.
+    let started = Instant::now();
     let vault = tauri::async_runtime::spawn_blocking(move || Vault::open(&open_path, &password))
         .await
         .map_err(|e| format!("unlock task panicked: {e}"))?
@@ -1254,6 +1368,7 @@ pub async fn unlock_vault(
             step(&app, "open", "failed", "wrong password");
             e.to_string()
         })?;
+    let open_ms = started.elapsed().as_millis() as u64;
     step(&app, "open", "done", "");
 
     step(&app, "entries", "pending", "");
@@ -1311,6 +1426,7 @@ pub async fn unlock_vault(
         rv.exported_keys = exported;
         rv.keys_expire_at = keys_expire_at;
         rv.materialized = materialized;
+        rv.write_ms = Some(open_ms);
         rv.vault = Some(vault);
     }
     Ok(entries)
@@ -1435,6 +1551,481 @@ pub async fn get_entry_detail(
     on_vault(app, id, move |v| entry_detail(v, &eid)).await
 }
 
+/// One attachment, with where it lands on disk if it asked to.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentDto {
+    pub name: String,
+    pub size: usize,
+    /// Whether the bytes look like text, and can therefore be shown in an
+    /// editor rather than described. Decided by sniffing the content: an
+    /// extension says what someone named the file, not what is in it.
+    pub is_text: bool,
+    /// Sniffed content type — `image/png`, `application/pdf` — or empty when
+    /// the bytes match no magic number we know.
+    pub mime: String,
+    /// That type in words, for a panel that can only describe what it cannot
+    /// show: "PNG image", "PDF document", falling back to "Text"/"Binary file".
+    pub kind: String,
+    /// Whether the UI can render these bytes as a picture rather than describe
+    /// them. Decided by the magic number, never by the file name.
+    pub is_image: bool,
+    /// `Materialize.<name>.Target`, or empty when this attachment does not ask
+    /// to be written anywhere.
+    pub target: String,
+    pub mode: String,
+    pub ttl: String,
+    pub allow_disk_backed: bool,
+}
+
+/// Is this text a person can edit, or bytes we should not pretend to render?
+///
+/// NUL is the giveaway — no text format contains one, every binary does — and
+/// invalid UTF-8 settles the rest. Sniffing beats trusting the extension: an
+/// SSH private key has no suffix at all and is perfectly good text, while
+/// `.settings` here is a UTF-16 XML blob KeePassXC wrote.
+fn looks_like_text(bytes: &[u8]) -> bool {
+    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
+}
+
+/// A recognised content type: what it is, what to call it, and whether it can
+/// be drawn.
+struct Sniffed {
+    mime: &'static str,
+    kind: &'static str,
+    is_image: bool,
+}
+
+const fn image(mime: &'static str, kind: &'static str) -> Option<Sniffed> {
+    Some(Sniffed {
+        mime,
+        kind,
+        is_image: true,
+    })
+}
+
+const fn other(mime: &'static str, kind: &'static str) -> Option<Sniffed> {
+    Some(Sniffed {
+        mime,
+        kind,
+        is_image: false,
+    })
+}
+
+/// Identify an attachment from its leading bytes.
+///
+/// KDBX stores a name and bytes — no content type — and the name is whatever
+/// someone typed, so the magic number is the only honest source. An entry's
+/// SSH key has no extension at all; a `.txt` may be a DER certificate.
+fn sniff(bytes: &[u8]) -> Option<Sniffed> {
+    let starts = |sig: &[u8]| bytes.starts_with(sig);
+    // ISO base-media brand, shared by HEIC/AVIF/MP4: the 4-byte size comes
+    // first, so the tag sits at offset 4 and the brand at 8.
+    let brand = |b: &[u8]| bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b;
+
+    if starts(b"\x89PNG\r\n\x1a\n") {
+        return image("image/png", "PNG image");
+    }
+    if starts(b"\xff\xd8\xff") {
+        return image("image/jpeg", "JPEG image");
+    }
+    if starts(b"GIF87a") || starts(b"GIF89a") {
+        return image("image/gif", "GIF image");
+    }
+    if bytes.len() >= 12 && starts(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return image("image/webp", "WebP image");
+    }
+    if starts(b"BM") {
+        return image("image/bmp", "Bitmap image");
+    }
+    if starts(b"II*\x00") || starts(b"MM\x00*") {
+        return image("image/tiff", "TIFF image");
+    }
+    if starts(b"\x00\x00\x01\x00") {
+        return image("image/x-icon", "Icon");
+    }
+    if brand(b"avif") {
+        return image("image/avif", "AVIF image");
+    }
+    if brand(b"heic") || brand(b"heix") || brand(b"mif1") {
+        return image("image/heic", "HEIC image");
+    }
+    // SVG is text, so it reaches the editor as well; it is flagged as an image
+    // so the panel can offer the picture first. Rendered inside an <img>,
+    // where a webview runs no script it may carry.
+    if svg_looking(bytes) {
+        return image("image/svg+xml", "SVG image");
+    }
+    if starts(b"%PDF-") {
+        return other("application/pdf", "PDF document");
+    }
+    if starts(b"PK\x03\x04") {
+        return other("application/zip", "Zip archive");
+    }
+    if starts(b"\x1f\x8b") {
+        return other("application/gzip", "Gzip archive");
+    }
+    if starts(b"SQLite format 3\x00") {
+        return other("application/vnd.sqlite3", "SQLite database");
+    }
+    if starts(b"\x7fELF") {
+        return other("application/x-executable", "ELF executable");
+    }
+    if starts(b"\xcf\xfa\xed\xfe") || starts(b"\xca\xfe\xba\xbe") {
+        return other("application/x-mach-binary", "Mach-O executable");
+    }
+    // A DER SEQUENCE with a long-form length: every X.509 certificate, PKCS#8
+    // key and PKCS#12 bundle starts this way, and telling them apart needs a
+    // real parse — so name the encoding and stop there rather than guess.
+    if starts(b"\x30\x82") {
+        return other(
+            "application/octet-stream",
+            "DER binary (certificate, key or PKCS#12)",
+        );
+    }
+    None
+}
+
+/// Is this an SVG document? Only the first bytes are examined, past any
+/// leading whitespace, XML declaration or doctype.
+fn svg_looking(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(512)];
+    let Ok(text) = std::str::from_utf8(head) else {
+        // A truncated multi-byte character at the 512-byte cut is not a
+        // reason to give up on a file that is otherwise plain text.
+        return false;
+    };
+    let text = text.trim_start();
+    (text.starts_with("<?xml") || text.starts_with("<!DOCTYPE svg") || text.starts_with("<svg"))
+        && text.contains("<svg")
+}
+
+/// The type of an attachment as the UI should present it: the sniffed answer
+/// when there is one, otherwise text or bytes.
+fn describe(bytes: &[u8], is_text: bool) -> (String, String, bool) {
+    match sniff(bytes) {
+        Some(s) => (s.mime.to_string(), s.kind.to_string(), s.is_image),
+        None if is_text => (String::new(), "Text".to_string(), false),
+        None => (String::new(), "Binary file".to_string(), false),
+    }
+}
+
+fn attachment_field(name: &str, setting: &str) -> String {
+    format!("Materialize.{name}.{setting}")
+}
+
+/// Every attachment on an entry, with its materialize settings.
+#[tauri::command]
+pub async fn list_attachments(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+) -> Result<Vec<AttachmentDto>, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault(app, id, move |v| {
+        let summary = v
+            .get_entry(&eid)
+            .ok_or_else(|| "entry not found".to_string())?;
+        let mut out = Vec::new();
+        for name in &summary.attachment_names {
+            let bytes = v
+                .read_binary(&eid, name)
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default();
+            let field = |setting: &str| {
+                v.get_field(&eid, &attachment_field(name, setting))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            };
+            let is_text = looks_like_text(&bytes);
+            let (mime, kind, is_image) = describe(&bytes, is_text);
+            out.push(AttachmentDto {
+                name: name.clone(),
+                size: bytes.len(),
+                is_text,
+                mime,
+                kind,
+                is_image,
+                target: field("Target"),
+                mode: field("Mode"),
+                ttl: field("TTL"),
+                allow_disk_backed: matches!(
+                    field("AllowDiskBacked")
+                        .trim()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "true" | "yes" | "1" | "on"
+                ),
+            });
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// An attachment's bytes as text.
+///
+/// Refuses rather than returning mojibake: an editor showing replacement
+/// characters would invite someone to save them back over a real key.
+#[tauri::command]
+pub async fn read_attachment(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    name: String,
+) -> Result<String, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault(app, id, move |v| {
+        let bytes = v
+            .read_binary(&eid, &name)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no attachment named {name:?}"))?;
+        if !looks_like_text(&bytes) {
+            return Err(format!(
+                "{name} is binary ({} bytes) — editing it as text would corrupt it",
+                bytes.len()
+            ));
+        }
+        String::from_utf8(bytes).map_err(|_| "attachment is not valid UTF-8".to_string())
+    })
+    .await
+}
+
+/// An image attachment as a base64 payload the webview can put in an `<img>`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentImageDto {
+    pub mime: String,
+    pub base64: String,
+}
+
+/// The cap on what will be handed to the webview as a data URL. A picture in a
+/// password vault is a scan or a screenshot; anything past this is not
+/// something a preview pane should be inflating into a string.
+const MAX_PREVIEW_BYTES: usize = 16 * 1024 * 1024;
+
+/// An attachment's bytes, base64'd, for showing as a picture.
+///
+/// Separate from `list_attachments` on purpose: that call is made every time an
+/// entry is selected, and base64ing every attachment on it to fill a panel
+/// nobody has opened would be wasteful.
+#[tauri::command]
+pub async fn read_attachment_image(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    name: String,
+) -> Result<AttachmentImageDto, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault(app, id, move |v| {
+        let bytes = v
+            .read_binary(&eid, &name)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no attachment named {name:?}"))?;
+        let sniffed = sniff(&bytes).filter(|s| s.is_image).ok_or_else(|| {
+            format!("{name} is not an image trove recognises, so it cannot be shown")
+        })?;
+        if bytes.len() > MAX_PREVIEW_BYTES {
+            return Err(format!(
+                "{name} is {} MB — too large to preview",
+                bytes.len() / (1024 * 1024)
+            ));
+        }
+        Ok(AttachmentImageDto {
+            mime: sniffed.mime.to_string(),
+            base64: BASE64.encode(&bytes),
+        })
+    })
+    .await
+}
+
+/// Replace an attachment's content, or add a new one.
+#[tauri::command]
+pub async fn save_attachment(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    name: String,
+    content: String,
+) -> Result<Vec<AttachmentDto>, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    let app2 = app.clone();
+    let id2 = id.clone();
+    on_vault_write(app, id, move |v| {
+        v.attach_binary(&eid, &name, content.as_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await?;
+    list_attachments(app2, id2, entry_id).await
+}
+
+/// Attach a file picked from disk, keeping its bytes verbatim.
+///
+/// Separate from `save_attachment` because that one carries a `String`: a
+/// re-encoded copy of a `.p12` or a DER certificate is a corrupt copy. This
+/// reads the bytes and stores them unchanged.
+///
+/// The name defaults to the file's own basename, which is almost always what
+/// someone means by "add this file".
+#[tauri::command]
+pub async fn attach_file(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    path: String,
+    name: Option<String>,
+) -> Result<Vec<AttachmentDto>, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    let src = PathBuf::from(&path);
+    let name = match name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+        Some(n) => n,
+        None => src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or_else(|| format!("{path} has no file name"))?,
+    };
+    let bytes = std::fs::read(&src).map_err(|e| format!("reading {path}: {e}"))?;
+
+    let app2 = app.clone();
+    let id2 = id.clone();
+    on_vault_write(app, id, move |v| {
+        v.attach_binary(&eid, &name, &bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await?;
+    list_attachments(app2, id2, entry_id).await
+}
+
+/// Remove an attachment and the settings that describe it — leaving
+/// `Materialize.<name>.*` behind would ask the daemon to write a file that no
+/// longer exists.
+#[tauri::command]
+pub async fn delete_attachment(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    name: String,
+) -> Result<Vec<AttachmentDto>, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    let app2 = app.clone();
+    let id2 = id.clone();
+    on_vault_write(app, id, move |v| {
+        v.remove_binary(&eid, &name).map_err(|e| e.to_string())?;
+        for setting in ["Target", "Mode", "TTL", "AllowDiskBacked"] {
+            let _ = v.remove_field(&eid, &attachment_field(&name, setting));
+        }
+        Ok(())
+    })
+    .await?;
+    list_attachments(app2, id2, entry_id).await
+}
+
+/// Rename an attachment, taking its settings and the agent config with it.
+#[tauri::command]
+pub async fn rename_attachment(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    old_name: String,
+    new_name: String,
+) -> Result<Vec<AttachmentDto>, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    let app2 = app.clone();
+    let id2 = id.clone();
+    on_vault_write(app, id, move |v| {
+        let renamed = v
+            .rename_attachment(&eid, &old_name, &new_name)
+            .map_err(|e| e.to_string())?;
+        // The agent settings name their key inside XML trove-core does not
+        // parse, so finish the job here where the format is understood.
+        if renamed.has_keeagent_settings {
+            if let Ok(Some(bytes)) = v.read_binary(&eid, "KeeAgent.settings") {
+                if let Some(updated) =
+                    troved::ssh_agent::keeagent::rewrite_key_attachment(&bytes, &new_name)
+                {
+                    v.attach_binary(&eid, "KeeAgent.settings", &updated)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    list_attachments(app2, id2, entry_id).await
+}
+
+/// Where one attachment should land on disk, as the settings panel states it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterializeInput {
+    pub target: String,
+    pub mode: String,
+    pub ttl: String,
+    pub allow_disk_backed: bool,
+}
+
+/// Set (or clear) where an attachment materializes.
+///
+/// An empty target removes every setting for it: "write this nowhere" is the
+/// absence of a target, not a target that is blank.
+#[tauri::command]
+pub async fn set_attachment_materialize(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    name: String,
+    settings: MaterializeInput,
+) -> Result<Vec<AttachmentDto>, String> {
+    let MaterializeInput {
+        target,
+        mode,
+        ttl,
+        allow_disk_backed,
+    } = settings;
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    let app2 = app.clone();
+    let id2 = id.clone();
+    on_vault_write(app, id, move |v| {
+        let field = |setting: &str| attachment_field(&name, setting);
+        if target.trim().is_empty() {
+            for setting in ["Target", "Mode", "TTL", "AllowDiskBacked"] {
+                let _ = v.remove_field(&eid, &field(setting));
+            }
+            return Ok(());
+        }
+        v.set_field(&eid, &field("Target"), target.trim())
+            .map_err(|e| e.to_string())?;
+        v.set_field(
+            &eid,
+            &field("Mode"),
+            if mode.trim().is_empty() {
+                "0600"
+            } else {
+                mode.trim()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        if ttl.trim().is_empty() {
+            let _ = v.remove_field(&eid, &field("TTL"));
+        } else {
+            v.set_field(&eid, &field("TTL"), ttl.trim())
+                .map_err(|e| e.to_string())?;
+        }
+        v.set_field(
+            &eid,
+            &field("AllowDiskBacked"),
+            if allow_disk_backed { "true" } else { "false" },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await?;
+    list_attachments(app2, id2, entry_id).await
+}
+
 // --- commands: mutations ----------------------------------------------------
 
 /// Create or update an entry, save the vault, return the fresh list + saved id.
@@ -1444,7 +2035,7 @@ pub async fn save_entry(
     id: String,
     input: EntryInput,
 ) -> Result<SaveResult, String> {
-    on_vault_mut(app, id, move |vault| {
+    on_vault_write(app, id, move |vault| {
         let entry_id = apply_save_entry(vault, &input)?;
         Ok(SaveResult {
             entries: build_entry_dtos(vault),
@@ -1464,7 +2055,7 @@ pub async fn delete_entry(
     // Not `unwrap`: a malformed id would panic the command, and a panic inside
     // the blocking task surfaces as an unhelpful "task panicked".
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_mut(app, id, move |vault| {
+    on_vault_write(app, id, move |vault| {
         apply_delete(vault, &eid)?;
         Ok(build_entry_dtos(vault))
     })
@@ -1480,7 +2071,7 @@ pub async fn set_favorite(
     fav: bool,
 ) -> Result<Vec<EntryDto>, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_mut(app, id, move |vault| {
+    on_vault_write(app, id, move |vault| {
         apply_set_favorite(vault, &eid, fav)?;
         Ok(build_entry_dtos(vault))
     })
@@ -1810,6 +2401,70 @@ mod tests {
         assert_eq!(
             ensure_no_id_collision(&state, &free, Path::new("/vaults/c.kdbx")),
             Ok(false)
+        );
+    }
+
+    #[test]
+    fn attachments_are_identified_by_their_bytes_not_their_names() {
+        // A PNG called `notes.txt` is still a PNG: the name is whatever
+        // someone typed, and KDBX stores no content type at all.
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+        let s = sniff(png).expect("PNG has a magic number");
+        assert_eq!(s.mime, "image/png");
+        assert!(s.is_image);
+
+        let jpeg = sniff(b"\xff\xd8\xff\xe0\x00\x10JFIF").unwrap();
+        assert_eq!(jpeg.mime, "image/jpeg");
+        assert!(jpeg.is_image);
+
+        // WebP and the ISO base-media brands need bytes past the first four.
+        let mut webp = b"RIFF\x00\x00\x00\x00WEBPVP8 ".to_vec();
+        webp.extend_from_slice(&[0; 8]);
+        assert_eq!(sniff(&webp).unwrap().mime, "image/webp");
+        let mut avif = vec![0, 0, 0, 0x18];
+        avif.extend_from_slice(b"ftypavif");
+        assert_eq!(sniff(&avif).unwrap().mime, "image/avif");
+    }
+
+    #[test]
+    fn non_images_are_named_rather_than_drawn() {
+        for (bytes, kind) in [
+            (b"%PDF-1.7\n".as_slice(), "PDF document"),
+            (b"PK\x03\x04\x14\x00".as_slice(), "Zip archive"),
+            (
+                b"\x30\x82\x04\xa3\x02\x01\x00".as_slice(),
+                "DER binary (certificate, key or PKCS#12)",
+            ),
+        ] {
+            let s = sniff(bytes).expect("known magic number");
+            assert_eq!(s.kind, kind);
+            assert!(!s.is_image, "{kind} must not be offered as a picture");
+        }
+    }
+
+    #[test]
+    fn svg_is_both_a_picture_and_text() {
+        let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        let s = sniff(svg).unwrap();
+        assert_eq!(s.mime, "image/svg+xml");
+        assert!(s.is_image);
+        assert!(looks_like_text(svg), "the source must stay editable");
+
+        // XML that is not SVG is not a picture.
+        assert!(sniff(br#"<?xml version="1.0"?><KeePassFile/>"#).is_none());
+    }
+
+    #[test]
+    fn unknown_bytes_fall_back_to_text_or_binary() {
+        let key = b"-----BEGIN OPENSSH PRIVATE KEY-----\n";
+        assert_eq!(
+            describe(key, true),
+            (String::new(), "Text".to_string(), false)
+        );
+        let junk = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        assert_eq!(
+            describe(&junk, false),
+            (String::new(), "Binary file".to_string(), false)
         );
     }
 }
