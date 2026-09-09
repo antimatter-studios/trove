@@ -4,6 +4,44 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.13.0 — 2026-09-09
+
+**Breaking: `TROVE_DB_PASSWORD` is now `TROVE_VAULT_PASSWORD`.** Rename it in
+your `.env.trove`. There is no fallback and no deprecation period — a secret
+that answers to two names is exactly the thing that rots quietly. Nothing else
+in trove says "DB": the vault is a vault everywhere else, `TROVE_VAULT` is its
+path, and this is that vault's password.
+
+**`--keychain` takes the password from the macOS login keychain**, managed with
+`trove keychain save|forget|status`. `save` proves the password opens the vault
+before storing it, because an entry that does not work is worse than no entry —
+it fails later and somewhere else.
+
+It is opt-in, and it is the lowest-priority source. `--env` and
+`--password-stdin` both outrank it, and it refuses outright when there is no
+interactive terminal. That is not caution for its own sake: a keychain read can
+raise a system dialog — the ACL trusts a particular binary, and `brew upgrade`
+replaces that binary, so the "unfamiliar binary" prompt recurs — and a dialog on
+a Mac nobody is sitting at is a command that never returns. On a remote session
+that costs the work in flight. So the sources that cannot block always win,
+giving both `--env` and `--password-stdin` is harmless (the file wins, stdin
+remains if it yields nothing), and when a higher-priority source is present
+trove says which one won rather than leaving it ambiguous.
+
+There is no biometry here, and it is worth recording why. Touch ID needs
+`kSecAttrAccessControl` on the data-protection keychain, which needs a
+team-prefixed `keychain-access-groups` entitlement, which under Developer ID
+needs a provisioning profile, which only an `.app` bundle can carry. A bare
+executable claiming that entitlement is killed at exec — measured, not assumed.
+Touch ID therefore belongs to `Trove.app`, and `--touchid` will be served by a
+helper inside that bundle rather than by this binary.
+
+**docs/cli-reference.md documents the `.env.trove` file properly** — where bare
+`--env` looks and why, the syntax, why there is deliberately no `~/.config`
+location (dotfile repositories get committed, and this file holds a vault
+password), the permission warning and `TROVE_ENV_STRICT`, and the
+password-source order with the reason each source sits where it does.
+
 ## v0.12.0 — 2026-09-08
 
 **One listing shape.** 0.11.0 grouped `list` by folder; in use that is not worth

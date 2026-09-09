@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.13.0
+**Breaking:** the env-file password variable is `TROVE_VAULT_PASSWORD`, not `TROVE_DB_PASSWORD` — rename it in your `.env.trove`, there is no fallback. New `--keychain` reads the password from the macOS login keychain (`trove keychain save|forget|status`); it is opt-in, always loses to `--env` and `--password-stdin`, and refuses without an interactive terminal, because a keychain dialog on a machine nobody is sitting at is a command that never returns. No biometry yet — Touch ID needs an entitlement only an `.app` bundle can carry, so it belongs to Trove.app. `docs/cli-reference.md` now documents the `.env.trove` file, its search order, permissions, and where a password may come from.
+
 ### v0.12.0
 `list` and `search` print the same shape again: one entry per line as `group/sub/title`, sorted, with a column naming the SSH key or attachments it carries. The folder grouping added in 0.11.0 is gone — a complete path per line greps and pastes, a header does not. `--env` also warns when its file is readable by more than its owner, since it holds a vault password; `TROVE_ENV_STRICT=1` turns that warning into a refusal.
 
@@ -436,6 +439,3 @@ The Trove desktop app graduates from a design prototype to a working KeePass man
 
 ### v0.6.0
 `trove daemons` (Unix) to see and reap orphaned daemons — a wedged one, or a stray from an old build, that the single-path `status` misses. A CLI↔daemon version-drift warning that flags a stale sibling `troved`. Materialize now creates a target's missing parent directories (`0700`) and surfaces failures loudly instead of a silent no-op. Plus docs for using two accounts on one host (work + personal GitHub) via `~/.ssh/config` host aliases.
-
-### v0.5.0
-Full `keepassxc-cli` command parity — generic entry CRUD, keyfile + YubiKey composite keys, TOTP, password generation + breach audit, clipboard, and vault `merge`/`export`/`db-edit` — plus beyond-parity features `keepassxc-cli` has no equivalent for: `exec` (secrets scoped to a process tree), `--json` output, a `git-credential` helper, and `trove://` secret references. Also introduces the **Trove desktop app**: a Tauri 2 GUI, shipped as macOS, Linux, and Windows bundles alongside the CLI.
