@@ -408,16 +408,19 @@ jobs:
           done
           cat SHA256SUMS
 
+      # Reuses the github-guard changelog guard, which ALSO enforces (pre-push)
+      # that this version's section exists — so the release body can never drift
+      # from the committed CHANGELOG.md. One source of truth.
+      #
+      # Through the action rather than an in-tree copy of the guard: the guards
+      # install into .git/hooks, which a CI checkout cannot see, and the copy
+      # kept here to work around that had begun to diverge from the guard.
       - name: Generate release notes from CHANGELOG.md
-        # Reuses the github-guard changelog guard, which ALSO enforces (pre-push)
-        # that this version's section exists — so the release body can never drift
-        # from the committed CHANGELOG.md. One source of truth.
-        shell: bash
-        env:
-          REF_NAME: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          .githooks/pre-push.d/git-changelog.sh notes "$REF_NAME" > release-notes.md
-          echo "----- release notes -----"; cat release-notes.md
+        id: notes
+        uses: antimatter-studios/agent-skills/.github/actions/changelog-notes@aeb2cad74a6cb6e358ecfc2736b88a926caed07d
+        with:
+          tag: ${{ github.event.inputs.tag || github.ref_name }}
+          output-file: release-notes.md
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
