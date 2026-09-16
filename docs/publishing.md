@@ -5,9 +5,10 @@ Only the library crate, `trove-core`, is published to crates.io. The binaries
 are not on crates.io.
 
 Ongoing publishing is automated: pushing a `vX.Y.Z` tag runs
-[`.github/workflows/publish-crates.yml`](../.github/workflows/publish-crates.yml),
-which publishes `trove-core` using crates.io **Trusted Publishing** (GitHub
-OIDC) — there is no long-lived API token stored in the repo.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), whose
+`publish-crate` job publishes `trove-core` using crates.io **Trusted
+Publishing** (GitHub OIDC) — there is no long-lived API token stored in the
+repo.
 
 Getting there is a one-time, three-step bootstrap.
 
@@ -42,8 +43,14 @@ never needs a stored token:
 2. Under **Trusted Publishing**, add a GitHub publisher:
    - **Repository owner:** `antimatter-studios`
    - **Repository name:** `trove`
-   - **Workflow filename:** `publish-crates.yml`
-   - **Environment:** leave blank (the workflow defines no environment).
+   - **Workflow filename:** `release.yml`
+   - **Environment:** `release`
+
+   Both of those must match the workflow exactly. Trusted Publishing keys on
+   the filename, so a publisher registered against anything else cannot mint a
+   token for this job — and the `publish-crate` job declares
+   `environment: release`, which the OIDC claim carries, so leaving the
+   environment blank fails too.
 3. Save. You can now revoke the manual token from step 1 if you like — CI uses
    short-lived OIDC tokens minted per run.
 
@@ -57,12 +64,21 @@ any tag whose commit is not contained in `main` (see below). For each release:
 2. Tag the merged commit on `main` and push it:
    `git checkout main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-The tag fires both pipelines:
-- `release.yml` — builds and attaches `trove`/`troved` binaries to a GitHub
-  Release.
-- `publish-crates.yml` — publishes `trove-core vX.Y.Z` to crates.io via OIDC.
+The tag fires one workflow, `release.yml`, with two jobs in sequence:
+- `release` — builds and attaches `trove`/`troved` binaries, and the desktop
+  bundles, to a GitHub Release.
+- `publish-crate` — publishes `trove-core vX.Y.Z` to crates.io via OIDC. It
+  `needs: release`, so a failed build never reaches crates.io.
 
-The publish workflow:
+The two were separate workflows until #23 folded them together, because one
+version and one tag produce one release; splitting them meant two places to
+keep a version check in step.
+
+If a publish needs retrying on its own, run `release.yml` from the Actions tab
+with `tag` set and `crate_only` ticked — that republishes the crate without
+rebuilding the binaries or touching the existing GitHub Release.
+
+The publish job:
 - **refuses tags that are not on `main`** — if the tagged commit is not
   contained in `main`, the job fails without publishing, so only reviewed,
   merged code can reach crates.io,
@@ -80,4 +96,4 @@ The publish workflow:
 - **Publishing the binaries later.** If you ever want `cargo install trove-cli`
   to work, the binaries' path dependency on `trove-core` must also carry a
   `version` (`trove-core = { path = "...", version = "0.3" }`), and they'd be
-  added to the publish workflow. Not done today.
+  added to the `publish-crate` job. Not done today.
