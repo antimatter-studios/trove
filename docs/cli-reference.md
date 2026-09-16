@@ -568,6 +568,77 @@ agent you get a warning — that is exactly where the original failure returns.
 Confirmation and warnings go to stderr; stdout stays empty so the command
 composes in a script.
 
+### Telling the agent which server a key is for
+
+`sshd`'s `MaxAuthTries` defaults to **6**, counted per connection, and every key
+an agent lists is offered and counted against it — the publickey query phase
+carries no signature, but it still costs an attempt. The agent serves every key
+in every unlocked vault, so past six keys a server refuses the connection before
+reaching one that sits later in the order, with `Received disconnect: Too many
+authentication failures`. It reads as the server rejecting you. And `sshd` logs
+a failure once the count reaches half the limit, so from the fourth offer onward
+it is writing the lines `fail2ban` counts.
+
+An entry can say which servers its key is for, in an `SshAgent.HostKeys` field.
+When a key claims the host `ssh` is connecting to, only the keys that claim it
+are offered:
+
+```sh
+trove edit "Infra/s1" --set "SshAgent.HostKeys=$(ssh-keyscan example.com)"
+```
+
+Raw `ssh-keyscan` output goes in unedited, and that is the recommended way to
+fill it: `ssh-keyscan` authenticates nothing, so collecting a host key can never
+itself contribute to a lockout. `SHA256:` fingerprints and plain OpenSSH
+public-key lines are accepted too, mixed freely, one per line; `#` lines are
+comments. **Record every host key a server offers, not just one** — a server
+presents one per algorithm and which one a client sees depends on
+`HostKeyAlgorithms` negotiation, so pinning only the Ed25519 key stops matching
+the day a client prefers the RSA one. `ssh-keyscan` returns them all. On a
+reinstall, append rather than replace.
+
+How the agent learns which server it is being consulted for: `ssh` sends the
+server's host key in a `session-bind@openssh.com` message as the **first** thing
+on the connection, before asking for identities, and separately on every hop of
+a `ProxyJump`. See [ssh-agent-session-bind.md](ssh-agent-session-bind.md) for
+the measurement.
+
+When nothing claims the host, every key is offered — exactly as an agent that
+had never heard of this feature would behave. That is deliberate: a declaration
+that has gone stale (a reinstalled server, a rotated host key) must not break a
+machine that worked yesterday. The cost is that a stale declaration quietly
+stops helping, which is what `ssh-agent which` is for. If you need a guarantee
+rather than an optimisation, use `ssh-agent empty` + `add`, which offers exactly
+what you named.
+
+### trove ssh-agent which
+
+```
+trove ssh-agent which <TARGET>
+```
+
+Show which keys would be offered to a server, without connecting to it.
+
+`<TARGET>` is a host (`example.com`, `example.com:2222`), a `SHA256:`
+fingerprint, or a file of public-key lines. A bare host is resolved with
+`ssh-keyscan`.
+
+```
+$ trove ssh-agent which example.com
+host key: SHA256:ldas6Axt6VLStrod1bjlqu5dCT18edL/zIFqGdQqJjM
+1 of the agent's keys declare this host; only these are offered:
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… Infra/s1
+```
+
+Three answers are possible: keys claim this host and only those are offered;
+nothing claims any host, so all are offered as always; or keys claim other hosts
+but none claims this one, so all are offered and the declarations are doing
+nothing here. The last is what a rotated host key looks like from this side, and
+without this command it is visible only in the server's auth log.
+
+The offered keys go to stdout in `ssh-add -L` format; the explanation goes to
+stderr, so `trove ssh-agent which host | …` pipes just the keys.
+
 ### Forwarding into your own ssh-agent
 
 `SSH_AUTH_SOCK` is inherited at fork, so exporting it in a shell never reaches an
@@ -838,6 +909,7 @@ All env vars are read at process start.
 | `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |
 | `TROVE_IDLE_TIMEOUT` | `900` | Idle-lock timeout in seconds. `0` disables auto-lock. Non-numeric values warn and fall back to default. Also the default lifetime constraint on forwarded SSH keys. |
 | `TROVE_SSH_FORWARD` | (on) | Set to `0` / `false` / `no` / `off` to stop pushing unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`. Read on every unlock, not just at start. Forwarding is already inert when `$SSH_AUTH_SOCK` is unset or points at trove's own socket. |
+| `TROVE_SSH_STRICT_HOSTKEYS` | (off) | Set to `1` / `true` / `yes` to answer a server that no key's `SshAgent.HostKeys` declares with an empty identity list, instead of falling back to offering everything. Read once when the agent socket is bound. Turns a stale declaration from a missed optimisation into a refused connection — which is the point, and why it is off by default. |
 | `TROVE_VAULT_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above). Prefer keeping it in a `0600` `.env.trove` that is never exported — an exported variable is inherited by every child process. |
 | `TROVE_ENV_STRICT` | (off) | Set to `1` / `true` / `yes` / `on` to make `--env` **refuse** a file readable by more than its owner, instead of warning. macOS/Unix only. |
 | `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |

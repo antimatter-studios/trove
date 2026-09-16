@@ -80,6 +80,16 @@ pub struct LoadedKey {
     /// pushed into the user's own ssh-agent. Irrelevant to how trove's own agent
     /// serves this key — see [`super::keeagent::ForwardPolicy`].
     pub forward: ForwardPolicy,
+    /// Host keys the owning entry declares this key is for, as SHA-256 digests
+    /// of the servers' public-key blobs. Read from the entry's
+    /// `SshAgent.HostKeys` field; empty when the entry says nothing, which is
+    /// the normal case and means "offer me to anyone".
+    ///
+    /// A list rather than one value because a server presents a separate host
+    /// key per algorithm and which one a client sees depends on
+    /// `HostKeyAlgorithms` negotiation — pinning only the Ed25519 key would
+    /// stop matching the day a client preferred the RSA one.
+    pub host_keys: Vec<[u8; 32]>,
     /// Underlying private key. Not exposed; signing happens via [`Self::sign`].
     private_key: PrivateKey,
 }
@@ -400,6 +410,9 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
         // Callers that read a `KeeAgent.settings` blob overwrite this; a bare
         // parse (content scan, `trove generate ssh`, tests) gets the default.
         forward: ForwardPolicy::default(),
+        // Filled by the loader that can see the owning entry's fields; a bare
+        // parse has no entry to read.
+        host_keys: Vec::new(),
         private_key: pk,
     })
 }

@@ -37,6 +37,15 @@ pub const SSH_AGENTC_REMOVE_ALL_IDENTITIES: u8 = 19;
 pub const SSH_AGENTC_LOCK: u8 = 22;
 pub const SSH_AGENTC_UNLOCK: u8 = 23;
 pub const SSH_AGENTC_ADD_ID_CONSTRAINED: u8 = 25;
+/// `SSH_AGENTC_EXTENSION` — a named, vendor-defined request. We serve exactly
+/// one: `session-bind@openssh.com`.
+pub const SSH_AGENTC_EXTENSION: u8 = 27;
+/// The extension `ssh(1)` sends, unprompted, as the FIRST message on every
+/// agent connection it opens for a session — before `REQUEST_IDENTITIES`. It
+/// hands the agent the host key of the server the client is authenticating to.
+/// See `docs/ssh-agent-session-bind.md` for the measurement that establishes
+/// the ordering, which is what makes filtering possible at all.
+pub const EXT_SESSION_BIND: &str = "session-bind@openssh.com";
 /// Constraint tag: the agent drops the key after N seconds by itself.
 pub const SSH_AGENT_CONSTRAIN_LIFETIME: u8 = 1;
 /// Constraint tag: the agent prompts the user before each use of the key.
@@ -99,8 +108,44 @@ pub enum AgentRequest {
     Lock { passphrase: Vec<u8> },
     /// `SSH_AGENTC_UNLOCK` — release a [`Self::Lock`] (`ssh-add -X`).
     Unlock { passphrase: Vec<u8> },
+    /// `session-bind@openssh.com` — `ssh(1)` telling us which server this
+    /// connection is authenticating to. See [`SessionBind`].
+    SessionBind(SessionBind),
+    /// An extension we don't implement. Answered with `SSH_AGENT_FAILURE`,
+    /// which is what the protocol asks for and what clients expect.
+    UnsupportedExtension(String),
     /// Any other request type. We respond with `SSH_AGENT_FAILURE`.
     Unsupported(u8),
+}
+
+/// The payload of a `session-bind@openssh.com` request.
+///
+/// Wire layout, after the extension-name string:
+///
+/// ```text
+/// string  hostkey          (SSH wire public-key blob)
+/// string  session identifier
+/// string  signature        (by hostkey, over the session identifier)
+/// byte    is_forwarding
+/// ```
+///
+/// The signature is kept but **not verified**, and that is safe only for what
+/// we currently do with the binding. Filtering the identity list can only ever
+/// narrow what a client is offered, and any client able to send a forged bind
+/// could instead send no bind at all and be offered everything — so forging
+/// buys an attacker nothing. Verification becomes mandatory the moment a
+/// binding is used to *refuse* something (destination constraints on signing),
+/// because then a forged bind would be a way to get a signature.
+#[derive(Debug, Clone)]
+pub struct SessionBind {
+    /// The server's public key, in SSH wire format.
+    pub host_key: Vec<u8>,
+    /// Identifies the SSH session this binding belongs to.
+    pub session_id: Vec<u8>,
+    /// The host key's signature over `session_id`. Unverified — see above.
+    pub signature: Vec<u8>,
+    /// Set when the connection is one the client will forward onward.
+    pub is_forwarding: bool,
 }
 
 /// Sanity cap on a single agent message. The protocol allows up to 2^32-1
@@ -204,8 +249,64 @@ pub fn parse_request(msg_type: u8, payload: &[u8]) -> Result<AgentRequest, WireE
                 Ok(AgentRequest::Unlock { passphrase })
             }
         }
+        SSH_AGENTC_EXTENSION => {
+            let mut cur = Cursor::new(payload);
+            let name = cur.read_string()?.to_vec();
+            if name != EXT_SESSION_BIND.as_bytes() {
+                // Unknown extensions carry an opaque body we must not try to
+                // parse. Name it and stop.
+                return Ok(AgentRequest::UnsupportedExtension(
+                    String::from_utf8_lossy(&name).into_owned(),
+                ));
+            }
+            let host_key = cur.read_string()?.to_vec();
+            let session_id = cur.read_string()?.to_vec();
+            let signature = cur.read_string()?.to_vec();
+            let is_forwarding = cur.read_u8()? != 0;
+            if !cur.is_empty() {
+                return Err(WireError::TrailingBytes);
+            }
+            Ok(AgentRequest::SessionBind(SessionBind {
+                host_key,
+                session_id,
+                signature,
+                is_forwarding,
+            }))
+        }
         other => Ok(AgentRequest::Unsupported(other)),
     }
+}
+
+/// SHA-256 over an SSH wire public-key blob — the digest behind the
+/// `SHA256:<base64>` fingerprints `ssh-keygen -lf` and `ssh-add -l` print, and
+/// so the form a person can read off `ssh-keyscan` output and recognise.
+pub fn key_fingerprint(blob: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(blob);
+    h.finalize().into()
+}
+
+/// Render a digest the way OpenSSH does: `SHA256:` followed by unpadded
+/// standard base64.
+pub fn format_fingerprint(digest: &[u8; 32]) -> String {
+    use base64::Engine as _;
+    format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)
+    )
+}
+
+/// Parse `SHA256:<base64>` back into a digest. Returns `None` for anything
+/// else, including the MD5 (`16:27:ac:…`) form, which we deliberately don't
+/// accept — it is deprecated and collision-prone.
+pub fn parse_fingerprint(text: &str) -> Option<[u8; 32]> {
+    use base64::Engine as _;
+    let b64 = text.trim().strip_prefix("SHA256:")?;
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(b64.trim_end_matches('='))
+        .ok()?;
+    bytes.try_into().ok()
 }
 
 /// Append a confirm constraint to an `ADD_IDENTITY` body, turning it into an
@@ -298,6 +399,15 @@ impl<'a> Cursor<'a> {
         a.copy_from_slice(&self.buf[self.pos..self.pos + 4]);
         self.pos += 4;
         Ok(u32::from_be_bytes(a))
+    }
+
+    fn read_u8(&mut self) -> Result<u8, WireError> {
+        if self.pos >= self.buf.len() {
+            return Err(WireError::ShortPayload);
+        }
+        let b = self.buf[self.pos];
+        self.pos += 1;
+        Ok(b)
     }
 
     fn read_string(&mut self) -> Result<&'a [u8], WireError> {
