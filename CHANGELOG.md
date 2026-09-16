@@ -4,6 +4,47 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.17.0 — 2026-09-16
+
+**`trove cp` duplicates an entry, key material and all.** One SSH key reused
+across several machines ends up filed under whichever service it was first
+created for, and then the name lies — a key called `antimatter-studios/gitea`
+is also what grants shell access to a Raspberry Pi. Giving it a second, accurate
+name previously meant `trove get`ting the private key to disk and
+`trove add ssh`ing it back, writing a key that had never existed outside the
+vault onto a filesystem:
+
+```sh
+trove cp "antimatter-studios/gitea" "homelab/ssh"
+```
+
+Everything the entry holds comes with it — private key, derived `id.pub`,
+`KeeAgent.settings`, custom fields, password, every attachment — because a
+partial copy looks usable and is not: an SSH entry without its settings blob is
+silently skipped by the agent. The copy is **independent and deliberately
+unmarked**: nothing records that two entries share key material, because such a
+link invites tooling that treats them as one thing, and then rotating the first
+key takes the second with it before anyone has rotated that one. Two names for
+one key is the transitional state; rotating them apart is the point.
+
+**`trove mv` renames while it moves.** It took a group and nothing else, so
+relocating and renaming were separate commands and doing both left a window
+where the entry sat in the right group under the wrong name. It now resolves a
+destination the way Unix does, and the rule that made it strict survives — the
+destination's parent must already exist, so a typo still fails:
+
+```sh
+trove mv "a/key" "homelab"       # homelab is a group  -> homelab/key
+trove mv "a/key" "homelab/ssh"   # ssh does not exist  -> homelab/ssh
+trove mv "a/key" "typo/ssh"      # typo does not exist -> error
+```
+
+Both verbs resolve their destination through one function, refuse a path
+another entry already occupies, and carry an alias so the pair stays symmetric:
+`cp`/`copy`, `mv`/`move`. A move now rebuilds the agent stores as a copy does —
+an SSH key's agent comment is its display path, so without that the agent goes
+on announcing a path that no longer exists.
+
 ## v0.16.0 — 2026-09-16
 
 **An agent with more than six keys can lock you out of a server.** `sshd`'s
