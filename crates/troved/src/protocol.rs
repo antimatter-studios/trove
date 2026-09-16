@@ -222,7 +222,25 @@ pub enum Request {
     /// Code-gated write: move an entry to an EXISTING group.
     MoveEntry {
         path: String,
+        /// Where the entry goes. An existing group means "move into it,
+        /// keeping the title"; anything else is an entry path whose PARENT
+        /// must already exist, and whose leaf becomes the new title.
+        ///
+        /// Still called `group` on the wire because it only ever held a group
+        /// before, and renaming it would break an older CLI for nothing.
         group: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: duplicate an entry, whole, at another path.
+    ///
+    /// Same destination rules as [`Request::MoveEntry`]. The copy is
+    /// independent — nothing records that two entries share key material,
+    /// because a recorded link invites tooling that rotates one and takes the
+    /// other with it.
+    CopyEntry {
+        path: String,
+        dest: String,
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
@@ -387,6 +405,12 @@ impl std::fmt::Debug for Request {
                 .debug_struct("RemoveEntry")
                 .field("path", path)
                 .field("permanent", permanent)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::CopyEntry { path, dest, .. } => f
+                .debug_struct("CopyEntry")
+                .field("path", path)
+                .field("dest", dest)
                 .field("code", &"<redacted>")
                 .finish(),
             Request::MoveEntry { path, group, .. } => f

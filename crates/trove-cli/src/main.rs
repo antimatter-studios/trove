@@ -377,13 +377,50 @@ enum Command {
         permanent: bool,
     },
 
-    /// Move an entry to an EXISTING group. Destinations are never created
-    /// implicitly (a typo should fail) — create one first with `trove mkdir`.
+    /// Move an entry, renaming it when the destination names a new title.
+    ///
+    /// Unix `mv` semantics, resolved against what already exists:
+    ///
+    ///     trove mv "a/key" "homelab"       homelab is a group  -> homelab/key
+    ///     trove mv "a/key" "homelab/ssh"   ssh does not exist  -> homelab/ssh
+    ///     trove mv "a/key" "typo/ssh"      typo does not exist -> error
+    ///
+    /// The destination's parent is never created implicitly, so a typo still
+    /// fails — create the group first with `trove mkdir`. A destination whose
+    /// leaf is itself an existing group means "move into it", which cannot be
+    /// a typo because the group demonstrably exists.
+    #[command(alias = "move")]
     Mv {
         /// Entry path to move, e.g. "github.com" or "Old/github".
         entry_path: String,
-        /// Destination group path, e.g. "Work/SSH" (or "Root" for top level).
+        /// Destination: an existing group, or an entry path whose parent
+        /// exists, e.g. "Work/SSH" or "Work/SSH/github".
+        #[arg(value_name = "DEST")]
         group_path: String,
+    },
+
+    /// Copy an entry, whole, to a new path — key material and all.
+    ///
+    /// Everything the entry holds comes with it: the private key, the derived
+    /// `id.pub`, `KeeAgent.settings`, custom fields and attachments. A partial
+    /// copy would look usable and not be — an SSH entry without its settings
+    /// blob is silently skipped by the agent.
+    ///
+    /// The point is to give one reused key a second, accurate name so the two
+    /// can be rotated apart later. The copy is INDEPENDENT: nothing records
+    /// that the entries share key material, because such a link invites tools
+    /// that rotate one and take the other with it.
+    ///
+    /// Same destination rules as `mv`, and an existing entry is refused rather
+    /// than overwritten. Nothing is written to disk on the way — the key never
+    /// leaves the daemon.
+    #[command(alias = "copy")]
+    Cp {
+        /// Entry path to copy, e.g. "antimatter-studios/gitea".
+        entry_path: String,
+        /// Destination entry path, e.g. "homelab/ssh".
+        #[arg(value_name = "DEST")]
+        dest_path: String,
     },
 
     /// Create a group hierarchy. Intermediate groups are created as needed
@@ -1453,6 +1490,10 @@ fn run(cli: Cli) -> Result<()> {
             entry_path,
             group_path,
         } => cmd_mv(vault, &entry_path, &group_path, pw_stdin),
+        Command::Cp {
+            entry_path,
+            dest_path,
+        } => cmd_cp(vault, &entry_path, &dest_path, pw_stdin),
         Command::Mkdir { group_path } => cmd_mkdir(vault, &group_path, pw_stdin),
         Command::Rmdir {
             group_path,
@@ -4062,7 +4103,8 @@ fn cmd_mv(vault: Option<&Path>, entry_path: &str, group_path: &str, pw_stdin: bo
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
-            v.move_entry(&id, group_path).context("moving entry")?;
+            v.move_entry_to_path(&id, group_path)
+                .context("moving entry")?;
             v.save().context("saving vault")?;
         }
         None => {
@@ -4075,6 +4117,30 @@ fn cmd_mv(vault: Option<&Path>, entry_path: &str, group_path: &str, pw_stdin: bo
         }
     }
     println!("moved '{entry_path}' to '{group_path}'");
+    Ok(())
+}
+
+/// `trove cp <ENTRY> <DEST>` — duplicate an entry, whole, at a new path.
+fn cmd_cp(vault: Option<&Path>, entry_path: &str, dest_path: &str, pw_stdin: bool) -> Result<()> {
+    match vault {
+        Some(path) => {
+            let mut v = open_vault(path, pw_stdin)?;
+            let id = v
+                .find_by_title(entry_path)
+                .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            v.copy_entry(&id, dest_path).context("copying entry")?;
+            v.save().context("saving vault")?;
+        }
+        None => {
+            let code = require_session_code()?;
+            daemon_call(&daemon::Request::CopyEntry {
+                path: entry_path.to_string(),
+                dest: dest_path.to_string(),
+                code,
+            })?;
+        }
+    }
+    println!("copied '{entry_path}' to '{dest_path}'");
     Ok(())
 }
 
@@ -5350,6 +5416,7 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
                 | CoreError::InvalidPath(_)
                 | CoreError::GroupNotFound(_)
                 | CoreError::GroupExists(_)
+                | CoreError::EntryExists(_)
                 | CoreError::GroupNotEmpty(_)
                 | CoreError::AttachmentNotFound(_)
                 | CoreError::AttachmentExists(_)

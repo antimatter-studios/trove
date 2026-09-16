@@ -294,6 +294,91 @@ async fn writes_are_gated_and_persist() {
     );
 }
 
+/// `CopyEntry` over the daemon, plus `MoveEntry`'s rename half — the two
+/// destination resolutions that used to need `mv` then `edit --title`.
+#[tokio::test]
+async fn copy_and_move_resolve_destinations_and_persist() {
+    let dir = TempDir::new().unwrap();
+    let path = seed_vault(&dir);
+    let h = Harness::new();
+    let code = h.unlock(&path).await;
+
+    for req in [
+        Request::AddPassword {
+            path: "api/stripe".into(),
+            username: Some("svc".into()),
+            url: None,
+            notes: None,
+            password: "sk_test_123".into(),
+            code: code.clone(),
+        },
+        Request::Mkdir {
+            path: "Work".into(),
+            code: code.clone(),
+        },
+        // The rename half: `billing` does not exist under Work, so this both
+        // relocates and renames, which previously took two commands.
+        Request::MoveEntry {
+            path: "api/stripe".into(),
+            group: "Work/billing".into(),
+            code: code.clone(),
+        },
+        Request::CopyEntry {
+            path: "Work/billing".into(),
+            dest: "Work/billing-standby".into(),
+            code: code.clone(),
+        },
+    ] {
+        let resp = h.handle_as(req, OWNER).await;
+        assert_eq!(resp["status"], "ok", "{resp}");
+    }
+
+    // A second copy onto the same path must refuse rather than overwrite.
+    let resp = h
+        .handle_as(
+            Request::CopyEntry {
+                path: "Work/billing".into(),
+                dest: "Work/billing-standby".into(),
+                code: code.clone(),
+            },
+            OWNER,
+        )
+        .await;
+    assert!(
+        is_err(&resp),
+        "copying onto an existing entry must refuse: {resp}"
+    );
+
+    // And a destination whose parent does not exist is still a typo.
+    let resp = h
+        .handle_as(
+            Request::CopyEntry {
+                path: "Work/billing".into(),
+                dest: "Typo/thing".into(),
+                code: code.clone(),
+            },
+            OWNER,
+        )
+        .await;
+    assert!(is_err(&resp), "a missing parent group must refuse: {resp}");
+
+    let v = Vault::open(&path, PASSWORD).expect("reopen");
+    let moved = v.find_by_title("Work/billing").expect("moved + renamed");
+    let copy = v
+        .find_by_title("Work/billing-standby")
+        .expect("copy is on disk");
+    assert_ne!(moved, copy, "the copy is its own entry");
+    assert_eq!(
+        v.get_field(&copy, "Password").unwrap().as_deref(),
+        Some("sk_test_123"),
+        "the copy carries the secret, not just the shape"
+    );
+    assert_eq!(
+        v.get_field(&copy, "UserName").unwrap().as_deref(),
+        Some("svc")
+    );
+}
+
 #[tokio::test]
 async fn remove_and_rmdir_report_recycle_state_and_persist() {
     let dir = TempDir::new().unwrap();
