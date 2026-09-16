@@ -409,12 +409,16 @@ async fn a_lifetime_constraint_from_the_settings_expires_the_key_in_the_agent() 
     };
     let tmp = short_tempdir();
     let vault = tmp.path().join("v.kdbx");
-    // One second, so the agent's own expiry is observable in a test.
+    // Short enough that the agent's own expiry is observable inside a test,
+    // long enough that observing the *add* isn't a race against it. At one
+    // second a loaded runner can spend the whole lifetime between the unlock
+    // and the assertion below, and then the key is legitimately gone — the
+    // agent did its job and the test failed anyway.
     vault_with_key(
         &vault,
         "fwd-shortlived",
         KEY_A,
-        Some(settings(true, Some(1), false)),
+        Some(settings(true, Some(5), false)),
     );
 
     point_at(Some(&agent.sock), tmp.path());
@@ -431,7 +435,7 @@ async fn a_lifetime_constraint_from_the_settings_expires_the_key_in_the_agent() 
     // which is only possible if SSH_AGENT_CONSTRAIN_LIFETIME really went over
     // the wire with the duration the entry asked for.
     let mut expired = false;
-    for _ in 0..60 {
+    for _ in 0..80 {
         if !agent.holds("fwd-shortlived") {
             expired = true;
             break;
@@ -440,7 +444,7 @@ async fn a_lifetime_constraint_from_the_settings_expires_the_key_in_the_agent() 
     }
     assert!(
         expired,
-        "the agent should have expired the key after ~1s: {}",
+        "the agent should have expired the key after ~5s: {}",
         agent.list()
     );
     clear_env();
