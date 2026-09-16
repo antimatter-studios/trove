@@ -83,6 +83,18 @@ pub enum Request {
         socket: String,
         entry: String,
     },
+    /// Ask which served keys would be offered to a server, without connecting
+    /// to it. Read-only.
+    ///
+    /// `host_keys` is whatever the caller has in front of it — `SHA256:`
+    /// fingerprints, OpenSSH public-key lines, or raw `ssh-keyscan` output —
+    /// parsed the same way an entry's `SshAgent.HostKeys` field is, so what is
+    /// tested here is exactly what would be matched. This exists because a
+    /// declaration that has gone stale is otherwise only visible from the
+    /// server's auth log.
+    SshAgentWhich {
+        host_keys: Vec<String>,
+    },
     /// Code-gated extraction over the unlocked daemon. Reads `attachment` (e.g.
     /// "id" for an SSH key) from the entry titled `title` and returns its bytes
     /// base64-encoded. Requires a vault unlocked by the same uid as the caller
@@ -282,6 +294,10 @@ impl std::fmt::Debug for Request {
                 .debug_struct("SshAgentAdd")
                 .field("socket", socket)
                 .field("entry", entry)
+                .finish(),
+            Request::SshAgentWhich { host_keys } => f
+                .debug_struct("SshAgentWhich")
+                .field("host_keys", host_keys)
                 .finish(),
             Request::Get {
                 title, attachment, ..
@@ -593,6 +609,19 @@ pub enum OkBody {
         ssh_served: usize,
         ssh_warnings: Vec<String>,
     },
+    /// Response to `SshAgentWhich`: what a server would be offered.
+    SshAgentWhich {
+        /// The host keys the question resolved to, as `SHA256:` fingerprints.
+        ssh_host_keys: Vec<String>,
+        /// `matching` — at least one key declares this host, and only those
+        /// would be offered. `all` — nothing declares any host, so the agent
+        /// offers everything, as it always has. `no-match` — keys do declare
+        /// hosts but none claims this one, so everything is offered and the
+        /// declaration is doing nothing.
+        ssh_selection: String,
+        /// The keys that would actually be offered, in order.
+        ssh_offered: Vec<SshKeyDto>,
+    },
 }
 
 impl Response {
@@ -680,6 +709,17 @@ impl Response {
             ssh_replaced,
             ssh_served,
             ssh_warnings,
+        })
+    }
+    pub fn ok_ssh_agent_which(
+        ssh_host_keys: Vec<String>,
+        ssh_selection: String,
+        ssh_offered: Vec<SshKeyDto>,
+    ) -> Self {
+        Response::Ok(OkBody::SshAgentWhich {
+            ssh_host_keys,
+            ssh_selection,
+            ssh_offered,
         })
     }
     pub fn ok_secret(data: String) -> Self {

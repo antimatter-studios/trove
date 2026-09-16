@@ -728,6 +728,28 @@ enum SshAgentOp {
         /// more than one key.
         entry: String,
     },
+
+    /// Show which keys would be offered to a server, without connecting to it.
+    ///
+    /// An agent holding more than six keys locks you out of a server whenever
+    /// the key it wants sits past the sixth (`sshd`'s `MaxAuthTries` defaults
+    /// to 6 and every listed key is offered and counted). To avoid that, an
+    /// entry can name the servers its key is for in an `SshAgent.HostKeys`
+    /// field, and the agent then offers only the keys that claim the host it
+    /// has been asked about:
+    ///
+    ///     trove edit "Infra/s1" --set "SshAgent.HostKeys=$(ssh-keyscan example.com)"
+    ///
+    /// This command answers what that would do. Without it, a declaration that
+    /// has gone stale — a reinstalled server, a rotated host key — is visible
+    /// only from the server's auth log.
+    Which {
+        /// A host (`example.com`, `example.com:2222`), a `SHA256:` fingerprint,
+        /// or a file holding public-key lines. A bare host is resolved with
+        /// `ssh-keyscan`, which costs no authentication attempt and so cannot
+        /// itself contribute to a lockout.
+        target: String,
+    },
 }
 
 /// SSH key algorithm for `trove generate ssh`.
@@ -1266,6 +1288,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::SshAgent {
             op: SshAgentOp::Add { entry },
         } => cmd_ssh_agent_add(&entry),
+        Command::SshAgent {
+            op: SshAgentOp::Which { target },
+        } => cmd_ssh_agent_which(&target),
         Command::GpgAgent {
             op: GpgAgentOp::Socket,
         } => cmd_gpg_agent_socket(),
@@ -1924,6 +1949,144 @@ fn cmd_ssh_agent_add(entry: &str) -> Result<()> {
         for w in warnings.iter().filter_map(Value::as_str) {
             eprintln!("trove: warning: {w}");
         }
+    }
+    Ok(())
+}
+
+/// Turn a `which` target into the host-key declarations the daemon should match
+/// against: a `SHA256:` fingerprint as-is, a file's contents, or the result of
+/// asking the host itself with `ssh-keyscan`.
+///
+/// `ssh-keyscan` is the right tool for the last case precisely because it
+/// authenticates nothing: it costs no `MaxAuthTries` attempt, so finding out
+/// what a server's host keys are can never be what gets you locked out.
+fn resolve_which_target(target: &str) -> Result<Vec<String>> {
+    if target.starts_with("SHA256:") {
+        return Ok(vec![target.to_string()]);
+    }
+    if Path::new(target).is_file() {
+        let text = std::fs::read_to_string(target)
+            .with_context(|| format!("reading host keys from {target}"))?;
+        return Ok(vec![text]);
+    }
+    let (host, port) = split_host_port(target);
+    let out = std::process::Command::new("ssh-keyscan")
+        .args(["-p", port, host])
+        .output()
+        .map_err(|e| {
+            anyhow!("could not run ssh-keyscan (needed to look up {host}'s host keys): {e}")
+        })?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if text.trim().is_empty() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.trim();
+        return Err(anyhow!(
+            "ssh-keyscan returned no host keys for {host} port {port}{}",
+            if why.is_empty() {
+                String::new()
+            } else {
+                format!(": {why}")
+            }
+        ));
+    }
+    Ok(vec![text])
+}
+
+/// Split a `which` target into host and port.
+///
+/// The naive "last colon wins" rule is wrong for IPv6: `2001:db8::1` ends in a
+/// component that is all digits, so it would be read as host `2001:db8:` on
+/// port `1` and scanned against an address nobody asked for. So a bare literal
+/// with more than one colon keeps all of itself, and a port is written the way
+/// ssh writes one — bracketed, `[2001:db8::1]:2222`.
+fn split_host_port(target: &str) -> (&str, &str) {
+    const DEFAULT: &str = "22";
+    if let Some(rest) = target.strip_prefix('[') {
+        return match rest.split_once(']') {
+            Some((host, "")) => (host, DEFAULT),
+            Some((host, tail)) => match tail.strip_prefix(':') {
+                Some(port) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+                    (host, port)
+                }
+                // `[host]` followed by something that isn't a port: leave it
+                // alone rather than guess at what was meant.
+                _ => (host, DEFAULT),
+            },
+            None => (target, DEFAULT),
+        };
+    }
+    // Two or more colons and no brackets: an IPv6 literal, all of it the host.
+    if target.matches(':').count() > 1 {
+        return (target, DEFAULT);
+    }
+    match target.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            (h, p)
+        }
+        _ => (target, DEFAULT),
+    }
+}
+
+/// `trove ssh-agent which <target>` — what a server would be offered.
+fn cmd_ssh_agent_which(target: &str) -> Result<()> {
+    let host_keys = resolve_which_target(target)?;
+    let resp = match daemon::send(&daemon::Request::SshAgentWhich { host_keys }) {
+        Ok(r) => r,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: "no trove daemon is running, so no keys are served and \
+                          nothing would be offered"
+                    .to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into())
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let fingerprints: Vec<&str> = resp
+        .get("ssh_host_keys")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    for fp in &fingerprints {
+        eprintln!("host key: {fp}");
+    }
+    let offered = resp
+        .get("ssh_offered")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    match resp.get("ssh_selection").and_then(Value::as_str) {
+        Some("matching") => eprintln!(
+            "{} of the agent's keys declare this host; only these are offered:",
+            offered.len()
+        ),
+        Some("no-match") if offered.is_empty() => eprintln!(
+            "no key declares this host, and TROVE_SSH_STRICT_HOSTKEYS is set, \
+             so nothing would be offered:"
+        ),
+        Some("no-match") => eprintln!(
+            "no key declares this host, though others declare theirs — \
+             all {} keys are offered, and the declarations are doing nothing here:",
+            offered.len()
+        ),
+        _ => eprintln!(
+            "no key declares any host, so all {} are offered:",
+            offered.len()
+        ),
+    }
+    for k in &offered {
+        let algo = k.get("algo").and_then(Value::as_str).unwrap_or("");
+        let blob = k.get("blob_b64").and_then(Value::as_str).unwrap_or("");
+        let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
+        println!("{algo} {blob} {comment}");
     }
     Ok(())
 }
@@ -5197,6 +5360,54 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
         }
     }
     EXIT_USER_ERROR
+}
+
+#[cfg(test)]
+mod which_target_tests {
+    use super::split_host_port;
+
+    #[test]
+    fn a_bare_host_gets_the_default_port() {
+        assert_eq!(split_host_port("example.com"), ("example.com", "22"));
+    }
+
+    #[test]
+    fn a_trailing_numeric_component_is_a_port() {
+        assert_eq!(split_host_port("example.com:2222"), ("example.com", "2222"));
+        assert_eq!(split_host_port("127.0.0.1:2299"), ("127.0.0.1", "2299"));
+    }
+
+    #[test]
+    fn a_bare_ipv6_literal_keeps_all_of_itself() {
+        // The last component is all digits, so "last colon wins" would read
+        // this as host "2001:db8:" on port 1 and scan something nobody asked
+        // for.
+        assert_eq!(split_host_port("2001:db8::1"), ("2001:db8::1", "22"));
+        assert_eq!(split_host_port("::1"), ("::1", "22"));
+        assert_eq!(
+            split_host_port("fe80::1ff:fe23:4567:890a"),
+            ("fe80::1ff:fe23:4567:890a", "22")
+        );
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_literal_can_carry_a_port() {
+        assert_eq!(
+            split_host_port("[2001:db8::1]:2222"),
+            ("2001:db8::1", "2222")
+        );
+        assert_eq!(split_host_port("[2001:db8::1]"), ("2001:db8::1", "22"));
+        assert_eq!(split_host_port("[::1]:22"), ("::1", "22"));
+    }
+
+    #[test]
+    fn a_non_numeric_suffix_is_part_of_the_host() {
+        assert_eq!(
+            split_host_port("example.com:ssh"),
+            ("example.com:ssh", "22")
+        );
+        assert_eq!(split_host_port("example.com:"), ("example.com:", "22"));
+    }
 }
 
 #[cfg(test)]

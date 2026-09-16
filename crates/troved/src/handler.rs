@@ -26,7 +26,7 @@ use crate::idle::{IdleState, IdleTracker};
 use crate::materialize::{self, MaterializedFile, MaterializedStore};
 use crate::protocol::{EntryDto, Request, Response};
 use crate::ssh_agent::scoped::{self, ScopedAgents};
-use crate::ssh_agent::{self, keeagent, keys as ssh_keys, KeyStore, LoadedKey};
+use crate::ssh_agent::{self, hostkey, keeagent, keys as ssh_keys, KeyStore, LoadedKey};
 use crate::vaults::VaultSet;
 
 pub type SharedState = Arc<Mutex<VaultSet>>;
@@ -84,6 +84,7 @@ pub async fn handle(
         | Request::GetVersion
         | Request::MaterializeStatus
         | Request::SshAgentList
+        | Request::SshAgentWhich { .. }
         | Request::GpgAgentList => {}
         _ => idle.bump(),
     }
@@ -547,6 +548,70 @@ pub async fn handle(
                     response: Response::err(e.to_string()),
                     shutdown: false,
                 },
+            }
+        }
+
+        Request::SshAgentWhich { host_keys } => {
+            use base64::Engine as _;
+            let declared = hostkey::parse_declarations(&host_keys.join("\n"));
+            // Every question resolves against one host at a time, but a server
+            // presents a host key per algorithm and the client sees whichever
+            // one negotiation picked. Answering for each in turn would be a
+            // menu; answering for the set is the question actually being asked,
+            // so a declaration matching any of them counts as a match.
+            //
+            // Strictness is read here, from the same process environment the
+            // agent read it from when it bound its socket, and applied through
+            // the same `offers` the agent uses. A preview that disagreed with
+            // the agent would be worse than no preview: the whole reason this
+            // command exists is that a stale declaration is otherwise visible
+            // only from the server's auth log.
+            let strict = hostkey::strict_from_env();
+            let keys = key_store.read().await;
+            let mut offered: Vec<usize> = Vec::new();
+            let mut selection = "all";
+            for host in &declared {
+                match ssh_agent::hostkey::select(&keys, Some(*host)) {
+                    ssh_agent::hostkey::Selection::Matching(idx) => {
+                        selection = "matching";
+                        for i in idx {
+                            if !offered.contains(&i) {
+                                offered.push(i);
+                            }
+                        }
+                    }
+                    ssh_agent::hostkey::Selection::DeclaredButNoMatch => {
+                        if selection == "all" {
+                            selection = "no-match";
+                        }
+                    }
+                    ssh_agent::hostkey::Selection::All => {}
+                }
+            }
+            if selection != "matching" {
+                // Neither remaining outcome narrows anything, so what gets
+                // offered is whatever `offers` would answer with for a single
+                // unmatched host: the whole keyring, or nothing at all when
+                // strict mode is on and declarations exist.
+                let host = declared.first().copied();
+                offered = ssh_agent::hostkey::offers(&keys, host, strict).indices;
+            }
+            let dtos = offered
+                .into_iter()
+                .map(|i| crate::protocol::SshKeyDto {
+                    algo: keys[i].algorithm_name().to_string(),
+                    blob_b64: base64::engine::general_purpose::STANDARD
+                        .encode(&keys[i].public_blob),
+                    comment: keys[i].comment.clone(),
+                })
+                .collect();
+            let fingerprints = declared
+                .iter()
+                .map(ssh_agent::wire::format_fingerprint)
+                .collect();
+            Handled {
+                response: Response::ok_ssh_agent_which(fingerprints, selection.to_string(), dtos),
+                shutdown: false,
             }
         }
 
@@ -1902,7 +1967,14 @@ fn try_load_ssh_attachment(
         format!("{display}:{attachment_name}")
     };
     match ssh_keys::parse_private_key(&bytes, &comment) {
-        Ok(loaded) => Some(loaded),
+        Ok(mut loaded) => {
+            // Which servers the entry says this key is for. Absent is the
+            // normal case and means "anyone" — see `ssh_agent::hostkey`.
+            if let Ok(Some(field)) = vault.get_field(&entry.id, hostkey::FIELD_HOST_KEYS) {
+                loaded.host_keys = hostkey::parse_declarations(&field);
+            }
+            Some(loaded)
+        }
         Err(ssh_keys::ParseError::NotOpenssh(detail)) => {
             if bytes.starts_with(b"-----BEGIN") {
                 eprintln!(

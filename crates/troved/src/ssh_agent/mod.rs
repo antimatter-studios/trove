@@ -28,6 +28,7 @@ use crate::ipc;
 /// analogue.
 #[cfg(unix)]
 pub mod forward;
+pub mod hostkey;
 pub mod keeagent;
 pub mod keys;
 pub mod scoped;
@@ -197,6 +198,14 @@ pub async fn serve(
     // all of them.
     let agent_lock: AgentLock = Arc::new(tokio::sync::RwLock::new(None));
 
+    // Read once, at bind time: whether an unclaimed host gets an empty answer
+    // rather than the whole keyring. A per-connection read would let the answer
+    // change under a running deployment.
+    let strict_host_keys = hostkey::strict_from_env();
+    if strict_host_keys {
+        eprintln!("ssh-agent: strict host keys — a server no key declares will be offered nothing");
+    }
+
     loop {
         match listener.accept().await {
             Ok(stream) => {
@@ -211,7 +220,8 @@ pub async fn serve(
                     // error inside `serve_connection` is logged at most once
                     // per connection at debug-equivalent verbosity (silent
                     // in release; we don't depend on the `log` crate).
-                    let _ = serve_connection(stream, store, agent_lock, idle).await;
+                    let _ =
+                        serve_connection(stream, store, agent_lock, idle, strict_host_keys).await;
                 });
             }
             Err(_) => {
@@ -256,8 +266,16 @@ async fn serve_connection(
     store: KeyStore,
     agent_lock: AgentLock,
     idle: Arc<IdleTracker>,
+    strict_host_keys: bool,
 ) -> std::io::Result<()> {
     let (mut read_half, mut write_half) = tokio::io::split(stream);
+    // Which server this connection is authenticating to, once `ssh` has told
+    // us. Per-connection, never shared: two hops of a `ProxyJump` open two
+    // connections and bind each to its own host key.
+    let mut bound_host: Option<[u8; 32]> = None;
+    // One line per connection at most, so a loop of failing connections
+    // doesn't fill the log with the same sentence.
+    let mut reported_stale = false;
     loop {
         let (msg_type, payload) = match read_message(&mut read_half).await {
             Ok(Some(p)) => p,
@@ -363,16 +381,67 @@ async fn serve_connection(
                 }
             }
 
+            AgentRequest::SessionBind(bind) => {
+                // Record which host this connection is for. `ssh` sends this
+                // before asking for identities, which is the whole reason
+                // filtering is possible — see `hostkey`.
+                bound_host = Some(wire::key_fingerprint(&bind.host_key));
+                // OpenSSH's own agent answers SUCCESS here. Answering FAILURE
+                // also works (the client carries on regardless), but claiming
+                // not to understand a message we just acted on would be a lie
+                // the next protocol addition could trip over.
+                if write_message(&mut write_half, SSH_AGENT_SUCCESS, &[])
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+
+            AgentRequest::UnsupportedExtension(_name) => {
+                if write_message(&mut write_half, SSH_AGENT_FAILURE, &[])
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+
             AgentRequest::RequestIdentities => {
                 // Build the answer under a brief read lock; the lock is
                 // dropped *before* we await the network write.
-                let items: Vec<(Vec<u8>, String)> = {
+                let (items, stale): (Vec<(Vec<u8>, String)>, bool) = {
                     let guard = store.read().await;
-                    guard
-                        .iter()
-                        .map(|k| (k.public_blob.clone(), k.comment.clone()))
-                        .collect()
+                    let offer = hostkey::offers(&guard, bound_host, strict_host_keys);
+                    (
+                        offer
+                            .indices
+                            .into_iter()
+                            .map(|i| (guard[i].public_blob.clone(), guard[i].comment.clone()))
+                            .collect(),
+                        offer.stale,
+                    )
                 };
+                if stale && !reported_stale {
+                    reported_stale = true;
+                    let host = bound_host
+                        .as_ref()
+                        .map(wire::format_fingerprint)
+                        .unwrap_or_default();
+                    if strict_host_keys {
+                        eprintln!(
+                            "ssh-agent: no key declares host {host}; offering nothing \
+                             (TROVE_SSH_STRICT_HOSTKEYS is set)"
+                        );
+                    } else {
+                        eprintln!(
+                            "ssh-agent: no key declares host {host}; offering all {} \
+                             (a rotated host key or a stale SshAgent.HostKeys field \
+                             would look exactly like this)",
+                            items.len()
+                        );
+                    }
+                }
                 let body = encode_identities_answer(&items);
                 if write_message(&mut write_half, SSH_AGENT_IDENTITIES_ANSWER, &body)
                     .await
