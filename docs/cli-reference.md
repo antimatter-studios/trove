@@ -112,11 +112,66 @@ destroyed outright. Reports which of the two happened.
 ## trove mv
 
 ```
-trove [--vault <PATH>] mv <ENTRY_PATH> <GROUP_PATH>
+trove [--vault <PATH>] mv <ENTRY_PATH> <DEST>     # alias: move
 ```
 
-Move an entry to an **existing** group (`Root` for the top level).
-Destinations are never created implicitly — `trove mkdir` first.
+Move an entry, renaming it when `<DEST>` names a new title — Unix `mv`
+semantics, resolved against what already exists:
+
+```sh
+trove mv "a/key" "homelab"       # homelab is a group      -> homelab/key
+trove mv "a/key" "homelab/ssh"   # ssh does not exist      -> homelab/ssh
+trove mv "a/key" "typo/ssh"      # typo does not exist     -> error
+```
+
+The destination's **parent** is never created implicitly, so a typo still
+fails — `trove mkdir` first. A destination whose leaf is itself an existing
+group means "move into it", which cannot be a typo because the group
+demonstrably exists. `Root` is the top level.
+
+Renaming in place is still `trove edit --title`; this is for when the entry
+moves as well, which used to take two commands and left a window where the
+entry sat in the right group under the wrong name.
+
+## trove cp
+
+```
+trove [--vault <PATH>] cp <ENTRY_PATH> <DEST>     # alias: copy
+```
+
+Duplicate an entry, whole, at a new path — **key material and all**.
+
+```sh
+trove cp "antimatter-studios/gitea" "homelab/ssh"
+```
+
+The case this exists for: one SSH key reused across several machines ends up
+filed under whichever service it was first created for, so the name lies — a
+key called `gitea` grants shell access to a Raspberry Pi. Copying gives it a
+second, accurate name without invalidating it or touching any
+`authorized_keys`, and the two can then be rotated apart. Rotating "the gitea
+key" today silently breaks the homelab.
+
+Everything the entry holds comes with it: the private key, the derived
+`id.pub`, `KeeAgent.settings`, custom fields, the password, every attachment.
+A partial copy would look usable and not be — an SSH entry without its settings
+blob is silently skipped by the agent, and one without `id.pub` is unreadable
+by anything wanting the public half.
+
+Without this the only route was `trove get` the private key to disk and
+`trove add ssh` it back, which writes a key that had never existed outside the
+vault onto a filesystem. `cp` keeps it inside the daemon, for the same reason
+`trove generate ssh` exists so nobody has to run `ssh-keygen` themselves.
+
+Same destination rules as `mv`, and an existing entry is **refused** rather
+than overwritten.
+
+**The copy is independent, and deliberately unmarked.** Nothing records that
+two entries share key material. A recorded link invites tooling that treats
+them as one thing — and then rotating the first key would take the second with
+it before anyone had rotated that one, which is precisely the accident copying
+exists to prevent. Two names for one key is the transitional state; rotating
+them apart afterwards is the point.
 
 ## trove mkdir
 

@@ -820,7 +820,33 @@ pub async fn handle(
         }
 
         Request::MoveEntry { path, group, code } => {
-            move_entry(state, session, peer_uid, &path, &group, &code).await
+            move_entry(
+                state,
+                session,
+                key_store,
+                gpg_store,
+                scoped_agents,
+                peer_uid,
+                &path,
+                &group,
+                &code,
+            )
+            .await
+        }
+
+        Request::CopyEntry { path, dest, code } => {
+            copy_entry(
+                state,
+                session,
+                key_store,
+                gpg_store,
+                scoped_agents,
+                peer_uid,
+                &path,
+                &dest,
+                &code,
+            )
+            .await
         }
 
         Request::Mkdir { path, code } => mkdir(state, session, peer_uid, &path, &code).await,
@@ -1685,9 +1711,13 @@ async fn remove_entry(
 }
 
 /// Code-gated write: move an entry to an existing group.
+#[allow(clippy::too_many_arguments)]
 async fn move_entry(
     state: &SharedState,
     session: &SessionStore,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
     peer_uid: u32,
     path: &str,
     group: &str,
@@ -1701,12 +1731,54 @@ async fn move_entry(
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    if let Err(e) = vault.move_entry(&id, group) {
+    if let Err(e) = vault.move_entry_to_path(&id, group) {
         return err_handled(format!("moving entry: {e}"));
     }
     if let Err(e) = vault.save() {
         return err_handled(format!("saving vault: {e}"));
     }
+    // A move changes the entry's group, and now its title too — and an SSH
+    // key's agent comment IS its display path. Without this the agent keeps
+    // announcing the old path until something else rebuilds the stores or the
+    // vault is unlocked again, so `ssh-add -l` names a path that no longer
+    // exists.
+    rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
+    ok_handled(Response::ok_empty())
+}
+
+/// Code-gated write: duplicate an entry, whole, at another path.
+///
+/// Rebuilds the agent stores afterwards, unlike `move_entry`: a move leaves the
+/// same key material in the vault under a different name, but a copy produces a
+/// second entry the agent should serve under its own comment. Without the
+/// rebuild the new name would not appear until the next unlock.
+#[allow(clippy::too_many_arguments)]
+async fn copy_entry(
+    state: &SharedState,
+    session: &SessionStore,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
+    peer_uid: u32,
+    path: &str,
+    dest: &str,
+    code: &str,
+) -> Handled {
+    if let Some(refused) = session_gate(session, peer_uid, code).await {
+        return refused;
+    }
+    let mut guard = state.lock().await;
+    let (vault, id) = match guard.find_entry_mut(path) {
+        Ok(found) => found,
+        Err(e) => return err_handled(e.to_string()),
+    };
+    if let Err(e) = vault.copy_entry(&id, dest) {
+        return err_handled(format!("copying entry: {e}"));
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_empty())
 }
 

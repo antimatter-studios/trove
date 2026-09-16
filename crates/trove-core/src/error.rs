@@ -41,6 +41,9 @@ pub enum Error {
     #[error("group already exists: {0}")]
     GroupExists(String),
 
+    #[error("entry already exists: {0}")]
+    EntryExists(String),
+
     #[error("group not empty: {0} (pass --recursive to delete it and its contents)")]
     GroupNotEmpty(String),
 

@@ -854,6 +854,143 @@ impl Vault {
         Ok(())
     }
 
+    /// Whether a `/`-separated group path names an existing group. The empty
+    /// string is the root group, which always exists.
+    ///
+    /// Exists so `mv`/`cp` can tell "move into this group" from "move to this
+    /// new name" without guessing, and without making their callers reach for
+    /// an error string to find out.
+    pub fn group_exists(&self, path: &str) -> bool {
+        self.resolve_group(path).is_ok()
+    }
+
+    /// Move an entry to `dst`, renaming it when `dst` names one.
+    ///
+    /// Unix `mv` semantics, resolved against what already exists:
+    ///   * `dst` is an existing group → move into it, keeping the title.
+    ///   * otherwise `dst` is an entry path → its PARENT must already exist,
+    ///     and the leaf becomes the new title (moving and renaming at once).
+    ///
+    /// The parent is never created implicitly, so a typo still fails — which
+    /// is the whole reason [`Vault::move_entry`] refuses to `mkdir -p`. The
+    /// ambiguous-looking case, a leaf that happens to be an existing group,
+    /// resolves as "move into it" like Unix: it cannot be a typo, because the
+    /// group demonstrably exists.
+    pub fn move_entry_to_path(&mut self, id: &EntryId, dst: &str) -> Result<()> {
+        let target = self.resolve_dest_path(id, dst)?;
+        let (group_path, leaf) = parse_entry_path(&target)?;
+        self.move_entry(id, &group_path.join("/"))?;
+        self.set_field(id, "Title", &leaf)
+    }
+
+    /// Work out the full entry path a `cp`/`mv` destination names, and refuse
+    /// it if something is already there.
+    ///
+    /// Shared by both verbs so they cannot drift apart — they document the same
+    /// rules, and the first version of this had them implemented twice, with
+    /// `cp` quietly treating an existing group as a new root-level entry name.
+    ///
+    ///   * `dst` is an existing group → `<dst>/<source title>`.
+    ///   * otherwise `dst` is the path, and its PARENT must already exist.
+    ///
+    /// The entry being moved is excluded from the collision check, so moving
+    /// something onto where it already is stays a no-op rather than an error.
+    fn resolve_dest_path(&self, id: &EntryId, dst: &str) -> Result<String> {
+        let target = if self.group_exists(dst) {
+            let title = self
+                .get_entry(id)
+                .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?
+                .title;
+            let group = parse_group_path(dst)?;
+            if group.is_empty() {
+                title
+            } else {
+                format!("{}/{}", group.join("/"), title)
+            }
+        } else {
+            let (group_path, _leaf) = parse_entry_path(dst)?;
+            let parent = group_path.join("/");
+            if !self.group_exists(&parent) {
+                return Err(Error::GroupNotFound(parent));
+            }
+            dst.to_string()
+        };
+        // Two entries sharing a display path make every later path lookup
+        // ambiguous, so refuse rather than silently create one.
+        let taken = self.list_entries().into_iter().any(|e| {
+            e.display_path().eq_ignore_ascii_case(&target) && EntryId(e.id.0.clone()) != *id
+        });
+        if taken {
+            return Err(Error::EntryExists(target));
+        }
+        Ok(target)
+    }
+
+    /// Duplicate an entry, whole, at `dst`.
+    ///
+    /// Everything the entry holds comes with it — every string field, every
+    /// attachment — because a partial copy produces something that looks
+    /// usable and is not: an SSH entry without its `KeeAgent.settings` is
+    /// silently skipped by the agent, and one without its derived `id.pub` is
+    /// unusable by anything reading the public half.
+    ///
+    /// The copy is **independent**. Nothing records that the two entries share
+    /// key material, and that is deliberate: a recorded link invites tooling
+    /// that treats them as one thing, and then rotating one would take the
+    /// other with it — which is exactly the accident copying exists to avoid.
+    /// Two names for one key is the *transitional* state; rotating them apart
+    /// afterwards is the point.
+    ///
+    /// Same destination rules as [`Vault::move_entry_to_path`]: the parent
+    /// group must already exist, and an existing entry at `dst` is refused
+    /// rather than overwritten.
+    pub fn copy_entry(&mut self, src: &EntryId, dst: &str) -> Result<EntryId> {
+        // Same resolution as `mv`, from the same function: an existing group
+        // means "copy into it under the source's title", anything else is the
+        // path itself and its parent must exist. The source is excluded from
+        // the collision check there, so copying an entry onto its own path
+        // still has to be caught here.
+        let target = self.resolve_dest_path(src, dst)?;
+        if self
+            .get_entry(src)
+            .is_some_and(|e| e.display_path().eq_ignore_ascii_case(&target))
+        {
+            return Err(Error::EntryExists(target));
+        }
+        // Read everything out first: the writes below re-borrow the database
+        // mutably, and a half-copied entry would be worse than none.
+        let fields = self.fields_with_prefix(src, "")?;
+        let mut values: Vec<(String, String)> = Vec::with_capacity(fields.len());
+        for name in fields {
+            if name == "Title" {
+                continue;
+            }
+            if let Some(v) = self.get_field(src, &name)? {
+                values.push((name, v));
+            }
+        }
+        let attachments = self
+            .get_entry(src)
+            .ok_or_else(|| Error::EntryNotFound(src.0.clone()))?
+            .attachment_names;
+        let mut blobs: Vec<(String, Vec<u8>)> = Vec::with_capacity(attachments.len());
+        for name in attachments {
+            if let Some(bytes) = self.read_binary(src, &name)? {
+                blobs.push((name, bytes));
+            }
+        }
+
+        // The parent is known to exist, so `add_entry`'s mkdir -p never fires.
+        let dst_id = self.add_entry(&target)?;
+        for (name, value) in values {
+            self.set_field(&dst_id, &name, &value)?;
+        }
+        for (name, bytes) in blobs {
+            self.attach_binary(&dst_id, &name, &bytes)?;
+        }
+        Ok(dst_id)
+    }
+
     /// Create a group hierarchy with `mkdir -p` semantics for intermediate
     /// segments. Errors with [`Error::GroupExists`] if the leaf group already
     /// exists (matching `keepassxc-cli mkdir`).
