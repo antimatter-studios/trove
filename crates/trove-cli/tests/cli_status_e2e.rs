@@ -20,6 +20,7 @@ use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
+use troved::ssh_agent::scoped::ScopedAgents;
 use troved::ssh_agent::KeyStore;
 
 const PASSWORD: &str = "cli-e2e-test-pw";
@@ -47,6 +48,7 @@ async fn spawn_daemon(
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     idle: Arc<IdleTracker>,
@@ -62,10 +64,11 @@ async fn spawn_daemon(
                     let s = state.clone();
                     let ks = key_store.clone();
                     let gks = gpg_store.clone();
+                    let sas = scoped_agents.clone();
                     let ms = mat_store.clone();
                     let se = session.clone();
                     let id = idle.clone();
-                    tokio::spawn(handle_connection(stream, s, ks, gks, ms, se, id));
+                    tokio::spawn(handle_connection(stream, s, ks, gks, sas, ms, se, id));
                 }
             }
         }
@@ -74,11 +77,13 @@ async fn spawn_daemon(
 
 /// Per-connection loop — reads one JSON request per line, hands to `handle`,
 /// writes one JSON response per line. Mirrors `crates/troved/src/main.rs`.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     stream: UnixStream,
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     idle: Arc<IdleTracker>,
@@ -93,7 +98,15 @@ async fn handle_connection(
         let resp = match serde_json::from_str(&line) {
             Ok(req) => {
                 handle(
-                    req, &state, &key_store, &gpg_store, &mat_store, &session, &idle, peer_uid,
+                    req,
+                    &state,
+                    &key_store,
+                    &gpg_store,
+                    &scoped_agents,
+                    &mat_store,
+                    &session,
+                    &idle,
+                    peer_uid,
                 )
                 .await
                 .response
@@ -135,6 +148,7 @@ async fn trove_status_round_trip_against_real_daemon() {
     let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+    let scoped_agents = troved::ssh_agent::scoped::new_registry();
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
     let session: SessionStore = Arc::new(Mutex::new(None));
     let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
@@ -146,6 +160,7 @@ async fn trove_status_round_trip_against_real_daemon() {
         state.clone(),
         key_store.clone(),
         gpg_store.clone(),
+        scoped_agents.clone(),
         mat_store.clone(),
         session.clone(),
         idle.clone(),

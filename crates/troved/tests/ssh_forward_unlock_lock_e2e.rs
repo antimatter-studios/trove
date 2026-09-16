@@ -28,6 +28,7 @@ use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
+use troved::ssh_agent::scoped::ScopedAgents;
 use troved::ssh_agent::{keeagent, KeyStore};
 
 const PASSWORD: &str = "ssh-forward-e2e-pw";
@@ -169,6 +170,7 @@ struct Harness {
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     idle: Arc<IdleTracker>,
@@ -181,6 +183,7 @@ impl Harness {
             state: Arc::new(AsyncMutex::new(troved::vaults::VaultSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
+            scoped_agents: troved::ssh_agent::scoped::new_registry(),
             mat_store: Arc::new(RwLock::new(Vec::new())),
             session: Arc::new(AsyncMutex::new(None)),
             // 0 = auto-lock disabled, which also means "no default lifetime
@@ -195,6 +198,7 @@ impl Harness {
             &self.state,
             &self.key_store,
             &self.gpg_store,
+            &self.scoped_agents,
             &self.mat_store,
             &self.session,
             &self.idle,

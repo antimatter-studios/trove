@@ -26,6 +26,7 @@ use troved::materialize::{self, MaterializedStore};
 use troved::protocol::{Request, Response};
 #[cfg(unix)]
 use troved::singleton;
+use troved::ssh_agent::scoped::ScopedAgents;
 use troved::ssh_agent::{self, KeyStore};
 
 /// Default idle-lock timeout when no `TROVE_IDLE_TIMEOUT` env var is set.
@@ -53,6 +54,7 @@ fn build_lock_callback(
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     shutdown: Arc<Notify>,
@@ -61,6 +63,7 @@ fn build_lock_callback(
         let state = state.clone();
         let key_store = key_store.clone();
         let gpg_store = gpg_store.clone();
+        let scoped_agents = scoped_agents.clone();
         let mat_store = mat_store.clone();
         let session = session.clone();
         let shutdown = shutdown.clone();
@@ -91,6 +94,9 @@ fn build_lock_callback(
                 let mut gkeys = gpg_store.write().await;
                 gkeys.clear();
             }
+            // Private agent sockets handed out by `ssh-agent empty` are the
+            // daemon's to clean up, and an idle-lock is a lock like any other.
+            ssh_agent::scoped::clear_all(&scoped_agents).await;
             {
                 let mut sess = session.lock().await;
                 *sess = None;
@@ -146,6 +152,7 @@ async fn handle_connection(
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     idle: Arc<IdleTracker>,
@@ -177,7 +184,15 @@ async fn handle_connection(
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
                 let handled = handle(
-                    req, &state, &key_store, &gpg_store, &mat_store, &session, &idle, peer_uid,
+                    req,
+                    &state,
+                    &key_store,
+                    &gpg_store,
+                    &scoped_agents,
+                    &mat_store,
+                    &session,
+                    &idle,
+                    peer_uid,
                 )
                 .await;
                 if handled.shutdown {
@@ -281,6 +296,7 @@ async fn main() -> Result<()> {
     let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+    let scoped_agents: ScopedAgents = ssh_agent::scoped::new_registry();
     let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
     let session: SessionStore = Arc::new(Mutex::new(None));
     let shutdown = Arc::new(Notify::new());
@@ -294,6 +310,7 @@ async fn main() -> Result<()> {
         state.clone(),
         key_store.clone(),
         gpg_store.clone(),
+        scoped_agents.clone(),
         mat_store.clone(),
         session.clone(),
         shutdown.clone(),
@@ -377,12 +394,21 @@ async fn main() -> Result<()> {
                     let state = state.clone();
                     let key_store = key_store.clone();
                     let gpg_store = gpg_store.clone();
+                    let scoped_agents = scoped_agents.clone();
                     let mat_store = mat_store.clone();
                     let session = session.clone();
                     let idle = idle.clone();
                     let shutdown = shutdown.clone();
                     tokio::spawn(handle_connection(
-                        stream, state, key_store, gpg_store, mat_store, session, idle, shutdown,
+                        stream,
+                        state,
+                        key_store,
+                        gpg_store,
+                        scoped_agents,
+                        mat_store,
+                        session,
+                        idle,
+                        shutdown,
                     ));
                 }
                 Err(_) => {
@@ -429,6 +455,9 @@ async fn main() -> Result<()> {
         let mut gkeys = gpg_store.write().await;
         gkeys.clear();
     }
+    // Scoped agent sockets unlink themselves here too, so a SIGTERM'd daemon
+    // leaves none of them behind.
+    ssh_agent::scoped::clear_all(&scoped_agents).await;
     {
         let mut sess = session.lock().await;
         *sess = None;
@@ -467,6 +496,7 @@ mod tests {
             let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
             let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+            let scoped_agents: ScopedAgents = ssh_agent::scoped::new_registry();
             let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
             let session: SessionStore = Arc::new(Mutex::new(None));
             let shutdown = Arc::new(Notify::new());
@@ -474,6 +504,7 @@ mod tests {
                 state.clone(),
                 key_store.clone(),
                 gpg_store.clone(),
+                scoped_agents.clone(),
                 mat_store.clone(),
                 session.clone(),
                 shutdown.clone(),
@@ -483,6 +514,7 @@ mod tests {
             let accept_state = state.clone();
             let accept_keys = key_store.clone();
             let accept_gpg = gpg_store.clone();
+            let accept_scoped = scoped_agents.clone();
             let accept_mat = mat_store.clone();
             let accept_session = session.clone();
             let accept_idle = idle.clone();
@@ -493,11 +525,12 @@ mod tests {
                         let s = accept_state.clone();
                         let ks = accept_keys.clone();
                         let gks = accept_gpg.clone();
+                        let sa = accept_scoped.clone();
                         let ms = accept_mat.clone();
                         let se = accept_session.clone();
                         let id = accept_idle.clone();
                         let sh = accept_shutdown.clone();
-                        tokio::spawn(handle_connection(stream, s, ks, gks, ms, se, id, sh));
+                        tokio::spawn(handle_connection(stream, s, ks, gks, sa, ms, se, id, sh));
                     }
                 }
             };

@@ -22,6 +22,7 @@ use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
+use troved::ssh_agent::scoped::ScopedAgents;
 use troved::ssh_agent::KeyStore;
 
 const PASSWORD: &str = "multi-vault-test-pw";
@@ -52,6 +53,7 @@ struct Daemon {
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     idle: Arc<IdleTracker>,
@@ -64,6 +66,7 @@ impl Daemon {
             state: Arc::new(Mutex::new(troved::vaults::VaultSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
+            scoped_agents: troved::ssh_agent::scoped::new_registry(),
             mat_store: Arc::new(RwLock::new(Vec::new())),
             session: Arc::new(Mutex::new(None)),
             // Auto-lock disabled: these tests drive Lock explicitly.
@@ -77,6 +80,7 @@ impl Daemon {
             &self.state,
             &self.key_store,
             &self.gpg_store,
+            &self.scoped_agents,
             &self.mat_store,
             &self.session,
             &self.idle,

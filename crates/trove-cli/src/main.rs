@@ -688,6 +688,46 @@ enum SshAgentOp {
     /// line). Reads the running daemon; prints nothing and exits 0 if it isn't
     /// running (nothing unlocked).
     List,
+
+    /// Print the path to a NEW, private agent socket that serves no keys.
+    ///
+    /// The daemon's main agent serves every key in every unlocked vault, which
+    /// is more than a deployment tool wants: `sshd`'s `MaxAuthTries` defaults
+    /// to 6, every key an agent lists is offered and counted against that, and
+    /// the connection dies before reaching a key that sits past the sixth. An
+    /// agent with nothing in it makes no offers at all, so it is the safe base
+    /// to fill deliberately:
+    ///
+    ///     sock=$(trove ssh-agent empty) || exit 1
+    ///     export SSH_AUTH_SOCK="$sock"
+    ///     trove ssh-agent add "Infra/s1"
+    ///
+    /// Assign first, export second. `export VAR=$(cmd)` returns `export`'s own
+    /// status, not the command's, so a failure here is swallowed even under
+    /// `set -e` — leaving `SSH_AUTH_SOCK` set to the empty string, which `ssh`
+    /// reads as "no agent at all".
+    ///
+    /// Each call returns a separate socket with its own keys, so parallel
+    /// callers can't disturb each other. The daemon owns the lifetime — the
+    /// sockets go on `trove lock`, and there is nothing to clean up. One daemon
+    /// hands out at most 32 of them; a caller looping on this has a bug, and a
+    /// refusal is friendlier than exhausting its file descriptors.
+    ///
+    /// Requires a daemon that is already running: a socket served by a daemon
+    /// with no vault unlocked could never be filled.
+    Empty,
+
+    /// Add one vault entry's SSH key to the agent named by `$SSH_AUTH_SOCK`.
+    ///
+    /// The socket must be one `trove ssh-agent empty` handed out; any other is
+    /// refused, because filling it would mean handing the key to an agent trove
+    /// doesn't run. Adding the same key twice refreshes it rather than
+    /// duplicating it, so re-running a script doesn't double its offers.
+    Add {
+        /// Entry path (`Infra/s1`), or `Infra/s1:deploy` when the entry holds
+        /// more than one key.
+        entry: String,
+    },
 }
 
 /// SSH key algorithm for `trove generate ssh`.
@@ -1220,6 +1260,12 @@ fn run(cli: Cli) -> Result<()> {
         Command::SshAgent {
             op: SshAgentOp::List,
         } => cmd_ssh_agent_list(),
+        Command::SshAgent {
+            op: SshAgentOp::Empty,
+        } => cmd_ssh_agent_empty(),
+        Command::SshAgent {
+            op: SshAgentOp::Add { entry },
+        } => cmd_ssh_agent_add(&entry),
         Command::GpgAgent {
             op: GpgAgentOp::Socket,
         } => cmd_gpg_agent_socket(),
@@ -1773,6 +1819,113 @@ fn cmd_ssh_agent_list() -> Result<()> {
         Err(e) if daemon::is_daemon_not_running(&e) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// `trove ssh-agent empty` — print the path to a fresh, private agent socket
+/// serving no keys.
+///
+/// Deliberately does NOT autospawn. A daemon with no vault holds no keys, so a
+/// socket it handed out could never be filled — and a daemon started this way
+/// has no idle timer running, so it and its sockets would sit there until
+/// something else came along. Requiring one that is already up makes the
+/// failure immediate and legible instead.
+fn cmd_ssh_agent_empty() -> Result<()> {
+    let resp = match daemon::send(&daemon::Request::SshAgentEmpty) {
+        Ok(r) => r,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: "no trove daemon is running, so a private agent socket would \
+                          have nothing to serve; unlock a vault first"
+                    .to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into())
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let socket = resp
+        .get("ssh_socket")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("daemon returned ok but no socket path"))?;
+    println!("{socket}");
+    Ok(())
+}
+
+/// `trove ssh-agent add <entry>` — load one entry's key into the agent named by
+/// `$SSH_AUTH_SOCK`.
+///
+/// Reads the socket from the environment rather than the daemon's default,
+/// because the whole point is to fill the private one the caller just exported.
+/// Deliberately does NOT autospawn: a daemon that wasn't running holds no
+/// unlocked vault and no scoped socket, so spawning one would only turn a clear
+/// problem into a confusing one.
+fn cmd_ssh_agent_add(entry: &str) -> Result<()> {
+    let socket = std::env::var("SSH_AUTH_SOCK").unwrap_or_default();
+    if socket.is_empty() {
+        return Err(DaemonClassified {
+            message: "SSH_AUTH_SOCK is not set, so there is no agent to add to; \
+                      run `sock=$(trove ssh-agent empty) || exit 1` and \
+                      `export SSH_AUTH_SOCK=\"$sock\"` first"
+                .to_string(),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let req = daemon::Request::SshAgentAdd {
+        socket: socket.clone(),
+        entry: entry.to_string(),
+    };
+    let resp = match daemon::send(&req) {
+        Ok(r) => r,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: "no trove daemon is running, so nothing is unlocked and \
+                          there is no agent to add to"
+                    .to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into())
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let comment = resp
+        .get("ssh_added")
+        .and_then(|k| k.get("comment"))
+        .and_then(Value::as_str)
+        .unwrap_or(entry);
+    let served = resp.get("ssh_served").and_then(Value::as_u64).unwrap_or(0);
+    let verb = if resp
+        .get("ssh_replaced")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "refreshed"
+    } else {
+        "added"
+    };
+    // stdout stays empty so `add` composes in a script; the confirmation is a
+    // note, not output.
+    eprintln!("ssh-agent: {verb} {comment} ({served} served on {socket})");
+    if let Some(warnings) = resp.get("ssh_warnings").and_then(Value::as_array) {
+        for w in warnings.iter().filter_map(Value::as_str) {
+            eprintln!("trove: warning: {w}");
+        }
+    }
+    Ok(())
 }
 
 /// `trove gpg-agent list` — list the GPG keys the running agent serves, one per

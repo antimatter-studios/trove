@@ -27,6 +27,7 @@ use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
+use troved::ssh_agent::scoped::ScopedAgents;
 use troved::ssh_agent::KeyStore;
 
 const PASSWORD: &str = "get-session-test-pw";
@@ -40,6 +41,7 @@ struct Harness {
     state: SharedState,
     key_store: KeyStore,
     gpg_store: GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     idle: Arc<IdleTracker>,
@@ -50,6 +52,7 @@ impl Harness {
         let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+        let scoped_agents = troved::ssh_agent::scoped::new_registry();
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
         let session: SessionStore = Arc::new(Mutex::new(None));
         // Auto-lock disabled (timeout 0) so the idle timer never races a test.
@@ -59,6 +62,7 @@ impl Harness {
             state,
             key_store,
             gpg_store,
+            scoped_agents,
             mat_store,
             session,
             idle,
@@ -72,6 +76,7 @@ impl Harness {
             &self.state,
             &self.key_store,
             &self.gpg_store,
+            &self.scoped_agents,
             &self.mat_store,
             &self.session,
             &self.idle,
