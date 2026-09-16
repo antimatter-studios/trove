@@ -64,6 +64,25 @@ pub enum Request {
     /// List the GPG keys the agent is currently serving. Read-only; returns an
     /// empty list when locked.
     GpgAgentList,
+    /// Create a new, private SSH agent socket serving no keys, and return its
+    /// path for the caller to export as `SSH_AUTH_SOCK`.
+    ///
+    /// An agent with nothing in it makes no offers, so it cannot trip `sshd`'s
+    /// `MaxAuthTries`. Needs no unlocked vault — the socket is the point, the
+    /// keys arrive afterwards via [`Request::SshAgentAdd`]. The daemon owns the
+    /// lifetime: scoped sockets go on `lock`.
+    SshAgentEmpty,
+    /// Add one entry's SSH key to the scoped agent listening at `socket`.
+    ///
+    /// `socket` is a path returned by [`Request::SshAgentEmpty`] — the CLI
+    /// passes whatever `SSH_AUTH_SOCK` holds, and any other socket is refused,
+    /// because only agents this daemon serves can be filled without the key
+    /// leaving the daemon. `entry` names the entry (`group/.../title`, or
+    /// `group/.../title:attachment` when the key isn't the conventional `id`).
+    SshAgentAdd {
+        socket: String,
+        entry: String,
+    },
     /// Code-gated extraction over the unlocked daemon. Reads `attachment` (e.g.
     /// "id" for an SSH key) from the entry titled `title` and returns its bytes
     /// base64-encoded. Requires a vault unlocked by the same uid as the caller
@@ -258,6 +277,12 @@ impl std::fmt::Debug for Request {
             Request::Status => f.write_str("Status"),
             Request::SshAgentList => f.write_str("SshAgentList"),
             Request::GpgAgentList => f.write_str("GpgAgentList"),
+            Request::SshAgentEmpty => f.write_str("SshAgentEmpty"),
+            Request::SshAgentAdd { socket, entry } => f
+                .debug_struct("SshAgentAdd")
+                .field("socket", socket)
+                .field("entry", entry)
+                .finish(),
             Request::Get {
                 title, attachment, ..
             } => f
@@ -552,6 +577,22 @@ pub enum OkBody {
     GpgAgentList {
         gpg_keys: Vec<GpgKeyDto>,
     },
+    /// Response to `SshAgentEmpty`: where the new private agent listens.
+    SshAgentSocket {
+        ssh_socket: String,
+    },
+    /// Response to `SshAgentAdd`: the key that went in, and how many the agent
+    /// serves now. `ssh_warnings` carries anything the caller should see but
+    /// that isn't a failure — crossing `MaxAuthTries`, above all.
+    SshAgentAdded {
+        ssh_socket: String,
+        ssh_added: SshKeyDto,
+        /// True when the key was already served here and was refreshed in
+        /// place, so running the same script twice doesn't double the offers.
+        ssh_replaced: bool,
+        ssh_served: usize,
+        ssh_warnings: Vec<String>,
+    },
 }
 
 impl Response {
@@ -622,6 +663,24 @@ impl Response {
     }
     pub fn ok_gpg_agent_list(gpg_keys: Vec<GpgKeyDto>) -> Self {
         Response::Ok(OkBody::GpgAgentList { gpg_keys })
+    }
+    pub fn ok_ssh_agent_socket(ssh_socket: String) -> Self {
+        Response::Ok(OkBody::SshAgentSocket { ssh_socket })
+    }
+    pub fn ok_ssh_agent_added(
+        ssh_socket: String,
+        ssh_added: SshKeyDto,
+        ssh_replaced: bool,
+        ssh_served: usize,
+        ssh_warnings: Vec<String>,
+    ) -> Self {
+        Response::Ok(OkBody::SshAgentAdded {
+            ssh_socket,
+            ssh_added,
+            ssh_replaced,
+            ssh_served,
+            ssh_warnings,
+        })
     }
     pub fn ok_secret(data: String) -> Self {
         Response::Ok(OkBody::Secret { data })

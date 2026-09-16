@@ -492,6 +492,82 @@ Print the path to the troved SSH agent socket, then exit. Resolution order:
 
 Typical use: `export SSH_AUTH_SOCK="$(trove ssh-agent socket)"`.
 
+### trove ssh-agent empty
+
+```
+trove ssh-agent empty
+```
+
+Print the path to a **new, private** agent socket that serves no keys.
+
+`sshd`'s `MaxAuthTries` defaults to **6**, counted per connection, and every key
+an agent lists is offered and counted against that — the publickey query phase
+carries no signature, but it still costs an attempt. The socket above serves
+every key in every unlocked vault, which is what you want at a terminal and not
+what a deployment tool wants: hold more than six keys and a server refuses the
+connection before reaching one that sits past the sixth, with
+`Received disconnect: Too many authentication failures`. Worse, `sshd` logs a
+failure from the fourth offer onward, which is what `fail2ban` counts.
+
+An agent with nothing in it makes no offers at all, so it is the safe base to
+fill deliberately:
+
+```sh
+sock=$(trove ssh-agent empty) || exit 1
+export SSH_AUTH_SOCK="$sock"
+trove ssh-agent add "Infra/s1"
+trove ssh-agent add "Infra/homelab"
+pulumi up
+```
+
+Assign first, export second. `export VAR=$(cmd)` returns the status of `export`,
+not of the command, so `export SSH_AUTH_SOCK="$(trove ssh-agent empty)"` passes
+even when `empty` fails — including under `set -e` — and leaves `SSH_AUTH_SOCK`
+set to the empty string. `ssh` reads that as no agent at all, so the failure
+resurfaces later as `Permission denied (publickey)` with nothing pointing at
+trove. `empty` writes nothing to stdout when it fails, so the separated form
+gives you the real status.
+
+Every call returns a **separate** socket with its own keys, so callers that run
+in parallel can't disturb each other's offers. The daemon owns the lifetime: the
+sockets go on `trove lock`, on idle-lock and at shutdown, and there is nothing
+to clean up. A key that leaves the vault — because its entry was edited, removed
+or moved — is dropped from these sockets at the same moment it is dropped from
+the main one. Key material never leaves troved: a scoped socket is served by the
+same agent code as the main one.
+
+One daemon hands out at most **32** of these. There is no way to close an
+individual socket, so a caller that loops on `ssh-agent empty` would otherwise
+consume file descriptors until the daemon stopped accepting anything; past the
+limit it is refused with a message naming `trove lock`.
+
+Requires a daemon that is already running — it does not autospawn one. A daemon
+with no vault unlocked holds no keys, so a socket it handed out could never be
+filled.
+
+### trove ssh-agent add
+
+```
+trove ssh-agent add <ENTRY>
+```
+
+Add one entry's SSH key to the agent named by `$SSH_AUTH_SOCK`.
+
+`<ENTRY>` is the entry path (`Infra/s1`), or `Infra/s1:deploy` when the entry
+holds more than one key. Naming the entry rather than a fingerprint is the
+point: whoever created it already knew which server it was for, so there is no
+discovery step — and there could not be one, because nothing in the SSH protocol
+enumerates the keys a server will accept.
+
+The socket must be one `trove ssh-agent empty` handed out; any other is refused,
+since filling it would mean handing the key to an agent trove doesn't run.
+Adding a key that is already there refreshes it instead of duplicating it, so
+re-running a script doesn't double its own offer count. Past six keys on one
+agent you get a warning — that is exactly where the original failure returns.
+
+Confirmation and warnings go to stderr; stdout stays empty so the command
+composes in a script.
+
 ### Forwarding into your own ssh-agent
 
 `SSH_AUTH_SOCK` is inherited at fork, so exporting it in a shell never reaches an

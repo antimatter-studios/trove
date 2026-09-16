@@ -30,6 +30,7 @@ use crate::ipc;
 pub mod forward;
 pub mod keeagent;
 pub mod keys;
+pub mod scoped;
 pub mod wire;
 
 pub use keys::{ForwardedKey, LoadedKey};
@@ -156,6 +157,20 @@ pub fn resolve_ssh_socket_path() -> PathBuf {
     PathBuf::from(tmp).join(format!("trove-ssh-{uid}.sock"))
 }
 
+/// Bind the SSH agent socket, without serving it yet.
+///
+/// Separate from [`serve`] so a caller that must hand the path to someone else
+/// can be sure the socket is accepting connections before it does — see
+/// [`scoped::create`], whose caller does `export SSH_AUTH_SOCK=$(...)` and runs
+/// `ssh` a moment later.
+///
+/// On Unix this removes a stale socket left by a dead daemon (bind would
+/// otherwise fail `EADDRINUSE`) and locks the socket to the owner; on Windows
+/// it stands up a named pipe.
+pub async fn bind_listener(socket_path: &std::path::Path) -> std::io::Result<ipc::Listener> {
+    ipc::bind(socket_path).await
+}
+
 /// Bind the SSH agent socket and serve forever. Returns when `accept` errors
 /// repeatedly (it backs off rather than dying — see the inner loop).
 ///
@@ -166,12 +181,17 @@ pub async fn run(
     store: KeyStore,
     idle: Arc<IdleTracker>,
 ) -> std::io::Result<()> {
-    // Bind via the platform IPC transport. On Unix this removes a stale
-    // socket left by a dead daemon (bind would otherwise fail EADDRINUSE) and
-    // locks the socket to the owner; on Windows it stands up a named pipe.
-    let mut listener = ipc::bind(&socket_path).await?;
+    let listener = bind_listener(&socket_path).await?;
     eprintln!("ssh-agent listening on {}", socket_path.display());
+    serve(listener, store, idle).await
+}
 
+/// Accept connections on an already-bound listener and serve them from `store`.
+pub async fn serve(
+    mut listener: ipc::Listener,
+    store: KeyStore,
+    idle: Arc<IdleTracker>,
+) -> std::io::Result<()> {
     // Agent-lock state belongs to this listener and is shared by every
     // connection it serves — `ssh-add -x` in one shell must lock the agent for
     // all of them.

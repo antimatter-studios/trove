@@ -22,6 +22,7 @@ use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize;
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
+use troved::ssh_agent::scoped::ScopedAgents;
 
 const PASSWORD: &str = "test-password-materialize";
 
@@ -32,6 +33,7 @@ struct Daemon {
     state: SharedState,
     key_store: troved::ssh_agent::KeyStore,
     gpg_store: troved::gpg_agent::GpgKeyStore,
+    scoped_agents: ScopedAgents,
     mat_store: MaterializedStore,
     session: SessionStore,
     idle: Arc<IdleTracker>,
@@ -42,6 +44,7 @@ impl Daemon {
         let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
         let key_store: troved::ssh_agent::KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: troved::gpg_agent::GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
+        let scoped_agents = troved::ssh_agent::scoped::new_registry();
         let mat_store: MaterializedStore = Arc::new(RwLock::new(Vec::new()));
         let session: SessionStore = Arc::new(Mutex::new(None));
         // No-op lock callback: these tests drive `Lock` explicitly and don't
@@ -53,6 +56,7 @@ impl Daemon {
             state,
             key_store,
             gpg_store,
+            scoped_agents,
             mat_store,
             session,
             idle,
@@ -65,6 +69,7 @@ impl Daemon {
             &self.state,
             &self.key_store,
             &self.gpg_store,
+            &self.scoped_agents,
             &self.mat_store,
             &self.session,
             &self.idle,

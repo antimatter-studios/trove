@@ -25,6 +25,7 @@ use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::idle::{IdleState, IdleTracker};
 use crate::materialize::{self, MaterializedFile, MaterializedStore};
 use crate::protocol::{EntryDto, Request, Response};
+use crate::ssh_agent::scoped::{self, ScopedAgents};
 use crate::ssh_agent::{self, keeagent, keys as ssh_keys, KeyStore, LoadedKey};
 use crate::vaults::VaultSet;
 
@@ -62,6 +63,7 @@ pub async fn handle(
     state: &SharedState,
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
     mat_store: &MaterializedStore,
     session: &SessionStore,
     idle: &Arc<IdleTracker>,
@@ -318,7 +320,7 @@ pub async fn handle(
                     materialize::wipe_for_vault(mat_store, &key).await;
                     {
                         let guard = state.lock().await;
-                        rebuild_agent_stores(&guard, key_store, gpg_store).await;
+                        rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
                     }
                 }
                 // Lock everything — a bare `trove lock`, and what the
@@ -353,7 +355,32 @@ pub async fn handle(
                 .collect();
             ssh_agent::unforward_on_lock(&dropped).await;
 
-            let still_open = !state.lock().await.is_empty();
+            // Scoped agents (`ssh-agent empty`) serve their own copies, so the
+            // same reasoning applies to them: whatever just dropped out of the
+            // daemon's store has to drop out of theirs, or `lock --vault` would
+            // leave a private socket still offering the locked vault's key.
+            // With nothing left unlocked, the sockets go entirely — the daemon
+            // owns their lifetime so the caller never has to clean up.
+            //
+            // Held across the vault-state lock on purpose. `SshAgentAdd` takes
+            // the same lock for the whole of its resolve-then-insert, so the
+            // two cannot interleave; without that, an add that had already
+            // copied a key out of a vault could install it into a scoped agent
+            // after this teardown had run, leaving a locked vault's key
+            // signable.
+            let still_open = {
+                let guard = state.lock().await;
+                let still_open = !guard.is_empty();
+                if still_open {
+                    let blobs: Vec<Vec<u8>> =
+                        still_served.iter().map(|k| k.public_blob.clone()).collect();
+                    scoped::retain(scoped_agents, &blobs).await;
+                } else {
+                    scoped::clear_all(scoped_agents).await;
+                }
+                still_open
+            };
+
             if still_open {
                 // We cancelled the idle timer above to avoid racing the wipe,
                 // but other vaults are still unlocked and must keep auto-locking
@@ -410,6 +437,7 @@ pub async fn handle(
                 let mut gkeys = gpg_store.write().await;
                 gkeys.clear();
             }
+            scoped::clear_all(scoped_agents).await;
             {
                 let mut sess = session.lock().await;
                 *sess = None;
@@ -442,6 +470,83 @@ pub async fn handle(
             Handled {
                 response: Response::ok_ssh_agent_list(dtos),
                 shutdown: false,
+            }
+        }
+
+        Request::SshAgentEmpty => {
+            // Under the vault-state lock, like every other registry mutation:
+            // it is the lock `Lock` also holds while tearing scoped agents
+            // down, so "created but not yet registered" is never a state a
+            // teardown can observe.
+            let _state_guard = state.lock().await;
+            match scoped::create(scoped_agents, idle.clone()).await {
+                Ok(path) => Handled {
+                    response: Response::ok_ssh_agent_socket(path.display().to_string()),
+                    shutdown: false,
+                },
+                Err(e) => Handled {
+                    response: Response::err(format!(
+                        "could not create a private ssh-agent socket: {e}"
+                    )),
+                    shutdown: false,
+                },
+            }
+        }
+
+        Request::SshAgentAdd { socket, entry } => {
+            use base64::Engine as _;
+            // The vault-state lock is held for the whole of this: resolving the
+            // entry, and installing the key it yields. `Lock` takes the same
+            // lock while it tears the scoped agents down, so a lock landing
+            // mid-add either happens entirely before (and the resolve finds
+            // nothing) or entirely after (and the teardown takes the key back
+            // out). Releasing it in between would leave a copied private key in
+            // hand with nothing stopping it being installed into an agent the
+            // lock had already cleaned.
+            let state_guard = state.lock().await;
+            // Resolve the entry first: naming something that isn't there is the
+            // likely mistake, and it should fail before we touch any agent.
+            let key = match find_ssh_key(&state_guard, &entry) {
+                Ok(k) => k,
+                Err(msg) => {
+                    return Handled {
+                        response: Response::err(msg),
+                        shutdown: false,
+                    }
+                }
+            };
+            let dto = crate::protocol::SshKeyDto {
+                algo: key.algorithm_name().to_string(),
+                blob_b64: base64::engine::general_purpose::STANDARD.encode(&key.public_blob),
+                comment: key.comment.clone(),
+            };
+            match scoped::add(scoped_agents, std::path::Path::new(&socket), key).await {
+                Ok(outcome) => {
+                    let mut warnings = Vec::new();
+                    if outcome.served > scoped::MAX_AUTH_TRIES_DEFAULT {
+                        warnings.push(format!(
+                            "this agent now serves {} keys; sshd's MaxAuthTries defaults to {}, \
+                             and every key an agent lists is offered and counted against it, \
+                             so a server will refuse the connection before reaching the later ones",
+                            outcome.served,
+                            scoped::MAX_AUTH_TRIES_DEFAULT
+                        ));
+                    }
+                    Handled {
+                        response: Response::ok_ssh_agent_added(
+                            socket,
+                            dto,
+                            outcome.replaced,
+                            outcome.served,
+                            warnings,
+                        ),
+                        shutdown: false,
+                    }
+                }
+                Err(e) => Handled {
+                    response: Response::err(e.to_string()),
+                    shutdown: false,
+                },
             }
         }
 
@@ -619,6 +724,7 @@ pub async fn handle(
                 session,
                 key_store,
                 gpg_store,
+                scoped_agents,
                 peer_uid,
                 &path,
                 title.as_deref(),
@@ -635,7 +741,15 @@ pub async fn handle(
             code,
         } => {
             remove_entry(
-                state, session, key_store, gpg_store, peer_uid, &path, permanent, &code,
+                state,
+                session,
+                key_store,
+                gpg_store,
+                scoped_agents,
+                peer_uid,
+                &path,
+                permanent,
+                &code,
             )
             .await
         }
@@ -653,7 +767,16 @@ pub async fn handle(
             code,
         } => {
             rmdir(
-                state, session, key_store, gpg_store, peer_uid, &path, permanent, recursive, &code,
+                state,
+                session,
+                key_store,
+                gpg_store,
+                scoped_agents,
+                peer_uid,
+                &path,
+                permanent,
+                recursive,
+                &code,
             )
             .await
         }
@@ -1321,6 +1444,66 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
     (ssh, gpg)
 }
 
+/// Find the one SSH key across the open vaults that `entry` names.
+///
+/// The agent comment is the entry's full path (`Work/SSH/github`) for the
+/// conventional `id` attachment and `<path>:<attachment>` for anything else, so
+/// both spellings resolve: `Work/SSH/github` finds a lone key on that entry,
+/// and `Work/SSH/github:deploy` picks one of several.
+///
+/// Ambiguity is an error rather than a guess. The whole point of `add` is that
+/// the caller states which key gets offered, so silently picking one of two
+/// would give back the uncertainty they came here to remove. The same keypair
+/// present in two vaults is not ambiguous — it is one key, and it resolves
+/// last-unlock-wins exactly as the main keyring does (docs/multi-vault.md).
+fn find_ssh_key(set: &VaultSet, entry: &str) -> Result<LoadedKey, String> {
+    if set.is_empty() {
+        return Err("no vault is unlocked".to_string());
+    }
+    let prefix = format!("{entry}:");
+    let mut exact: Vec<LoadedKey> = Vec::new();
+    let mut prefixed: Vec<LoadedKey> = Vec::new();
+    for vault in set.iter() {
+        for key in load_ssh_keys_from_vault(vault) {
+            if key.comment == entry {
+                exact.push(key);
+            } else if key.comment.starts_with(&prefix) {
+                prefixed.push(key);
+            }
+        }
+    }
+    // An exact hit beats an attachment-qualified one: on an entry holding both
+    // `id` and `deploy`, the bare path means `id`.
+    let mut candidates = if exact.is_empty() { prefixed } else { exact };
+    // Collapse the same keypair appearing in several vaults, keeping the last
+    // seen — the signature is byte-identical either way.
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    candidates.reverse();
+    candidates.retain(|k| {
+        if seen.contains(&k.public_blob) {
+            false
+        } else {
+            seen.push(k.public_blob.clone());
+            true
+        }
+    });
+    match candidates.len() {
+        1 => Ok(candidates.remove(0)),
+        0 => Err(format!(
+            "no SSH key in the unlocked vaults is named '{entry}'"
+        )),
+        _ => {
+            let mut names: Vec<&str> = candidates.iter().map(|k| k.comment.as_str()).collect();
+            names.sort_unstable();
+            Err(format!(
+                "'{entry}' names {} SSH keys ({}); name one of them exactly",
+                names.len(),
+                names.join(", ")
+            ))
+        }
+    }
+}
+
 /// The 20-byte keygrip identifying a loaded GPG key on the Assuan wire,
 /// whichever role the key plays.
 fn gpg_keygrip(key: &LoadedGpgKey) -> [u8; 20] {
@@ -1335,8 +1518,14 @@ fn gpg_keygrip(key: &LoadedGpgKey) -> [u8; 20] {
 /// have carried agent-served key material — rebuild both agent stores from the
 /// whole open set so they never serve stale keys, and so a write to one vault
 /// doesn't drop another vault's keys off the keyring.
-async fn rebuild_agent_stores(set: &VaultSet, key_store: &KeyStore, gpg_store: &GpgKeyStore) {
+async fn rebuild_agent_stores(
+    set: &VaultSet,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
+) {
     let (ssh, gpg) = union_agent_keys(set);
+    let still_served: Vec<Vec<u8>> = ssh.iter().map(|k| k.public_blob.clone()).collect();
     {
         let mut keys = key_store.write().await;
         *keys = ssh;
@@ -1345,6 +1534,12 @@ async fn rebuild_agent_stores(set: &VaultSet, key_store: &KeyStore, gpg_store: &
         let mut keys = gpg_store.write().await;
         *keys = gpg;
     }
+    // Scoped agents hold their own copies, so a key the vault no longer has
+    // would keep signing on a private socket until the next lock. Replacing an
+    // entry's key, deleting the entry, or removing its group all land here, and
+    // all three mean the old key is gone — for every agent, not just the main
+    // one.
+    scoped::retain(scoped_agents, &still_served).await;
 }
 
 /// Code-gated write: field-level edits (set/unset/rename) on one entry.
@@ -1354,6 +1549,7 @@ async fn edit_entry(
     session: &SessionStore,
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
     peer_uid: u32,
     path: &str,
     title: Option<&str>,
@@ -1387,7 +1583,7 @@ async fn edit_entry(
     if let Err(e) = vault.save() {
         return err_handled(format!("saving vault: {e}"));
     }
-    rebuild_agent_stores(&guard, key_store, gpg_store).await;
+    rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_empty())
 }
 
@@ -1398,6 +1594,7 @@ async fn remove_entry(
     session: &SessionStore,
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
     peer_uid: u32,
     path: &str,
     permanent: bool,
@@ -1418,7 +1615,7 @@ async fn remove_entry(
     if let Err(e) = vault.save() {
         return err_handled(format!("saving vault: {e}"));
     }
-    rebuild_agent_stores(&guard, key_store, gpg_store).await;
+    rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_recycled(recycled))
 }
 
@@ -1482,6 +1679,7 @@ async fn rmdir(
     session: &SessionStore,
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
     peer_uid: u32,
     path: &str,
     permanent: bool,
@@ -1503,7 +1701,7 @@ async fn rmdir(
     if let Err(e) = vault.save() {
         return err_handled(format!("saving vault: {e}"));
     }
-    rebuild_agent_stores(&guard, key_store, gpg_store).await;
+    rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_recycled(recycled))
 }
 
