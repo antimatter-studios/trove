@@ -4,6 +4,56 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.16.0 — 2026-09-16
+
+**An agent with more than six keys can lock you out of a server.** `sshd`'s
+`MaxAuthTries` defaults to 6, counted per connection, and every key an agent
+lists is offered and counted against it — the publickey query phase carries no
+signature, but it still costs an attempt. trove's agent serves every key in
+every unlocked vault, so a key sitting past the sixth is never reached and the
+connection dies with `Received disconnect: Too many authentication failures`,
+which reads as the server rejecting you. The agent's order is not stable across
+unlocks, so an unchanged setup works at 15:00 and fails at 17:00, and `sshd`
+logs a failure from the fourth offer onward, which is what `fail2ban` counts.
+
+**Choose exactly what gets offered.** `trove ssh-agent empty` prints the path to
+a new, private agent socket serving nothing, and `trove ssh-agent add <entry>`
+puts one named entry's key on it:
+
+```sh
+sock=$(trove ssh-agent empty) || exit 1
+export SSH_AUTH_SOCK="$sock"
+trove ssh-agent add "Infra/s1"
+```
+
+Assign first and export second — `export VAR=$(cmd)` returns export's own status,
+so a failure passes even under `set -e` and leaves `SSH_AUTH_SOCK` empty, which
+`ssh` reads as no agent at all. Every `empty` is a separate socket with its own
+keys, so callers running in parallel cannot disturb each other's offers. Key
+material never leaves the daemon — a private socket is served by the same agent
+code as the main one — and the daemon owns the lifetime, so the sockets go on
+`lock`, on idle-lock and at shutdown, and a key that leaves the vault leaves
+them at the same moment.
+
+**Or let the agent choose, from the server's host key.** An entry can name the
+servers its key is for in an `SshAgent.HostKeys` field, and the agent then offers
+only the keys that claim the host `ssh` is connecting to:
+
+```sh
+trove edit "Infra/s1" --set "SshAgent.HostKeys=$(ssh-keyscan example.com)"
+```
+
+Raw `ssh-keyscan` output goes in unedited, which matters because `ssh-keyscan`
+authenticates nothing — collecting a host key cannot itself contribute to a
+lockout. The agent learns the host from `session-bind@openssh.com`, which `ssh`
+sends before asking for identities and separately on every hop of a `ProxyJump`;
+that ordering was measured rather than assumed, and the measurement is in
+`docs/ssh-agent-session-bind.md`. When nothing claims the host, everything is
+offered exactly as before, so switching this on cannot take a working setup
+away. `trove ssh-agent which <host>` shows what would be offered without
+connecting, and `TROVE_SSH_STRICT_HOSTKEYS=1` makes a miss offer nothing for
+callers who would rather find out immediately.
+
 ## v0.15.0 — 2026-09-10
 
 **Desktop attachments reach the file.** Adding, replacing, renaming or deleting

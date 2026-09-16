@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.16.0
+An agent holding more than six keys can lock you out of a server: `sshd`'s `MaxAuthTries` defaults to 6, counted per connection, and every key the agent lists is offered and counted against it even though the query phase carries no signature — so a key sitting past the sixth is never reached, and from the fourth offer `sshd` is writing the lines `fail2ban` counts. Two ways out. `trove ssh-agent empty` prints a new private agent socket serving nothing and `trove ssh-agent add <entry>` puts one named entry's key on it, so a script offers exactly what it chose; each `empty` is a separate socket, the keys never leave the daemon, and the sockets go on `lock`. Or an entry can name the servers its key is for in an `SshAgent.HostKeys` field — paste `ssh-keyscan` output in unedited — and the agent then offers only the keys that claim the host `ssh` is connecting to, which it learns from the host key `ssh` hands it before asking for identities. Nothing claims the host, everything is offered as before, so switching it on cannot take a working setup away; `trove ssh-agent which <host>` shows what would be offered without connecting, and `TROVE_SSH_STRICT_HOSTKEYS=1` makes a miss offer nothing instead.
+
 ### v0.15.0
 Attachments added or edited in the desktop app are written to the vault file — they were changed in memory only, and lasted as long as the window stayed open. Because a KDBX write re-derives the key with Argon2 every time, a save now shows a progress bar sized by what this vault's own writes actually cost, and a picked file appears in the list immediately rather than after the write. Attachments are identified by their bytes rather than their file names: images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, AVIF, HEIC, SVG) are shown as pictures, and PDF, Zip, gzip, SQLite, ELF, Mach-O and DER are named. Adding a file is one button plus a link for a blank one, where it used to be two buttons that read alike.
 
@@ -436,6 +439,3 @@ Unlocking in the desktop app no longer freezes the window — every command ran 
 
 ### v0.8.0
 Several vaults can be unlocked at once — `unlock` is additive, both agents serve the union, and `lock --vault <PATH>` drops one while the rest keep serving. Unlocking now also pushes your SSH keys into the *system* agent (the KeePassXC model), which is the only way keys reach a GUI application or an already-running terminal; the desktop app does the same on unlock, plus file materialization, a settings panel and a per-entry toggle. RSA OpenPGP keys work for signing and decryption. `KeeAgent.settings` written by KeePassXC are read correctly at last — they are UTF-16, which a UTF-8 reader silently mis-parsed, so every key you had marked was being skipped. New `--env` flag opens a vault from a `.env.trove` without a prompt. macOS release binaries are signed with the hardened runtime, so a same-uid process can no longer read the daemon's memory.
-
-### v0.7.1
-The desktop app's sidebar folder tree now lists groups alphabetically at every level (natural, case-insensitive) instead of in insertion order.
