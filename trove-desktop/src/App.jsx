@@ -471,6 +471,10 @@ function App() {
       entryId: orig ? orig.id : null,
       path: f.path, username: f.username, password: f.password,
       url: f.url, notes: f.notes, entryType: f.type,
+      // Blank-named rows are dropped here rather than sent: the form keeps an
+      // empty row around while someone is typing into it, and a half-added
+      // attribute should not reach the vault.
+      fields: (f.fields || []).filter((x) => x.k.trim() !== ""),
     };
     const res = await api.saveEntry(vault.id, input);
     patch({ entries: res.entries, selId: res.id, group: "__all" });

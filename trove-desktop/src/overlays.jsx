@@ -353,10 +353,17 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
     path: entry.path, username: entry.username,
     password: (detail && detail.password) || "", url: entry.url,
     notes: (detail && detail.notes) || "", type: entry.type,
-  } : { path: "", username: "", password: genPassword(), url: "", notes: "", type: "login" });
+    // Copied, not referenced: editing a row must not mutate the detail object
+    // the read-only pane behind this modal is still rendering from.
+    fields: ((detail && detail.fields) || []).map((x) => ({ k: x.k, v: x.v })),
+  } : { path: "", username: "", password: genPassword(), url: "", notes: "", type: "login", fields: [] });
   const [show, setShow] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
+  const setField = (i, part, v) =>
+    setF((o) => ({ ...o, fields: o.fields.map((x, j) => (j === i ? { ...x, [part]: v } : x)) }));
+  const addField = () => setF((o) => ({ ...o, fields: [...o.fields, { k: "", v: "" }] }));
+  const dropField = (i) => setF((o) => ({ ...o, fields: o.fields.filter((_, j) => j !== i) }));
   const ref = React.useRef(null);
   React.useEffect(() => { ref.current && ref.current.focus(); }, []);
 
@@ -406,6 +413,40 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
           <div className="fld">
             <label>Notes</label>
             <textarea className="inp" rows={3} value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything else worth remembering…" />
+          </div>
+          <div className="fld">
+            <label>
+              Attributes{" "}
+              <span style={{ color: "var(--text-ghost)", fontWeight: 400 }}>
+                — extra named values, e.g. git.token
+              </span>
+            </label>
+            {f.fields.map((kv, i) => (
+              <div className="pw-row" key={i} style={{ marginBottom: 6 }}>
+                <input
+                  className="inp mono"
+                  style={{ flex: "0 0 38%" }}
+                  value={kv.k}
+                  onChange={(e) => setField(i, "k", e.target.value)}
+                  placeholder="name"
+                  aria-label={"Attribute name " + (i + 1)}
+                />
+                <input
+                  className="inp mono"
+                  value={kv.v}
+                  onChange={(e) => setField(i, "v", e.target.value)}
+                  placeholder="value"
+                  aria-label={"Attribute value " + (i + 1)}
+                />
+                <button className="pw-tool" title="Remove attribute" onClick={() => dropField(i)}>
+                  <Icon name="trash" size={15} />
+                </button>
+              </div>
+            ))}
+            <button className="btn-ghost" style={{ marginTop: 2 }} onClick={addField}>
+              <Icon name="plus" size={14} style={{ display: "inline", verticalAlign: "-2px", marginRight: 5 }} />
+              Add attribute
+            </button>
           </div>
         </div>
         <div className="modal-foot">

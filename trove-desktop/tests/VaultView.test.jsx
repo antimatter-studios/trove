@@ -149,6 +149,88 @@ describe('unlocked vault interactions', () => {
     expect(secretField.querySelector('.fv').textContent).toContain(DETAIL.password);
   });
 
+  // Attribute editing. The detail pane could always SHOW attributes and copy
+  // them, but there was no way to add or change one without leaving the app for
+  // KeePassXC or the CLI — which is how a `git.token` attribute would have to
+  // be created.
+  async function openEditForm(c) {
+    fireEvent.click(c.querySelectorAll('.list .erow')[0]);
+    await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
+    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    fireEvent.click(edit);
+    await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
+    return c.querySelector('.modal');
+  }
+
+  it('prefills the edit form with the entry existing attributes', async () => {
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+    const names = [...modal.querySelectorAll('input')].map((i) => i.value);
+    expect(names).toContain('Host');
+    expect(names).toContain('db.prod');
+  });
+
+  it('saves a newly added attribute', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+
+    const add = [...modal.querySelectorAll('button')].find((b) => /add attribute/i.test(b.textContent));
+    expect(add).toBeTruthy();
+    fireEvent.click(add);
+
+    const nameInputs = [...modal.querySelectorAll('input[aria-label^="Attribute name"]')];
+    const valueInputs = [...modal.querySelectorAll('input[aria-label^="Attribute value"]')];
+    fireEvent.change(nameInputs[nameInputs.length - 1], { target: { value: 'git.token' } });
+    fireEvent.change(valueInputs[valueInputs.length - 1], { target: { value: 'tok_abc' } });
+
+    const save = [...modal.querySelectorAll('button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    const input = api.saveEntry.mock.calls[0][1];
+    expect(input.fields).toEqual(
+      expect.arrayContaining([{ k: 'git.token', v: 'tok_abc' }]),
+    );
+    // The attribute it already had must still be there — adding one is not
+    // replacing them.
+    expect(input.fields).toEqual(expect.arrayContaining([{ k: 'Host', v: 'db.prod' }]));
+  });
+
+  it('a removed attribute is absent from the saved payload', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+
+    const remove = [...modal.querySelectorAll('button')].find((b) => /remove attribute/i.test(b.title || ''));
+    expect(remove).toBeTruthy();
+    fireEvent.click(remove);
+
+    const save = [...modal.querySelectorAll('button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    expect(api.saveEntry.mock.calls[0][1].fields).toEqual([]);
+  });
+
+  it('a half-typed attribute row is not sent', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+
+    // Add a row and leave the name blank — someone who thinks better of it
+    // should not have to delete the row before they can save.
+    const add = [...modal.querySelectorAll('button')].find((b) => /add attribute/i.test(b.textContent));
+    fireEvent.click(add);
+
+    const save = [...modal.querySelectorAll('button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    const sent = api.saveEntry.mock.calls[0][1].fields;
+    expect(sent.every((f) => f.k.trim() !== '')).toBe(true);
+  });
+
   it('opens the command palette from the toolbar', async () => {
     const c = await mountUnlocked();
     const palBtn = c.querySelector('button[title*="Command palette"]');
