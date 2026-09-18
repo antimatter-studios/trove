@@ -15,6 +15,7 @@ mod keychain;
 mod pwgen;
 mod xml_export;
 
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -73,11 +74,19 @@ struct Cli {
         long = "env",
         global = true,
         num_args = 0..=1,
+        // A value must be attached with `=`. Without this an optional-value
+        // flag eats whatever follows it, and what follows it is usually the
+        // subcommand: `trove --vault v --env git-credential get` took
+        // "git-credential" as the PATH and then ran `trove get`. That is the
+        // credential-helper invocation exactly, since git appends the
+        // operation to whatever `credential.helper` holds — so the one place
+        // `--env` exists to serve was the one place it broke.
+        require_equals = true,
         conflicts_with = "password_stdin",
         value_name = "PATH"
     )]
     // Three states, which one Option cannot express: absent (no --env at all),
-    // bare `--env` (Some(None) — search for the file), and `--env <PATH>`
+    // bare `--env` (Some(None) — search for the file), and `--env=<PATH>`
     // (Some(Some(p)) — use exactly that).
     env_file: Option<Option<PathBuf>>,
 
@@ -1102,8 +1111,70 @@ enum GetResource {
     },
 }
 
+/// `--env` needs its value attached (`--env=<PATH>`), so the space-separated
+/// form now fails as an unknown subcommand — a message that describes the
+/// symptom and hides the cause. Spot that shape and say what to type instead.
+///
+/// Matching on raw argv rather than on clap's error text: the error is an
+/// English sentence that changes between clap releases, while the argv shape
+/// is the actual thing being diagnosed.
+///
+/// Fires only when the token after `--env` is not a subcommand. Otherwise
+/// `trove --env list --bogus` — a perfectly good bare `--env`, with a typo in
+/// the subcommand's own flags — would have clap's real diagnostic replaced by
+/// advice to write `--env=list`, which is both wrong and further from the fix
+/// than the message it hid.
+fn env_needs_equals_hint(args: &[OsString]) -> Option<String> {
+    let i = args.iter().position(|a| a == "--env")?;
+    let next = args.get(i + 1)?.to_string_lossy().into_owned();
+    if next.starts_with('-') {
+        return None;
+    }
+    if is_subcommand_name(&next) {
+        return None;
+    }
+    Some(format!(
+        "--env takes its path attached: `--env={next}`, not `--env {next}`.\n       \
+         Without the `=`, a bare `--env` would swallow whatever follows it — \
+         which is usually the subcommand."
+    ))
+}
+
+/// Whether `name` is one of this CLI's subcommands, by any spelling it accepts.
+///
+/// Read off clap's own command tree rather than a list kept here, so adding a
+/// subcommand or an alias cannot silently teach the hint to misfire on it.
+fn is_subcommand_name(name: &str) -> bool {
+    use clap::CommandFactory as _;
+    Cli::command()
+        .get_subcommands()
+        .any(|sub| sub.get_name() == name || sub.get_all_aliases().any(|alias| alias == name))
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // `args_os`, not `args`: the latter panics on an argument that is not valid
+    // UTF-8, and arguments here are frequently paths — `--vault`, `--env`, and
+    // everything `exec` forwards to a child process, which it already carries
+    // as `OsString` precisely because a path need not be UTF-8.
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&argv) {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Only re-explain the one error this flag's shape causes; every
+            // other parse failure is clap's to report, help and version
+            // included.
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
+            ) {
+                if let Some(hint) = env_needs_equals_hint(&argv) {
+                    eprintln!("error: {hint}");
+                    return ExitCode::from(EXIT_USER_ERROR);
+                }
+            }
+            e.exit();
+        }
+    };
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -1203,7 +1274,7 @@ fn run(cli: Cli) -> Result<()> {
                             candidates.iter().map(|p| p.display().to_string()).collect();
                         anyhow!(
                             "no {DEFAULT_ENV_FILE} found — looked in: {}. \
-                             Pass `--env <PATH>` to name one.",
+                             Pass `--env=<PATH>` to name one.",
                             looked.join(", ")
                         )
                     })?
@@ -5427,6 +5498,141 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
         }
     }
     EXIT_USER_ERROR
+}
+
+#[cfg(test)]
+mod env_flag_tests {
+    use super::*;
+
+    /// The bug this flag's shape caused: `--env` took the SUBCOMMAND as its
+    /// path and left the next word as the command, so the credential helper —
+    /// `git config credential.helper "trove --vault v --env git-credential"`,
+    /// with git appending the operation — silently ran `trove get` instead.
+    #[test]
+    fn env_does_not_swallow_the_subcommand() {
+        let cli = Cli::try_parse_from([
+            "trove",
+            "--vault",
+            "/tmp/v.kdbx",
+            "--env",
+            "git-credential",
+            "get",
+        ])
+        .expect("a bare --env before a subcommand must parse");
+        assert_eq!(
+            cli.env_file,
+            Some(None),
+            "--env with no attached value means 'search for the file'"
+        );
+        match cli.command {
+            Command::GitCredential { operation } => assert_eq!(operation, "get"),
+            other => panic!("expected git-credential, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_takes_an_attached_path() {
+        let cli = Cli::try_parse_from([
+            "trove",
+            "--vault",
+            "/tmp/v.kdbx",
+            "--env=/tmp/x.env",
+            "status",
+        ])
+        .expect("an attached path must parse");
+        assert_eq!(
+            cli.env_file,
+            Some(Some(PathBuf::from("/tmp/x.env"))),
+            "--env=<PATH> names exactly that file"
+        );
+    }
+
+    /// Hyphen-prefixed tokens were never the problem — clap does not take one
+    /// as an optional value — but it is the case people expect to break, so
+    /// pin it.
+    #[test]
+    fn env_never_swallowed_a_flag() {
+        let cli = Cli::try_parse_from([
+            "trove",
+            "--vault",
+            "/tmp/v.kdbx",
+            "--env",
+            "--keychain",
+            "status",
+        ])
+        .expect("a flag after --env must parse");
+        assert_eq!(cli.env_file, Some(None));
+        assert!(cli.keychain, "--keychain survived as its own flag");
+    }
+
+    #[test]
+    fn the_space_separated_form_is_explained_rather_than_guessed_at() {
+        let hint = env_needs_equals_hint(&argv(&["trove", "--env", "/tmp/x.env", "status"]))
+            .expect("this shape should be recognised");
+        assert!(
+            hint.contains("--env=/tmp/x.env"),
+            "hint should show the fix: {hint}"
+        );
+    }
+
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn an_unrelated_parse_error_is_left_to_clap() {
+        assert!(
+            env_needs_equals_hint(&argv(&["trove", "bogus"])).is_none(),
+            "without --env there is nothing for this hint to explain"
+        );
+        assert!(
+            env_needs_equals_hint(&argv(&["trove", "--env", "--keychain"])).is_none(),
+            "a flag after --env is not the equals mistake"
+        );
+    }
+
+    /// `trove --env list --bogus` is a correct bare `--env` with a typo in the
+    /// subcommand's own flags. Replacing clap's `--bogus` diagnostic with
+    /// "write --env=list" would be both wrong and further from the fix than the
+    /// message it hid.
+    #[test]
+    fn a_subcommand_after_env_is_not_the_equals_mistake() {
+        for name in ["list", "status", "git-credential", "cp", "mv"] {
+            assert!(
+                env_needs_equals_hint(&argv(&["trove", "--env", name, "--bogus"])).is_none(),
+                "{name} is a subcommand, not a forgotten path"
+            );
+        }
+    }
+
+    /// Aliases too, read off clap's command tree rather than a list here — so
+    /// adding one cannot quietly teach the hint to misfire on it.
+    #[test]
+    fn a_subcommand_alias_is_recognised_as_well() {
+        for alias in ["copy", "move"] {
+            assert!(
+                is_subcommand_name(alias),
+                "{alias} is an alias and must count as a subcommand"
+            );
+            assert!(env_needs_equals_hint(&argv(&["trove", "--env", alias, "a", "b"])).is_none());
+        }
+    }
+
+    /// Arguments are frequently paths, and a path need not be valid UTF-8.
+    /// Collecting argv with `args()` rather than `args_os()` panicked before
+    /// clap ever ran.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_argument_does_not_panic() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let weird = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff, b'.', b'e']);
+        let args = vec![OsString::from("trove"), OsString::from("--env"), weird];
+        let hint = env_needs_equals_hint(&args).expect("still recognised, lossily");
+        assert!(
+            hint.contains("--env="),
+            "hint should still name the fix: {hint}"
+        );
+    }
 }
 
 #[cfg(test)]

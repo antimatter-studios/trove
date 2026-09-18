@@ -879,15 +879,27 @@ never silently open a vault for a command that didn't ask for one.
 | form | reads |
 | --- | --- |
 | `--env` | `./.env.trove`, then `<vault dir>/.env.trove` |
-| `--env <dir>` | `<dir>/.env.trove` |
-| `--env <file>` | exactly that file |
+| `--env=<dir>` | `<dir>/.env.trove` |
+| `--env=<file>` | exactly that file |
+
+**A path must be attached with `=`.** `--env=<PATH>`, never `--env <PATH>`. An
+option whose value is optional otherwise takes whatever follows it, and what
+follows it is usually the subcommand — `trove --vault v --env git-credential
+get` read `git-credential` as the path and then ran `trove get`. That is the
+credential-helper invocation exactly, since git appends the operation to
+whatever `credential.helper` holds, so the one command `--env` exists to serve
+was the one command it broke. Writing the space-separated form now explains
+itself rather than failing as an unknown subcommand.
+
+Flags were never affected: `--env --keychain status` has always parsed, because
+a `-`-prefixed token is not taken as an optional value.
 
 Bare `--env` tries the working directory first, so a project checkout can override,
 then the directory holding the vault being opened — which is where the file belongs
 when a vault and its settings are kept together (`~/vaults/work.kdbx` beside
 `~/vaults/.env.trove`). When neither exists, the error names both places it looked.
 
-`--env <file>` naming a file that does not exist is a **hard error**, never a silent
+`--env=<file>` naming a file that does not exist is a **hard error**, never a silent
 fallback: you named that path, so a typo must not be papered over by prompting or by
 reading something else.
 

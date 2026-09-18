@@ -119,15 +119,14 @@ fn env_accepts_a_directory_and_appends_the_default_filename() {
             "list",
             "--vault",
             vault.to_str().unwrap(),
-            "--env",
-            tmp.path().to_str().unwrap(),
+            &format!("--env={}", tmp.path().display()),
         ],
         "",
         &[],
     );
     assert!(
         out.status.success(),
-        "--env <dir> should find <dir>/.env.trove: {}",
+        "--env=<dir> should find <dir>/.env.trove: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -147,15 +146,14 @@ fn env_accepts_an_explicit_file_path() {
             "list",
             "--vault",
             vault.to_str().unwrap(),
-            "--env",
-            renamed.to_str().unwrap(),
+            &format!("--env={}", renamed.display()),
         ],
         "",
         &[],
     );
     assert!(
         out.status.success(),
-        "--env <file> should read that file: {}",
+        "--env=<file> should read that file: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -481,5 +479,74 @@ fn keychain_refuses_without_a_terminal_and_never_outranks_the_others() {
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("--keychain ignored"),
         "and says which source won"
+    );
+}
+
+/// The bug `require_equals` exists to fix, at the level it actually bit.
+///
+/// `git config credential.helper "trove --vault v --env git-credential"` has
+/// git append the operation, so trove sees `--env git-credential get`. With an
+/// optional value and no `=`, `--env` took `git-credential` as its path and
+/// `get` became the subcommand — so the one command `--env` was written to
+/// serve was the one command it broke, and silently, by running a different
+/// one.
+#[test]
+fn a_bare_env_does_not_swallow_the_subcommand() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &[
+            "--vault",
+            vault.to_str().unwrap(),
+            "--env",
+            "git-credential",
+            "get",
+        ],
+        "protocol=https\nhost=example.com\n\n",
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Usage: trove get"),
+        "--env must not eat the subcommand and leave `get` running: {stderr}"
+    );
+    assert!(
+        out.status.success(),
+        "the credential helper should run: {stderr}"
+    );
+}
+
+/// The cost of requiring `=`: the space-separated form now fails. It must fail
+/// by naming the fix, not as `unrecognized subcommand '/some/path'`, which
+/// describes the symptom and hides the cause.
+#[test]
+fn the_space_separated_form_says_what_to_type_instead() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    let env_path = tmp.path().join(".env.trove");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &[
+            "list",
+            "--vault",
+            vault.to_str().unwrap(),
+            "--env",
+            env_path.to_str().unwrap(),
+        ],
+        "",
+        &[],
+    );
+    assert!(!out.status.success(), "the space form should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("--env={}", env_path.display())),
+        "the error should show the exact fix: {stderr}"
     );
 }
