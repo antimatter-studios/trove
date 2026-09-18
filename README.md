@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.17.3
+The desktop app can edit an entry's attributes, not just show and copy them — name/value rows in the edit form, with add and remove. Needed because a `git.token` attribute is how the credential helper is told to send a token rather than the web login, and there was no way to create one from the app that stores it. Reserved keys (`_Trove*`, `Materialize.*`) survive a save that never showed them, attributes cannot be named after the five standard fields, and names are stored exactly as typed.
+
 ### v0.17.2
 The git credential helper sends an entry's `git.token` attribute when it has one, falling back to `Password`. A self-hosted forge entry is usually the web login too, and forges increasingly want a token rather than a password for git over HTTPS — so both secrets now live on one entry, each used where it belongs. `git.token` is an ordinary KDBX attribute, editable in KeePassXC, matched case-insensitively.
 
@@ -436,6 +439,3 @@ Saving a vault no longer overwrites changes another writer made — the CLI, Kee
 
 ### v0.11.0
 `trove list` is grouped by folder, sorted, and no longer led by a UUID that no command accepts (it moved behind `--show-id`; `--json` still carries it). Each entry gets one short column saying what it holds — an SSH entry is named by its private key, and KeePassXC's `KeeAgent.settings` blob is never shown or counted. `search` gained the same column but stays flat, since its hits cross folders.
-
-### v0.10.0
-`trove show --json` prints one entry as an object — attachments as an array, custom fields as an object of values, unset scalars as `null` — so a program never has to parse the human format. Protected values keep the same rule: a password is an absent key unless `--show-protected`. Bare `--env` now looks in the working directory and then beside the vault being opened, instead of only at `./.env.trove`, and says where it looked when it finds nothing.
