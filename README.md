@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.17.1
+`--env` no longer eats the subcommand: `trove --vault v --env git-credential get` read `git-credential` as the path and ran `trove get` instead, which broke the git credential helper — the one command `--env` exists to serve. Bare `--env` still searches for `.env.trove`; naming a file is now `--env=<PATH>`, and the space-separated form explains itself rather than failing as an unknown subcommand. A `credential.helper` line needs no change.
+
 ### v0.17.0
 `trove cp <ENTRY> <DEST>` duplicates an entry — private key, derived `id.pub`, `KeeAgent.settings`, custom fields, attachments — so one SSH key reused across machines can carry a second, accurate name without being exported to disk and re-added. The copy is independent and nothing records that the two entries share a key: a recorded link invites tooling that rotates one and takes the other with it, which is the accident copying exists to prevent. `trove mv` now renames while it moves, Unix-style — an existing group means move into it, a new leaf means move and rename, and a destination whose parent does not exist is still an error. Both refuse a path another entry occupies, and both carry an alias (`cp`/`copy`, `mv`/`move`).
 
@@ -436,6 +439,3 @@ Saving a vault no longer overwrites changes another writer made — the CLI, Kee
 
 ### v0.9.1
 The desktop app is called Trove — the Dock read "TroveDesktop", which is a repository name rather than an application's. The bundle is now `Trove.app`; its identifier is unchanged, so it upgrades in place and keeps its preferences and permissions, and the Homebrew cask is still installed as `trove-desktop` to keep it separate from `trove-cli`.
-
-### v0.9.0
-Unlocking in the desktop app no longer freezes the window — every command ran on the main thread and blocked the event loop for the whole Argon2 derivation; they now run off it, and the unlock shows each step as it happens. Locking is split into two ideas that were previously one confusing button: *App lock* hides the window and takes nothing back from the machine (this is what the idle timer fires), while *Data lock* removes one vault's keys from the system agent and dematerializes its files. Every SSH entry carries its own agent policy — load or not, lifetime, confirm-each-signature, remove-on-data-lock — written where KeePassXC reads it. On the CLI side, a stale `SSH_AUTH_SOCK` no longer breaks forwarding: macOS restarts its ssh-agent on a new socket and every older process keeps the dead path, so trove now verifies the socket by protocol, asks launchd where the live agent is, and hands the working path to the session shell so `ssh` and `git` can follow. `--no-shell` is an alias for `--export`, for automation that cannot exit a subshell.

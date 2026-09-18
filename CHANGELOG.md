@@ -4,6 +4,26 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.17.1 — 2026-09-18
+
+**`--env` needs its path attached, and stops eating the subcommand.** `--env`
+takes an optional value, and an option whose value is optional consumes
+whatever follows it — which is usually the subcommand. So
+`trove --vault v --env git-credential get` read `git-credential` as the path
+and then ran `trove get`. That is the git credential helper's exact
+invocation, since `credential.helper` holds everything up to the subcommand
+and git appends the operation, so the one command `--env` exists to serve was
+the one command it broke, silently, by running a different one.
+
+Bare `--env` still searches for `.env.trove`. **Naming a file is now
+`--env=<PATH>`** — the space-separated form no longer works, and says so,
+naming the replacement rather than failing as `unrecognized subcommand`.
+A `credential.helper` line needs no change: it uses bare `--env`.
+
+Flags were never affected — `--env --keychain status` always parsed, because a
+`-`-prefixed token is not taken as an optional value. Only bare words were
+swallowed.
+
 ## v0.17.0 — 2026-09-16
 
 **`trove cp` duplicates an entry, key material and all.** One SSH key reused
