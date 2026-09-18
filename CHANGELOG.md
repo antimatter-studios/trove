@@ -4,6 +4,27 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.17.2 — 2026-09-18
+
+**The git credential helper sends a `git.token` attribute when the entry has
+one.** Forges increasingly refuse account passwords for git over HTTPS and want
+a personal access token instead, but the entry for a self-hosted forge is
+usually also the web login — so `Password`, the only field the helper read, was
+already holding the site password. Putting the token there cost you the web
+login; keeping the web login there meant git could not authenticate.
+
+```
+antimatter-studios/git
+  Password:   my-web-login       # still logs into the web UI
+  git.token:  a1b2c3…            # what git gets
+```
+
+`git.token` is an ordinary KDBX custom string field, so KeePassXC shows and
+edits it under an entry's additional attributes like any other. The name is
+matched case-insensitively, and an empty value counts as absent rather than as
+"send nothing", so a half-filled attribute cannot break an entry whose
+`Password` still works.
+
 ## v0.17.1 — 2026-09-18
 
 **`--env` needs its path attached, and stops eating the subcommand.** `--env`
