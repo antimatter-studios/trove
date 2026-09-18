@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.17.2
+The git credential helper sends an entry's `git.token` attribute when it has one, falling back to `Password`. A self-hosted forge entry is usually the web login too, and forges increasingly want a token rather than a password for git over HTTPS — so both secrets now live on one entry, each used where it belongs. `git.token` is an ordinary KDBX attribute, editable in KeePassXC, matched case-insensitively.
+
 ### v0.17.1
 `--env` no longer eats the subcommand: `trove --vault v --env git-credential get` read `git-credential` as the path and ran `trove get` instead, which broke the git credential helper — the one command `--env` exists to serve. Bare `--env` still searches for `.env.trove`; naming a file is now `--env=<PATH>`, and the space-separated form explains itself rather than failing as an unknown subcommand. A `credential.helper` line needs no change.
 
@@ -436,6 +439,3 @@ Saving a vault no longer overwrites changes another writer made — the CLI, Kee
 
 ### v0.10.0
 `trove show --json` prints one entry as an object — attachments as an array, custom fields as an object of values, unset scalars as `null` — so a program never has to parse the human format. Protected values keep the same rule: a password is an absent key unless `--show-protected`. Bare `--env` now looks in the working directory and then beside the vault being opened, instead of only at `./.env.trove`, and says where it looked when it finds nothing.
-
-### v0.9.1
-The desktop app is called Trove — the Dock read "TroveDesktop", which is a repository name rather than an application's. The bundle is now `Trove.app`; its identifier is unchanged, so it upgrades in place and keeps its preferences and permissions, and the Homebrew cask is still installed as `trove-desktop` to keep it separate from `trove-cli`.
