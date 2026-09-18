@@ -4,6 +4,28 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.17.3 — 2026-09-18
+
+**Attributes are editable in the desktop app, not just copyable.** The detail
+pane showed an entry's attributes and let you copy them, and that was all —
+adding or changing one meant leaving the app for KeePassXC or the CLI. That is
+not a rare corner: a `git.token` attribute is how the credential helper is told
+to send a personal access token rather than the web login, and there was no way
+to create one from the app that stores it.
+
+The edit form now has an Attributes section with name/value rows, add and
+remove. Saving reconciles: what is present is set, what was removed is deleted.
+
+Three things it deliberately refuses to do, each of which would lose data
+quietly. `_Trove*` and `Materialize.*` are hidden from the form and survive a
+save that never mentioned them, so editing an entry's username cannot destroy
+its materialize config. An attribute may not be named `Title`, `UserName`,
+`Password`, `URL` or `Notes` — attributes are written after the standard
+fields, so a `Password` attribute would replace the password just typed and
+then vanish from the attribute list, leaving nothing on screen to show where it
+went. And names are stored exactly as given, because trimming them would rename
+an existing attribute as a side effect of saving something else.
+
 ## v0.17.2 — 2026-09-18
 
 **The git credential helper sends a `git.token` attribute when the entry has
