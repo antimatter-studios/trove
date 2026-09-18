@@ -403,6 +403,35 @@ accepted and ignored — trove is a deliberate vault, not an autofilled cache.
 Offline-only. With `--password-stdin`, the vault password is stdin line 1 and
 git's request block follows.
 
+### Which secret is sent: `git.token`, else `Password`
+
+Forges increasingly refuse account passwords for git over HTTPS and want a
+personal access token instead. The same entry is usually also the web login, so
+writing the token into `Password` costs you the password for the site. Put it
+in a `git.token` attribute and the helper prefers it:
+
+```
+antimatter-studios/git
+  UserName:   chris.alex.thomas
+  Password:   my-web-login       ← still logs into the web UI
+  git.token:  a1b2c3…            ← what git gets
+```
+
+`git.token` is an ordinary KDBX custom string field — KeePassXC shows and edits
+it under an entry's additional attributes like any other — and the name is
+matched case-insensitively, so `Git.Token` works too. An empty value counts as
+absent rather than as "send nothing", so a half-filled attribute can't silently
+break an entry whose `Password` still works.
+
+There is no cross-tool convention to adopt here. The name is meant to read as
+"the token git uses" rather than as anything trove-specific, so it means the
+same to someone who has never heard of trove.
+
+A forge rejecting the wrong one of these says only `invalid username, password
+or token`, which does not tell you which of the two it just refused — so if git
+authentication fails against a host whose entry is also a web login, check
+which secret is being sent before assuming the credential is stale.
+
 ## trove resolve
 
 ```
