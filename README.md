@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.17.4
+Desktop entry paths are relative to the folder you are in — typing `ssh` inside `Infra` creates `Infra/ssh`, a leading `/` escapes to the root, and the field previews where it will land. Saving keeps your place instead of jumping to All Entries, and only follows the entry when it has left the view. Folders list what is filed directly in them, file-browser style, with subfolders in the sidebar. Two bugs found by hand: New entry while editing kept the previous entry's values and would have saved a duplicate of it, and new entries no longer arrive with a generated password nobody asked for.
+
 ### v0.17.3
 The desktop app can edit an entry's attributes, not just show and copy them — name/value rows in the edit form, with add and remove. Needed because a `git.token` attribute is how the credential helper is told to send a token rather than the web login, and there was no way to create one from the app that stores it. Reserved keys (`_Trove*`, `Materialize.*`) survive a save that never showed them, attributes cannot be named after the five standard fields, and names are stored exactly as typed.
 
@@ -436,6 +439,3 @@ Saving a vault no longer overwrites changes another writer made — the CLI, Kee
 
 ### v0.12.0
 `list` and `search` print the same shape again: one entry per line as `group/sub/title`, sorted, with a column naming the SSH key or attachments it carries. The folder grouping added in 0.11.0 is gone — a complete path per line greps and pastes, a header does not. `--env` also warns when its file is readable by more than its owner, since it holds a vault password; `TROVE_ENV_STRICT=1` turns that warning into a refusal.
-
-### v0.11.0
-`trove list` is grouped by folder, sorted, and no longer led by a UUID that no command accepts (it moved behind `--show-id`; `--json` still carries it). Each entry gets one short column saying what it holds — an SSH entry is named by its private key, and KeePassXC's `KeeAgent.settings` blob is never shown or counted. `search` gained the same column but stays flat, since its hits cross folders.
