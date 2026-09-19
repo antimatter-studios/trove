@@ -1,7 +1,7 @@
 import React from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { Icon } from './icons.jsx';
-import { buildTree } from './tree.js';
+import { buildTree, resolveEntryPath, isVisibleIn } from './tree.js';
 import * as api from './api.js';
 import { Sidebar, EntryList, Detail } from './views.jsx';
 import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal } from './overlays.jsx';
@@ -211,8 +211,7 @@ function App() {
 
   const filtered = React.useMemo(() => {
     let out = entries;
-    if (group === "__fav") out = out.filter((e) => e.fav);
-    else if (group !== "__all") out = out.filter((e) => e.groupPath === group || e.groupPath.startsWith(group + "/"));
+    out = out.filter((e) => isVisibleIn(e, group));
     const q = query.trim().toLowerCase();
     if (q) out = out.filter((e) => e.path.toLowerCase().includes(q) || e.username.toLowerCase().includes(q) || (e.url || "").toLowerCase().includes(q));
     out = out.slice().sort((a, b) => {
@@ -224,8 +223,18 @@ function App() {
     return out;
   }, [entries, group, query, sort]);
 
+  // Keep the selection inside the list that is on screen. An empty list must
+  // clear it, not keep the old one: the detail pane resolves `selId` against
+  // ALL entries, so a folder listing nothing would still show the entry you
+  // had selected elsewhere — a detail pane describing something the list in
+  // front of it does not contain. Folders that hold only subfolders list
+  // nothing, so this is reachable by ordinary clicking.
   useEffect(() => {
-    if (filtered.length && !filtered.some((e) => e.id === selId)) patch({ selId: filtered[0].id });
+    if (!filtered.length) {
+      if (selId !== null) patch({ selId: null });
+      return;
+    }
+    if (!filtered.some((e) => e.id === selId)) patch({ selId: filtered[0].id });
   }, [filtered, selId, patch]);
 
   const selected = entries.find((e) => e.id === selId) || null;
@@ -469,7 +478,10 @@ function App() {
   const saveEntry = async (f, orig) => {
     const input = {
       entryId: orig ? orig.id : null,
-      path: f.path, username: f.username, password: f.password,
+      // What was typed is relative to the folder being browsed unless it
+      // starts with `/`. Resolving here rather than in the form keeps the
+      // form showing what the user typed.
+      path: resolveEntryPath(f.path, group), username: f.username, password: f.password,
       url: f.url, notes: f.notes, entryType: f.type,
       // Blank-named rows are dropped here rather than sent: the form keeps an
       // empty row around while someone is typing into it, and a half-added
@@ -477,7 +489,20 @@ function App() {
       fields: (f.fields || []).filter((x) => x.k.trim() !== ""),
     };
     const res = await api.saveEntry(vault.id, input);
-    patch({ entries: res.entries, selId: res.id, group: "__all" });
+    // Stay put unless the entry would no longer be on screen.
+    //
+    // Saving must not move you for no reason: browsing `Infra` shows
+    // `Infra/Personal/thing`, so editing that entry there and following it to
+    // `Infra/Personal` would navigate away from a view that was already
+    // showing it. Only when the saved entry has left the current view — a new
+    // entry created elsewhere, or one moved out — is there anything to follow,
+    // and then the folder it actually landed in is where you want to be.
+    const saved = res.entries.find((e) => e.id === res.id);
+    patch((v) => ({
+      entries: res.entries,
+      selId: res.id,
+      group: isVisibleIn(saved, v.group) ? v.group : (saved && saved.groupPath) || "__all",
+    }));
     setForm(null);
     flashPlain(orig ? "Entry saved" : "Entry added");
   };
@@ -671,7 +696,12 @@ function App() {
 
         {/* overlays */}
         {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => patch({ selId: id, group: "__all" })} />}
-        {form && <EntryForm entry={form.entry} detail={form.detail} onClose={() => setForm(null)} onSave={saveEntry} onDelete={(e) => { setForm(null); setDel(e); }} />}
+        {/* Keyed so switching targets remounts it. The form seeds its state in
+            a useState initialiser, which React runs only on mount — without a
+            key, hitting New entry (⌘N) while the form is open for an existing
+            entry kept that entry's values on screen while `entry` became null,
+            so saving created a duplicate of it instead of a new entry. */}
+        {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onDelete={(e) => { setForm(null); setDel(e); }} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}
         {help && <HelpModal onClose={() => setHelp(false)} />}
         {settingsOpen && settings && <SettingsModal settings={settings} onChange={saveSettings} onClose={() => setSettingsOpen(false)} />}

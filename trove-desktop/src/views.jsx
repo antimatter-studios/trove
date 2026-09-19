@@ -55,7 +55,7 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect }) {
         </span>
         <Icon name="folder" size={15} className="tfic" />
         <span className="tr-name">{node.name}</span>
-        <span className="tr-count">{node.count}</span>
+        <span className="tr-count" title={node.count !== node.own ? `${node.own} here, ${node.count} including subfolders` : undefined}>{node.own}</span>
       </div>
       {hasKids && isOpen && node.children.map((c) => (
         <TreeNode key={c.path} node={c} depth={depth + 1} open={open} setOpen={setOpen} selected={selected} onSelect={onSelect} />
