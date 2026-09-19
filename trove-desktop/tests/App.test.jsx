@@ -106,6 +106,14 @@ describe('app chrome + theme', () => {
   });
 });
 
+// An unlock is several async hops — the backend call, progress events, then
+// the vault view mounting — and on a loaded CI runner that exceeds waitFor's
+// one-second default even though nothing is wrong. These assertions have
+// flaked four times in a day and blocked releases each time, so they wait as
+// long as the work can legitimately take. The suite's own testTimeout (20s)
+// still catches a genuine hang.
+const UNLOCK_WAIT = { timeout: 10000 };
+
 describe('real unlock flow', () => {
   it('unlocking a locked vault renders the live three-pane from unlock_vault', async () => {
     api.listVaults.mockResolvedValue([LOCKED_VAULT]);
@@ -119,7 +127,7 @@ describe('real unlock flow', () => {
     fireEvent.change(input, { target: { value: 'correct horse' } });
     fireEvent.submit(c.querySelector('.unlock-card'));
 
-    await waitFor(() => expect(c.querySelector('.body .pane.sidebar')).toBeTruthy());
+    await waitFor(() => expect(c.querySelector('.body .pane.sidebar')).toBeTruthy(), UNLOCK_WAIT);
     expect(api.unlockVault).toHaveBeenCalledWith('v1', 'correct horse');
     expect(c.querySelector('.body .pane.list')).toBeTruthy();
     expect(c.querySelector('.body .pane.detail')).toBeTruthy();
@@ -186,7 +194,10 @@ describe('real unlock flow', () => {
     // directly now so it cannot be. Asserting the field's value here would race
     // the other way — a rejected unlock clears it.
     fireEvent.submit(c.querySelector('.unlock-card'));
-    await waitFor(() => expect(c.querySelector('.ul-err').textContent).toContain('Incorrect master password'));
+    await waitFor(
+      () => expect((c.querySelector('.ul-err') || {}).textContent || '').toContain('Incorrect master password'),
+      UNLOCK_WAIT,
+    );
     expect(c.querySelector('.body .pane.sidebar')).toBeFalsy();
   });
 });

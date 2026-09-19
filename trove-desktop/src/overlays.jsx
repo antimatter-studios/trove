@@ -2,6 +2,7 @@ import React from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { Icon, TYPE_ICON } from './icons.jsx';
 import * as api from './api.js';
+import { baseGroup, displayEntryPath, resolveEntryPath } from './tree.js';
 // Trove — overlays: unlock, command palette, entry form, toast, help
 
 /* ============ UNLOCK ============ */
@@ -345,18 +346,24 @@ function genPassword() {
   let s = ""; for (let i = 0; i < 20; i++) s += sets[Math.floor(Math.random() * sets.length)];
   return s;
 }
-function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
+function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
   const editing = !!entry;
   // The list DTO carries no secrets; the current password + notes for an existing
   // entry are fetched (get_entry_detail) and handed in via `detail` to prefill.
   const [f, setF] = React.useState(() => entry ? {
-    path: entry.path, username: entry.username,
+    // Relative to the folder being browsed: saving it unchanged must be a
+    // no-op, and the full path would be re-prefixed by the resolver.
+    path: displayEntryPath(entry.path, group), username: entry.username,
     password: (detail && detail.password) || "", url: entry.url,
     notes: (detail && detail.notes) || "", type: entry.type,
     // Copied, not referenced: editing a row must not mutate the detail object
     // the read-only pane behind this modal is still rendering from.
     fields: ((detail && detail.fields) || []).map((x) => ({ k: x.k, v: x.v })),
-  } : { path: "", username: "", password: genPassword(), url: "", notes: "", type: "login", fields: [] });
+  } : { path: "", username: "", password: "", url: "", notes: "", type: "login", fields: [] });
+  // The password starts empty rather than pre-generated. Most new entries are
+  // recording a credential that already exists somewhere, and a value nobody
+  // asked for has to be noticed and cleared first — the generate button beside
+  // the field covers the other case in one click.
   const [show, setShow] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
@@ -391,8 +398,20 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
         </div>
         <div className="modal-body">
           <div className="fld">
-            <label>Path <span style={{ color: "var(--text-ghost)", fontWeight: 400 }}>— group/subgroup/name</span></label>
-            <input ref={ref} className="inp mono" value={f.path} onChange={(e) => set("path", e.target.value)} placeholder="inpace/00004.alex-clinic/ssh" />
+            <label>
+              Path{" "}
+              <span style={{ color: "var(--text-ghost)", fontWeight: 400 }}>
+                {baseGroup(group)
+                  ? `— inside ${baseGroup(group)}, or /absolute`
+                  : "— group/subgroup/name"}
+              </span>
+            </label>
+            <input ref={ref} className="inp mono" value={f.path} onChange={(e) => set("path", e.target.value)} placeholder={baseGroup(group) ? `name, or subfolder/name (inside ${baseGroup(group)})` : "group/subgroup/name"} />
+            {f.path.trim() !== "" && (
+              <div style={{ marginTop: 4, fontSize: 12, color: "var(--text-ghost)", fontFamily: "var(--font-mono)" }}>
+                → {resolveEntryPath(f.path, group)}
+              </div>
+            )}
           </div>
           <div className="fld">
             <label>Username</label>
