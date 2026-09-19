@@ -4,6 +4,35 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.17.4 — 2026-09-20
+
+**Entry paths in the desktop app are relative to the folder you are in.** The
+path field was absolute and saving reset the folder to All Entries, so every
+save lost your place in the tree. Typing `ssh` inside `Infra` now creates
+`Infra/ssh`; a leading `/` escapes to the root, so `/Personal/thing` goes where
+it says regardless of where you are standing. The field previews where a path
+will land. Editing shows the path relative to the current folder, because
+showing the full path would re-prefix it on save.
+
+**Saving stays where you are** unless the entry has left the view, and only
+then follows it. Editing an entry in a subfolder while browsing its parent no
+longer navigates deeper for no reason.
+
+**A folder lists what is filed directly in it**, the way a file browser does —
+subfolders are things you click into, not contents that spill into the list.
+Its badge counts that rather than the whole subtree, with the recursive total
+moved to a tooltip.
+
+Two bugs found by using the app rather than testing it. Pressing **New entry**
+while the edit form was open kept the previous entry's values on screen and
+would have saved them as a duplicate of that entry — the form was never keyed,
+so React reused it and its state initialiser did not re-run. And a new entry no
+longer arrives with a **generated password**: most new entries record a
+credential that already exists, and in a password manager a value nobody asked
+for is alarming before it is convenient, because nothing on screen says whether
+it was generated, leaked in from another entry, or a bug. The generate button
+beside the field covers the other case in one click.
+
 ## v0.17.3 — 2026-09-18
 
 **Attributes are editable in the desktop app, not just copyable.** The detail
