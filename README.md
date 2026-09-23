@@ -426,6 +426,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.19.0
+`trove unlock --filter TAG` enables only entries with that native KDBX tag, including tags inherited from groups—so SSH offers the right keys before a server's authentication-attempt limit. Entry and group tags can be edited through the CLI and desktop. Favorites now use the native `Favorite` tag while keeping the star and Favorites view; the old `_TroveFav=1` custom field is ignored, not migrated.
+
 ### v0.18.0
 `trove unlock --detach` unlocks the vault and hands your prompt straight back — no subshell, nothing to `eval`, and no session code. Both agents serve the vault's keys and `Materialize.*` entries are written as always, so `ssh`, `git` and `gpg` work; what is refused in that shell is extraction (`get`, `materialize`), because no code was minted. Not minted and withheld — not minted: a code nobody holds is still a live extraction capability sitting in daemon memory. Detaching one vault leaves an earlier session working, since unlock is additive. **`--no-shell` is removed**; it aliased `--export` and read like a statement about your terminal when it was really about `eval`, which made it the obvious wrong flag to reach for. `--export` is the replacement. The socket path `--export` prints is now shell-quoted.
 
@@ -452,6 +455,3 @@ Attachments added or edited in the desktop app are written to the vault file —
 
 ### v0.14.0
 Saving a vault no longer overwrites changes another writer made — the CLI, KeePassXC, or the same file synced from another Mac — and the desktop app notices an outside change and reloads instead of showing a list that stopped being true. Materialization is described per attachment (`Materialize.<attachment>.Target`), so one entry can write several files each with its own mode, and `trove rename-attachment` moves an attachment together with the settings and agent config that name it. The desktop app gains Touch ID unlock, and its bundle identifier becomes `com.antimatterstudios.trove` (settings and registered vaults are migrated).
-
-### v0.13.0
-**Breaking:** the env-file password variable is `TROVE_VAULT_PASSWORD`, not `TROVE_DB_PASSWORD` — rename it in your `.env.trove`, there is no fallback. New `--keychain` reads the password from the macOS login keychain (`trove keychain save|forget|status`); it is opt-in, always loses to `--env` and `--password-stdin`, and refuses without an interactive terminal, because a keychain dialog on a machine nobody is sitting at is a command that never returns. No biometry yet — Touch ID needs an entitlement only an `.app` bundle can carry, so it belongs to Trove.app. `docs/cli-reference.md` now documents the `.env.trove` file, its search order, permissions, and where a password may come from.
