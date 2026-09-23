@@ -6,28 +6,49 @@
 // the entry name. buildTree turns the flat list into a nested group tree with
 // recursive counts, which the sidebar renders.
 
-// Build a nested group tree with counts
-function buildTree(entries) {
-  const root = { name: "", path: "", children: {}, count: 0, own: 0 };
+// Build a nested group tree with direct and recursive counts plus native tags.
+function buildTree(entries, groups = []) {
+  const root = { name: "Root", path: "__root", groupPath: [], children: {}, count: 0, own: 0, tags: [], inheritedTags: [] };
+  const ensurePath = (segments) => {
+    let node = root;
+    const acc = [];
+    for (const seg of segments) {
+      acc.push(seg);
+      if (!node.children[seg]) {
+        node.children[seg] = { name: seg, path: acc.join("/"), groupPath: [...acc], children: {}, count: 0, own: 0, tags: [], inheritedTags: [] };
+      }
+      node = node.children[seg];
+    }
+    return node;
+  };
+  const rootGroup = groups.find((group) => group.path.length === 0);
+  if (rootGroup) {
+    root.tags = rootGroup.tags || [];
+    root.inheritedTags = rootGroup.inheritedTags || [];
+  }
   for (const e of entries) {
     let node = root;
     node.count++;
-    let acc = [];
     for (const seg of e.group) {
-      acc.push(seg);
-      if (!node.children[seg]) {
-        node.children[seg] = { name: seg, path: acc.join("/"), children: {}, count: 0, own: 0 };
-      }
+      if (!node.children[seg]) ensurePath([...node.groupPath, seg]);
       node = node.children[seg];
       node.count++;
     }
     // Where the entry is actually filed, as opposed to every folder above it.
     node.own++;
   }
+  for (const group of groups) {
+    const node = group.path.length ? ensurePath(group.path) : root;
+    node.tags = group.tags || [];
+    node.inheritedTags = group.inheritedTags || [];
+  }
   const toArr = (node) => ({
     name: node.name,
     path: node.path,
+    groupPath: node.groupPath,
     count: node.count,
+    tags: node.tags,
+    inheritedTags: node.inheritedTags,
     // What clicking this folder lists. The badge shows this rather than
     // `count`, because a folder listing its direct contents while displaying a
     // recursive total is a badge that lies about what clicking does.
@@ -38,7 +59,7 @@ function buildTree(entries) {
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }))
       .map(toArr),
   });
-  return toArr(root).children;
+  return [toArr(root)];
 }
 
 export { buildTree };
@@ -47,12 +68,11 @@ export { buildTree };
 
 /// The folder a typed path is interpreted against.
 ///
-/// `__all` and `__fav` are not folders — the first is every entry and the
-/// second is a cross-cutting selection — so both resolve against the root.
+/// `__all`, `__fav`, and `__root` resolve against the vault root.
 /// That makes relative and absolute identical in those views, which is
 /// precisely the behaviour they had before paths were relative at all.
 export function baseGroup(group) {
-  return !group || group === "__all" || group === "__fav" ? "" : group;
+  return !group || group === "__all" || group === "__fav" || group === "__root" ? "" : group;
 }
 
 /// Resolve what someone typed in the path field into a full entry path.
@@ -107,5 +127,6 @@ export function isVisibleIn(entry, group) {
   if (!entry) return false;
   if (!group || group === "__all") return true;
   if (group === "__fav") return !!entry.fav;
+  if (group === "__root") return entry.groupPath === "";
   return entry.groupPath === group;
 }

@@ -49,6 +49,8 @@ pub fn run() {
             commands::set_settings,
             commands::lock_vault,
             commands::list_entries,
+            commands::list_groups,
+            commands::set_group_tags,
             commands::list_attachments,
             commands::read_attachment,
             commands::read_attachment_image,

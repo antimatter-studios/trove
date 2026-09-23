@@ -185,6 +185,10 @@ pub struct EntryDto {
     pub group: Vec<String>,
     /// `group.join("/")`.
     pub group_path: String,
+    /// Tags assigned directly to this entry.
+    pub tags: Vec<String>,
+    /// Tags inherited from containing groups.
+    pub inherited_tags: Vec<String>,
     pub username: String,
     pub url: String,
     /// `"login" | "ssh" | "cert" | "db"` — stored `_TroveType` else derived.
@@ -250,11 +254,22 @@ pub struct EntryInput {
     pub url: String,
     pub notes: String,
     pub entry_type: String,
+    /// Direct KeePass-native entry tags. `None` preserves tags from older clients.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
     /// User-visible custom attributes, exactly the set [`entry_detail`]
     /// returns. Optional on the wire so an older frontend that does not send
     /// them leaves the entry's attributes alone rather than wiping them.
     #[serde(default)]
     pub fields: Option<Vec<KvDto>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupDto {
+    pub path: Vec<String>,
+    pub tags: Vec<String>,
+    pub inherited_tags: Vec<String>,
 }
 
 /// Result of [`save_entry`]: the fresh list plus the saved entry's id (for
@@ -263,6 +278,7 @@ pub struct EntryInput {
 #[serde(rename_all = "camelCase")]
 pub struct SaveResult {
     pub entries: Vec<EntryDto>,
+    pub groups: Vec<GroupDto>,
     pub id: String,
 }
 
@@ -833,6 +849,18 @@ fn build_entry_dtos(vault: &Vault) -> Vec<EntryDto> {
         .collect()
 }
 
+fn build_group_dtos(vault: &Vault) -> Vec<GroupDto> {
+    vault
+        .list_groups()
+        .into_iter()
+        .map(|group| GroupDto {
+            path: group.path,
+            tags: group.tags,
+            inherited_tags: group.inherited_tags,
+        })
+        .collect()
+}
+
 fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
     // Read the reserved fields + password (for strength/length) per entry.
     // These are computed server-side; the password never leaves this function.
@@ -865,6 +893,8 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
         title: s.title,
         group: s.group_path,
         group_path,
+        tags: s.tags,
+        inherited_tags: s.inherited_tags,
         username: s.username.unwrap_or_default(),
         url,
         entry_type,
@@ -1059,6 +1089,9 @@ fn apply_save_entry(vault: &mut Vault, input: &EntryInput) -> Result<EntryId, St
     set_or_clear(vault, &entry_id, "URL", &input.url)?;
     set_or_clear(vault, &entry_id, "Notes", &input.notes)?;
     set_or_clear(vault, &entry_id, "_TroveType", &input.entry_type)?;
+    if let Some(tags) = &input.tags {
+        vault.set_tags(&entry_id, tags).map_err(|e| e.to_string())?;
+    }
     if let Some(fields) = &input.fields {
         apply_attributes(vault, &entry_id, fields)?;
     }
@@ -1623,6 +1656,11 @@ pub async fn list_entries(app: AppHandle, id: String) -> Result<Vec<EntryDto>, S
     on_vault(app, id, |v| Ok(build_entry_dtos(v))).await
 }
 
+#[tauri::command]
+pub async fn list_groups(app: AppHandle, id: String) -> Result<Vec<GroupDto>, String> {
+    on_vault(app, id, |v| Ok(build_group_dtos(v))).await
+}
+
 // --- commands: reading one entry -------------------------------------------
 
 /// Read a single field (e.g. `Password`) for one entry, on demand.
@@ -2139,8 +2177,25 @@ pub async fn save_entry(
         let entry_id = apply_save_entry(vault, &input)?;
         Ok(SaveResult {
             entries: build_entry_dtos(vault),
+            groups: build_group_dtos(vault),
             id: entry_id.as_str().to_string(),
         })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_group_tags(
+    app: AppHandle,
+    id: String,
+    path: String,
+    tags: Vec<String>,
+) -> Result<Vec<GroupDto>, String> {
+    on_vault_write(app, id, move |vault| {
+        vault
+            .set_group_tags(&path, &tags)
+            .map_err(|e| e.to_string())?;
+        Ok(build_group_dtos(vault))
     })
     .await
 }
@@ -2356,6 +2411,7 @@ mod tests {
             url: "ssh://build.example.io".to_string(),
             notes: "rotate quarterly".to_string(),
             entry_type: "ssh".to_string(),
+            tags: None,
             fields: None,
         }
     }

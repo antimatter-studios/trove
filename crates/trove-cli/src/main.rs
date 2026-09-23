@@ -237,6 +237,11 @@ enum Command {
         /// (the env-var default or whatever a prior `idle set` left).
         #[arg(long = "timeout")]
         timeout: Option<u64>,
+        /// Expose only entries carrying this KeePass tag, directly or through
+        /// a containing group, through agents and unlock-time materialization.
+        /// Matching is case-insensitive.
+        #[arg(long = "filter", value_name = "TAG")]
+        filter: Option<String>,
         /// Print `export TROVE_SESSION=…` for `eval "$(…)"` instead of opening a
         /// session subshell. Implied when stdout is not a terminal.
         #[arg(long = "export")]
@@ -385,6 +390,15 @@ enum Command {
         /// Remove a custom field (repeatable).
         #[arg(long = "unset", value_name = "NAME")]
         unsets: Vec<String>,
+        /// Add a KeePass-native tag (repeatable).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Remove a KeePass-native tag (repeatable, case-insensitive).
+        #[arg(long = "untag", value_name = "TAG")]
+        untags: Vec<String>,
+        /// Remove all KeePass-native tags before applying `--tag` values.
+        #[arg(long = "clear-tags")]
+        clear_tags: bool,
     },
 
     /// Remove an entry. Default is the KeePassXC behavior: move it to the
@@ -481,6 +495,12 @@ enum Command {
         /// Seconds until the guarded auto-clear. 0 disables clearing.
         #[arg(long, default_value_t = 10)]
         timeout: u64,
+    },
+
+    /// Inspect and edit KeePass-native group tags (including empty groups).
+    Group {
+        #[command(subcommand)]
+        op: GroupOp,
     },
 
     /// Internal: the detached clipboard clearer (spawned by `clip`).
@@ -665,6 +685,30 @@ enum ExportFormat {
     Xml,
     /// KeePassXC's CSV column convention.
     Csv,
+}
+
+#[derive(Debug, Subcommand)]
+enum GroupOp {
+    /// List groups and their direct/inherited tags. Offline-only.
+    List {
+        /// Machine-readable array of group summaries.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or remove native tags on a group. Offline-only.
+    Edit {
+        /// Group path (use `Root` for the database root group).
+        group_path: String,
+        /// Add a tag (repeatable).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Remove a direct group tag (repeatable, case-insensitive).
+        #[arg(long = "untag", value_name = "TAG")]
+        untags: Vec<String>,
+        /// Remove all direct group tags before applying `--tag` values.
+        #[arg(long = "clear-tags")]
+        clear_tags: bool,
+    },
 }
 
 #[cfg(unix)]
@@ -1418,15 +1462,35 @@ fn run(cli: Cli) -> Result<()> {
             op: GpgAgentOp::List,
         } => cmd_gpg_agent_list(),
         Command::Materialize => cmd_materialize(require_vault(vault)?, pw_stdin),
+        Command::Group {
+            op: GroupOp::List { json },
+        } => cmd_group_list(require_vault(vault)?, pw_stdin, json),
+        Command::Group {
+            op:
+                GroupOp::Edit {
+                    group_path,
+                    tags,
+                    untags,
+                    clear_tags,
+                },
+        } => cmd_group_edit(
+            require_vault(vault)?,
+            &group_path,
+            &tags,
+            &untags,
+            clear_tags,
+            pw_stdin,
+        ),
         // `unlock` is daemon-directed: it uses its own positional vault and
         // deliberately ignores the global `--vault` offline selector.
         Command::Unlock {
             vault,
             timeout,
+            filter,
             export,
             shell,
             detach,
-        } => cmd_unlock(&vault, timeout, export, shell, detach, pw_stdin),
+        } => cmd_unlock(&vault, timeout, filter, export, shell, detach, pw_stdin),
         Command::Lock { vault } => cmd_lock(vault.as_deref()),
         Command::Status => cmd_status(),
         #[cfg(unix)]
@@ -1554,6 +1618,9 @@ fn run(cli: Cli) -> Result<()> {
             password_prompt,
             sets,
             unsets,
+            tags,
+            untags,
+            clear_tags,
         } => cmd_edit(
             vault,
             &entry_path,
@@ -1564,6 +1631,9 @@ fn run(cli: Cli) -> Result<()> {
             password_prompt,
             &sets,
             &unsets,
+            &tags,
+            &untags,
+            clear_tags,
             pw_stdin,
         ),
         Command::Rm {
@@ -2296,6 +2366,8 @@ fn entry_summary_json(e: &trove_core::EntrySummary) -> Value {
         "url": e.url,
         "attachments": e.attachment_names,
         "group_path": e.group_path,
+        "tags": e.tags,
+        "inherited_tags": e.inherited_tags,
     })
 }
 
@@ -3694,6 +3766,8 @@ fn print_show_summary(
     password: Option<&str>,
     custom_fields: &[String],
     attachments: &[String],
+    tags: &[String],
+    inherited_tags: &[String],
 ) {
     println!("Path: {display_path}");
     println!("Title: {title}");
@@ -3709,6 +3783,12 @@ fn print_show_summary(
     }
     if !attachments.is_empty() {
         println!("Attachments: {}", attachments.join(", "));
+    }
+    if !tags.is_empty() {
+        println!("Tags: {}", tags.join(", "));
+    }
+    if !inherited_tags.is_empty() {
+        println!("Inherited tags: {}", inherited_tags.join(", "));
     }
 }
 
@@ -3734,6 +3814,8 @@ struct ShowJson<'a> {
     password: Option<&'a str>,
     fields: serde_json::Map<String, Value>,
     attachments: &'a [String],
+    tags: &'a [String],
+    inherited_tags: &'a [String],
 }
 
 fn entry_show_json(e: ShowJson<'_>) -> Value {
@@ -3751,6 +3833,11 @@ fn entry_show_json(e: ShowJson<'_>) -> Value {
     }
     out.insert("fields".into(), Value::Object(e.fields));
     out.insert("attachments".into(), Value::from(e.attachments.to_vec()));
+    out.insert("tags".into(), Value::from(e.tags.to_vec()));
+    out.insert(
+        "inherited_tags".into(),
+        Value::from(e.inherited_tags.to_vec()),
+    );
     Value::Object(out)
 }
 
@@ -3912,6 +3999,8 @@ fn cmd_show(
                         password: password.as_deref(),
                         fields,
                         attachments: &summary.attachment_names,
+                        tags: &summary.tags,
+                        inherited_tags: &summary.inherited_tags,
                     }))?
                 );
                 return Ok(());
@@ -3925,6 +4014,8 @@ fn cmd_show(
                 password.as_deref(),
                 &custom,
                 &summary.attachment_names,
+                &summary.tags,
+                &summary.inherited_tags,
             );
         }
         None => {
@@ -4007,6 +4098,8 @@ fn cmd_show(
                         password: password.as_deref(),
                         fields,
                         attachments: &list("attachments"),
+                        tags: &list("tags"),
+                        inherited_tags: &list("inherited_tags"),
                     }))?
                 );
                 return Ok(());
@@ -4020,6 +4113,8 @@ fn cmd_show(
                 password.as_deref(),
                 &list("custom_fields"),
                 &list("attachments"),
+                &list("tags"),
+                &list("inherited_tags"),
             );
         }
     }
@@ -4087,6 +4182,9 @@ fn cmd_edit(
     password_prompt: bool,
     set_args: &[String],
     unsets: &[String],
+    tags: &[String],
+    untags: &[String],
+    clear_tags: bool,
     pw_stdin: bool,
 ) -> Result<()> {
     let mut sets = std::collections::BTreeMap::new();
@@ -4105,10 +4203,16 @@ fn cmd_edit(
             prompt_entry_password().context("reading new password")?,
         );
     }
-    if sets.is_empty() && unsets.is_empty() && title.is_none() {
+    if sets.is_empty()
+        && unsets.is_empty()
+        && title.is_none()
+        && tags.is_empty()
+        && untags.is_empty()
+        && !clear_tags
+    {
         return Err(anyhow!(
             "nothing to change: pass --title/--username/--url/--notes, \
-             --password-prompt, --set or --unset"
+             --password-prompt, --set/--unset, --tag/--untag or --clear-tags"
         ));
     }
     match vault {
@@ -4128,6 +4232,22 @@ fn cmd_edit(
             if let Some(new_title) = title {
                 v.set_field(&id, "Title", new_title).context("renaming")?;
             }
+            if clear_tags || !tags.is_empty() || !untags.is_empty() {
+                let mut current = v.get_entry(&id).map(|entry| entry.tags).unwrap_or_default();
+                if clear_tags {
+                    current.clear();
+                }
+                current.retain(|tag| !untags.iter().any(|remove| tag.eq_ignore_ascii_case(remove)));
+                for tag in tags {
+                    if !current
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(tag))
+                    {
+                        current.push(tag.clone());
+                    }
+                }
+                v.set_tags(&id, &current).context("setting tags")?;
+            }
             v.save().context("saving vault")?;
         }
         None => {
@@ -4137,6 +4257,9 @@ fn cmd_edit(
                 title: title.map(str::to_string),
                 sets,
                 unsets: unsets.to_vec(),
+                add_tags: tags.to_vec(),
+                remove_tags: untags.to_vec(),
+                clear_tags,
                 code,
             })?;
         }
@@ -4225,6 +4348,76 @@ fn cmd_cp(vault: Option<&Path>, entry_path: &str, dest_path: &str, pw_stdin: boo
         }
     }
     println!("copied '{entry_path}' to '{dest_path}'");
+    Ok(())
+}
+
+fn cmd_group_list(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
+    let vault = open_vault(vault_path, pw_stdin)?;
+    let groups = vault.list_groups();
+    if json {
+        let values: Vec<Value> = groups
+            .iter()
+            .map(|group| {
+                serde_json::json!({
+                    "path": group.display_path(),
+                    "tags": group.tags,
+                    "inherited_tags": group.inherited_tags,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&values)?);
+    } else {
+        for group in groups {
+            let direct = group.tags.join(", ");
+            let inherited = group.inherited_tags.join(", ");
+            println!(
+                "{}\ttags=[{}]\tinherited=[{}]",
+                group.display_path(),
+                direct,
+                inherited
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_group_edit(
+    vault_path: &Path,
+    group_path: &str,
+    tags: &[String],
+    untags: &[String],
+    clear_tags: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    if tags.is_empty() && untags.is_empty() && !clear_tags {
+        return Err(anyhow!(
+            "nothing to change: pass --tag, --untag or --clear-tags"
+        ));
+    }
+    let mut vault = open_vault(vault_path, pw_stdin)?;
+    let group = vault
+        .list_groups()
+        .into_iter()
+        .find(|group| group.display_path().eq_ignore_ascii_case(group_path))
+        .ok_or_else(|| anyhow!("group not found: {group_path}"))?;
+    let mut current = group.tags;
+    if clear_tags {
+        current.clear();
+    }
+    current.retain(|tag| !untags.iter().any(|remove| tag.eq_ignore_ascii_case(remove)));
+    for tag in tags {
+        if !current
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(tag))
+        {
+            current.push(tag.clone());
+        }
+    }
+    vault
+        .set_group_tags(group_path, &current)
+        .context("setting group tags")?;
+    vault.save().context("saving vault")?;
+    println!("updated tags on group '{group_path}'");
     Ok(())
 }
 
@@ -4878,6 +5071,7 @@ struct DaemonClassified {
 fn cmd_unlock(
     vault: &Path,
     timeout: Option<u64>,
+    filter: Option<String>,
     export: bool,
     shell: bool,
     detach: bool,
@@ -4920,6 +5114,7 @@ fn cmd_unlock(
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(bytes)
         }),
+        filter,
         // Only speak up to decline. Sending `None` otherwise keeps the request
         // byte-identical to what every previous release sent.
         session: detach.then_some(false),

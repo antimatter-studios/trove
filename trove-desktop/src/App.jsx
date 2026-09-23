@@ -4,7 +4,7 @@ import { Icon } from './icons.jsx';
 import { buildTree, resolveEntryPath, isVisibleIn } from './tree.js';
 import * as api from './api.js';
 import { Sidebar, EntryList, Detail } from './views.jsx';
-import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal } from './overlays.jsx';
+import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal, GroupTagsModal } from './overlays.jsx';
 // Trove — main app (multi-vault, backed by real .kdbx files via src/api.js)
 
 const { useState, useEffect, useRef, useCallback } = React;
@@ -16,6 +16,7 @@ const DEFAULT_LIST_W = 320;
 const SIDEBAR_MIN = 170, SIDEBAR_MAX = 420;
 const LIST_MIN = 240, LIST_MAX = 620;
 const clampW = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const isFavoriteTag = (tag) => tag.toLowerCase() === "favorite";
 
 // A draggable vertical divider between two panes. Reports incremental cursor
 // deltas while dragging; double-click resets the adjacent pane to its default.
@@ -73,11 +74,11 @@ function fmtLeft(ms) {
   return `${s}s`;
 }
 
-const NO_VAULT = { id: null, name: "No vault", file: "—", path: "", locked: true, entries: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
+const NO_VAULT = { id: null, name: "No vault", file: "—", path: "", locked: true, entries: [], groups: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
 
 // Give a fetched VaultDto the per-vault view state the UI layers on top.
 function withViewState(v) {
-  return { ...v, entries: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
+  return { ...v, entries: [], groups: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
 }
 
 function App() {
@@ -99,6 +100,7 @@ function App() {
 
   const [palette, setPalette] = useState(false);
   const [form, setForm] = useState(null);
+  const [groupEditor, setGroupEditor] = useState(null);
   const [del, setDel] = useState(null);
   const [help, setHelp] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -206,7 +208,7 @@ function App() {
   }, []);
 
   // ---- tree, filtered + sorted list ----
-  const tree = React.useMemo(() => buildTree(entries), [entries]);
+  const tree = React.useMemo(() => buildTree(entries, vault.groups), [entries, vault.groups]);
   const favCount = entries.filter((e) => e.fav).length;
 
   const filtered = React.useMemo(() => {
@@ -262,10 +264,10 @@ function App() {
     const v = vaults.find((x) => x.id === activeId);
     if (!v || v.locked || v.loaded) return;
     let cancelled = false;
-    api.listEntries(v.id).then((list) => {
+    Promise.all([api.listEntries(v.id), api.listGroups(v.id)]).then(([list, groups]) => {
       if (cancelled) return;
       setVaults((vs) => vs.map((x) => x.id === v.id
-        ? { ...x, entries: list, loaded: true, selId: x.selId || (list[0] ? list[0].id : null) }
+        ? { ...x, entries: list, groups, loaded: true, selId: x.selId || (list[0] ? list[0].id : null) }
         : x));
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -289,12 +291,12 @@ function App() {
       if (stopped || document.hidden) return;
       try {
         if (!(await api.vaultChangedOnDisk(id))) return;
-        const list = await api.reloadVault(id);
+        const [list, groups] = await Promise.all([api.reloadVault(id), api.listGroups(id)]);
         if (stopped) return;
         setVaults((vs) => vs.map((x) => x.id === id
           // Keep the selection if that entry still exists, so a reload does not
           // yank the reader somewhere else; fall back to the first entry.
-          ? { ...x, entries: list,
+          ? { ...x, entries: list, groups,
               selId: list.some((e) => e.id === x.selId) ? x.selId : (list[0] ? list[0].id : null) }
           : x));
         flashPlain("Reloaded — the vault changed outside this window");
@@ -366,7 +368,7 @@ function App() {
   const lockOne = useCallback(async (id, retractKeys) => {
     if (id == null) return;
     try { await api.lockVault(id, retractKeys); } catch (e) {}
-    setVaults((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], loaded: false, selId: null } : v));
+    setVaults((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], groups: [], loaded: false, selId: null } : v));
   }, []);
 
   // Data lock: this database only. Its keys come out of the agent and its files
@@ -404,8 +406,10 @@ function App() {
   const touchIdUnlock = async () => await api.biometricUnlock(vault.id);
   // Called after a successful password unlock, with the password that worked.
   const touchIdRemember = async (pw) => await api.biometricEnroll(vault.id, pw);
-  const unlockReady = (list) =>
-    patch({ locked: false, entries: list, loaded: true, group: "__all", selId: list[0] ? list[0].id : null });
+  const unlockReady = async (list) => {
+    const groups = await api.listGroups(vault.id).catch(() => []);
+    patch({ locked: false, entries: list, groups, loaded: true, group: "__all", selId: list[0] ? list[0].id : null });
+  };
   const switchVault = (id) => {
     setActiveId(id); setSwitcher(false);
     setPalette(false); setForm(null); setDel(null); setRevealed(false);
@@ -483,6 +487,7 @@ function App() {
       // form showing what the user typed.
       path: resolveEntryPath(f.path, group), username: f.username, password: f.password,
       url: f.url, notes: f.notes, entryType: f.type,
+      tags: [...f.tags.filter((tag) => !isFavoriteTag(tag)), ...(orig?.fav ? ["Favorite"] : [])],
       // Blank-named rows are dropped here rather than sent: the form keeps an
       // empty row around while someone is typing into it, and a half-added
       // attribute should not reach the vault.
@@ -500,11 +505,20 @@ function App() {
     const saved = res.entries.find((e) => e.id === res.id);
     patch((v) => ({
       entries: res.entries,
+      groups: res.groups,
       selId: res.id,
       group: isVisibleIn(saved, v.group) ? v.group : (saved && saved.groupPath) || "__all",
     }));
     setForm(null);
     flashPlain(orig ? "Entry saved" : "Entry added");
+  };
+  const saveGroupTags = async (group, tags) => {
+    const path = group.groupPath.join("/");
+    const groups = await api.setGroupTags(vault.id, path, tags);
+    const entries = await api.listEntries(vault.id);
+    patch({ groups, entries });
+    setGroupEditor(null);
+    flashPlain("Group tags saved");
   };
   const doDelete = async (e) => {
     let list;
@@ -603,9 +617,9 @@ function App() {
   useEffect(() => () => { clearInterval(clipTimer.current); clearTimeout(copiedTimer.current); clearTimeout(plainTimer.current); }, []);
 
   // ---- render ----
-  const groupTitle = group === "__all" ? "All entries" : group === "__fav" ? "Favorites" : group.split("/").pop();
+  const groupTitle = group === "__all" ? "All entries" : group === "__fav" ? "Favorites" : group === "__root" ? "Root" : group.split("/").pop();
   const groupSub = (query ? filtered.length + " of " + entries.length + " match “" + query + "”" : filtered.length + (filtered.length === 1 ? " entry" : " entries"))
-    + (group !== "__all" && group !== "__fav" ? " · " + group : "");
+    + (group !== "__all" && group !== "__fav" && group !== "__root" ? " · " + group : "");
 
 
   // The old toolbar row held these; they sit at the top of the detail column now.
@@ -666,7 +680,7 @@ function App() {
           <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} onTouchId={touchIdUnlock} onRemember={touchIdRemember} />
         ) : (
           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
-            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
+            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} onEditGroupTags={setGroupEditor} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
             <ResizeHandle
               label="Resize sidebar"
               onDelta={(inc) => setSidebarW((w) => clampW(w + inc, SIDEBAR_MIN, SIDEBAR_MAX))}
@@ -696,12 +710,8 @@ function App() {
 
         {/* overlays */}
         {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => patch({ selId: id, group: "__all" })} />}
-        {/* Keyed so switching targets remounts it. The form seeds its state in
-            a useState initialiser, which React runs only on mount — without a
-            key, hitting New entry (⌘N) while the form is open for an existing
-            entry kept that entry's values on screen while `entry` became null,
-            so saving created a duplicate of it instead of a new entry. */}
         {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onDelete={(e) => { setForm(null); setDel(e); }} />}
+        {groupEditor && <GroupTagsModal group={groupEditor} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}
         {help && <HelpModal onClose={() => setHelp(false)} />}
         {settingsOpen && settings && <SettingsModal settings={settings} onChange={saveSettings} onClose={() => setSettingsOpen(false)} />}

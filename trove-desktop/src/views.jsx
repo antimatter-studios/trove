@@ -35,7 +35,7 @@ function strengthInfo(v) {
 }
 
 /* ============ SIDEBAR ============ */
-function TreeNode({ node, depth, open, setOpen, selected, onSelect }) {
+function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags }) {
   const hasKids = node.children && node.children.length > 0;
   const isOpen = open[node.path];
   const sel = selected === node.path;
@@ -55,17 +55,19 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect }) {
         </span>
         <Icon name="folder" size={15} className="tfic" />
         <span className="tr-name">{node.name}</span>
+        {node.tags.length > 0 && <span className="tr-tag-count" title={`Tags: ${node.tags.join(", ")}`}>⌑{node.tags.length}</span>}
+        <button className="tr-edit-tags" title={`Edit ${node.name} tags`} aria-label={`Edit ${node.name} tags`} onClick={(e) => { e.stopPropagation(); onEditTags(node); }}><Icon name="edit" size={12} /></button>
         <span className="tr-count" title={node.count !== node.own ? `${node.own} here, ${node.count} including subfolders` : undefined}>{node.own}</span>
       </div>
       {hasKids && isOpen && node.children.map((c) => (
-        <TreeNode key={c.path} node={c} depth={depth + 1} open={open} setOpen={setOpen} selected={selected} onSelect={onSelect} />
+        <TreeNode key={c.path} node={c} depth={depth + 1} open={open} setOpen={setOpen} selected={selected} onSelect={onSelect} onEditTags={onEditTags} />
       ))}
     </React.Fragment>
   );
 }
 
-function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel }) {
-  const [open, setOpenState] = React.useState({ inpace: true, personal: true, infra: false });
+function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel }) {
+  const [open, setOpenState] = React.useState({ __root: true, inpace: true, personal: true, infra: false });
   const setOpen = (p) => setOpenState((o) => ({ ...o, [p]: !o[p] }));
   return (
     <div className="pane sidebar">
@@ -109,7 +111,7 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, o
 
         <div className="sb-label">Groups</div>
         {tree.map((n) => (
-          <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} />
+          <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} />
         ))}
       </div>
       {/* Pinned to the bottom of the sidebar: a new entry goes into the vault
@@ -694,6 +696,16 @@ function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, on
             </div>
           </div>
         </div>
+
+        {((entry.tags || []).some((tag) => tag.toLowerCase() !== "favorite") || (entry.inheritedTags || []).length > 0) && (
+          <div className="dt-section">
+            <div className="dt-sec-label">Tags</div>
+            <div className="tag-list">
+              {(entry.tags || []).filter((tag) => tag.toLowerCase() !== "favorite").map((tag) => <span className="tag-chip" key={`direct-${tag}`}>{tag}</span>)}
+              {(entry.inheritedTags || []).map((tag) => <span className="tag-chip inherited" key={`inherited-${tag}`} title="Inherited from a group">{tag}</span>)}
+            </div>
+          </div>
+        )}
 
         <div className="dt-section">
           <div className="dt-sec-label">Credentials</div>

@@ -96,6 +96,19 @@ impl Daemon {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
+            session: None,
+        })
+        .await
+    }
+
+    async fn unlock_filtered(&self, vault: &Path, filter: &str) -> Response {
+        self.handle(Request::Unlock {
+            path: vault.to_string_lossy().into_owned(),
+            password: PASSWORD.to_string(),
+            timeout: None,
+            keyfile: None,
+            filter: Some(filter.to_string()),
             session: None,
         })
         .await
@@ -119,6 +132,14 @@ impl Daemon {
 fn vault_with_key(path: &Path, entry: &str, key: &[u8]) {
     let mut v = Vault::create(path, PASSWORD).expect("create vault");
     let id = v.add_entry(entry).expect("add entry");
+    v.attach_binary(&id, "id", key).expect("attach key");
+    v.save().expect("save");
+}
+
+fn vault_with_tagged_key(path: &Path, entry: &str, key: &[u8], tag: &str) {
+    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+    let id = v.add_entry(entry).expect("add entry");
+    v.set_tags(&id, &[tag.to_string()]).expect("set tag");
     v.attach_binary(&id, "id", key).expect("attach key");
     v.save().expect("save");
 }
@@ -190,6 +211,24 @@ async fn second_unlock_adds_to_the_set_instead_of_replacing_it() {
         .collect();
     assert!(titles.contains(&"github.com".to_string()), "{titles:?}");
     assert!(titles.contains(&"gitlab.com".to_string()), "{titles:?}");
+}
+
+#[tokio::test]
+async fn unlock_filter_exposes_only_entries_with_the_selected_tag() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = tmp.path().join("filtered.kdbx");
+    vault_with_tagged_key(&vault, "gitlab-key", KEY_A, "GitLab");
+    let mut v = Vault::open(&vault, PASSWORD).expect("open");
+    let untagged = v.add_entry("personal-key").expect("add untagged entry");
+    v.attach_binary(&untagged, "id", KEY_B).expect("attach key");
+    v.save().expect("save");
+
+    let d = Daemon::new();
+    assert!(matches!(
+        d.unlock_filtered(&vault, "gitlab").await,
+        Response::Ok(_)
+    ));
+    assert_eq!(d.served_ssh_comments().await, vec!["gitlab-key"]);
 }
 
 #[tokio::test]

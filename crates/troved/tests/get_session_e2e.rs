@@ -101,6 +101,7 @@ fn unlock(path: &Path) -> Request {
         password: PASSWORD.to_string(),
         timeout: None,
         keyfile: None,
+        filter: None,
         session: None,
     }
 }
@@ -210,6 +211,7 @@ fn unlock_detached(path: &Path) -> Request {
         timeout: None,
         keyfile: None,
         session: Some(false),
+        filter: None,
     }
 }
 

@@ -125,6 +125,7 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -168,6 +169,7 @@ async fn status_with_disabled_idle_reports_zero_timeout() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -213,6 +215,7 @@ async fn status_request_does_not_bump_idle_timer() {
         password: PASSWORD.to_string(),
         timeout: None,
         keyfile: None,
+        filter: None,
         session: None,
     };
     let _ = handle(
@@ -271,6 +274,7 @@ async fn lock_signals_daemon_shutdown_when_open_set_empties() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -327,6 +331,7 @@ async fn ssh_agent_list_returns_served_keys() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;

@@ -48,6 +48,9 @@ fn create_open_roundtrip_with_binary_attachment() {
             .set_field(&id, "Password", "passphrase-for-the-key")
             .expect("set password");
         vault
+            .set_tags(&id, &["gitlab".to_string(), "work".to_string()])
+            .expect("set tags");
+        vault
             .attach_binary(&id, "id_ed25519", &key_bytes)
             .expect("attach");
         vault.save().expect("save");
@@ -63,6 +66,7 @@ fn create_open_roundtrip_with_binary_attachment() {
     assert_eq!(summary.username.as_deref(), Some("git"));
     assert_eq!(summary.url.as_deref(), Some("git@github.com"));
     assert_eq!(summary.attachment_names, vec!["id_ed25519".to_string()]);
+    assert_eq!(summary.tags, vec!["gitlab", "work"]);
 
     let read = vault
         .read_binary(&id, "id_ed25519")

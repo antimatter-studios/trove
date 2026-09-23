@@ -19,9 +19,9 @@ describe('buildTree', () => {
       entry(['2-early']),
     ]);
     // Top level: numbers sort naturally (2 before 10), then letters.
-    expect(tree.map((n) => n.name)).toEqual(['2-early', '10-late', 'Alpha', 'zebra']);
+    expect(tree[0].children.map((n) => n.name)).toEqual(['2-early', '10-late', 'Alpha', 'zebra']);
     // Nested children are sorted too (the recursion applies at every depth).
-    const alpha = tree.find((n) => n.name === 'Alpha');
+    const alpha = tree[0].children.find((n) => n.name === 'Alpha');
     expect(alpha.children.map((n) => n.name)).toEqual(['sub-a', 'sub-z']);
   });
 });
@@ -114,7 +114,7 @@ describe('folder counts match what clicking shows', () => {
 
   it('own counts what is filed directly in the folder', () => {
     const t = buildTree([e(['Infra']), e(['Infra', 'Personal']), e(['Infra', 'Personal'])]);
-    const infra = t.find((n) => n.name === 'Infra');
+    const infra = t[0].children.find((n) => n.name === 'Infra');
     expect(infra.own).toBe(1);
     expect(infra.count).toBe(3);
     const personal = infra.children.find((n) => n.name === 'Personal');
@@ -125,7 +125,7 @@ describe('folder counts match what clicking shows', () => {
   // rather than implying entries are there.
   it('a pure container folder owns nothing', () => {
     const t = buildTree([e(['Infra', 'Personal'])]);
-    const infra = t.find((n) => n.name === 'Infra');
+    const infra = t[0].children.find((n) => n.name === 'Infra');
     expect(infra.own).toBe(0);
     expect(infra.count).toBe(1);
   });

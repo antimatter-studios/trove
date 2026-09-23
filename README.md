@@ -139,6 +139,22 @@ ssh-add -L          # should list every ed25519/RSA-3072+/P-256/P-384 key in the
 ssh github.com      # signs against the daemon
 ```
 
+If the vault contains more keys than a server's authentication-attempt limit
+allows, tag the entries you want for a particular workflow and unlock with a
+filter:
+
+```sh
+trove edit gitlab-deploy --tag gitlab
+trove unlock my-vault.kdbx --filter=gitlab
+```
+
+`--filter` matches KeePass-native tags on entries or any containing group
+(case-insensitively). Only matching entries are exposed through the SSH/GPG
+agents and unlock-time materialization; the vault itself remains unlocked for
+the normal session-gated commands. Use `trove group list` and `trove group edit`
+to inspect and edit group tags. Without a filter, all entries continue to be
+exposed as before.
+
 Exporting `SSH_AUTH_SOCK` only reaches processes started afterwards, so unlock *also* pushes the keys into whatever agent `$SSH_AUTH_SOCK` already named — the KeePassXC model — and lock asks that agent to drop them again. That's what makes an already-running editor able to push. Per-key behaviour (removal at lock, lifetime and confirm constraints) comes from each entry's `KeeAgent.settings` and is editable in KeePassXC itself; `TROVE_SSH_FORWARD=0` turns the whole thing off. The trade: the private bytes leave the daemon, so lock can only *ask* for them back. `IdentityAgent "$(trove ssh-agent socket)"` in `~/.ssh/config` solves the same reachability problem with nothing leaving troved — see [docs/macos.md](docs/macos.md).
 
 For scripted use, `trove --password-stdin unlock my-vault.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).

@@ -91,6 +91,7 @@ impl Harness {
                     password: PASSWORD.to_string(),
                     timeout: None,
                     keyfile: None,
+                    filter: None,
                     session: None,
                 },
                 OWNER,
@@ -259,6 +260,9 @@ async fn writes_are_gated_and_persist() {
             title: None,
             sets: [("Env".to_string(), "prod".to_string())].into(),
             unsets: vec![],
+            add_tags: vec![],
+            remove_tags: vec![],
+            clear_tags: false,
             code: code.clone(),
         },
     ] {

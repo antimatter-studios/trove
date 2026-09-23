@@ -81,6 +81,10 @@ pub struct EntrySummary {
     /// itself is excluded (an entry directly under root has an empty
     /// `group_path`). Use `display_path()` to render as `Group/Sub/Title`.
     pub group_path: Vec<String>,
+    /// KeePass-native tags attached to this entry.
+    pub tags: Vec<String>,
+    /// Tags inherited from the containing groups, root → nearest parent.
+    pub inherited_tags: Vec<String>,
     /// Entry creation time as an RFC3339 UTC string (e.g.
     /// `2026-07-21T14:12:00+00:00`), from the kdbx entry's `CreationTime`.
     /// `None` when the vault does not record it.
@@ -88,6 +92,28 @@ pub struct EntrySummary {
     /// Entry last-modification time as an RFC3339 UTC string, from the kdbx
     /// entry's `LastModificationTime`. `None` when unavailable.
     pub modified: Option<String>,
+}
+
+/// Non-secret summary of a group and its direct/inherited KeePass tags.
+#[derive(Debug, Clone)]
+pub struct GroupSummary {
+    /// Names of the groups from the database root to this group. Empty for
+    /// the root group itself.
+    pub path: Vec<String>,
+    /// KeePass-native tags assigned directly to this group.
+    pub tags: Vec<String>,
+    /// Tags inherited from ancestor groups, root → nearest parent.
+    pub inherited_tags: Vec<String>,
+}
+
+impl GroupSummary {
+    pub fn display_path(&self) -> String {
+        if self.path.is_empty() {
+            "Root".to_string()
+        } else {
+            self.path.join("/")
+        }
+    }
 }
 
 impl EntrySummary {
@@ -102,6 +128,14 @@ impl EntrySummary {
             s.push_str(&self.title);
             s
         }
+    }
+
+    /// Whether this entry has a tag directly or inherits it from a group.
+    pub fn has_tag(&self, wanted: &str) -> bool {
+        self.tags
+            .iter()
+            .chain(&self.inherited_tags)
+            .any(|tag| tag.eq_ignore_ascii_case(wanted))
     }
 }
 
@@ -562,6 +596,36 @@ impl Vault {
             .collect()
     }
 
+    /// List groups (including the root and empty groups), with direct and
+    /// inherited native tags. Paths are sorted for stable CLI/UI output.
+    pub fn list_groups(&self) -> Vec<GroupSummary> {
+        let mut groups: Vec<_> = self
+            .inner
+            .db
+            .iter_all_groups()
+            .map(|group| summarise_group(&group))
+            .collect();
+        groups.sort_by(|a, b| {
+            a.path
+                .join("/")
+                .to_lowercase()
+                .cmp(&b.path.join("/").to_lowercase())
+        });
+        groups
+    }
+
+    /// Replace the KeePass-native tags assigned directly to a group.
+    /// Group modification time is updated as KeePass expects.
+    pub fn set_group_tags(&mut self, path: &str, tags: &[String]) -> Result<()> {
+        let id = self.resolve_group(path)?;
+        self.inner
+            .db
+            .group_mut(id)
+            .ok_or_else(|| Error::GroupNotFound(path.to_string()))?
+            .edit_tracking(|group| group.tags = tags.to_vec());
+        Ok(())
+    }
+
     /// Look up an entry by ID. Returns `None` if no such entry exists.
     pub fn get_entry(&self, id: &EntryId) -> Option<EntrySummary> {
         self.inner
@@ -645,6 +709,19 @@ impl Vault {
         } else {
             entry.set_unprotected(field, value);
         }
+        touch_modified(&mut entry);
+        Ok(())
+    }
+
+    /// Replace the KeePass-native tags on an entry.
+    pub fn set_tags(&mut self, id: &EntryId, tags: &[String]) -> Result<()> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let mut entry = self
+            .inner
+            .db
+            .entry_mut(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        entry.tags = tags.to_vec();
         touch_modified(&mut entry);
         Ok(())
     }
@@ -1422,6 +1499,8 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
         url: e.get_url().map(str::to_owned),
         attachment_names,
         group_path: build_group_path(e),
+        tags: e.tags.clone(),
+        inherited_tags: build_inherited_tags(Some(e.parent())),
         // kdbx stores these as second-precision naive UTC datetimes; render
         // them as RFC3339 UTC strings. `and_utc()` reinterprets the naive
         // value as UTC (it already is, per the KDBX spec) without shifting it.
@@ -1433,6 +1512,58 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
             .last_modification
             .map(|dt| dt.and_utc().to_rfc3339()),
     }
+}
+
+fn summarise_group(group: &keepass::db::GroupRef<'_>) -> GroupSummary {
+    GroupSummary {
+        path: build_group_path_from_group(group),
+        tags: group.tags.clone(),
+        inherited_tags: build_inherited_tags(group.parent()),
+    }
+}
+
+fn build_inherited_tags(group: Option<keepass::db::GroupRef<'_>>) -> Vec<String> {
+    let Some(group) = group else {
+        return Vec::new();
+    };
+    let db = group.database();
+    let mut current_id = group.id();
+    let mut ancestors = Vec::new();
+    while let Some(group) = db.group(current_id) {
+        ancestors.push(group.tags.clone());
+        if let Some(parent) = group.parent() {
+            current_id = parent.id();
+        } else {
+            break;
+        }
+    }
+    ancestors.reverse();
+    let mut tags = Vec::new();
+    for tag in ancestors.into_iter().flatten() {
+        if !tags
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&tag))
+        {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
+fn build_group_path_from_group(group: &keepass::db::GroupRef<'_>) -> Vec<String> {
+    let mut rev = Vec::new();
+    let db = group.database();
+    let mut current_id = group.id();
+    while let Some(group) = db.group(current_id) {
+        if let Some(parent) = group.parent() {
+            rev.push(group.name.clone());
+            current_id = parent.id();
+        } else {
+            break;
+        }
+    }
+    rev.reverse();
+    rev
 }
 
 /// Walk an entry's parent chain to the database root, collecting group

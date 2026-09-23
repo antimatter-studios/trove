@@ -28,6 +28,11 @@ pub enum Request {
         // NOTE: sensitive — key material. Never Debug-print.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keyfile: Option<String>,
+        /// Optional KeePass tag. When set, only entries carrying this exact
+        /// tag or inherited group tag (case-insensitive) are exposed through
+        /// the agents and materialization on this unlock.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<String>,
         /// Whether to mint a session code for this unlock. `None` (absent on
         /// the wire) and `Some(true)` both mint, so every existing caller is
         /// unchanged; `Some(false)` is `unlock --detach` saying it has nowhere
@@ -220,6 +225,15 @@ pub enum Request {
         sets: std::collections::BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unsets: Vec<String>,
+        /// KeePass-native tags to add to the entry.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        add_tags: Vec<String>,
+        /// KeePass-native tags to remove from the entry (case-insensitive).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove_tags: Vec<String>,
+        /// Remove every KeePass-native tag before applying `add_tags`.
+        #[serde(default)]
+        clear_tags: bool,
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
@@ -299,11 +313,17 @@ impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Request::Ping => f.write_str("Ping"),
-            Request::Unlock { path, timeout, .. } => f
+            Request::Unlock {
+                path,
+                timeout,
+                filter,
+                ..
+            } => f
                 .debug_struct("Unlock")
                 .field("path", path)
                 .field("password", &"<redacted>")
                 .field("timeout", timeout)
+                .field("filter", filter)
                 .field("keyfile", &"<redacted>")
                 .finish(),
             Request::List => f.write_str("List"),
@@ -401,6 +421,9 @@ impl std::fmt::Debug for Request {
                 title,
                 sets,
                 unsets,
+                add_tags,
+                remove_tags,
+                clear_tags,
                 ..
             } => f
                 .debug_struct("EditEntry")
@@ -409,6 +432,9 @@ impl std::fmt::Debug for Request {
                 // Field NAMES are safe to log; values may be secrets.
                 .field("sets", &sets.keys().collect::<Vec<_>>())
                 .field("unsets", unsets)
+                .field("add_tags", add_tags)
+                .field("remove_tags", remove_tags)
+                .field("clear_tags", clear_tags)
                 .field("code", &"<redacted>")
                 .finish(),
             Request::RemoveEntry {
@@ -476,6 +502,12 @@ pub struct EntryDto {
     /// usable `title`.
     #[serde(default)]
     pub group_path: Vec<String>,
+    /// KeePass-native tags attached to this entry.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Tags inherited from containing groups, root → nearest parent.
+    #[serde(default)]
+    pub inherited_tags: Vec<String>,
 }
 
 /// Full non-secret view of one entry, for `ShowEntry`. Everything here is
@@ -492,6 +524,11 @@ pub struct ShowDto {
     pub custom_fields: Vec<String>,
     pub attachments: Vec<String>,
     pub group_path: Vec<String>,
+    /// KeePass-native tags attached to this entry.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub inherited_tags: Vec<String>,
 }
 
 /// One SSH key served by the agent, for `ssh-agent list`. Rendered by the CLI
@@ -513,6 +550,9 @@ pub struct GpgKeyDto {
     pub comment: String,
 }
 
+// This is a wire-level response; boxing its payload would not reduce serialized
+// size and would add indirection to every response construction and consumer.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum Response {

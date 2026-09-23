@@ -161,9 +161,23 @@ pub type MaterializedStore = Arc<RwLock<Vec<MaterializedFile>>>;
 /// collected per-entry and returned alongside the successful plans, so the
 /// caller can log per-entry failures without aborting unlock.
 pub fn build_plans(vault: &Vault) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
+    build_plans_filtered(vault, None)
+}
+
+/// Build plans only for entries carrying `filter` as a KeePass-native tag.
+/// `None` preserves the historical behavior and includes every entry.
+pub fn build_plans_filtered(
+    vault: &Vault,
+    filter: Option<&str>,
+) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
     let mut plans = Vec::new();
     let mut errors = Vec::new();
     for entry in vault.list_entries() {
+        if let Some(wanted) = filter {
+            if !entry.has_tag(wanted) {
+                continue;
+            }
+        }
         match plans_for_entry(vault, &entry) {
             Ok(p) => plans.extend(p),
             Err(e) => errors.push((entry.title, e)),

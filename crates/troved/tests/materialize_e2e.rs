@@ -171,6 +171,7 @@ async fn unlock_writes_file_lock_wipes_it() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -220,6 +221,7 @@ async fn ttl_wipes_file_while_vault_remains_unlocked() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -263,6 +265,7 @@ async fn multi_file_unlock_and_lock() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -314,6 +317,7 @@ async fn one_bad_entry_does_not_block_others() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -349,6 +353,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -421,6 +426,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;
@@ -467,6 +473,7 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            filter: None,
             session: None,
         })
         .await;

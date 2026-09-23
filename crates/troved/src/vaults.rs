@@ -104,6 +104,10 @@ fn join_paths(paths: &[PathBuf]) -> String {
 struct Open<V> {
     key: PathBuf,
     vault: V,
+    /// Optional entry tag required for this vault's agent/materialization
+    /// exposure. The decrypted vault itself remains available for the normal
+    /// session-gated CRUD surface.
+    filter: Option<String>,
 }
 
 /// Every vault the daemon currently holds unlocked, in unlock order.
@@ -142,11 +146,20 @@ impl<V: VaultLike> VaultSet<V> {
     /// whatever was derived from it (materialized files in particular) before
     /// dropping it.
     pub fn insert(&mut self, vault: V) -> Option<V> {
+        self.insert_with_filter(vault, None)
+    }
+
+    /// Add a vault and optionally restrict what it exposes through agents and
+    /// materialization to entries carrying `filter` as a tag.
+    pub fn insert_with_filter(&mut self, vault: V, filter: Option<String>) -> Option<V> {
         let key = canonical_key(vault.path());
         match self.open.iter_mut().find(|o| o.key == key) {
-            Some(slot) => Some(std::mem::replace(&mut slot.vault, vault)),
+            Some(slot) => {
+                slot.filter = filter;
+                Some(std::mem::replace(&mut slot.vault, vault))
+            }
             None => {
-                self.open.push(Open { key, vault });
+                self.open.push(Open { key, vault, filter });
                 None
             }
         }
@@ -176,6 +189,11 @@ impl<V: VaultLike> VaultSet<V> {
     /// Every open vault, in unlock order.
     pub fn iter(&self) -> impl Iterator<Item = &V> {
         self.open.iter().map(|o| &o.vault)
+    }
+
+    /// Every open vault with the tag filter selected at unlock time.
+    pub fn iter_with_filters(&self) -> impl Iterator<Item = (&V, Option<&str>)> {
+        self.open.iter().map(|o| (&o.vault, o.filter.as_deref()))
     }
 
     /// The canonical path of every open vault, in unlock order.
