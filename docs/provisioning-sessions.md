@@ -50,6 +50,22 @@ bytes to the caller. That's what the **session code** gates.
    a script) it instead prints `export TROVE_SESSION=…` on **stdout** with a
    human-readable notice on **stderr**. Either way the code lands in a shell env
    — not on screen, not in `ps`, not on disk.
+4. **`--detach` declines the code entirely.** Both handoffs above need somewhere
+   to put the code: a subshell to launch, or an `eval` to consume the line. An
+   operator who wants neither — unlock the vault, keep the shell they are in —
+   has nowhere for it to go, and a code with nowhere to go is not harmless. It
+   is a live extraction capability sitting in daemon memory for the whole
+   unlock, reachable by anything that can read the operator's environment or
+   guess badly enough. So `--detach` has the daemon mint nothing: the gate is
+   never opened rather than opened and abandoned.
+
+   The vault is still fully unlocked — the SSH and GPG agents serve its keys and
+   `Materialize.*` entries are written to disk, because those are the *authenticate*
+   half of the table above and need no code. What is refused is *extraction*:
+   `get` and `materialize` in that shell. This is the honest shape of "I unlocked
+   for ssh and git" — the common case, which previously had to take a session
+   code it had no use for. Recovering one means unlocking again without the flag;
+   there is deliberately no way to ask the daemon for the code afterwards.
 
 ### Three barriers, three adversaries
 

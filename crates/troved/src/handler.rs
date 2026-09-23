@@ -99,6 +99,7 @@ pub async fn handle(
             password,
             timeout,
             keyfile,
+            session: mint_session,
         } => {
             let path_buf = PathBuf::from(path);
             // Decode composite-key material (if any) before the blocking open.
@@ -223,14 +224,29 @@ pub async fn handle(
                     // Mint the session code, bound to the uid that unlocked.
                     // Extraction (`Get`) will demand both. Returned to the CLI,
                     // which emits it as `export TROVE_SESSION=…`.
-                    let code = mint_session_code();
-                    {
+                    //
+                    // `session: Some(false)` — `unlock --detach` — declines.
+                    // The caller has nowhere to put a code (no subshell, no
+                    // `eval`), and a code nobody holds is not harmless: it is a
+                    // live extraction capability sitting in daemon memory for
+                    // the life of the unlock. Not minting means the gate is
+                    // never opened rather than opened and abandoned.
+                    //
+                    // Declining also leaves any EXISTING session alone. Unlock
+                    // is additive across vaults, so overwriting here would
+                    // revoke the session of a shell that is still using it —
+                    // detaching a new vault must not log out the old one.
+                    let code = if mint_session == Some(false) {
+                        None
+                    } else {
+                        let code = mint_session_code();
                         let mut sess = session.lock().await;
                         *sess = Some(Session {
                             code: code.clone(),
                             uid: peer_uid,
                         });
-                    }
+                        Some(code)
+                    };
                     Handled {
                         response: Response::ok_unlocked(
                             code,

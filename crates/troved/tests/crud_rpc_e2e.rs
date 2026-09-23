@@ -91,6 +91,7 @@ impl Harness {
                     password: PASSWORD.to_string(),
                     timeout: None,
                     keyfile: None,
+                    session: None,
                 },
                 OWNER,
             )
