@@ -410,6 +410,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.18.0
+`trove unlock --detach` unlocks the vault and hands your prompt straight back — no subshell, nothing to `eval`, and no session code. Both agents serve the vault's keys and `Materialize.*` entries are written as always, so `ssh`, `git` and `gpg` work; what is refused in that shell is extraction (`get`, `materialize`), because no code was minted. Not minted and withheld — not minted: a code nobody holds is still a live extraction capability sitting in daemon memory. Detaching one vault leaves an earlier session working, since unlock is additive. **`--no-shell` is removed**; it aliased `--export` and read like a statement about your terminal when it was really about `eval`, which made it the obvious wrong flag to reach for. `--export` is the replacement. The socket path `--export` prints is now shell-quoted.
+
 ### v0.17.4
 Desktop entry paths are relative to the folder you are in — typing `ssh` inside `Infra` creates `Infra/ssh`, a leading `/` escapes to the root, and the field previews where it will land. Saving keeps your place instead of jumping to All Entries, and only follows the entry when it has left the view. Folders list what is filed directly in them, file-browser style, with subfolders in the sidebar. Two bugs found by hand: New entry while editing kept the previous entry's values and would have saved a duplicate of it, and new entries no longer arrive with a generated password nobody asked for.
 
@@ -436,6 +439,3 @@ Saving a vault no longer overwrites changes another writer made — the CLI, Kee
 
 ### v0.13.0
 **Breaking:** the env-file password variable is `TROVE_VAULT_PASSWORD`, not `TROVE_DB_PASSWORD` — rename it in your `.env.trove`, there is no fallback. New `--keychain` reads the password from the macOS login keychain (`trove keychain save|forget|status`); it is opt-in, always loses to `--env` and `--password-stdin`, and refuses without an interactive terminal, because a keychain dialog on a machine nobody is sitting at is a command that never returns. No biometry yet — Touch ID needs an entitlement only an `.app` bundle can carry, so it belongs to Trove.app. `docs/cli-reference.md` now documents the `.env.trove` file, its search order, permissions, and where a password may come from.
-
-### v0.12.0
-`list` and `search` print the same shape again: one entry per line as `group/sub/title`, sorted, with a column naming the SSH key or attachments it carries. The folder grouping added in 0.11.0 is gone — a complete path per line greps and pastes, a header does not. `--env` also warns when its file is readable by more than its owner, since it holds a vault password; `TROVE_ENV_STRICT=1` turns that warning into a refusal.
