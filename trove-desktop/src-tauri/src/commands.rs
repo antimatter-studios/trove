@@ -2666,7 +2666,10 @@ mod tests {
             migrated.get_entry_tags(&eid).unwrap(),
             ["git", "private", "Favorite"]
         );
-        assert_eq!(migrated.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(), None);
+        assert_eq!(
+            migrated.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2676,7 +2679,12 @@ mod tests {
         vault
             .set_entry_tags(
                 &eid,
-                vec!["git".into(), "fAVorite".into(), "private".into(), "FAVORITE".into()],
+                vec![
+                    "git".into(),
+                    "fAVorite".into(),
+                    "private".into(),
+                    "FAVORITE".into(),
+                ],
             )
             .unwrap();
         vault.set_field(&eid, LEGACY_FAVORITE_FIELD, "1").unwrap();
@@ -2690,7 +2698,10 @@ mod tests {
             migrated.get_entry_tags(&eid).unwrap(),
             ["git", "Favorite", "private"]
         );
-        assert_eq!(migrated.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(), None);
+        assert_eq!(
+            migrated.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2698,7 +2709,10 @@ mod tests {
         let (mut vault, path) = temp_vault();
         let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
         vault
-            .set_entry_tags(&eid, vec!["favorite".into(), "git".into(), "FAVORITE".into()])
+            .set_entry_tags(
+                &eid,
+                vec!["favorite".into(), "git".into(), "FAVORITE".into()],
+            )
             .unwrap();
         vault.save().unwrap();
         let mut reopened = Vault::open(&path, "correct horse").unwrap();
@@ -2723,7 +2737,10 @@ mod tests {
         let reopened = Vault::open(&path, "correct horse").unwrap();
         assert!(!build_entry_dtos(&reopened)[0].fav);
         assert!(reopened.get_entry_tags(&eid).unwrap().is_empty());
-        assert_eq!(reopened.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(), None);
+        assert_eq!(
+            reopened.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2735,7 +2752,9 @@ mod tests {
 
         let mut stale = Vault::open(&path, "correct horse").unwrap();
         let mut other_writer = Vault::open(&path, "correct horse").unwrap();
-        other_writer.set_field(&eid, "Notes", "updated elsewhere").unwrap();
+        other_writer
+            .set_field(&eid, "Notes", "updated elsewhere")
+            .unwrap();
         other_writer.save().unwrap();
 
         assert!(save_with_favorite_migration(&mut stale).is_err());
@@ -2743,7 +2762,10 @@ mod tests {
         assert!(build_entry_dtos(&on_disk)[0].fav);
         assert!(on_disk.get_entry_tags(&eid).unwrap().is_empty());
         assert_eq!(
-            on_disk.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap().as_deref(),
+            on_disk
+                .get_field(&eid, LEGACY_FAVORITE_FIELD)
+                .unwrap()
+                .as_deref(),
             Some("1")
         );
     }
