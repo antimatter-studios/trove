@@ -159,7 +159,7 @@ describe('unlocked vault interactions', () => {
   async function openEditForm(c) {
     fireEvent.click(c.querySelectorAll('.list .erow')[0]);
     await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
-    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    const edit = [...c.querySelectorAll('.detail button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
     fireEvent.click(edit);
     await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
     return c.querySelector('.modal');

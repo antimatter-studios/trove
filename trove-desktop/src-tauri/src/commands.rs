@@ -2172,7 +2172,9 @@ pub async fn set_group_tags(
     tags: Vec<String>,
 ) -> Result<Vec<GroupDto>, String> {
     on_vault_write(app, id, move |vault| {
-        vault.set_group_tags(&path, &tags).map_err(|e| e.to_string())?;
+        vault
+            .set_group_tags(&path, &tags)
+            .map_err(|e| e.to_string())?;
         Ok(build_group_dtos(vault))
     })
     .await
