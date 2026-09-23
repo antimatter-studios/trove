@@ -4,6 +4,19 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.19.0 — 2026-09-23
+
+**Unlock can be filtered by native KDBX tags.** `trove unlock --filter gitlab`
+enables only entries tagged `gitlab`, including tags inherited from their
+groups. This gives SSH a smaller identity list when a server refuses keys
+offered too late. Entry and group tags can be listed and edited through the CLI;
+the desktop app displays and edits them too.
+
+**Favorites are stored as the native `Favorite` tag.** The desktop star and
+Favorites view remain; the generic tag display hides `Favorite` for a cleaner
+UI. The obsolete `_TroveFav=1` custom field is ignored, not migrated: toggle the
+star to add the native tag to an entry.
+
 ## v0.18.0 — 2026-09-23
 
 **`unlock --detach` unlocks the vault and gives you your prompt back.** The two
