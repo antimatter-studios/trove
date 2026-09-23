@@ -255,6 +255,21 @@ input { font-family: inherit; }
 .tree-row.sel .tfic { color: var(--accent); }
 .tr-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
 .tr-count { font-size: 11px; color: var(--text-ghost); font-variant-numeric: tabular-nums; }
+.tr-tag-count { font-size: 10px; color: var(--text-faint); }
+.tr-edit-tags { display: none; border: 0; background: transparent; color: var(--text-faint); padding: 2px; border-radius: 4px; cursor: pointer; }
+.tree-row:hover .tr-edit-tags, .tr-edit-tags:focus-visible { display: grid; place-items: center; }
+.tr-edit-tags:hover { color: var(--accent); background: var(--bg-2); }
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-chip { border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; color: var(--text-dim); font-size: 11px; }
+.tag-editor-list { margin-bottom: 8px; }
+.tag-editor-list .tag-chip { display: inline-flex; align-items: center; gap: 6px; }
+.tag-editor-list button { border: 0; padding: 0; background: transparent; color: var(--text-faint); cursor: pointer; font-size: 15px; line-height: 1; }
+.tag-editor-list button:hover { color: var(--red); }
+.tag-add-row { display: flex; align-items: center; gap: 6px; }
+.tag-add-row .inp { min-width: 0; flex: 1; }
+.tag-chip.inherited { border-style: dashed; color: var(--text-faint); }
+.tag-inherited { color: var(--text-faint); font-size: 12px; }
+.tag-inherited span { margin-right: 8px; color: var(--text-ghost); font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 /* New entry, pinned above the sidebar footer: it acts on the vault this pane
    represents, so it lives here rather than in a global toolbar. */
 /* Lock state on the vault chip: the badge carries the colour, so the state is

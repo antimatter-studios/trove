@@ -50,6 +50,14 @@ export function listEntries(id) {
   return invoke('list_entries', { id }).then(normEntries);
 }
 
+export function listGroups(id) {
+  return invoke('list_groups', { id });
+}
+
+export function setGroupTags(id, path, tags) {
+  return invoke('set_group_tags', { id, path, tags });
+}
+
 /* ---- Reading one entry (secrets, on demand) ---- */
 
 // get_field(id, entryId, field) -> Option<String>
@@ -70,6 +78,7 @@ export function saveEntry(id, input) {
   return invoke('save_entry', { id, input }).then((res) => ({
     id: res.id,
     entries: normEntries(res.entries),
+    groups: res.groups || [],
   }));
 }
 

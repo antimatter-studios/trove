@@ -101,6 +101,7 @@ fn unlock(path: &Path) -> Request {
         password: PASSWORD.to_string(),
         timeout: None,
         keyfile: None,
+        filter: None,
     }
 }
 

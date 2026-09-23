@@ -26,6 +26,18 @@ trove [OPTIONS] <COMMAND>
 
 `unlock` is the exception: it is inherently daemon-directed, so it keeps its own positional `<VAULT>` and ignores `--vault`.
 
+## trove unlock
+
+```
+trove unlock [--filter <TAG>] <VAULT>
+```
+
+Unlocks a vault additively. `--filter` selects entries tagged `<TAG>` directly
+or through a containing group (case-insensitive) for SSH/GPG agent exposure
+and unlock-time materialization. The decrypted vault remains available to the
+normal session-gated commands. `trove edit` manages entry tags; `trove group`
+lists and edits group tags. Without `--filter`, every entry is exposed.
+
 Entry-addressing commands accept a `group/sub/title` **entry path**; intermediate groups are created on write as needed.
 
 Exit codes (from [`classify_exit`](../crates/trove-cli/src/main.rs)):
@@ -97,6 +109,20 @@ Field-level edits on an existing entry. At least one change flag is required.
 | `--password-prompt` | Prompt (hidden, confirmed) for a new password. |
 | `--set NAME=VALUE` | Set a custom field (repeatable). |
 | `--unset NAME` | Remove a custom field (repeatable). |
+| `--tag TAG` / `--untag TAG` | Add or remove a KeePass-native entry tag (repeatable). |
+| `--clear-tags` | Remove all KeePass-native entry tags before applying `--tag`. |
+
+## trove group
+
+```
+trove [--vault <PATH>] group list [--json]
+trove [--vault <PATH>] group edit <GROUP_PATH> [--tag TAG]... [--untag TAG]... [--clear-tags]
+```
+
+List groups (including empty groups and `Root`) with direct and inherited
+KeePass tags, or edit tags directly on a group. Group edits are offline; pass
+`--vault` and unlock the file through the CLI. Tags inherited from ancestors
+are shown but not changed by editing a child group.
 
 ## trove rm
 
@@ -996,7 +1022,7 @@ Request envelope: `{"cmd": "<name>", ...}`. Response envelope: `{"status": "ok"|
 | `cmd` | Request fields | Response on success | Notes |
 | --- | --- | --- | --- |
 | `ping` | none | `{"status":"ok","pong":true}` | Heartbeat. Does **not** reset the idle timer. |
-| `unlock` | `path: string`, `password: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…],"ssh_forward_warnings":[…]}` | **Additive** — adds this vault to the unlocked set rather than replacing it, and the SSH/GPG stores are rebuilt from the union of every open vault (see [multi-vault.md](multi-vault.md)). Re-unlocking a vault already open replaces just that one. Runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the vault) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. A target another unlocked vault already materialized is skipped and warned about, never overwritten. Also forwards the unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`, under the same contract: never fails the unlock, per-key failures land in `ssh_forward_warnings` (omitted when empty). |
+| `unlock` | `path: string`, `password: string`, `filter?: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…],"ssh_forward_warnings":[…]}` | **Additive** — adds this vault to the unlocked set rather than replacing it, and the SSH/GPG stores are rebuilt from the union of every open vault (see [multi-vault.md](multi-vault.md)). Re-unlocking a vault already open replaces just that one. When `filter` is present, only entries carrying that KeePass-native tag are exposed through the agents and materialization. Otherwise runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every selected materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the vault) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. A target another unlocked vault already materialized is skipped and warned about, never overwritten. Also forwards the selected SSH keys into the agent named by `$SSH_AUTH_SOCK`, under the same contract: never fails the unlock, per-key failures land in `ssh_forward_warnings` (omitted when empty). |
 | `list` | none | `{"status":"ok","entries":[{"id","title","username","url","attachments"}, ...]}` | The union across every unlocked vault, in unlock order. Errors if none is unlocked. |
 | `lock` | `vault: string` *(optional)* | `{"status":"ok"}` | Without `vault`: wipes all materialized files, drops every vault, clears the SSH+GPG stores, cancels the idle timer. With `vault`: drops only that vault, wipes only **its** materialized files, rebuilds the key stores from what is still open, and keeps the idle timer armed; errors if no vault is unlocked at that path. Either way, keys that dropped out of the store are also removed from the agent named by `$SSH_AUTH_SOCK` (unless the entry set `RemoveAtDatabaseClose=false`); keys another still-unlocked vault provides stay. Idempotent. |
 | `shutdown` | none | `{"status":"ok"}` | Same as `lock`, then signals the daemon main loop to exit. |

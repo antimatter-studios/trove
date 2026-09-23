@@ -99,6 +99,7 @@ pub async fn handle(
             password,
             timeout,
             keyfile,
+            filter,
         } => {
             let path_buf = PathBuf::from(path);
             // Decode composite-key material (if any) before the blocking open.
@@ -147,8 +148,14 @@ pub async fn handle(
                     // still succeeds. The unlock RESPONSE goes out only after
                     // every materialize completes — so by the time the user
                     // sees `ok`, the files are on disk.
-                    let (materialized, materialize_warnings) =
-                        materialize_from_vault(&vault, &vault_key, &claimed, mat_store).await;
+                    let (materialized, materialize_warnings) = materialize_from_vault(
+                        &vault,
+                        &vault_key,
+                        &claimed,
+                        mat_store,
+                        filter.as_deref(),
+                    )
+                    .await;
                     {
                         let mut g = mat_store.write().await;
                         // Append: other unlocked vaults' files stay tracked.
@@ -162,7 +169,7 @@ pub async fn handle(
                     // in place.
                     let (ssh, gpg) = {
                         let mut guard = state.lock().await;
-                        guard.insert(vault);
+                        guard.insert_with_filter(vault, filter.clone());
                         union_agent_keys(&guard)
                     };
 
@@ -274,6 +281,8 @@ pub async fn handle(
                     url: s.url,
                     attachments: s.attachment_names,
                     group_path: s.group_path,
+                    tags: s.tags,
+                    inherited_tags: s.inherited_tags,
                 })
                 .collect();
             Handled {
@@ -782,6 +791,9 @@ pub async fn handle(
             title,
             sets,
             unsets,
+            add_tags,
+            remove_tags,
+            clear_tags,
             code,
         } => {
             edit_entry(
@@ -795,6 +807,9 @@ pub async fn handle(
                 title.as_deref(),
                 &sets,
                 &unsets,
+                &add_tags,
+                &remove_tags,
+                clear_tags,
                 &code,
             )
             .await
@@ -1287,8 +1302,9 @@ async fn materialize_from_vault(
     vault_key: &std::path::Path,
     claimed: &[(PathBuf, PathBuf)],
     store: &MaterializedStore,
+    filter: Option<&str>,
 ) -> (Vec<MaterializedFile>, Vec<String>) {
-    let (plans, plan_errors) = materialize::build_plans(vault);
+    let (plans, plan_errors) = materialize::build_plans_filtered(vault, filter);
     let mut warnings = Vec::new();
     for (title, e) in plan_errors {
         let line = format!("entry '{title}': {e}");
@@ -1363,6 +1379,7 @@ fn entry_dto(s: EntrySummary) -> EntryDto {
         url: s.url,
         attachments: s.attachment_names,
         group_path: s.group_path,
+        tags: s.tags,
     }
 }
 
@@ -1400,6 +1417,8 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
         custom_fields,
         attachments: summary.attachment_names,
         group_path: summary.group_path,
+        tags: summary.tags,
+        inherited_tags: summary.inherited_tags,
     }))
 }
 
@@ -1511,8 +1530,8 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
     let mut ssh_seen: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut gpg: Vec<LoadedGpgKey> = Vec::new();
     let mut gpg_seen: HashMap<[u8; 20], usize> = HashMap::new();
-    for vault in set.iter() {
-        for key in load_ssh_keys_from_vault(vault) {
+    for (vault, filter) in set.iter_with_filters() {
+        for key in load_ssh_keys_from_vault_filtered(vault, filter) {
             match ssh_seen.get(&key.public_blob) {
                 Some(&i) => ssh[i] = key,
                 None => {
@@ -1521,7 +1540,7 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
                 }
             }
         }
-        for key in load_gpg_keys_from_vault(vault) {
+        for key in load_gpg_keys_from_vault_filtered(vault, filter) {
             let grip = gpg_keygrip(&key);
             match gpg_seen.get(&grip) {
                 Some(&i) => gpg[i] = key,
@@ -1554,8 +1573,8 @@ fn find_ssh_key(set: &VaultSet, entry: &str) -> Result<LoadedKey, String> {
     let prefix = format!("{entry}:");
     let mut exact: Vec<LoadedKey> = Vec::new();
     let mut prefixed: Vec<LoadedKey> = Vec::new();
-    for vault in set.iter() {
-        for key in load_ssh_keys_from_vault(vault) {
+    for (vault, filter) in set.iter_with_filters() {
+        for key in load_ssh_keys_from_vault_filtered(vault, filter) {
             if key.comment == entry {
                 exact.push(key);
             } else if key.comment.starts_with(&prefix) {
@@ -1646,6 +1665,9 @@ async fn edit_entry(
     title: Option<&str>,
     sets: &std::collections::BTreeMap<String, String>,
     unsets: &[String],
+    add_tags: &[String],
+    remove_tags: &[String],
+    clear_tags: bool,
     code: &str,
 ) -> Handled {
     if let Some(refused) = session_gate(session, peer_uid, code).await {
@@ -1669,6 +1691,31 @@ async fn edit_entry(
     if let Some(new_title) = title {
         if let Err(e) = vault.set_field(&id, "Title", new_title) {
             return err_handled(format!("renaming: {e}"));
+        }
+    }
+    if clear_tags || !add_tags.is_empty() || !remove_tags.is_empty() {
+        let mut tags = vault
+            .get_entry(&id)
+            .map(|entry| entry.tags)
+            .unwrap_or_default();
+        if clear_tags {
+            tags.clear();
+        }
+        tags.retain(|tag| {
+            !remove_tags
+                .iter()
+                .any(|remove| tag.eq_ignore_ascii_case(remove))
+        });
+        for tag in add_tags {
+            if !tags
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(tag))
+            {
+                tags.push(tag.clone());
+            }
+        }
+        if let Err(e) = vault.set_tags(&id, &tags) {
+            return err_handled(format!("setting tags: {e}"));
         }
     }
     if let Err(e) = vault.save() {
@@ -1904,10 +1951,18 @@ async fn add_totp(
 /// ed25519 secret key found across all entries. Other algorithms and
 /// encrypted exports are skipped with a one-line warning. Never panics.
 pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
+    load_gpg_keys_from_vault_filtered(vault, None)
+}
+
+/// Filtered variant used by an unlock that selected a tag.
+pub fn load_gpg_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) -> Vec<LoadedGpgKey> {
     const ATTACHMENT_NAME: &str = "gpg-priv";
     let mut out = Vec::new();
     let entries: Vec<EntrySummary> = vault.list_entries();
     for entry in entries {
+        if !entry_matches_filter(&entry, filter) {
+            continue;
+        }
         if !entry.attachment_names.iter().any(|a| a == ATTACHMENT_NAME) {
             continue;
         }
@@ -1964,9 +2019,17 @@ pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
 /// `<path>` for the conventional `id` attachment name) where `<path>` is the
 /// full group-prefixed title (`Work/SSH/github`).
 pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
+    load_ssh_keys_from_vault_filtered(vault, None)
+}
+
+/// Filtered variant used by an unlock that selected a tag.
+pub fn load_ssh_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) -> Vec<LoadedKey> {
     let mut out = Vec::new();
     let entries: Vec<EntrySummary> = vault.list_entries();
     for entry in entries {
+        if !entry_matches_filter(&entry, filter) {
+            continue;
+        }
         if entry
             .attachment_names
             .iter()
@@ -2012,6 +2075,10 @@ pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
         }
     }
     out
+}
+
+fn entry_matches_filter(entry: &EntrySummary, filter: Option<&str>) -> bool {
+    filter.is_none_or(|wanted| entry.has_tag(wanted))
 }
 
 /// Try to read and parse a single attachment as an SSH private key.

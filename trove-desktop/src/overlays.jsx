@@ -345,6 +345,25 @@ function genPassword() {
   let s = ""; for (let i = 0; i < 20; i++) s += sets[Math.floor(Math.random() * sets.length)];
   return s;
 }
+function TagEditor({ tags, onChange, placeholder }) {
+  const [value, setValue] = React.useState("");
+  const add = () => {
+    if (!value || tags.some((tag) => tag.toLowerCase() === value.toLowerCase())) return;
+    onChange([...tags, value]);
+    setValue("");
+  };
+  return (
+    <div>
+      <div className="tag-list tag-editor-list">
+        {tags.map((tag, index) => <span className="tag-chip" key={`${tag}-${index}`}>{tag}<button type="button" aria-label={`Remove ${tag}`} onClick={() => onChange(tags.filter((_, i) => i !== index))}>×</button></span>)}
+      </div>
+      <div className="tag-add-row">
+        <input className="inp" value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }} placeholder={placeholder || "Add a tag"} />
+        <button type="button" className="btn-ghost" onClick={add} disabled={!value}>Add</button>
+      </div>
+    </div>
+  );
+}
 function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
   const editing = !!entry;
   // The list DTO carries no secrets; the current password + notes for an existing
@@ -352,8 +371,8 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
   const [f, setF] = React.useState(() => entry ? {
     path: entry.path, username: entry.username,
     password: (detail && detail.password) || "", url: entry.url,
-    notes: (detail && detail.notes) || "", type: entry.type,
-  } : { path: "", username: "", password: genPassword(), url: "", notes: "", type: "login" });
+    notes: (detail && detail.notes) || "", type: entry.type, tags: (entry.tags || []).filter((tag) => tag.toLowerCase() !== "favorite"),
+  } : { path: "", username: "", password: genPassword(), url: "", notes: "", type: "login", tags: [] });
   const [show, setShow] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
@@ -404,6 +423,10 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
             <input className="inp mono" value={f.url} onChange={(e) => set("url", e.target.value)} placeholder="https://" />
           </div>
           <div className="fld">
+            <label>KeePass tags</label>
+            <TagEditor tags={f.tags} onChange={(tags) => set("tags", tags)} placeholder="Add an entry tag" />
+          </div>
+          <div className="fld">
             <label>Notes</label>
             <textarea className="inp" rows={3} value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything else worth remembering…" />
           </div>
@@ -414,6 +437,36 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn-primary" onClick={save} disabled={busy}>{editing ? "Save changes" : "Add entry"}</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function GroupTagsModal({ group, onClose, onSave }) {
+  const [tags, setTags] = React.useState(group.tags || []);
+  const [busy, setBusy] = React.useState(false);
+  const save = async () => {
+    if (busy) return;
+    setBusy(true);
+    try { await onSave(group, tags); } catch (e) { setBusy(false); }
+  };
+  const label = group.groupPath.length ? group.groupPath.join("/") : "Root";
+  return (
+    <div className="scrim center" onMouseDown={onClose}>
+      <div className="modal" style={{ width: "min(480px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div className="mh-badge"><Icon name="folder" size={19} /></div>
+          <div><h2>Group tags</h2><p>{label}</p></div>
+          <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="fld">
+            <label>Tags on this group</label>
+            <TagEditor tags={tags} onChange={setTags} placeholder="Add a group tag" />
+          </div>
+          {group.inheritedTags?.length > 0 && <div className="tag-inherited"><span>Inherited</span> {group.inheritedTags.join(", ")}</div>}
+        </div>
+        <div className="modal-foot"><div className="grow" /><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary" onClick={save} disabled={busy}>Save tags</button></div>
       </div>
     </div>
   );
@@ -791,4 +844,4 @@ function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
   );
 }
 
-export { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };
+export { Unlock, CommandPalette, EntryForm, GroupTagsModal, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };
