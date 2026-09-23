@@ -257,7 +257,7 @@ describe('unlocked vault interactions', () => {
 
     fireEvent.click(c.querySelectorAll('.list .erow')[0]);
     await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
-    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    const edit = [...c.querySelectorAll('.detail button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
     fireEvent.click(edit);
     await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
     const save = [...c.querySelectorAll('.modal button')].find((b) => /save changes/i.test(b.textContent));
@@ -273,7 +273,7 @@ describe('unlocked vault interactions', () => {
     const c = await mountUnlocked();
     fireEvent.click(c.querySelectorAll('.list .erow')[0]);
     await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
-    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    const edit = [...c.querySelectorAll('.detail button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
     fireEvent.click(edit);
     await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
 
@@ -294,7 +294,7 @@ describe('unlocked vault interactions', () => {
     const c = await mountUnlocked();
     fireEvent.click(c.querySelectorAll('.list .erow')[0]);
     await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
-    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    const edit = [...c.querySelectorAll('.detail button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
     fireEvent.click(edit);
     await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
     const pathOf = (el) => el.querySelector('input.mono').value;
