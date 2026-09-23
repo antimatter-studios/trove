@@ -40,6 +40,14 @@ npm run test:rust      # backend tests (cargo)
 crate is picked up immediately — no crates.io publish or version bump needed while
 co-developing. The crate is still published to crates.io for external consumers.
 
+## Favorites
+
+The star and Favorites view use the ordinary KDBX entry tag `Favorite` (matched
+without regard to case). Other KeePass clients see it as a normal tag; the
+desktop presents it through the star rather than a separate tag label. Existing
+`_TroveFav=1` favorites remain visible, and the desktop converts them to the
+native tag on the next successful vault write. Other entry tags are preserved.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
