@@ -38,6 +38,8 @@ const RECENTS_FILE: &str = "vaults.json";
 /// Basename of the JSON file (in the app config dir) holding app settings.
 const SETTINGS_FILE: &str = "settings.json";
 
+const FAVORITE_TAG: &str = "Favorite";
+
 // --- state -----------------------------------------------------------------
 
 /// A registered vault: its canonical path, display name, and — when unlocked —
@@ -869,11 +871,8 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
         .unwrap_or_default();
     let trove_type = vault.get_field(&s.id, "_TroveType").ok().flatten();
     let fav = vault
-        .get_field(&s.id, "_TroveFav")
-        .ok()
-        .flatten()
-        .as_deref()
-        == Some("1");
+        .get_entry_tags(&s.id)
+        .is_ok_and(|tags| tags.iter().any(|tag| is_favorite_tag(tag)));
 
     let id = s.id.as_str().to_string();
     let path = s.display_path();
@@ -1206,18 +1205,39 @@ fn entry_detail(vault: &Vault, eid: &EntryId) -> Result<EntryDetailDto, String> 
     })
 }
 
-/// Set/clear `_TroveFav`. Saved by the caller.
-fn apply_set_favorite(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), String> {
-    if fav {
+fn is_favorite_tag(tag: &str) -> bool {
+    tag.eq_ignore_ascii_case(FAVORITE_TAG)
+}
+
+/// Keep every unrelated tag in order and exactly one canonical Favorite tag.
+fn set_favorite_tag(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), String> {
+    let tags = vault.get_entry_tags(eid).map_err(|e| e.to_string())?;
+    let mut updated = Vec::with_capacity(tags.len() + usize::from(fav));
+    let mut inserted = false;
+    for tag in &tags {
+        if is_favorite_tag(tag) {
+            if fav && !inserted {
+                updated.push(FAVORITE_TAG.to_string());
+                inserted = true;
+            }
+        } else {
+            updated.push(tag.clone());
+        }
+    }
+    if fav && !inserted {
+        updated.push(FAVORITE_TAG.to_string());
+    }
+    if updated != tags {
         vault
-            .set_field(eid, "_TroveFav", "1")
-            .map_err(|e| e.to_string())?;
-    } else {
-        vault
-            .remove_field(eid, "_TroveFav")
+            .set_entry_tags(eid, updated)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Set/clear the native Favorite tag. Saved by the caller.
+fn apply_set_favorite(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), String> {
+    set_favorite_tag(vault, eid, fav)
 }
 
 /// Move an entry to the recycle bin. Saved by the caller.
@@ -2457,7 +2477,7 @@ mod tests {
         vault
             .set_field(&eid, "Materialize.id.Target", "~/.ssh/id_ed25519")
             .unwrap();
-        vault.set_field(&eid, "_TroveFav", "1").unwrap();
+        vault.set_field(&eid, "_TroveObsolete", "1").unwrap();
 
         apply_save_entry(
             &mut vault,
@@ -2474,7 +2494,7 @@ mod tests {
             names.iter().any(|k| k == "Materialize.id.Target"),
             "materialize config must survive: {names:?}"
         );
-        assert!(names.iter().any(|k| k == "_TroveFav"), "got {names:?}");
+        assert!(names.iter().any(|k| k == "_TroveObsolete"), "got {names:?}");
         // And they are still hidden from the form.
         let d = entry_detail(&vault, &eid).unwrap();
         assert_eq!(d.fields.len(), 1);
@@ -2616,11 +2636,21 @@ mod tests {
         let (mut vault, _path) = temp_vault();
         let eid = apply_save_entry(&mut vault, &input(None, "Infra/SSH/build")).unwrap();
 
+        vault
+            .set_entry_tags(&eid, vec!["ssh".into(), "work".into()])
+            .unwrap();
+
         apply_set_favorite(&mut vault, &eid, true).unwrap();
         assert!(build_entry_dtos(&vault)[0].fav);
+        assert_eq!(
+            vault.get_entry_tags(&eid).unwrap(),
+            ["ssh", "work", "Favorite"]
+        );
+        apply_set_favorite(&mut vault, &eid, true).unwrap();
+        assert_eq!(vault.get_entry_tags(&eid).unwrap().len(), 3);
         apply_set_favorite(&mut vault, &eid, false).unwrap();
         assert!(!build_entry_dtos(&vault)[0].fav);
-
+        assert_eq!(vault.get_entry_tags(&eid).unwrap(), ["ssh", "work"]);
         // Delete recycles the entry: it leaves the live listing.
         apply_delete(&mut vault, &eid).unwrap();
         let live: Vec<_> = build_entry_dtos(&vault)
@@ -2632,6 +2662,27 @@ mod tests {
             })
             .collect();
         assert!(live.is_empty());
+    }
+
+    #[test]
+    fn native_favorite_tag_is_visible_and_star_removes_all_case_variants() {
+        let (mut vault, path) = temp_vault();
+        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
+        vault
+            .set_entry_tags(
+                &eid,
+                vec!["favorite".into(), "git".into(), "FAVORITE".into()],
+            )
+            .unwrap();
+        vault.save().unwrap();
+        let mut reopened = Vault::open(&path, "correct horse").unwrap();
+        assert!(build_entry_dtos(&reopened)[0].fav);
+
+        apply_set_favorite(&mut reopened, &eid, false).unwrap();
+        reopened.save().unwrap();
+        let cleared = Vault::open(&path, "correct horse").unwrap();
+        assert!(!build_entry_dtos(&cleared)[0].fav);
+        assert_eq!(cleared.get_entry_tags(&eid).unwrap(), ["git"]);
     }
 
     #[test]

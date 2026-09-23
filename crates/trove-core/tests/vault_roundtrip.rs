@@ -76,6 +76,36 @@ fn create_open_roundtrip_with_binary_attachment() {
 }
 
 #[test]
+fn native_entry_tags_round_trip_as_kdbx_tags() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("tags.kdbx");
+    let mut vault = Vault::create(&path, "pw").unwrap();
+    let id = vault.add_entry("tagged").unwrap();
+    vault
+        .set_entry_tags(&id, vec!["gitlab".into(), "Favorite".into()])
+        .unwrap();
+    vault.save().unwrap();
+
+    let reopened = Vault::open(&path, "pw").unwrap();
+    assert_eq!(
+        reopened.get_entry_tags(&id).unwrap(),
+        ["gitlab", "Favorite"]
+    );
+    assert_eq!(reopened.get_field(&id, "_TroveFav").unwrap(), None);
+
+    // Independently parse the same file through keepass, confirming these
+    // are native entry tags and not a Trove custom string field.
+    let mut file = std::fs::File::open(&path).unwrap();
+    let db = keepass::Database::open(&mut file, keepass::DatabaseKey::new().with_password("pw"))
+        .unwrap();
+    let entry = db
+        .iter_all_entries()
+        .find(|entry| entry.get_title() == Some("tagged"))
+        .unwrap();
+    assert_eq!(entry.tags, ["gitlab", "Favorite"]);
+}
+
+#[test]
 fn open_with_wrong_password_returns_bad_password() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault.kdbx");

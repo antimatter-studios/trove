@@ -96,6 +96,22 @@ describe('unlocked vault interactions', () => {
     expect(api.listEntries).toHaveBeenCalledWith('v1');
   });
 
+  it('shows favorites separately and toggles them with the star', async () => {
+    const c = await mountUnlocked();
+    const favorites = [...c.querySelectorAll('.sidebar .tree-row')]
+      .find((row) => row.querySelector('.tr-name')?.textContent === 'Favorites');
+    expect(favorites.querySelector('.tr-count').textContent).toBe('1');
+    fireEvent.click(favorites);
+    await waitFor(() => expect(c.querySelectorAll('.list .erow')).toHaveLength(1));
+    expect(c.querySelector('.list .erow .etitle-txt').textContent).toBe('postgres');
+
+    api.setFavorite.mockResolvedValue(ENTRIES.map((entry) => ({ ...entry, fav: false })));
+    fireEvent.click(c.querySelector('.detail button[title="Favorite"]'));
+    await waitFor(() => expect(api.setFavorite).toHaveBeenCalledWith('v1', 'e1', false));
+    await waitFor(() => expect(c.querySelectorAll('.list .erow')).toHaveLength(0));
+    expect(favorites.querySelector('.tr-count').textContent).toBe('0');
+  });
+
   it('reloads when the vault file is changed by something else', async () => {
     const c = await mountUnlocked();
     expect(c.querySelectorAll('.list .erow').length).toBe(ENTRIES.length);
