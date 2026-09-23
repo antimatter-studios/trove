@@ -14,6 +14,19 @@
 //! `host` (scheme/port/path ignored). If the request carries a `username`,
 //! only an entry whose `UserName` also matches is used. The first match in
 //! vault order wins; ties are the user's to disambiguate by narrowing URLs.
+//!
+//! Which secret is sent: the entry's `git.token` attribute when it has one,
+//! otherwise `Password`. Forges increasingly refuse account passwords for git
+//! over HTTPS and want a personal access token instead, but the same entry is
+//! usually also the web login — so writing the token into `Password` costs you
+//! the password for the site. An attribute keeps both on one entry.
+//!
+//! `git.token` is an ordinary KDBX custom string field, so KeePassXC shows and
+//! edits it like any other attribute, and the name is matched
+//! case-insensitively. There is no cross-tool convention to adopt here; the
+//! name is chosen to read as "the token git uses" rather than as anything
+//! trove-specific, so it means the same thing to someone who has never heard
+//! of trove.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -79,11 +92,38 @@ pub fn lookup(v: &Vault, req: &HashMap<String, String>) -> Result<Option<(String
                 continue;
             }
         }
-        if let Some(pw) = v.get_field(&e.id, "Password")? {
-            return Ok(Some((entry_user, pw)));
+        if let Some(secret) = git_secret(v, &e.id)? {
+            return Ok(Some((entry_user, secret)));
         }
     }
     Ok(None)
+}
+
+/// The attribute a personal access token lives in, matched case-insensitively.
+pub const TOKEN_FIELD: &str = "git.token";
+
+/// The secret to hand git for this entry: its `git.token` attribute if it has
+/// one, else `Password`.
+///
+/// Preferring the token matters because the fallback is not a worse token, it
+/// is a different secret entirely — the web login. An entry that has both is
+/// the normal case for a self-hosted forge, and sending the wrong one fails
+/// with the forge's generic "invalid username, password or token", which says
+/// nothing about which of the two it just rejected.
+fn git_secret(v: &Vault, id: &trove_core::EntryId) -> Result<Option<String>> {
+    for name in v.custom_field_names(id)? {
+        if name.eq_ignore_ascii_case(TOKEN_FIELD) {
+            if let Some(tok) = v.get_field(id, &name)? {
+                if !tok.is_empty() {
+                    return Ok(Some(tok));
+                }
+            }
+        }
+    }
+    // An empty `git.token` is treated as absent rather than as "send nothing":
+    // a half-filled attribute should not silently break an entry whose
+    // Password still works.
+    Ok(v.get_field(id, "Password")?.filter(|p| !p.is_empty()))
 }
 
 /// Run one credential operation. `get` reads a request and writes the reply;
@@ -169,6 +209,75 @@ mod tests {
         v.set_field(&id, "Password", "glpat_x").unwrap();
         v.set_field(&id, "URL", "https://gitlab.com").unwrap();
         v
+    }
+
+    /// The case this exists for: a self-hosted forge entry that is also the web
+    /// login. `Password` logs into the site, `git.token` is what git must send,
+    /// and putting the token in `Password` would cost the site password.
+    #[test]
+    fn a_git_token_attribute_is_preferred_over_the_password() {
+        let dir = TempDir::new().unwrap();
+        let mut v = Vault::create(&dir.path().join("t.kdbx"), "pw").unwrap();
+        let id = v.add_entry("Git/gitea").unwrap();
+        v.set_field(&id, "UserName", "chris").unwrap();
+        v.set_field(&id, "Password", "my-web-login").unwrap();
+        v.set_field(&id, "URL", "https://git.example.com").unwrap();
+        v.set_field(&id, "git.token", "tok_abc").unwrap();
+
+        let out = get(&v, "protocol=https\nhost=git.example.com\n\n");
+        assert!(
+            out.contains("password=tok_abc"),
+            "should send the token: {out}"
+        );
+        assert!(
+            !out.contains("my-web-login"),
+            "the web login must not be sent to git: {out}"
+        );
+    }
+
+    #[test]
+    fn without_the_attribute_the_password_is_still_used() {
+        let dir = TempDir::new().unwrap();
+        let v = vault(&dir);
+        let out = get(&v, "protocol=https\nhost=github.com\nusername=octocat\n\n");
+        assert!(out.contains("password=ghp_token_1"), "{out}");
+    }
+
+    /// KeePassXC lets someone type the attribute name themselves, so the
+    /// capitalisation they choose should not decide whether it works.
+    #[test]
+    fn the_attribute_name_is_matched_case_insensitively() {
+        for spelling in ["git.token", "Git.Token", "GIT.TOKEN"] {
+            let dir = TempDir::new().unwrap();
+            let mut v = Vault::create(&dir.path().join("t.kdbx"), "pw").unwrap();
+            let id = v.add_entry("Git/x").unwrap();
+            v.set_field(&id, "UserName", "u").unwrap();
+            v.set_field(&id, "Password", "pw-not-this").unwrap();
+            v.set_field(&id, "URL", "https://h.example.com").unwrap();
+            v.set_field(&id, spelling, "tok").unwrap();
+
+            let out = get(&v, "protocol=https\nhost=h.example.com\n\n");
+            assert!(
+                out.contains("password=tok"),
+                "{spelling} should work: {out}"
+            );
+        }
+    }
+
+    /// A half-filled attribute should not break an entry whose Password works
+    /// — an empty value is "not set", not "send nothing".
+    #[test]
+    fn an_empty_git_token_falls_back_rather_than_sending_nothing() {
+        let dir = TempDir::new().unwrap();
+        let mut v = Vault::create(&dir.path().join("t.kdbx"), "pw").unwrap();
+        let id = v.add_entry("Git/y").unwrap();
+        v.set_field(&id, "UserName", "u").unwrap();
+        v.set_field(&id, "Password", "still-works").unwrap();
+        v.set_field(&id, "URL", "https://h2.example.com").unwrap();
+        v.set_field(&id, "git.token", "").unwrap();
+
+        let out = get(&v, "protocol=https\nhost=h2.example.com\n\n");
+        assert!(out.contains("password=still-works"), "{out}");
     }
 
     fn get(v: &Vault, req_lines: &str) -> String {

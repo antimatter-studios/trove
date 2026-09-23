@@ -149,6 +149,185 @@ describe('unlocked vault interactions', () => {
     expect(secretField.querySelector('.fv').textContent).toContain(DETAIL.password);
   });
 
+  // Attribute editing. The detail pane could always SHOW attributes and copy
+  // them, but there was no way to add or change one without leaving the app for
+  // KeePassXC or the CLI — which is how a `git.token` attribute would have to
+  // be created.
+  async function openEditForm(c) {
+    fireEvent.click(c.querySelectorAll('.list .erow')[0]);
+    await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
+    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    fireEvent.click(edit);
+    await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
+    return c.querySelector('.modal');
+  }
+
+  it('prefills the edit form with the entry existing attributes', async () => {
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+    const names = [...modal.querySelectorAll('input')].map((i) => i.value);
+    expect(names).toContain('Host');
+    expect(names).toContain('db.prod');
+  });
+
+  it('saves a newly added attribute', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+
+    const add = [...modal.querySelectorAll('button')].find((b) => /add attribute/i.test(b.textContent));
+    expect(add).toBeTruthy();
+    fireEvent.click(add);
+
+    const nameInputs = [...modal.querySelectorAll('input[aria-label^="Attribute name"]')];
+    const valueInputs = [...modal.querySelectorAll('input[aria-label^="Attribute value"]')];
+    fireEvent.change(nameInputs[nameInputs.length - 1], { target: { value: 'git.token' } });
+    fireEvent.change(valueInputs[valueInputs.length - 1], { target: { value: 'tok_abc' } });
+
+    const save = [...modal.querySelectorAll('button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    const input = api.saveEntry.mock.calls[0][1];
+    expect(input.fields).toEqual(
+      expect.arrayContaining([{ k: 'git.token', v: 'tok_abc' }]),
+    );
+    // The attribute it already had must still be there — adding one is not
+    // replacing them.
+    expect(input.fields).toEqual(expect.arrayContaining([{ k: 'Host', v: 'db.prod' }]));
+  });
+
+  it('a removed attribute is absent from the saved payload', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+
+    const remove = [...modal.querySelectorAll('button')].find((b) => /remove attribute/i.test(b.title || ''));
+    expect(remove).toBeTruthy();
+    fireEvent.click(remove);
+
+    const save = [...modal.querySelectorAll('button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    expect(api.saveEntry.mock.calls[0][1].fields).toEqual([]);
+  });
+
+  it('a half-typed attribute row is not sent', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    const modal = await openEditForm(c);
+
+    // Add a row and leave the name blank — someone who thinks better of it
+    // should not have to delete the row before they can save.
+    const add = [...modal.querySelectorAll('button')].find((b) => /add attribute/i.test(b.textContent));
+    fireEvent.click(add);
+
+    const save = [...modal.querySelectorAll('button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    const sent = api.saveEntry.mock.calls[0][1].fields;
+    expect(sent.every((f) => f.k.trim() !== '')).toBe(true);
+  });
+
+  // Saving used to reset the folder to All Entries, losing your place on every
+  // edit (#123). The rule now is "follow the entry": go to the folder it landed
+  // in and select it. An edit in place therefore leaves you exactly where you
+  // were, because the entry's folder is the folder you are browsing.
+  it('an edit in place leaves the browsed folder alone', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    // Navigate into the folder the entry is actually filed in. Sidebar folders
+    // are `.tree-row`; the previous selector matched `.srow`, matched nothing,
+    // and clicked conditionally — so this silently tested All Entries instead.
+    //
+    // `infra` itself holds no entries (postgres is in `infra/prod`) and now
+    // lists nothing, so the leaf is where the entry is: expand, then select.
+    const row = (re) => [...c.querySelectorAll('.pane.sidebar .tree-row')].find((r) => re.test(r.textContent));
+    const infra = row(/infra/i);
+    expect(infra).toBeTruthy();
+    fireEvent.click(infra.querySelector('.tw'));
+    await waitFor(() => expect(row(/prod/i)).toBeTruthy());
+    fireEvent.click(row(/prod/i));
+    await waitFor(() => expect(c.querySelectorAll('.list .erow').length).toBe(1));
+
+    fireEvent.click(c.querySelectorAll('.list .erow')[0]);
+    await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
+    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    fireEvent.click(edit);
+    await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
+    const save = [...c.querySelectorAll('.modal button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    // The entry stays selected rather than the list jumping back to the top.
+    await waitFor(() => expect(c.querySelector('.erow.sel')).toBeTruthy());
+  });
+
+  it('the path sent is resolved against the folder being browsed', async () => {
+    api.saveEntry.mockResolvedValue({ id: 'e1', entries: ENTRIES });
+    const c = await mountUnlocked();
+    fireEvent.click(c.querySelectorAll('.list .erow')[0]);
+    await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
+    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    fireEvent.click(edit);
+    await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
+
+    const save = [...c.querySelectorAll('.modal button')].find((b) => /save changes/i.test(b.textContent));
+    fireEvent.click(save);
+    await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
+    // Browsing All entries, so relative and absolute coincide: the entry keeps
+    // the path it already had rather than being re-prefixed. The list is
+    // title-sorted, so row 0 is fastmail.
+    expect(api.saveEntry.mock.calls[0][1].path).toBe('personal/email/fastmail');
+  });
+
+  // Without a key on EntryForm, React reused the instance and its useState
+  // initialiser did not re-run: pressing New entry while the form was open for
+  // an existing entry kept that entry's values on screen while `entry` became
+  // null — so saving created a duplicate of it instead of a new entry.
+  it('New entry after editing shows an empty form, not the previous entry', async () => {
+    const c = await mountUnlocked();
+    fireEvent.click(c.querySelectorAll('.list .erow')[0]);
+    await waitFor(() => expect(api.getEntryDetail).toHaveBeenCalled());
+    const edit = [...c.querySelectorAll('button')].find((b) => /edit/i.test(b.textContent || b.title || ''));
+    fireEvent.click(edit);
+    await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
+    const pathOf = (el) => el.querySelector('input.mono').value;
+    expect(pathOf(c.querySelector('.modal'))).not.toBe('');
+
+    // ⌘N while the form is open.
+    fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await waitFor(() => {
+      expect(c.querySelector('.modal').textContent).toContain('New entry');
+    });
+    expect(pathOf(c.querySelector('.modal'))).toBe('');
+  });
+
+  it('a new entry starts with an empty password', async () => {
+    const c = await mountUnlocked();
+    fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await waitFor(() => expect(c.querySelector('.modal')).toBeTruthy());
+    const pw = c.querySelector('.modal input[type="password"]');
+    expect(pw).toBeTruthy();
+    expect(pw.value).toBe('');
+  });
+
+  // A folder holding only subfolders lists nothing. The detail pane resolves
+  // the selection against ALL entries, so without clearing it you would be
+  // reading the details of an entry the list in front of you does not contain.
+  it('an empty folder clears the selection rather than showing a stale detail', async () => {
+    const c = await mountUnlocked();
+    fireEvent.click(c.querySelectorAll('.list .erow')[0]);
+    await waitFor(() => expect(c.querySelector('.erow.sel')).toBeTruthy());
+
+    const row = (re) => [...c.querySelectorAll('.pane.sidebar .tree-row')].find((r) => re.test(r.textContent));
+    fireEvent.click(row(/infra/i));
+    await waitFor(() => expect(c.querySelectorAll('.list .erow').length).toBe(0));
+    expect(c.querySelector('.erow.sel')).toBeFalsy();
+  });
+
   it('opens the command palette from the toolbar', async () => {
     const c = await mountUnlocked();
     const palBtn = c.querySelector('button[title*="Command palette"]');

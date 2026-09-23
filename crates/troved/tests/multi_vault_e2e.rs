@@ -97,6 +97,7 @@ impl Daemon {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await
     }
@@ -108,6 +109,7 @@ impl Daemon {
             timeout: None,
             keyfile: None,
             filter: Some(filter.to_string()),
+            session: None,
         })
         .await
     }

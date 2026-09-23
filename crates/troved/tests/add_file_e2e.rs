@@ -99,6 +99,7 @@ fn unlock(path: &Path) -> Request {
         timeout: None,
         keyfile: None,
         filter: None,
+        session: None,
     }
 }
 

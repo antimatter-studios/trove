@@ -29,10 +29,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keyfile: Option<String>,
         /// Optional KeePass tag. When set, only entries carrying this exact
-        /// tag (case-insensitive) are exposed through the agents and
-        /// materialization on this unlock.
+        /// tag or inherited group tag (case-insensitive) are exposed through
+        /// the agents and materialization on this unlock.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<String>,
+        /// Whether to mint a session code for this unlock. `None` (absent on
+        /// the wire) and `Some(true)` both mint, so every existing caller is
+        /// unchanged; `Some(false)` is `unlock --detach` saying it has nowhere
+        /// to put a code and would rather one did not exist.
+        ///
+        /// Declining is not the same as minting and discarding: a code nobody
+        /// holds is still a capability sitting in daemon memory. This way the
+        /// extraction gate is simply never opened for this unlock, and an
+        /// existing session from an earlier unlock is left untouched.
+        /// Wire-optional for back-compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<bool>,
     },
     List,
     /// Lock one unlocked vault, or all of them.
@@ -591,7 +603,12 @@ pub enum OkBody {
     /// Response to `Unlock`: the one-time session code for this unlock. The CLI
     /// emits it as `export TROVE_SESSION=…`; subsequent `Get`s present it.
     Unlocked {
-        code: String,
+        /// The session code, absent when the unlock declined to mint one
+        /// (`--detach`). Absent and empty are different things: absent means
+        /// no capability exists, so a caller that needs one must re-unlock
+        /// rather than look for it somewhere else.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
         /// The daemon's build version, stamped by `build.rs`. Surfaced by the
         /// CLI at unlock so a stale daemon (still running pre-rebuild code) is
         /// obvious without hunting through `ps`.
@@ -733,7 +750,7 @@ impl Response {
         })
     }
     pub fn ok_unlocked(
-        code: String,
+        code: Option<String>,
         materialize_warnings: Vec<String>,
         ssh_forward_warnings: Vec<String>,
         ssh_forward_notes: Vec<String>,

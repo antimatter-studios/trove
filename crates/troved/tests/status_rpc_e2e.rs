@@ -126,6 +126,7 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -169,6 +170,7 @@ async fn status_with_disabled_idle_reports_zero_timeout() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
 
@@ -214,6 +216,7 @@ async fn status_request_does_not_bump_idle_timer() {
         timeout: None,
         keyfile: None,
         filter: None,
+        session: None,
     };
     let _ = handle(
         req_unlock,
@@ -272,6 +275,7 @@ async fn lock_signals_daemon_shutdown_when_open_set_empties() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -328,6 +332,7 @@ async fn ssh_agent_list_returns_served_keys() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");

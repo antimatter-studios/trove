@@ -2,6 +2,7 @@ import React from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { Icon, TYPE_ICON } from './icons.jsx';
 import * as api from './api.js';
+import { baseGroup, displayEntryPath, resolveEntryPath } from './tree.js';
 // Trove — overlays: unlock, command palette, entry form, toast, help
 
 /* ============ UNLOCK ============ */
@@ -364,18 +365,32 @@ function TagEditor({ tags, onChange, placeholder }) {
     </div>
   );
 }
-function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
+function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
   const editing = !!entry;
   // The list DTO carries no secrets; the current password + notes for an existing
   // entry are fetched (get_entry_detail) and handed in via `detail` to prefill.
   const [f, setF] = React.useState(() => entry ? {
-    path: entry.path, username: entry.username,
+    // Relative to the folder being browsed: saving it unchanged must be a
+    // no-op, and the full path would be re-prefixed by the resolver.
+    path: displayEntryPath(entry.path, group), username: entry.username,
     password: (detail && detail.password) || "", url: entry.url,
-    notes: (detail && detail.notes) || "", type: entry.type, tags: (entry.tags || []).filter((tag) => tag.toLowerCase() !== "favorite"),
-  } : { path: "", username: "", password: genPassword(), url: "", notes: "", type: "login", tags: [] });
+    notes: (detail && detail.notes) || "", type: entry.type,
+    // Copied, not referenced: editing a row must not mutate the detail object
+    // the read-only pane behind this modal is still rendering from.
+    fields: ((detail && detail.fields) || []).map((x) => ({ k: x.k, v: x.v })),
+    tags: (entry.tags || []).filter((tag) => tag.toLowerCase() !== "favorite"),
+  } : { path: "", username: "", password: "", url: "", notes: "", type: "login", fields: [], tags: [] });
+  // The password starts empty rather than pre-generated. Most new entries are
+  // recording a credential that already exists somewhere, and a value nobody
+  // asked for has to be noticed and cleared first — the generate button beside
+  // the field covers the other case in one click.
   const [show, setShow] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
+  const setField = (i, part, v) =>
+    setF((o) => ({ ...o, fields: o.fields.map((x, j) => (j === i ? { ...x, [part]: v } : x)) }));
+  const addField = () => setF((o) => ({ ...o, fields: [...o.fields, { k: "", v: "" }] }));
+  const dropField = (i) => setF((o) => ({ ...o, fields: o.fields.filter((_, j) => j !== i) }));
   const ref = React.useRef(null);
   React.useEffect(() => { ref.current && ref.current.focus(); }, []);
 
@@ -403,8 +418,20 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
         </div>
         <div className="modal-body">
           <div className="fld">
-            <label>Path <span style={{ color: "var(--text-ghost)", fontWeight: 400 }}>— group/subgroup/name</span></label>
-            <input ref={ref} className="inp mono" value={f.path} onChange={(e) => set("path", e.target.value)} placeholder="inpace/00004.alex-clinic/ssh" />
+            <label>
+              Path{" "}
+              <span style={{ color: "var(--text-ghost)", fontWeight: 400 }}>
+                {baseGroup(group)
+                  ? `— inside ${baseGroup(group)}, or /absolute`
+                  : "— group/subgroup/name"}
+              </span>
+            </label>
+            <input ref={ref} className="inp mono" value={f.path} onChange={(e) => set("path", e.target.value)} placeholder={baseGroup(group) ? `name, or subfolder/name (inside ${baseGroup(group)})` : "group/subgroup/name"} />
+            {f.path.trim() !== "" && (
+              <div style={{ marginTop: 4, fontSize: 12, color: "var(--text-ghost)", fontFamily: "var(--font-mono)" }}>
+                → {resolveEntryPath(f.path, group)}
+              </div>
+            )}
           </div>
           <div className="fld">
             <label>Username</label>
@@ -429,6 +456,40 @@ function EntryForm({ entry, detail, onClose, onSave, onDelete }) {
           <div className="fld">
             <label>Notes</label>
             <textarea className="inp" rows={3} value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything else worth remembering…" />
+          </div>
+          <div className="fld">
+            <label>
+              Attributes{" "}
+              <span style={{ color: "var(--text-ghost)", fontWeight: 400 }}>
+                — extra named values, e.g. git.token
+              </span>
+            </label>
+            {f.fields.map((kv, i) => (
+              <div className="pw-row" key={i} style={{ marginBottom: 6 }}>
+                <input
+                  className="inp mono"
+                  style={{ flex: "0 0 38%" }}
+                  value={kv.k}
+                  onChange={(e) => setField(i, "k", e.target.value)}
+                  placeholder="name"
+                  aria-label={"Attribute name " + (i + 1)}
+                />
+                <input
+                  className="inp mono"
+                  value={kv.v}
+                  onChange={(e) => setField(i, "v", e.target.value)}
+                  placeholder="value"
+                  aria-label={"Attribute value " + (i + 1)}
+                />
+                <button className="pw-tool" title="Remove attribute" onClick={() => dropField(i)}>
+                  <Icon name="trash" size={15} />
+                </button>
+              </div>
+            ))}
+            <button className="btn-ghost" style={{ marginTop: 2 }} onClick={addField}>
+              <Icon name="plus" size={14} style={{ display: "inline", verticalAlign: "-2px", marginRight: 5 }} />
+              Add attribute
+            </button>
           </div>
         </div>
         <div className="modal-foot">

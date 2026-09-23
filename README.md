@@ -426,6 +426,18 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.18.0
+`trove unlock --detach` unlocks the vault and hands your prompt straight back — no subshell, nothing to `eval`, and no session code. Both agents serve the vault's keys and `Materialize.*` entries are written as always, so `ssh`, `git` and `gpg` work; what is refused in that shell is extraction (`get`, `materialize`), because no code was minted. Not minted and withheld — not minted: a code nobody holds is still a live extraction capability sitting in daemon memory. Detaching one vault leaves an earlier session working, since unlock is additive. **`--no-shell` is removed**; it aliased `--export` and read like a statement about your terminal when it was really about `eval`, which made it the obvious wrong flag to reach for. `--export` is the replacement. The socket path `--export` prints is now shell-quoted.
+
+### v0.17.4
+Desktop entry paths are relative to the folder you are in — typing `ssh` inside `Infra` creates `Infra/ssh`, a leading `/` escapes to the root, and the field previews where it will land. Saving keeps your place instead of jumping to All Entries, and only follows the entry when it has left the view. Folders list what is filed directly in them, file-browser style, with subfolders in the sidebar. Two bugs found by hand: New entry while editing kept the previous entry's values and would have saved a duplicate of it, and new entries no longer arrive with a generated password nobody asked for.
+
+### v0.17.3
+The desktop app can edit an entry's attributes, not just show and copy them — name/value rows in the edit form, with add and remove. Needed because a `git.token` attribute is how the credential helper is told to send a token rather than the web login, and there was no way to create one from the app that stores it. Reserved keys (`_Trove*`, `Materialize.*`) survive a save that never showed them, attributes cannot be named after the five standard fields, and names are stored exactly as typed.
+
+### v0.17.2
+The git credential helper sends an entry's `git.token` attribute when it has one, falling back to `Password`. A self-hosted forge entry is usually the web login too, and forges increasingly want a token rather than a password for git over HTTPS — so both secrets now live on one entry, each used where it belongs. `git.token` is an ordinary KDBX attribute, editable in KeePassXC, matched case-insensitively.
+
 ### v0.17.1
 `--env` no longer eats the subcommand: `trove --vault v --env git-credential get` read `git-credential` as the path and ran `trove get` instead, which broke the git credential helper — the one command `--env` exists to serve. Bare `--env` still searches for `.env.trove`; naming a file is now `--env=<PATH>`, and the space-separated form explains itself rather than failing as an unknown subcommand. A `credential.helper` line needs no change.
 
@@ -443,15 +455,3 @@ Saving a vault no longer overwrites changes another writer made — the CLI, Kee
 
 ### v0.13.0
 **Breaking:** the env-file password variable is `TROVE_VAULT_PASSWORD`, not `TROVE_DB_PASSWORD` — rename it in your `.env.trove`, there is no fallback. New `--keychain` reads the password from the macOS login keychain (`trove keychain save|forget|status`); it is opt-in, always loses to `--env` and `--password-stdin`, and refuses without an interactive terminal, because a keychain dialog on a machine nobody is sitting at is a command that never returns. No biometry yet — Touch ID needs an entitlement only an `.app` bundle can carry, so it belongs to Trove.app. `docs/cli-reference.md` now documents the `.env.trove` file, its search order, permissions, and where a password may come from.
-
-### v0.12.0
-`list` and `search` print the same shape again: one entry per line as `group/sub/title`, sorted, with a column naming the SSH key or attachments it carries. The folder grouping added in 0.11.0 is gone — a complete path per line greps and pastes, a header does not. `--env` also warns when its file is readable by more than its owner, since it holds a vault password; `TROVE_ENV_STRICT=1` turns that warning into a refusal.
-
-### v0.11.0
-`trove list` is grouped by folder, sorted, and no longer led by a UUID that no command accepts (it moved behind `--show-id`; `--json` still carries it). Each entry gets one short column saying what it holds — an SSH entry is named by its private key, and KeePassXC's `KeeAgent.settings` blob is never shown or counted. `search` gained the same column but stays flat, since its hits cross folders.
-
-### v0.10.0
-`trove show --json` prints one entry as an object — attachments as an array, custom fields as an object of values, unset scalars as `null` — so a program never has to parse the human format. Protected values keep the same rule: a password is an absent key unless `--show-protected`. Bare `--env` now looks in the working directory and then beside the vault being opened, instead of only at `./.env.trove`, and says where it looked when it finds nothing.
-
-### v0.9.1
-The desktop app is called Trove — the Dock read "TroveDesktop", which is a repository name rather than an application's. The bundle is now `Trove.app`; its identifier is unchanged, so it upgrades in place and keeps its preferences and permissions, and the Homebrew cask is still installed as `trove-desktop` to keep it separate from `trove-cli`.

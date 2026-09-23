@@ -172,6 +172,7 @@ async fn unlock_writes_file_lock_wipes_it() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -221,6 +222,7 @@ async fn ttl_wipes_file_while_vault_remains_unlocked() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
@@ -264,6 +266,7 @@ async fn multi_file_unlock_and_lock() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
@@ -315,6 +318,7 @@ async fn one_bad_entry_does_not_block_others() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock should still ok");
@@ -350,6 +354,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -422,6 +427,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
 
@@ -468,6 +474,7 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));

@@ -215,6 +215,7 @@ impl Harness {
             timeout: None,
             keyfile: None,
             filter: None,
+            session: None,
         })
         .await
     }

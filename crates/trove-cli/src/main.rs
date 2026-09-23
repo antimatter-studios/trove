@@ -226,7 +226,8 @@ enum Command {
     /// `$TROVE_SESSION` already set, so `add`/`get` work immediately — `exit`
     /// ends the session. When stdout is piped (e.g. `eval "$(trove unlock …)"`)
     /// it instead prints `export TROVE_SESSION=…` for the calling shell.
-    /// `--export` / `--shell` force a mode.
+    /// `--export` / `--shell` force a mode, and `--detach` opts out of both:
+    /// keys in the agents, your own prompt back, no session code.
     Unlock {
         /// Path to the .kdbx vault to unlock.
         vault: PathBuf,
@@ -236,21 +237,33 @@ enum Command {
         /// (the env-var default or whatever a prior `idle set` left).
         #[arg(long = "timeout")]
         timeout: Option<u64>,
-        /// Expose only entries carrying this KeePass tag through the SSH/GPG
-        /// agents and unlock-time materialization. Matching is case-insensitive.
+        /// Expose only entries carrying this KeePass tag, directly or through
+        /// a containing group, through agents and unlock-time materialization.
+        /// Matching is case-insensitive.
         #[arg(long = "filter", value_name = "TAG")]
         filter: Option<String>,
         /// Print `export TROVE_SESSION=…` for `eval "$(…)"` instead of opening a
         /// session subshell. Implied when stdout is not a terminal.
-        ///
-        /// `--no-shell` is the same thing said the other way round, for callers
-        /// who want to say what they are avoiding: a subshell an automation
-        /// harness has no way to exit.
-        #[arg(long = "export", visible_alias = "no-shell")]
+        #[arg(long = "export")]
         export: bool,
         /// Open a session subshell even when stdout is not a terminal.
         #[arg(long = "shell", conflicts_with = "export")]
         shell: bool,
+        /// Unlock and hand your prompt straight back: no subshell, nothing to
+        /// `eval`, and no session code.
+        ///
+        /// The vault is unlocked exactly as it always is — the SSH and GPG
+        /// agents serve its keys, and `Materialize.*` entries are written to
+        /// disk. What you don't get is the session code, because there is
+        /// nowhere to put it: a process cannot set a variable in the shell that
+        /// launched it, which is the whole reason the other two modes exist.
+        ///
+        /// So `get` and `materialize` stay refused in that shell, while `ssh`,
+        /// `git` and `gpg` keep working — they go through the agents, which
+        /// need no code. Use `--vault <PATH>` for an offline read, or unlock
+        /// again without this flag if you want a session after all.
+        #[arg(long = "detach", conflicts_with_all = ["export", "shell"])]
+        detach: bool,
     },
 
     /// Tell the running `troved` to lock: wipe materialized files, drop
@@ -1476,7 +1489,8 @@ fn run(cli: Cli) -> Result<()> {
             filter,
             export,
             shell,
-        } => cmd_unlock(&vault, timeout, filter, export, shell, pw_stdin),
+            detach,
+        } => cmd_unlock(&vault, timeout, filter, export, shell, detach, pw_stdin),
         Command::Lock { vault } => cmd_lock(vault.as_deref()),
         Command::Status => cmd_status(),
         #[cfg(unix)]
@@ -5048,6 +5062,7 @@ fn cmd_unlock(
     filter: Option<String>,
     export: bool,
     shell: bool,
+    detach: bool,
     pw_stdin: bool,
 ) -> Result<()> {
     if !vault.exists() {
@@ -5088,6 +5103,9 @@ fn cmd_unlock(
             base64::engine::general_purpose::STANDARD.encode(bytes)
         }),
         filter,
+        // Only speak up to decline. Sending `None` otherwise keeps the request
+        // byte-identical to what every previous release sent.
+        session: detach.then_some(false),
     };
     let (resp, autospawned) = match daemon::send_autospawn_reporting(&req) {
         Ok(v) => v,
@@ -5115,11 +5133,10 @@ fn cmd_unlock(
 
     // The daemon minted a one-time session code for this unlock. Code-gated
     // `add`/`get` read it back from $TROVE_SESSION. See docs/provisioning-sessions.md.
-    //
-    let code = resp
-        .get("code")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("daemon unlocked but returned no session code"))?;
+    // Absent when we asked it not to mint one (`--detach`). A daemon older than
+    // that flag ignores the field and mints anyway; we simply never read the
+    // code, which lands in the same place — nobody holds it.
+    let code = resp.get("code").and_then(Value::as_str);
 
     // Diagnostic banner on stderr (never the `export …` stdout that
     // `eval "$(…)"` consumes): the CLI + daemon build versions and how the
@@ -5202,6 +5219,32 @@ fn cmd_unlock(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
+    // `--detach`: say what happened and get out of the way. Nothing on stdout —
+    // there is nothing for a caller to consume, and printing an `export` line
+    // here would put a code on screen that the flag exists to not create.
+    if detach {
+        eprintln!(
+            "trove: unlocked {} · keys served by the agents · no session code (--detach)",
+            vault.display()
+        );
+        // The one thing detaching cannot do for itself. When the daemon had to
+        // forward keys somewhere other than this shell's SSH_AUTH_SOCK, the
+        // other two modes carry the corrected value into the environment they
+        // create; we have no environment to write to, so hand the operator the
+        // line rather than leave them pointed at a dead socket.
+        if let Some(sock) = &agent_sock {
+            eprintln!(
+                "trove: ssh-agent moved — run: export SSH_AUTH_SOCK={}",
+                sh_single_quote(sock)
+            );
+        }
+        return Ok(());
+    }
+
+    // Past here a code is the whole point, so its absence is a real error
+    // rather than a mode.
+    let code = code.ok_or_else(|| anyhow!("daemon unlocked but returned no session code"))?;
+
     let spawn_shell = shell || (!export && std::io::stdout().is_terminal());
     if spawn_shell {
         eprintln!(
@@ -5211,7 +5254,7 @@ fn cmd_unlock(
         return exec_session_shell(code, agent_sock.as_deref());
     }
     if let Some(sock) = &agent_sock {
-        println!("export SSH_AUTH_SOCK={sock}");
+        println!("export SSH_AUTH_SOCK={}", sh_single_quote(sock));
     }
     println!("export TROVE_SESSION={code}");
     eprintln!(
@@ -5219,6 +5262,17 @@ fn cmd_unlock(
         vault.display()
     );
     Ok(())
+}
+
+/// Wrap a value in single quotes for a shell to read back verbatim.
+///
+/// Export mode's output is consumed by `eval`, so anything that reaches it has
+/// to survive being re-parsed. Socket paths are discovered at runtime — from a
+/// live agent, or from launchd — not constants this code controls. Single
+/// quotes are the only form that holds for arbitrary bytes; a `'` in the value
+/// is closed, escaped and reopened.
+fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Launch the operator's own shell with `TROVE_SESSION` set, so they land in a
@@ -6033,5 +6087,72 @@ mod classify_tests {
     #[test]
     fn classify_exit_defaults_to_user_error() {
         assert_eq!(classify_exit(&anyhow!("totally unknown")), EXIT_USER_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod unlock_mode_tests {
+    use super::*;
+
+    fn unlock_flags(argv: &[&str]) -> (bool, bool, bool) {
+        let cli = Cli::try_parse_from(argv).expect("should parse");
+        match cli.command {
+            Command::Unlock {
+                export,
+                shell,
+                detach,
+                ..
+            } => (export, shell, detach),
+            other => panic!("expected unlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detach_parses_and_is_off_by_default() {
+        assert_eq!(
+            unlock_flags(&["trove", "unlock", "v.kdbx"]),
+            (false, false, false)
+        );
+        assert_eq!(
+            unlock_flags(&["trove", "unlock", "--detach", "v.kdbx"]),
+            (false, false, true)
+        );
+    }
+
+    /// All three modes answer "where does the session code go", so asking for
+    /// two is a question with no answer. Better to say so than to pick.
+    #[test]
+    fn detach_conflicts_with_the_delivery_modes() {
+        for other in ["--export", "--shell"] {
+            let r = Cli::try_parse_from(["trove", "unlock", "--detach", other, "v.kdbx"]);
+            assert!(
+                r.is_err(),
+                "--detach {other} must be rejected, not silently resolved"
+            );
+        }
+    }
+
+    /// `--no-shell` was an alias for `--export`, which is a different question
+    /// from the one `--detach` answers. Two near-synonyms in `--help` were the
+    /// confusion; it is gone rather than hidden, so a script still passing it
+    /// fails loudly instead of quietly doing something else.
+    #[test]
+    fn no_shell_alias_is_gone() {
+        let r = Cli::try_parse_from(["trove", "unlock", "--no-shell", "v.kdbx"]);
+        assert!(r.is_err(), "--no-shell must no longer parse");
+    }
+
+    #[test]
+    fn single_quoting_survives_a_round_trip_through_sh() {
+        // Plain paths are unremarkable.
+        assert_eq!(sh_single_quote("/tmp/agent.sock"), "'/tmp/agent.sock'");
+        // Whitespace and shell metacharacters stay inert inside the quotes.
+        assert_eq!(
+            sh_single_quote("/tmp/my agent/$(id).sock"),
+            "'/tmp/my agent/$(id).sock'"
+        );
+        // A quote closes, escapes and reopens — the one case naive quoting
+        // gets wrong, and the one that would end the quoted region early.
+        assert_eq!(sh_single_quote("it's"), r"'it'\''s'");
     }
 }

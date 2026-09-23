@@ -57,7 +57,7 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags }
         <span className="tr-name">{node.name}</span>
         {node.tags.length > 0 && <span className="tr-tag-count" title={`Tags: ${node.tags.join(", ")}`}>⌑{node.tags.length}</span>}
         <button className="tr-edit-tags" title={`Edit ${node.name} tags`} aria-label={`Edit ${node.name} tags`} onClick={(e) => { e.stopPropagation(); onEditTags(node); }}><Icon name="edit" size={12} /></button>
-        <span className="tr-count">{node.count}</span>
+        <span className="tr-count" title={node.count !== node.own ? `${node.own} here, ${node.count} including subfolders` : undefined}>{node.own}</span>
       </div>
       {hasKids && isOpen && node.children.map((c) => (
         <TreeNode key={c.path} node={c} depth={depth + 1} open={open} setOpen={setOpen} selected={selected} onSelect={onSelect} onEditTags={onEditTags} />

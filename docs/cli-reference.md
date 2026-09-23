@@ -29,7 +29,7 @@ trove [OPTIONS] <COMMAND>
 ## trove unlock
 
 ```
-trove unlock [--filter <TAG>] <VAULT>
+trove unlock [--filter <TAG>] [--detach] <VAULT>
 ```
 
 Unlocks a vault additively. `--filter` selects entries tagged `<TAG>` directly
@@ -37,6 +37,8 @@ or through a containing group (case-insensitive) for SSH/GPG agent exposure
 and unlock-time materialization. The decrypted vault remains available to the
 normal session-gated commands. `trove edit` manages entry tags; `trove group`
 lists and edits group tags. Without `--filter`, every entry is exposed.
+`--detach` unlocks without creating a session code or opening a subshell; the
+agent keys and materialized files remain available.
 
 Entry-addressing commands accept a `group/sub/title` **entry path**; intermediate groups are created on write as needed.
 
@@ -428,6 +430,35 @@ reply so git falls back to its next helper or prompt. `store`/`erase` are
 accepted and ignored — trove is a deliberate vault, not an autofilled cache.
 Offline-only. With `--password-stdin`, the vault password is stdin line 1 and
 git's request block follows.
+
+### Which secret is sent: `git.token`, else `Password`
+
+Forges increasingly refuse account passwords for git over HTTPS and want a
+personal access token instead. The same entry is usually also the web login, so
+writing the token into `Password` costs you the password for the site. Put it
+in a `git.token` attribute and the helper prefers it:
+
+```
+antimatter-studios/git
+  UserName:   chris.alex.thomas
+  Password:   my-web-login       ← still logs into the web UI
+  git.token:  a1b2c3…            ← what git gets
+```
+
+`git.token` is an ordinary KDBX custom string field — KeePassXC shows and edits
+it under an entry's additional attributes like any other — and the name is
+matched case-insensitively, so `Git.Token` works too. An empty value counts as
+absent rather than as "send nothing", so a half-filled attribute can't silently
+break an entry whose `Password` still works.
+
+There is no cross-tool convention to adopt here. The name is meant to read as
+"the token git uses" rather than as anything trove-specific, so it means the
+same to someone who has never heard of trove.
+
+A forge rejecting the wrong one of these says only `invalid username, password
+or token`, which does not tell you which of the two it just refused — so if git
+authentication fails against a host whose entry is also a web login, check
+which secret is being sent before assuming the credential is stale.
 
 ## trove resolve
 

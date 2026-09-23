@@ -220,8 +220,9 @@ pub struct EntryDto {
     pub agent_remove_on_close: bool,
 }
 
-/// One custom string field (`k` = name, `v` = value).
-#[derive(Serialize)]
+/// One custom string field (`k` = name, `v` = value). Travels both ways now:
+/// out in an entry's detail, back in when the form saves.
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KvDto {
     pub k: String,
@@ -254,6 +255,11 @@ pub struct EntryInput {
     /// Direct KeePass-native entry tags. `None` preserves tags from older clients.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// User-visible custom attributes, exactly the set [`entry_detail`]
+    /// returns. Optional on the wire so an older frontend that does not send
+    /// them leaves the entry's attributes alone rather than wiping them.
+    #[serde(default)]
+    pub fields: Option<Vec<KvDto>>,
 }
 
 #[derive(Serialize)]
@@ -1087,7 +1093,81 @@ fn apply_save_entry(vault: &mut Vault, input: &EntryInput) -> Result<EntryId, St
     if let Some(tags) = &input.tags {
         vault.set_tags(&entry_id, tags).map_err(|e| e.to_string())?;
     }
+    if let Some(fields) = &input.fields {
+        apply_attributes(vault, &entry_id, fields)?;
+    }
     Ok(entry_id)
+}
+
+/// Reconcile an entry's user attributes with what the form sent: set the ones
+/// present, remove the ones that are gone.
+///
+/// Removal is by difference rather than by an explicit delete list, because the
+/// form is the whole truth about the attributes it can see — a row the user
+/// deleted simply is not there any more. Only keys passing
+/// [`is_user_attribute`] are ever removed, so `_Trove*` and `Materialize.*`
+/// survive a save they were never shown in.
+///
+/// A blank name is skipped rather than rejected: the form starts a new row
+/// empty, and someone who adds a row and then thinks better of it should not
+/// have to delete it before they can save.
+///
+/// Names are stored exactly as given. Trimming them here would silently rename
+/// an existing attribute on an ordinary save — the form returns `" foo "` as it
+/// found it, and a reconcile that wrote `foo` would create one key and delete
+/// the other, breaking anything that looks the attribute up by name. Whitespace
+/// only decides whether a row counts as blank.
+fn apply_attributes(vault: &mut Vault, eid: &EntryId, fields: &[KvDto]) -> Result<(), String> {
+    let existing: Vec<String> = vault
+        .custom_field_names(eid)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|k| is_user_attribute(k))
+        .collect();
+    let mut kept: Vec<&str> = Vec::with_capacity(fields.len());
+    for f in fields {
+        let name = f.k.as_str();
+        if name.trim().is_empty() || !is_user_attribute(name) || is_standard_field(name) {
+            continue;
+        }
+        vault
+            .set_field(eid, name, &f.v)
+            .map_err(|e| e.to_string())?;
+        kept.push(name);
+    }
+    for old in existing {
+        if !kept.iter().any(|k| *k == old) {
+            vault.remove_field(eid, &old).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a custom field is one the user owns and the UI shows.
+///
+/// `_Trove*` is our own bookkeeping. `Materialize.*` is not an attribute of the
+/// entry at all — it describes an attachment, and the Attachments section
+/// presents it as such; listed as an attribute it would be duplicate noise, and
+/// editable there a typo would silently stop a file being written.
+///
+/// Read and write MUST agree on this, which is why it is one function rather
+/// than two matching conditions. Saving reconciles the entry's attributes
+/// against what the form sent, so anything excluded here is invisible to the
+/// form and would be deleted on every save if the two ever drifted apart.
+/// The five fields KDBX gives every entry, which the form already edits through
+/// their own controls.
+///
+/// An attribute may not be named one of these. `apply_attributes` runs after
+/// the standard fields are written, so a `Password` attribute would overwrite
+/// the password the user just typed into the password control — and then vanish
+/// from the attribute list, because these names are excluded from it. The
+/// password would be gone with nothing on screen to show where it went.
+fn is_standard_field(key: &str) -> bool {
+    matches!(key, "Title" | "UserName" | "Password" | "URL" | "Notes")
+}
+
+fn is_user_attribute(key: &str) -> bool {
+    !key.starts_with("_Trove") && !key.starts_with("Materialize.")
 }
 
 /// Non-secret + password detail for a selected entry.
@@ -1110,7 +1190,7 @@ fn entry_detail(vault: &Vault, eid: &EntryId) -> Result<EntryDetailDto, String> 
         // Attachments section presents it as such. Listed here as well it is
         // duplicate noise, and worse, editable in a place where a typo would
         // silently stop a file being written.
-        if k.starts_with("_Trove") || k.starts_with("Materialize.") {
+        if !is_user_attribute(&k) {
             continue;
         }
         let v = vault
@@ -2310,7 +2390,172 @@ mod tests {
             notes: "rotate quarterly".to_string(),
             entry_type: "ssh".to_string(),
             tags: None,
+            fields: None,
         }
+    }
+
+    /// `fields: None` means "the caller said nothing about attributes", which
+    /// must leave them alone — an older frontend that does not send them should
+    /// not wipe what is already on the entry.
+    fn input_with_fields(entry_id: Option<String>, path: &str, kv: &[(&str, &str)]) -> EntryInput {
+        EntryInput {
+            fields: Some(
+                kv.iter()
+                    .map(|(k, v)| KvDto {
+                        k: k.to_string(),
+                        v: v.to_string(),
+                    })
+                    .collect(),
+            ),
+            ..input(entry_id, path)
+        }
+    }
+
+    #[test]
+    fn attributes_are_saved_and_come_back_in_the_detail() {
+        let (mut vault, _p) = temp_vault();
+        let eid = apply_save_entry(
+            &mut vault,
+            &input_with_fields(None, "forge/gitea", &[("git.token", "tok_abc")]),
+        )
+        .unwrap();
+        let d = entry_detail(&vault, &eid).unwrap();
+        let got: Vec<(String, String)> = d.fields.into_iter().map(|f| (f.k, f.v)).collect();
+        assert_eq!(got, vec![("git.token".to_string(), "tok_abc".to_string())]);
+    }
+
+    #[test]
+    fn an_attribute_removed_from_the_form_is_removed_from_the_entry() {
+        let (mut vault, _p) = temp_vault();
+        let eid = apply_save_entry(
+            &mut vault,
+            &input_with_fields(None, "forge/gitea", &[("a", "1"), ("b", "2")]),
+        )
+        .unwrap();
+        let id = eid.as_str().to_string();
+        // Save again with `b` gone — the form is the whole truth about the
+        // attributes it can see, so a row that is no longer there is a delete.
+        apply_save_entry(
+            &mut vault,
+            &input_with_fields(Some(id), "forge/gitea", &[("a", "1")]),
+        )
+        .unwrap();
+        let names = vault.custom_field_names(&eid).unwrap();
+        assert!(names.iter().any(|k| k == "a"));
+        assert!(!names.iter().any(|k| k == "b"), "got {names:?}");
+    }
+
+    /// The dangerous case: reserved keys are never shown in the form, so if the
+    /// reconcile treated "absent from the form" as "delete" for them too, every
+    /// save would silently destroy an entry's materialize config.
+    #[test]
+    fn reserved_keys_survive_a_save_that_never_mentioned_them() {
+        let (mut vault, _p) = temp_vault();
+        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
+        vault
+            .set_field(&eid, "Materialize.id.Target", "~/.ssh/id_ed25519")
+            .unwrap();
+        vault.set_field(&eid, "_TroveFav", "1").unwrap();
+
+        apply_save_entry(
+            &mut vault,
+            &input_with_fields(
+                Some(eid.as_str().to_string()),
+                "forge/gitea",
+                &[("git.token", "t")],
+            ),
+        )
+        .unwrap();
+
+        let names = vault.custom_field_names(&eid).unwrap();
+        assert!(
+            names.iter().any(|k| k == "Materialize.id.Target"),
+            "materialize config must survive: {names:?}"
+        );
+        assert!(names.iter().any(|k| k == "_TroveFav"), "got {names:?}");
+        // And they are still hidden from the form.
+        let d = entry_detail(&vault, &eid).unwrap();
+        assert_eq!(d.fields.len(), 1);
+        assert_eq!(d.fields[0].k, "git.token");
+    }
+
+    #[test]
+    fn omitting_fields_entirely_leaves_attributes_untouched() {
+        let (mut vault, _p) = temp_vault();
+        let eid = apply_save_entry(
+            &mut vault,
+            &input_with_fields(None, "forge/gitea", &[("keep", "me")]),
+        )
+        .unwrap();
+        // `fields: None` — an older frontend, or any caller that says nothing.
+        apply_save_entry(
+            &mut vault,
+            &input(Some(eid.as_str().to_string()), "forge/gitea"),
+        )
+        .unwrap();
+        let names = vault.custom_field_names(&eid).unwrap();
+        assert!(names.iter().any(|k| k == "keep"), "got {names:?}");
+    }
+
+    /// An attribute named `Password` would be written after the password
+    /// control and replace it — then vanish from the attribute list, because
+    /// standard names are excluded there. The password would be gone with
+    /// nothing on screen to show where it went.
+    #[test]
+    fn an_attribute_cannot_overwrite_a_standard_field() {
+        let (mut vault, _p) = temp_vault();
+        let eid = apply_save_entry(
+            &mut vault,
+            &input_with_fields(
+                None,
+                "forge/gitea",
+                &[
+                    ("Password", "hijacked"),
+                    ("UserName", "hijacked"),
+                    ("git.token", "t"),
+                ],
+            ),
+        )
+        .unwrap();
+        // The real password is the one the form's password control sent.
+        assert_eq!(
+            vault.get_field(&eid, "Password").unwrap().as_deref(),
+            Some("Gx7$mQ2!vLpZ9wKt")
+        );
+        assert_eq!(
+            vault.get_field(&eid, "UserName").unwrap().as_deref(),
+            Some("deploy")
+        );
+        let d = entry_detail(&vault, &eid).unwrap();
+        assert_eq!(d.fields.len(), 1);
+        assert_eq!(d.fields[0].k, "git.token");
+    }
+
+    /// The form returns an existing name exactly as it found it. Trimming on
+    /// the way in would create the trimmed key and delete the original —
+    /// renaming an attribute as a side effect of saving something else.
+    #[test]
+    fn saving_does_not_rename_an_attribute_with_surrounding_whitespace() {
+        let (mut vault, _p) = temp_vault();
+        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
+        vault.set_field(&eid, " spaced ", "v").unwrap();
+
+        // Round-trip: read what the form would show, save it back unchanged.
+        let d = entry_detail(&vault, &eid).unwrap();
+        let same: Vec<(&str, &str)> = d
+            .fields
+            .iter()
+            .map(|f| (f.k.as_str(), f.v.as_str()))
+            .collect();
+        apply_save_entry(
+            &mut vault,
+            &input_with_fields(Some(eid.as_str().to_string()), "forge/gitea", &same),
+        )
+        .unwrap();
+
+        let names = vault.custom_field_names(&eid).unwrap();
+        assert!(names.iter().any(|k| k == " spaced "), "got {names:?}");
+        assert!(!names.iter().any(|k| k == "spaced"), "got {names:?}");
     }
 
     #[test]
