@@ -1462,9 +1462,9 @@ fn run(cli: Cli) -> Result<()> {
             op: GpgAgentOp::List,
         } => cmd_gpg_agent_list(),
         Command::Materialize => cmd_materialize(require_vault(vault)?, pw_stdin),
-        Command::Group { op: GroupOp::List { json } } => {
-            cmd_group_list(require_vault(vault)?, pw_stdin, json)
-        }
+        Command::Group {
+            op: GroupOp::List { json },
+        } => cmd_group_list(require_vault(vault)?, pw_stdin, json),
         Command::Group {
             op:
                 GroupOp::Edit {
@@ -4370,7 +4370,12 @@ fn cmd_group_list(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
         for group in groups {
             let direct = group.tags.join(", ");
             let inherited = group.inherited_tags.join(", ");
-            println!("{}\ttags=[{}]\tinherited=[{}]", group.display_path(), direct, inherited);
+            println!(
+                "{}\ttags=[{}]\tinherited=[{}]",
+                group.display_path(),
+                direct,
+                inherited
+            );
         }
     }
     Ok(())
@@ -4385,7 +4390,9 @@ fn cmd_group_edit(
     pw_stdin: bool,
 ) -> Result<()> {
     if tags.is_empty() && untags.is_empty() && !clear_tags {
-        return Err(anyhow!("nothing to change: pass --tag, --untag or --clear-tags"));
+        return Err(anyhow!(
+            "nothing to change: pass --tag, --untag or --clear-tags"
+        ));
     }
     let mut vault = open_vault(vault_path, pw_stdin)?;
     let group = vault
@@ -4399,11 +4406,16 @@ fn cmd_group_edit(
     }
     current.retain(|tag| !untags.iter().any(|remove| tag.eq_ignore_ascii_case(remove)));
     for tag in tags {
-        if !current.iter().any(|existing| existing.eq_ignore_ascii_case(tag)) {
+        if !current
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(tag))
+        {
             current.push(tag.clone());
         }
     }
-    vault.set_group_tags(group_path, &current).context("setting group tags")?;
+    vault
+        .set_group_tags(group_path, &current)
+        .context("setting group tags")?;
     vault.save().context("saving vault")?;
     println!("updated tags on group '{group_path}'");
     Ok(())

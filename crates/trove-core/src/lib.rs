@@ -1506,7 +1506,10 @@ fn build_inherited_tags(group: Option<keepass::db::GroupRef<'_>>) -> Vec<String>
     ancestors.reverse();
     let mut tags = Vec::new();
     for tag in ancestors.into_iter().flatten() {
-        if !tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&tag)) {
+        if !tags
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&tag))
+        {
             tags.push(tag);
         }
     }
