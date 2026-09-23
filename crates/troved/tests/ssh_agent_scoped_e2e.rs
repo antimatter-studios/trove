@@ -147,6 +147,7 @@ impl Harness {
                 password: PASSWORD.to_string(),
                 timeout: None,
                 keyfile: None,
+                session: None,
             })
             .await;
         assert_eq!(resp["status"], "ok", "unlock failed: {resp}");

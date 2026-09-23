@@ -169,6 +169,7 @@ async fn idle_expiry_clears_all_secret_material() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -245,6 +246,7 @@ async fn explicit_lock_cancels_timer() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            session: None,
         })
         .await;
     assert!(target.exists());
@@ -283,6 +285,7 @@ async fn control_rpc_activity_keeps_vault_unlocked() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            session: None,
         })
         .await;
     assert!(target.exists());
@@ -347,6 +350,7 @@ async fn ssh_agent_traffic_resets_idle_timer() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            session: None,
         })
         .await;
     assert!(target.exists());
@@ -422,6 +426,7 @@ async fn unlock_timeout_overrides_configured_value() {
             password: PASSWORD.to_string(),
             timeout: Some(1),
             keyfile: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -468,6 +473,7 @@ async fn unlock_without_timeout_preserves_configured_value() {
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
+            session: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));

@@ -101,6 +101,7 @@ fn unlock(path: &Path) -> Request {
         password: PASSWORD.to_string(),
         timeout: None,
         keyfile: None,
+        session: None,
     }
 }
 
@@ -197,4 +198,88 @@ async fn lock_invalidates_then_reunlock_rotates_code() {
     assert_eq!(b["status"], "err", "stale code must stay refused: {b}");
     let b = h.handle_as(get(&code2, "id", ENTRY), OWNER).await;
     assert_eq!(b["status"], "ok", "fresh code should work: {b}");
+}
+
+/// `unlock --detach` sends `session: Some(false)`. The daemon must not mint a
+/// code at all — not mint one and withhold it — so the extraction gate is never
+/// opened for that unlock.
+fn unlock_detached(path: &Path) -> Request {
+    Request::Unlock {
+        path: path.to_string_lossy().into_owned(),
+        password: PASSWORD.to_string(),
+        timeout: None,
+        keyfile: None,
+        session: Some(false),
+    }
+}
+
+#[tokio::test]
+async fn detached_unlock_mints_no_code_and_extraction_stays_refused() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = tmp.path().join("v.kdbx");
+    create_vault(&vault);
+    let h = Harness::new();
+
+    let b = h.handle_as(unlock_detached(&vault), OWNER).await;
+    assert_eq!(b["status"], "ok", "detached unlock should succeed: {b}");
+
+    // Absent, not empty. An empty string would still be a capability the CLI
+    // could hand on; the field is simply not there.
+    assert!(
+        b.get("code").is_none() || b["code"].is_null(),
+        "detached unlock must return no session code: {b}"
+    );
+
+    // The vault IS unlocked — this is not a failed unlock being asserted on.
+    let b = h.handle_as(Request::List, OWNER).await;
+    assert_eq!(
+        b["status"], "ok",
+        "vault should be unlocked and listable: {b}"
+    );
+
+    // ...but with no code minted, nothing can extract, by the unlocking uid or
+    // anyone else, with any code they care to invent.
+    let b = h.handle_as(get("", "id", ENTRY), OWNER).await;
+    assert_eq!(b["status"], "err", "empty code must be refused: {b}");
+    let b = h.handle_as(get("guessed", "id", ENTRY), OWNER).await;
+    assert_eq!(b["status"], "err", "no code exists to match: {b}");
+}
+
+#[tokio::test]
+async fn detached_unlock_leaves_an_existing_session_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let first = tmp.path().join("first.kdbx");
+    let second = tmp.path().join("second.kdbx");
+    create_vault(&first);
+    // A DIFFERENT entry title: with both vaults unlocked, a title present in
+    // two of them is refused as ambiguous, which would mask what this test is
+    // actually asking about.
+    {
+        let mut v = Vault::create(&second, PASSWORD).expect("create second vault");
+        let id = v.add_entry("other/customer").expect("add entry");
+        v.attach_binary(&id, "id", KEY_BYTES).expect("attach key");
+        v.save().expect("save vault");
+    }
+    let h = Harness::new();
+
+    // A normal unlock: the operator has a session shell open against `first`.
+    let b = h.handle_as(unlock(&first), OWNER).await;
+    assert_eq!(b["status"], "ok", "first unlock should succeed: {b}");
+    let code = b["code"].as_str().expect("session code").to_string();
+
+    // Detaching a SECOND vault must not revoke it. Unlock is additive, so
+    // overwriting the session here would silently log out a shell that is
+    // still working — the detached unlock has no business touching it.
+    let b = h.handle_as(unlock_detached(&second), OWNER).await;
+    assert_eq!(b["status"], "ok", "detached unlock should succeed: {b}");
+    assert!(
+        b.get("code").is_none() || b["code"].is_null(),
+        "detached unlock must still mint nothing: {b}"
+    );
+
+    let b = h.handle_as(get(&code, "id", ENTRY), OWNER).await;
+    assert_eq!(
+        b["status"], "ok",
+        "the earlier session must survive a detached unlock: {b}"
+    );
 }
