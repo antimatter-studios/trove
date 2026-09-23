@@ -32,6 +32,8 @@ vi.mock('../src/api.js', () => ({
   unlockVault: vi.fn(),
   lockVault: vi.fn(),
   listEntries: vi.fn(),
+  listGroups: vi.fn(),
+  setGroupTags: vi.fn(),
   getField: vi.fn(),
   getEntryDetail: vi.fn(),
   saveEntry: vi.fn(),
@@ -79,6 +81,7 @@ beforeEach(() => {
   try { localStorage.clear(); } catch { /* ignore */ }
   api.listVaults.mockResolvedValue([OPEN_VAULT]);
   api.listEntries.mockResolvedValue(ENTRIES);
+  api.listGroups.mockResolvedValue([]);
   api.getEntryDetail.mockResolvedValue(DETAIL);
   api.getField.mockResolvedValue(DETAIL.password);
 });

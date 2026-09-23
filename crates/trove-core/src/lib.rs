@@ -1497,11 +1497,19 @@ fn summarise_group(group: &keepass::db::GroupRef<'_>) -> GroupSummary {
 }
 
 fn build_inherited_tags(group: Option<keepass::db::GroupRef<'_>>) -> Vec<String> {
+    let Some(group) = group else {
+        return Vec::new();
+    };
+    let db = group.database();
+    let mut current_id = group.id();
     let mut ancestors = Vec::new();
-    let mut current = group;
-    while let Some(group) = current {
+    while let Some(group) = db.group(current_id) {
         ancestors.push(group.tags.clone());
-        current = group.parent();
+        if let Some(parent) = group.parent() {
+            current_id = parent.id();
+        } else {
+            break;
+        }
     }
     ancestors.reverse();
     let mut tags = Vec::new();
@@ -1518,13 +1526,14 @@ fn build_inherited_tags(group: Option<keepass::db::GroupRef<'_>>) -> Vec<String>
 
 fn build_group_path_from_group(group: &keepass::db::GroupRef<'_>) -> Vec<String> {
     let mut rev = Vec::new();
-    let mut current = Some(group.clone());
-    while let Some(group) = current {
+    let db = group.database();
+    let mut current_id = group.id();
+    while let Some(group) = db.group(current_id) {
         if let Some(parent) = group.parent() {
             rev.push(group.name.clone());
-            current = Some(parent);
+            current_id = parent.id();
         } else {
-            current = None;
+            break;
         }
     }
     rev.reverse();

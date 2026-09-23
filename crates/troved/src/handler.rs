@@ -1396,6 +1396,7 @@ fn entry_dto(s: EntrySummary) -> EntryDto {
         attachments: s.attachment_names,
         group_path: s.group_path,
         tags: s.tags,
+        inherited_tags: s.inherited_tags,
     }
 }
 

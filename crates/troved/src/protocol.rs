@@ -550,6 +550,9 @@ pub struct GpgKeyDto {
     pub comment: String,
 }
 
+// This is a wire-level response; boxing its payload would not reduce serialized
+// size and would add indirection to every response construction and consumer.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum Response {

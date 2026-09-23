@@ -211,6 +211,7 @@ fn unlock_detached(path: &Path) -> Request {
         timeout: None,
         keyfile: None,
         session: Some(false),
+        filter: None,
     }
 }
 
