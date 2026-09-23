@@ -4,6 +4,48 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.18.0 — 2026-09-23
+
+**`unlock --detach` unlocks the vault and gives you your prompt back.** The two
+existing modes both answer the same question — where does the session code go —
+because a process cannot set a variable in the shell that launched it. So
+`unlock` either launches a subshell with `TROVE_SESSION` set, or prints
+`export TROVE_SESSION=…` for `eval` to consume. Neither fits the commonest case:
+unlocking so that `ssh`, `git` and `gpg` work, in the shell you are already in,
+with the history and jobs you already have.
+
+`--detach` is that case. The vault unlocks exactly as it always does — both
+agents serve its keys, `Materialize.*` entries are written to disk — and no
+session code is minted at all. Not minted and withheld: **not minted**. A code
+nobody holds is not a tidy loose end, it is a live extraction capability sitting
+in daemon memory for the life of the unlock, and the point of the flag is that
+the gate is never opened rather than opened and abandoned. `get` and
+`materialize` are therefore refused in that shell, which is the accurate
+description of what you asked for; `ssh`, `git` and `gpg` keep working, because
+they go through the agents and never needed a code. Use `--vault <PATH>` to read
+offline, or unlock again without the flag if you wanted a session after all.
+
+Detaching one vault leaves an existing session alone. `unlock` is additive
+across vaults, so revoking the session of a shell still using it would be a
+surprising way to open a second vault.
+
+### Removed
+
+**`--no-shell` is gone.** It was an alias for `--export`, and it read like a
+statement about your terminal when it was really about `eval` — which made it
+the obvious flag to reach for when you wanted the behaviour `--detach` now
+provides, and the wrong one. Two near-synonyms in `--help` were the confusion,
+so it is removed rather than hidden: a script still passing it fails loudly
+instead of quietly selecting a mode nobody asked for. Pass `--export` for the
+`eval "$(trove unlock …)"` handoff, which is what `--no-shell` always did.
+
+### Fixed
+
+**`unlock --export` quotes the socket path it prints.** Export mode's output is
+consumed by `eval`, but the healed `SSH_AUTH_SOCK` value went out unquoted. That
+path is discovered at runtime from a live agent or from launchd, not a constant
+this code controls, so whitespace or a shell metacharacter in it would break the
+
 ## v0.17.4 — 2026-09-20
 
 **Entry paths in the desktop app are relative to the folder you are in.** The

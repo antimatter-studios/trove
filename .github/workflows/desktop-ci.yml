@@ -137,10 +137,17 @@ jobs:
           ws=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
           st=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
           pj=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' package.json | head -1)
+          tc=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -1)
           core=$(awk '/^name = "trove-core"$/{getline; sub(/^version = "/,""); sub(/"$/,""); print; exit}' src-tauri/Cargo.lock)
-          echo "workspace=$ws  desktop.cargo=$st  desktop.pkg=$pj  lock.trove-core=$core"
+          echo "workspace=$ws  desktop.cargo=$st  desktop.pkg=$pj  desktop.tauri=$tc  lock.trove-core=$core"
           fail=0
           [ "$st"   = "$ws" ] || { echo "::error::src-tauri/Cargo.toml version ($st) != workspace ($ws)"; fail=1; }
           [ "$pj"   = "$ws" ] || { echo "::error::package.json version ($pj) != workspace ($ws)"; fail=1; }
+          # tauri.conf.json is what the built app reports in its window title and
+          # bundle metadata. It was NOT checked here and drifted four releases
+          # behind unnoticed (#133) — a release tag rewrites it, so only ordinary
+          # dev builds showed the wrong version, which is exactly where someone
+          # looks to find out what they are running.
+          [ "$tc"   = "$ws" ] || { echo "::error::src-tauri/tauri.conf.json version ($tc) != workspace ($ws)"; fail=1; }
           [ "$core" = "$ws" ] || { echo "::error::Cargo.lock pins trove-core $core != workspace $ws — run: cargo update --manifest-path trove-desktop/src-tauri/Cargo.toml && commit the lock"; fail=1; }
           exit $fail
