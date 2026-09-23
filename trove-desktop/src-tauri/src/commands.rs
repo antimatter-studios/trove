@@ -39,7 +39,6 @@ const RECENTS_FILE: &str = "vaults.json";
 const SETTINGS_FILE: &str = "settings.json";
 
 const FAVORITE_TAG: &str = "Favorite";
-const LEGACY_FAVORITE_FIELD: &str = "_TroveFav";
 
 // --- state -----------------------------------------------------------------
 
@@ -734,7 +733,7 @@ where
         // Measure the save alone. The mutation before it is memory work and
         // costs nothing worth reporting; the KDF is the whole of the wait.
         let started = Instant::now();
-        save_with_favorite_migration(vault)?;
+        vault.save().map_err(|e| e.to_string())?;
         rv.write_ms = Some(started.elapsed().as_millis() as u64);
         Ok::<T, String>(out)
     })
@@ -845,13 +844,7 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
     let trove_type = vault.get_field(&s.id, "_TroveType").ok().flatten();
     let fav = vault
         .get_entry_tags(&s.id)
-        .is_ok_and(|tags| tags.iter().any(|tag| is_favorite_tag(tag)))
-        || vault
-            .get_field(&s.id, LEGACY_FAVORITE_FIELD)
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("1");
+        .is_ok_and(|tags| tags.iter().any(|tag| is_favorite_tag(tag)));
 
     let id = s.id.as_str().to_string();
     let path = s.display_path();
@@ -1209,37 +1202,9 @@ fn set_favorite_tag(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), S
     Ok(())
 }
 
-/// Convert legacy desktop favorites during a normal vault write. The native
-/// tag is installed before the legacy field is removed; Vault::save atomically
-/// replaces the file, so a failed write leaves the on-disk legacy data intact.
-fn migrate_legacy_favorites(vault: &mut Vault) -> Result<(), String> {
-    for summary in vault.list_entries() {
-        if let Some(value) = vault
-            .get_field(&summary.id, LEGACY_FAVORITE_FIELD)
-            .map_err(|e| e.to_string())?
-        {
-            if value == "1" {
-                set_favorite_tag(vault, &summary.id, true)?;
-            }
-            vault
-                .remove_field(&summary.id, LEGACY_FAVORITE_FIELD)
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn save_with_favorite_migration(vault: &mut Vault) -> Result<(), String> {
-    migrate_legacy_favorites(vault)?;
-    vault.save().map_err(|e| e.to_string())
-}
-
 /// Set/clear the native Favorite tag. Saved by the caller.
 fn apply_set_favorite(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), String> {
-    set_favorite_tag(vault, eid, fav)?;
-    vault
-        .remove_field(eid, LEGACY_FAVORITE_FIELD)
-        .map_err(|e| e.to_string())
+    set_favorite_tag(vault, eid, fav)
 }
 
 /// Move an entry to the recycle bin. Saved by the caller.
@@ -2280,7 +2245,7 @@ pub async fn set_agent_key(
                         ),
                     )
                     .map_err(|e| e.to_string())?;
-                save_with_favorite_migration(vault)?;
+                vault.save().map_err(|e| e.to_string())?;
                 // Re-read so the key carries the policy just written. On
                 // disable the loader no longer returns it, so fall back to the
                 // probe — the agent still has to be told to drop it.
@@ -2456,7 +2421,7 @@ mod tests {
         vault
             .set_field(&eid, "Materialize.id.Target", "~/.ssh/id_ed25519")
             .unwrap();
-        vault.set_field(&eid, "_TroveFav", "1").unwrap();
+        vault.set_field(&eid, "_TroveObsolete", "1").unwrap();
 
         apply_save_entry(
             &mut vault,
@@ -2473,7 +2438,7 @@ mod tests {
             names.iter().any(|k| k == "Materialize.id.Target"),
             "materialize config must survive: {names:?}"
         );
-        assert!(names.iter().any(|k| k == "_TroveFav"), "got {names:?}");
+        assert!(names.iter().any(|k| k == "_TroveObsolete"), "got {names:?}");
         // And they are still hidden from the form.
         let d = entry_detail(&vault, &eid).unwrap();
         assert_eq!(d.fields.len(), 1);
@@ -2630,8 +2595,6 @@ mod tests {
         apply_set_favorite(&mut vault, &eid, false).unwrap();
         assert!(!build_entry_dtos(&vault)[0].fav);
         assert_eq!(vault.get_entry_tags(&eid).unwrap(), ["ssh", "work"]);
-        assert_eq!(vault.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(), None);
-
         // Delete recycles the entry: it leaves the live listing.
         apply_delete(&mut vault, &eid).unwrap();
         let live: Vec<_> = build_entry_dtos(&vault)
@@ -2643,65 +2606,6 @@ mod tests {
             })
             .collect();
         assert!(live.is_empty());
-    }
-
-    #[test]
-    fn legacy_favorite_is_visible_until_migrated_and_survives_kdbx_round_trip() {
-        let (mut vault, path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
-        vault
-            .set_entry_tags(&eid, vec!["git".into(), "private".into()])
-            .unwrap();
-        vault.set_field(&eid, LEGACY_FAVORITE_FIELD, "1").unwrap();
-        vault.save().unwrap(); // Simulate a vault written by an older desktop.
-
-        let mut reopened = Vault::open(&path, "correct horse").unwrap();
-        assert!(build_entry_dtos(&reopened)[0].fav);
-        assert_eq!(reopened.get_entry_tags(&eid).unwrap(), ["git", "private"]);
-        save_with_favorite_migration(&mut reopened).unwrap();
-
-        let migrated = Vault::open(&path, "correct horse").unwrap();
-        assert!(build_entry_dtos(&migrated)[0].fav);
-        assert_eq!(
-            migrated.get_entry_tags(&eid).unwrap(),
-            ["git", "private", "Favorite"]
-        );
-        assert_eq!(
-            migrated.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn existing_case_variants_are_normalized_without_duplicate_or_tag_loss() {
-        let (mut vault, path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
-        vault
-            .set_entry_tags(
-                &eid,
-                vec![
-                    "git".into(),
-                    "fAVorite".into(),
-                    "private".into(),
-                    "FAVORITE".into(),
-                ],
-            )
-            .unwrap();
-        vault.set_field(&eid, LEGACY_FAVORITE_FIELD, "1").unwrap();
-        vault.save().unwrap();
-        let mut reopened = Vault::open(&path, "correct horse").unwrap();
-        assert!(build_entry_dtos(&reopened)[0].fav);
-
-        save_with_favorite_migration(&mut reopened).unwrap();
-        let migrated = Vault::open(&path, "correct horse").unwrap();
-        assert_eq!(
-            migrated.get_entry_tags(&eid).unwrap(),
-            ["git", "Favorite", "private"]
-        );
-        assert_eq!(
-            migrated.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(),
-            None
-        );
     }
 
     #[test]
@@ -2719,55 +2623,10 @@ mod tests {
         assert!(build_entry_dtos(&reopened)[0].fav);
 
         apply_set_favorite(&mut reopened, &eid, false).unwrap();
-        save_with_favorite_migration(&mut reopened).unwrap();
+        reopened.save().unwrap();
         let cleared = Vault::open(&path, "correct horse").unwrap();
         assert!(!build_entry_dtos(&cleared)[0].fav);
         assert_eq!(cleared.get_entry_tags(&eid).unwrap(), ["git"]);
-    }
-
-    #[test]
-    fn unstarring_an_unmigrated_legacy_favorite_does_not_restore_it_on_save() {
-        let (mut vault, path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
-        vault.set_field(&eid, LEGACY_FAVORITE_FIELD, "1").unwrap();
-        assert!(build_entry_dtos(&vault)[0].fav);
-
-        apply_set_favorite(&mut vault, &eid, false).unwrap();
-        save_with_favorite_migration(&mut vault).unwrap();
-        let reopened = Vault::open(&path, "correct horse").unwrap();
-        assert!(!build_entry_dtos(&reopened)[0].fav);
-        assert!(reopened.get_entry_tags(&eid).unwrap().is_empty());
-        assert_eq!(
-            reopened.get_field(&eid, LEGACY_FAVORITE_FIELD).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn failed_migration_write_keeps_legacy_favorite_on_disk() {
-        let (mut vault, path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
-        vault.set_field(&eid, LEGACY_FAVORITE_FIELD, "1").unwrap();
-        vault.save().unwrap();
-
-        let mut stale = Vault::open(&path, "correct horse").unwrap();
-        let mut other_writer = Vault::open(&path, "correct horse").unwrap();
-        other_writer
-            .set_field(&eid, "Notes", "updated elsewhere")
-            .unwrap();
-        other_writer.save().unwrap();
-
-        assert!(save_with_favorite_migration(&mut stale).is_err());
-        let on_disk = Vault::open(&path, "correct horse").unwrap();
-        assert!(build_entry_dtos(&on_disk)[0].fav);
-        assert!(on_disk.get_entry_tags(&eid).unwrap().is_empty());
-        assert_eq!(
-            on_disk
-                .get_field(&eid, LEGACY_FAVORITE_FIELD)
-                .unwrap()
-                .as_deref(),
-            Some("1")
-        );
     }
 
     #[test]
