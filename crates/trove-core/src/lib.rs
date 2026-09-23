@@ -571,6 +571,32 @@ impl Vault {
             .map(|e| summarise(&e))
     }
 
+    /// Native KDBX entry tags. These are separate from custom string fields.
+    pub fn get_entry_tags(&self, id: &EntryId) -> Result<Vec<String>> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let entry = self
+            .inner
+            .db
+            .entry(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        Ok(entry.tags.clone())
+    }
+
+    /// Replace an entry's native KDBX tags, preserving the caller's order.
+    pub fn set_entry_tags(&mut self, id: &EntryId, tags: Vec<String>) -> Result<()> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let mut entry = self
+            .inner
+            .db
+            .entry_mut(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        if entry.tags != tags {
+            entry.tags = tags;
+            touch_modified(&mut entry);
+        }
+        Ok(())
+    }
+
     /// Look up an entry by title or path.
     ///
     /// * Plain title with no `/`: returns the first entry whose leaf title
