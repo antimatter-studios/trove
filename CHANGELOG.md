@@ -4,6 +4,14 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.20.0 — 2026-09-25
+
+**Unlock can select a password for each vault from `.env.trove`.** Use a YAML
+map keyed by exact vault filename, or dotenv profiles that pair
+`TROVE_VAULT_<NAME>_FILE` with `TROVE_VAULT_<NAME>_PASSWORD`. This makes
+unlocking several databases in one directory work with `trove unlock --env`;
+the existing `TROVE_VAULT_PASSWORD` remains available and takes precedence.
+
 ## v0.19.0 — 2026-09-23
 
 **Unlock can be filtered by native KDBX tags.** `trove unlock --filter gitlab`

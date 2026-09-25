@@ -63,13 +63,15 @@ struct Cli {
     ///
     /// Bare `--env` looks for `.env.trove` in the working directory and then
     /// beside the vault being opened; pass a path to read a specific file.
-    /// Lines are `KEY=VALUE`, with `#` comments, an optional `export ` prefix
-    /// and optional quotes. A variable already set in the environment wins, so
-    /// the file supplies defaults rather than overriding the caller.
+    /// Dotenv files accept `KEY=VALUE` lines, comments, an optional `export `
+    /// prefix and optional quotes. Pair `TROVE_VAULT_<NAME>_FILE` with
+    /// `TROVE_VAULT_<NAME>_PASSWORD` to select a password by exact filename.
+    /// Alternatively, use a YAML map from vault filenames to passwords. An
+    /// existing environment variable wins over the file.
     ///
-    /// Its main use is `TROVE_VAULT_PASSWORD`, which unlocks the vault without a
-    /// prompt. Nothing is read unless this flag is given — trove never picks up
-    /// a password file just because one happens to exist next to it.
+    /// `TROVE_VAULT_PASSWORD` remains available for one password shared by all
+    /// vaults. Nothing is read unless this flag is given — trove never picks up
+    /// credentials just because a file happens to exist next to a vault.
     #[arg(
         long = "env",
         global = true,
@@ -3170,7 +3172,7 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     // disaster — the file wins and stdin is there if it yields nothing). The
     // keychain comes last because reading it can raise a system dialog, and a
     // dialog in a terminal that cannot answer costs you the session.
-    let password = if let Some(p) = password_from_env() {
+    let password = if let Some(p) = password_for_vault(path) {
         p
     } else if pw_stdin {
         read_password_from_stdin().context("reading vault password from stdin")?
@@ -3207,6 +3209,10 @@ const DEFAULT_ENV_FILE: &str = ".env.trove";
 /// is loaded too — `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths — so
 /// one file can carry a whole trove configuration, not just a secret.
 const PASSWORD_VAR: &str = "TROVE_VAULT_PASSWORD";
+/// Per-vault credentials loaded from a YAML `.env.trove`, keyed by exact
+/// filename (for example, `work.kdbx`).
+static VAULT_PASSWORDS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+    std::sync::OnceLock::new();
 
 /// Whether `--env` was given. Only then will a password be taken from the
 /// environment: an exported `TROVE_VAULT_PASSWORD` must never silently unlock a
@@ -3353,6 +3359,46 @@ fn load_env_file(path: &Path) -> Result<usize> {
     check_env_file_perms(path)?;
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading env file {}", path.display()))?;
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'));
+    let yaml = first.is_some_and(|line| {
+        let eq = line.find('=');
+        let colon = line.find(':');
+        colon.is_some() && (eq.is_none() || colon < eq)
+    });
+    if yaml {
+        let values: serde_yaml::Value = serde_yaml::from_str(&text)
+            .with_context(|| format!("parsing YAML credentials in {}", path.display()))?;
+        let mapping = values.as_mapping().ok_or_else(|| {
+            anyhow!(
+                "{}: YAML credentials must map vault filenames to passwords",
+                path.display()
+            )
+        })?;
+        let mut passwords = std::collections::HashMap::new();
+        for (key, value) in mapping {
+            let name = key
+                .as_str()
+                .ok_or_else(|| anyhow!("{}: YAML vault names must be strings", path.display()))?;
+            let password = value.as_str().ok_or_else(|| {
+                anyhow!("{}: password for {name:?} must be a string", path.display())
+            })?;
+            if name.is_empty() || password.is_empty() {
+                return Err(anyhow!(
+                    "{}: vault names and passwords must not be empty",
+                    path.display()
+                ));
+            }
+            passwords.insert(name.to_owned(), password.to_owned());
+        }
+        let n = passwords.len();
+        VAULT_PASSWORDS
+            .set(passwords)
+            .map_err(|_| anyhow!("a YAML .env.trove file was already loaded"))?;
+        return Ok(n);
+    }
     let mut set = 0usize;
     for (i, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -3395,6 +3441,41 @@ fn password_from_env() -> Option<String> {
         Ok(v) if !v.is_empty() => Some(v),
         _ => None,
     }
+}
+
+/// Resolve the opt-in password source for a particular vault. The legacy
+/// single-password variable takes precedence over named dotenv profiles and
+/// the YAML map.
+fn password_for_vault(vault: &Path) -> Option<String> {
+    password_from_env().or_else(|| {
+        if !ENV_OPT_IN.get().copied().unwrap_or(false) {
+            return None;
+        }
+        let name = vault.file_name()?.to_str()?;
+        // A profile names the vault explicitly, so filenames need no conversion
+        // into environment-variable-safe identifiers. Sort for stable behavior
+        // if more than one profile names the same vault.
+        let mut profiles: Vec<_> = std::env::vars_os()
+            .filter_map(|(key, file)| {
+                let key = key.into_string().ok()?;
+                let profile = key.strip_prefix("TROVE_VAULT_")?.strip_suffix("_FILE")?;
+                if profile.is_empty() || file != name {
+                    return None;
+                }
+                Some(profile.to_owned())
+            })
+            .collect();
+        profiles.sort();
+        for profile in profiles {
+            let key = format!("TROVE_VAULT_{profile}_PASSWORD");
+            if let Ok(password) = std::env::var(key) {
+                if !password.is_empty() {
+                    return Some(password);
+                }
+            }
+        }
+        VAULT_PASSWORDS.get().and_then(|map| map.get(name).cloned())
+    })
 }
 
 fn read_password_from_stdin() -> Result<String> {
@@ -5096,7 +5177,7 @@ fn cmd_unlock(
         .ok_or_else(|| anyhow!("vault path is not valid utf-8"))?
         .to_string();
     // Same order as `open_vault`: the sources that cannot block come first.
-    let password = if let Some(p) = password_from_env() {
+    let password = if let Some(p) = password_for_vault(&vault_abs) {
         p
     } else if pw_stdin {
         read_password_from_stdin().context("reading vault password from stdin")?

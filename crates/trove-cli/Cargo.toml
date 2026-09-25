@@ -35,6 +35,7 @@ tokio = { workspace = true, features = ["rt", "macros", "signal", "time", "proce
 # `troved::protocol` and parse responses as untyped serde_json::Value (the
 # `OkBody` enum is `#[serde(untagged)]` and not safe to deserialize strictly).
 serde_json.workspace = true
+serde_yaml = "0.9"
 # v0.0.10.0: code-gated `get` routes extraction through the daemon, which
 # returns attachment bytes base64-encoded on the JSON wire. We decode here.
 base64 = "0.22"
