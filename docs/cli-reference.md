@@ -927,9 +927,9 @@ Permission model: every socket is bound by the daemon, then `chmod 0600` so only
 
 ## The `.env.trove` file
 
-A `KEY=VALUE` file that supplies trove's environment, loaded only when `--env` is
-passed. Nothing is read without that flag: an exported `TROVE_VAULT_PASSWORD` must
-never silently open a vault for a command that didn't ask for one.
+A dotenv `KEY=VALUE` file or YAML password map, loaded only when `--env` is
+passed. Nothing is read without that flag: an exported password must never
+silently open a vault for a command that didn't ask for one.
 
 ### Where it is found
 
@@ -965,6 +965,8 @@ dotfile repositories, and this file holds a vault password.
 
 ### Syntax
 
+For one shared password, the dotenv format remains available:
+
 ```sh
 # comments and blank lines are ignored
 TROVE_VAULT_PASSWORD=correct horse battery staple
@@ -972,12 +974,41 @@ export TROVE_VAULT=/Users/me/vaults/work.kdbx   # an `export ` prefix is allowed
 TROVE_IDLE_TIMEOUT="900"                        # quotes are optional
 ```
 
-No interpolation, no multi-line values — this holds configuration and a password, not a
-shell script. A variable **already set in the environment wins**, so the file supplies
-defaults rather than overriding its caller.
+For several databases, dotenv profiles pair a `_FILE` value with a `_PASSWORD`
+value. The file must match the exact vault filename, including `.kdbx`:
 
-Every trove variable can live here, not just the password: `TROVE_VAULT`,
-`TROVE_IDLE_TIMEOUT`, the socket paths. One file can carry a whole configuration.
+```dotenv
+TROVE_VAULT_WORK_FILE=work.kdbx
+TROVE_VAULT_WORK_PASSWORD="work vault password"
+TROVE_VAULT_PERSONAL_FILE=personal.kdbx
+TROVE_VAULT_PERSONAL_PASSWORD="personal vault password"
+```
+
+The profile name (`WORK` or `PERSONAL` here) links each pair of variables; it
+does not need to resemble the filename. Dotenv profiles can share a file with
+other settings such as `TROVE_IDLE_TIMEOUT`.
+
+Alternatively, `.env.trove` can be a YAML mapping from the exact vault filename
+to its password:
+
+```yaml
+work.kdbx: "work vault password"
+personal.kdbx: "personal vault password"
+```
+
+With either format, `trove unlock work.kdbx --env` uses the work password, while
+unlocking `personal.kdbx` uses the personal password. The YAML form is a
+credentials map; dotenv settings such as `TROVE_IDLE_TIMEOUT` cannot be mixed
+into that same file. `TROVE_VAULT_PASSWORD`, when set, takes precedence over a
+matching profile or YAML entry.
+
+In dotenv form there is no interpolation or multi-line values — this holds
+configuration and a password, not a shell script. A variable **already set in the
+environment wins**, so the file supplies defaults rather than overriding its caller.
+
+Every trove variable can live in dotenv form, not just the password:
+`TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths. The YAML form is for the
+per-vault password map.
 
 ### Permissions
 
@@ -1035,6 +1066,7 @@ All env vars are read at process start.
 | `TROVE_SSH_FORWARD` | (on) | Set to `0` / `false` / `no` / `off` to stop pushing unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`. Read on every unlock, not just at start. Forwarding is already inert when `$SSH_AUTH_SOCK` is unset or points at trove's own socket. |
 | `TROVE_SSH_STRICT_HOSTKEYS` | (off) | Set to `1` / `true` / `yes` to answer a server that no key's `SshAgent.HostKeys` declares with an empty identity list, instead of falling back to offering everything. Read once when the agent socket is bound. Turns a stale declaration from a missed optimisation into a refused connection — which is the point, and why it is off by default. |
 | `TROVE_VAULT_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above). Prefer keeping it in a `0600` `.env.trove` that is never exported — an exported variable is inherited by every child process. |
+| `TROVE_VAULT_<NAME>_FILE` / `TROVE_VAULT_<NAME>_PASSWORD` | (unset) | Named password profile, used **only** with `--env`. `_FILE` matches the exact vault filename; `_PASSWORD` supplies its password. |
 | `TROVE_ENV_STRICT` | (off) | Set to `1` / `true` / `yes` / `on` to make `--env` **refuse** a file readable by more than its owner, instead of warning. macOS/Unix only. |
 | `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
