@@ -982,9 +982,9 @@ enum AddResource {
         /// Length of the generated password (with --generate; default 20).
         #[arg(long, requires = "generate")]
         length: Option<usize>,
-        /// Read the password from stdin instead of prompting. When the global
-        /// `--password-stdin` is also set, the VAULT password is line 1 and
-        /// this secret is line 2.
+        /// Read the entry password from stdin instead of prompting. Offline
+        /// only: with global `--password-stdin`, the vault password is line 1
+        /// and this secret is line 2.
         #[arg(long = "secret-stdin")]
         secret_stdin: bool,
     },
@@ -3751,6 +3751,7 @@ fn cmd_add_password(
     secret_stdin: bool,
     pw_stdin: bool,
 ) -> Result<()> {
+    validate_add_password_stdin_mode(vault, pw_stdin)?;
     // Offline mode opens the vault FIRST so that with `--password-stdin
     // --secret-stdin` the vault password is line 1 and the secret line 2.
     let mut offline_vault = match vault {
@@ -3803,6 +3804,32 @@ fn cmd_add_password(
         println!("stored password entry at '{entry_path}'");
     }
     Ok(())
+}
+
+fn validate_add_password_stdin_mode(vault: Option<&Path>, pw_stdin: bool) -> Result<()> {
+    if pw_stdin && vault.is_none() {
+        return Err(anyhow!(
+            "--password-stdin is only for offline commands with --vault; daemon mode does not need a vault password"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod add_password_stdin_tests {
+    use super::validate_add_password_stdin_mode;
+    use std::path::Path;
+
+    #[test]
+    fn rejects_vault_password_stdin_in_daemon_mode() {
+        let error = validate_add_password_stdin_mode(None, true).unwrap_err();
+        assert!(error.to_string().contains("only for offline commands"));
+    }
+
+    #[test]
+    fn allows_vault_password_stdin_with_offline_vault() {
+        validate_add_password_stdin_mode(Some(Path::new("vault.kdbx")), true).unwrap();
+    }
 }
 
 fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
