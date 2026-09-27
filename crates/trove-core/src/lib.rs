@@ -1610,6 +1610,27 @@ impl Vault {
         iterations: Option<u64>,
         parallelism: Option<u32>,
     ) -> Result<()> {
+        if let Some(memory) = memory_kib {
+            if !(8..(1u64 << 32)).contains(&memory) {
+                return Err(Error::Kdbx(
+                    "Argon2 memory must be between 8 KiB and less than 2^32 KiB".into(),
+                ));
+            }
+        }
+        if let Some(iterations) = iterations {
+            if !(1..=i32::MAX as u64).contains(&iterations) {
+                return Err(Error::Kdbx(
+                    "Argon2 iterations must be between 1 and 2^31-1".into(),
+                ));
+            }
+        }
+        if let Some(parallelism) = parallelism {
+            if !(1..(1 << 24)).contains(&parallelism) {
+                return Err(Error::Kdbx(
+                    "Argon2 parallelism must be between 1 and less than 2^24".into(),
+                ));
+            }
+        }
         match &mut self.inner.db.config.kdf_config {
             keepass::config::KdfConfig::Argon2 {
                 iterations: it,
@@ -1618,7 +1639,9 @@ impl Vault {
                 ..
             } => {
                 if let Some(m) = memory_kib {
-                    *memory = m;
+                    *memory = m
+                        .checked_mul(1024)
+                        .ok_or_else(|| Error::Kdbx("Argon2 memory value overflows bytes".into()))?;
                 }
                 if let Some(i) = iterations {
                     *it = i;
