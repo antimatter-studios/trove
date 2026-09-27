@@ -112,8 +112,8 @@ mod windows_imp {
 
     pub struct Listener {
         name: OsString,
-        /// The instance the next `accept()` will wait on. Always `Some`
-        /// between accepts; taken and replaced on each accept.
+        /// The instance the next `accept()` will wait on. `None` means the
+        /// last accept could not re-arm it; the next call retries creation.
         pending: Option<NamedPipeServer>,
     }
 
@@ -141,16 +141,34 @@ mod windows_imp {
     }
 
     impl Listener {
+        #[cfg(test)]
+        pub fn without_pending_for_test(path: &Path) -> Self {
+            Self {
+                name: pipe_name(path),
+                pending: None,
+            }
+        }
+
         pub async fn accept(&mut self) -> io::Result<Stream> {
             // tokio's documented accept loop: wait for a client on the current
             // instance, then stand up the next instance so the following
             // accept() has something to wait on.
-            let server = self
-                .pending
-                .take()
-                .expect("listener always holds a pending instance");
-            server.connect().await?;
+            if self.pending.is_none() {
+                self.pending = Some(security::create_server(&self.name, false)?);
+            }
+            let server = self.pending.take().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "named-pipe listener could not create a pending instance",
+                )
+            })?;
+            let connected = server.connect().await;
+            // Re-arm even after a failed connection, so transient client
+            // failures do not permanently consume the listener instance.
+            // If creation fails, leave pending empty; a subsequent accept()
+            // retries it instead of panicking on a missing instance.
             self.pending = Some(security::create_server(&self.name, false)?);
+            connected?;
             Ok(server)
         }
     }
@@ -308,5 +326,34 @@ mod unix_tests {
         connect(&path)
             .await
             .expect("rebound listener must be connectable");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::windows_imp::{connect, Listener};
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn accept_recovers_when_no_instance_is_pending() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("recover");
+        let mut listener = Listener::without_pending_for_test(&path);
+
+        let accept_task = tokio::spawn(async move { listener.accept().await });
+        let mut client = None;
+        for _ in 0..100 {
+            if let Ok(stream) = connect(&path).await {
+                client = Some(stream);
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        let _client = client.expect("accept must create an instance for a client");
+        let accepted = accept_task
+            .await
+            .expect("accept task must not panic")
+            .expect("accept should recover and complete");
+        drop(accepted);
     }
 }
