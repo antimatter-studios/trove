@@ -17,9 +17,6 @@ pub enum Error {
     #[error("kdbx error: {0}")]
     Kdbx(String),
 
-    #[error("challenge-response failed: {0}")]
-    ChallengeResponse(String),
-
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

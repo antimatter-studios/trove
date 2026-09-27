@@ -1670,7 +1670,7 @@ fn open_err_to_error(e: keepass::error::DatabaseOpenError) -> Error {
         DatabaseOpenError::Key(DatabaseKeyError::IncorrectKey) => Error::BadPassword,
         #[cfg(feature = "yubikey")]
         DatabaseOpenError::Key(DatabaseKeyError::ChallengeResponse(err)) => {
-            Error::ChallengeResponse(err.to_string())
+            Error::Kdbx(format!("challenge-response failed: {err}"))
         }
         DatabaseOpenError::Key(other) => Error::Kdbx(other.to_string()),
         DatabaseOpenError::UnsupportedVersion => {
