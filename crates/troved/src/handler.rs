@@ -1548,7 +1548,16 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
     let mut gpg: Vec<LoadedGpgKey> = Vec::new();
     let mut gpg_seen: HashMap<[u8; 20], usize> = HashMap::new();
     for (vault, filter) in set.iter_with_filters() {
-        for key in load_ssh_keys_from_vault_filtered(vault, filter) {
+        let vault_label = vault
+            .path()
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("vault");
+        for mut key in load_ssh_keys_from_vault_filtered(vault, filter) {
+            // Keep the source visible in ssh-add -l and trove ssh-agent list.
+            // Entry lookup uses the unqualified loader in find_ssh_key above.
+            key.comment = format!("{vault_label}:{}", key.comment);
             match ssh_seen.get(&key.public_blob) {
                 Some(&i) => ssh[i] = key,
                 None => {
