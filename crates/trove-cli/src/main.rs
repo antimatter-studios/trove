@@ -1262,6 +1262,99 @@ fn require_vault(vault: Option<&Path>) -> Result<&Path> {
     })
 }
 
+#[cfg(any(feature = "yubikey", test))]
+fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>) -> bool {
+    match command {
+        // These commands always open a local vault directly.
+        Command::Init
+        | Command::Materialize
+        | Command::Group { .. }
+        | Command::Exec { .. }
+        | Command::Analyze { .. }
+        | Command::GitCredential { .. }
+        | Command::Resolve { .. }
+        | Command::Merge { .. }
+        | Command::Export { .. }
+        | Command::DbEdit { .. }
+        | Command::DbInfo { .. } => true,
+        // These route to troved when no explicit offline vault was selected.
+        Command::List { .. }
+        | Command::Add { .. }
+        | Command::Get { .. }
+        | Command::Clip { .. }
+        | Command::Show { .. }
+        | Command::Search { .. }
+        | Command::Edit { .. }
+        | Command::Rm { .. }
+        | Command::Mv { .. }
+        | Command::Cp { .. }
+        | Command::Mkdir { .. }
+        | Command::Rmdir { .. }
+        | Command::RenameAttachment { .. } => vault.is_some(),
+        Command::Generate {
+            resource: GenerateResource::Ssh { .. },
+        } => vault.is_some(),
+        // Includes unlock: its positional vault is always opened by troved.
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod challenge_response_routing_tests {
+    use super::*;
+
+    #[test]
+    fn challenge_response_is_allowed_only_on_offline_vault_paths() {
+        let vault = Path::new("vault.kdbx");
+        assert!(challenge_response_uses_offline_vault(
+            &Command::Init,
+            Some(vault)
+        ));
+        assert!(challenge_response_uses_offline_vault(
+            &Command::Materialize,
+            Some(vault)
+        ));
+        assert!(challenge_response_uses_offline_vault(
+            &Command::Exec {
+                scope: Some(String::from("Infra")),
+                entry: None,
+                group: None,
+                command: vec!["true".into()],
+            },
+            Some(vault)
+        ));
+        assert!(challenge_response_uses_offline_vault(
+            &Command::List {
+                json: false,
+                show_id: false,
+            },
+            Some(vault)
+        ));
+        assert!(!challenge_response_uses_offline_vault(
+            &Command::List {
+                json: false,
+                show_id: false,
+            },
+            None
+        ));
+        assert!(!challenge_response_uses_offline_vault(
+            &Command::Status,
+            Some(vault)
+        ));
+        assert!(!challenge_response_uses_offline_vault(
+            &Command::Unlock {
+                vault: PathBuf::from("vault.kdbx"),
+                timeout: None,
+                filter: None,
+                export: false,
+                shell: false,
+                detach: false,
+            },
+            Some(vault)
+        ));
+    }
+}
+
 /// The `--key-file` bytes, read once in `run()` before any command executes.
 /// A read-only global mirroring the flag's global scope (same trust model as
 /// the `TROVE_SOCK` env override) — every vault-opening path consults it via
@@ -1363,8 +1456,23 @@ fn run(cli: Cli) -> Result<()> {
         None => None,
     };
     KEY_FILE.set(keyfile_bytes).expect("run() is called once");
+    // The global offline selector. `Some` → operate on this file directly;
+    // `None` → use the daemon (for commands that have a daemon mode).
+    // `unlock` ignores it and uses its own positional vault.
+    // Explicit CLI input wins over the environment; the latter may have been
+    // loaded from --env immediately above.
+    let selected_vault = cli.vault.clone().or_else(env_vault_path);
+    let vault = selected_vault.as_deref();
     #[cfg(feature = "yubikey")]
     {
+        let challenge_response_requested = cli.yubikey.is_some() || cli.cr_secret_hex.is_some();
+        if challenge_response_requested
+            && !challenge_response_uses_offline_vault(&cli.command, vault)
+        {
+            return Err(anyhow!(
+                "YubiKey challenge-response is supported only when trove opens a vault offline; daemon-backed commands, including `unlock`, do not support it"
+            ));
+        }
         // Fail fast: a missing/ambiguous device or bad hex should surface
         // before any password prompt.
         let cr = match (&cli.yubikey, &cli.cr_secret_hex) {
@@ -1376,14 +1484,6 @@ fn run(cli: Cli) -> Result<()> {
         };
         CHALLENGE_RESPONSE.set(cr).expect("run() is called once");
     }
-    // The global offline selector. `Some` → operate on this file directly;
-    // `None` → use the daemon (for commands that have a daemon mode). Commands
-    // with no daemon mode (init/materialize) require it via `require_vault`.
-    // `unlock` ignores it and uses its own positional.
-    // Explicit CLI input wins over the environment; the latter may have been
-    // loaded from --env immediately above.
-    let selected_vault = cli.vault.clone().or_else(env_vault_path);
-    let vault = selected_vault.as_deref();
     match cli.command {
         Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
         Command::List { json, show_id } => cmd_list(vault, pw_stdin, json, show_id),
