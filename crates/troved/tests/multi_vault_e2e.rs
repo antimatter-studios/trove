@@ -191,13 +191,13 @@ async fn second_unlock_adds_to_the_set_instead_of_replacing_it() {
 
     let d = Daemon::new();
     assert!(matches!(d.unlock(&a).await, Response::Ok(_)));
-    assert_eq!(d.served_ssh_comments().await, vec!["personal/github.com"]);
+    assert_eq!(d.served_ssh_comments().await, vec!["a:personal/github.com"]);
 
     // The whole point: unlocking b must not evict a.
     assert!(matches!(d.unlock(&b).await, Response::Ok(_)));
     assert_eq!(
         d.served_ssh_comments().await,
-        vec!["personal/github.com", "work/gitlab.com"],
+        vec!["a:personal/github.com", "b:work/gitlab.com"],
         "the agent must serve the union of both vaults' keys"
     );
 
@@ -228,7 +228,7 @@ async fn unlock_filter_exposes_only_entries_with_the_selected_tag() {
         d.unlock_filtered(&vault, "gitlab").await,
         Response::Ok(_)
     ));
-    assert_eq!(d.served_ssh_comments().await, vec!["gitlab-key"]);
+    assert_eq!(d.served_ssh_comments().await, vec!["filtered:gitlab-key"]);
 }
 
 #[tokio::test]
@@ -279,7 +279,7 @@ async fn locking_one_vault_leaves_the_other_serving() {
 
     assert_eq!(
         d.served_ssh_comments().await,
-        vec!["work/gitlab.com"],
+        vec!["b:work/gitlab.com"],
         "locking a must drop only a's key from the agent"
     );
     assert!(
@@ -322,7 +322,7 @@ async fn locking_a_vault_that_is_not_open_is_an_error() {
         "expected a targeted error, got: {resp:?}"
     );
     // …and the mistake must not have locked anything.
-    assert_eq!(d.served_ssh_comments().await, vec!["personal/github.com"]);
+    assert_eq!(d.served_ssh_comments().await, vec!["a:personal/github.com"]);
 }
 
 #[tokio::test]
@@ -360,7 +360,10 @@ async fn a_title_in_two_vaults_refuses_rather_than_guessing() {
 
     // Both keys still serve — the agent keys by public blob, so a title
     // collision is not a key collision.
-    assert_eq!(d.served_ssh_comments().await.len(), 2);
+    assert_eq!(
+        d.served_ssh_comments().await,
+        vec!["a:github.com", "b:github.com"]
+    );
 
     let resp = d
         .handle(Request::ShowEntry {
@@ -389,7 +392,7 @@ async fn re_unlocking_the_same_vault_does_not_duplicate_its_keys() {
 
     assert_eq!(
         d.served_ssh_comments().await,
-        vec!["personal/github.com"],
+        vec!["a:personal/github.com"],
         "a re-unlock must replace the vault, not stack a second copy"
     );
     assert_eq!(d.state.lock().await.len(), 1);
