@@ -1623,13 +1623,15 @@ fn run(cli: Cli) -> Result<()> {
             show_id,
         } => cmd_search(
             vault,
-            term.as_deref(),
-            &fields,
-            &tags,
-            &attachments,
+            SearchOptions {
+                term,
+                fields,
+                tags,
+                attachments,
+                json,
+                show_id,
+            },
             pw_stdin,
-            json,
-            show_id,
         ),
         Command::Edit {
             entry_path,
@@ -4222,33 +4224,37 @@ fn cmd_show(
     Ok(())
 }
 
-fn cmd_search(
-    vault: Option<&Path>,
-    term: Option<&str>,
-    fields: &[String],
-    tags: &[String],
-    attachments: &[String],
-    pw_stdin: bool,
+struct SearchOptions {
+    term: Option<String>,
+    fields: Vec<String>,
+    tags: Vec<String>,
+    attachments: Vec<String>,
     json: bool,
     show_id: bool,
-) -> Result<()> {
-    let fields = parse_search_fields(fields)?;
-    if term.is_none() && fields.is_empty() && tags.is_empty() && attachments.is_empty() {
+}
+
+fn cmd_search(vault: Option<&Path>, options: SearchOptions, pw_stdin: bool) -> Result<()> {
+    let fields = parse_search_fields(&options.fields)?;
+    if options.term.is_none()
+        && fields.is_empty()
+        && options.tags.is_empty()
+        && options.attachments.is_empty()
+    {
         return Err(anyhow!(
             "search needs a term or at least one --field, --tag, or --attachment filter"
         ));
     }
     let query = SearchQuery {
-        term: term.map(str::to_string),
+        term: options.term.clone(),
         fields: fields.clone(),
-        tags: tags.to_vec(),
-        attachments: attachments.to_vec(),
+        tags: options.tags.clone(),
+        attachments: options.attachments.clone(),
     };
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
             let hits = v.search_entries_with(&query);
-            if json {
+            if options.json {
                 let arr: Vec<Value> = hits
                     .iter()
                     .map(|hit| {
@@ -4269,11 +4275,11 @@ fn cmd_search(
                     attachments: hit.entry.attachment_names.clone(),
                 })
                 .collect();
-            print_entry_rows(rows, show_id, false);
+            print_entry_rows(rows, options.show_id, false);
         }
         None => {
             let resp = daemon_call(&daemon::Request::Search {
-                term: term.map(str::to_string),
+                term: options.term,
                 fields: fields
                     .iter()
                     .map(|f| match &f.value {
@@ -4281,19 +4287,19 @@ fn cmd_search(
                         None => f.name.clone(),
                     })
                     .collect(),
-                tags: tags.to_vec(),
-                attachments: attachments.to_vec(),
+                tags: options.tags,
+                attachments: options.attachments,
             })?;
             let entries = resp
                 .get("entries")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            if json {
+            if options.json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
                 return Ok(());
             }
-            print_entry_rows(rows_from_json(&entries), show_id, false);
+            print_entry_rows(rows_from_json(&entries), options.show_id, false);
         }
     }
     Ok(())
