@@ -94,6 +94,31 @@ pub struct EntrySummary {
     pub modified: Option<String>,
 }
 
+/// A user-selected exact custom-field filter for [`SearchQuery`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFieldFilter {
+    pub name: String,
+    /// `None` matches any unprotected value for this field name.
+    pub value: Option<String>,
+}
+
+/// Search terms and exact filters. Categories are combined with AND; repeated
+/// filters within a category are combined with OR.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub term: Option<String>,
+    pub fields: Vec<SearchFieldFilter>,
+    pub tags: Vec<String>,
+    pub attachment_globs: Vec<String>,
+}
+
+/// An entry and the unprotected metadata surfaces that made it match.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub entry: EntrySummary,
+    pub matched: Vec<String>,
+}
+
 /// Non-secret summary of a group and its direct/inherited KeePass tags.
 #[derive(Debug, Clone)]
 pub struct GroupSummary {
@@ -1226,26 +1251,151 @@ impl Vault {
         Ok(true)
     }
 
-    /// Case-insensitive substring search over title, username, URL, notes
-    /// and the group path. Protected values are never searched.
-    pub fn search_entries(&self, term: &str) -> Vec<EntrySummary> {
-        let needle = term.to_lowercase();
-        self.inner
-            .db
-            .iter_all_entries()
-            .filter(|e| {
-                let hay = |s: Option<&str>| s.is_some_and(|v| v.to_lowercase().contains(&needle));
-                hay(e.get_title())
-                    || hay(e.get_username())
-                    || hay(e.get_url())
-                    || hay(e.get("Notes"))
-                    || build_group_path(e)
-                        .join("/")
-                        .to_lowercase()
-                        .contains(&needle)
+    /// Search unprotected entry metadata with a term and/or exact filters.
+    /// Protected values (including custom fields protected in an imported
+    /// KeePass database) are never examined. Term and filter categories are
+    /// combined with AND; repeated filters within a category use OR.
+    pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>> {
+        let attachment_patterns: Vec<glob::Pattern> = query
+            .attachment_globs
+            .iter()
+            .map(|p| {
+                glob::Pattern::new(p)
+                    .map_err(|e| Error::InvalidPath(format!("invalid attachment glob '{p}': {e}")))
             })
-            .map(|e| summarise(&e))
-            .collect()
+            .collect::<Result<_>>()?;
+        let mut hits = Vec::new();
+        for e in self.inner.db.iter_all_entries() {
+            let summary = summarise(&e);
+            let mut matched = Vec::new();
+
+            if let Some(term) = query.term.as_deref() {
+                let needle = term.to_lowercase();
+                let mut term_matches = Vec::new();
+                let mut check = |label: String, value: &str| {
+                    if value.to_lowercase().contains(&needle) {
+                        term_matches.push(label);
+                    }
+                };
+                check("group path".into(), &summary.group_path.join("/"));
+                for (name, value) in &e.fields {
+                    if name.eq_ignore_ascii_case("Password") || name.eq_ignore_ascii_case("otp") {
+                        continue;
+                    }
+                    if let Value::Unprotected(value) = value {
+                        let label = if name.eq_ignore_ascii_case("Title") {
+                            "title".to_string()
+                        } else if name.eq_ignore_ascii_case("UserName") {
+                            "username".to_string()
+                        } else if name.eq_ignore_ascii_case("URL") {
+                            "url".to_string()
+                        } else if name.eq_ignore_ascii_case("Notes") {
+                            "notes".to_string()
+                        } else {
+                            check(format!("field {name}"), name);
+                            format!("field {name}")
+                        };
+                        check(label, value);
+                    }
+                }
+                for name in &summary.attachment_names {
+                    check(format!("attachment {name}"), name);
+                }
+                for tag in summary.tags.iter().chain(&summary.inherited_tags) {
+                    check(format!("tag {tag}"), tag);
+                }
+                if term_matches.is_empty() {
+                    continue;
+                }
+                matched.extend(term_matches);
+            }
+
+            if !query.fields.is_empty() {
+                let field_matches: Vec<String> = query
+                    .fields
+                    .iter()
+                    .filter_map(|filter| {
+                        let Some(value) = e.fields.get(&filter.name) else {
+                            return None;
+                        };
+                        if ["Title", "UserName", "Password", "URL", "Notes", "otp"]
+                            .iter()
+                            .any(|standard| filter.name.eq_ignore_ascii_case(standard))
+                        {
+                            return None;
+                        }
+                        let Value::Unprotected(actual) = value else {
+                            return None;
+                        };
+                        if filter
+                            .value
+                            .as_deref()
+                            .is_some_and(|wanted| actual != wanted)
+                        {
+                            return None;
+                        }
+                        Some(format!("field {}", filter.name))
+                    })
+                    .collect();
+                if field_matches.is_empty() {
+                    continue;
+                }
+                matched.extend(field_matches);
+            }
+
+            if !query.tags.is_empty() {
+                let tag_matches: Vec<String> = query
+                    .tags
+                    .iter()
+                    .filter_map(|wanted| {
+                        summary
+                            .tags
+                            .iter()
+                            .chain(&summary.inherited_tags)
+                            .find(|tag| tag.eq_ignore_ascii_case(wanted))
+                            .map(|tag| format!("tag {tag}"))
+                    })
+                    .collect();
+                if tag_matches.is_empty() {
+                    continue;
+                }
+                matched.extend(tag_matches);
+            }
+
+            if !attachment_patterns.is_empty() {
+                let attachment_matches: Vec<String> = summary
+                    .attachment_names
+                    .iter()
+                    .filter(|name| attachment_patterns.iter().any(|p| p.matches(name)))
+                    .map(|name| format!("attachment {name}"))
+                    .collect();
+                if attachment_matches.is_empty() {
+                    continue;
+                }
+                matched.extend(attachment_matches);
+            }
+
+            matched.sort();
+            matched.dedup();
+
+            hits.push(SearchHit {
+                entry: summary,
+                matched,
+            });
+        }
+        Ok(hits)
+    }
+
+    /// Backwards-compatible free-text search helper.
+    pub fn search_entries(&self, term: &str) -> Vec<EntrySummary> {
+        self.search(&SearchQuery {
+            term: Some(term.to_string()),
+            ..SearchQuery::default()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|hit| hit.entry)
+        .collect()
     }
 
     /// Resolve a `trove://` secret reference to a field value.
@@ -1482,6 +1632,44 @@ impl Vault {
             .collect();
         names.sort();
         Ok(names)
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn protected_custom_fields_are_not_searched_or_exactly_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("protected.kdbx");
+        let mut vault = Vault::create(&path, "test password").unwrap();
+        let id = vault.add_entry("entry").unwrap();
+        let raw_id = vault.lookup_entry_id(&id).unwrap();
+        vault
+            .inner
+            .db
+            .entry_mut(raw_id)
+            .unwrap()
+            .set_protected("Automation.Target", "private-value");
+
+        assert!(vault
+            .search(&SearchQuery {
+                term: Some("private-value".into()),
+                ..SearchQuery::default()
+            })
+            .unwrap()
+            .is_empty());
+        assert!(vault
+            .search(&SearchQuery {
+                fields: vec![SearchFieldFilter {
+                    name: "Automation.Target".into(),
+                    value: Some("private-value".into()),
+                }],
+                ..SearchQuery::default()
+            })
+            .unwrap()
+            .is_empty());
     }
 }
 

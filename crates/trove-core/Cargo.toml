@@ -20,6 +20,7 @@ yubikey = ["keepass/challenge_response"]
 # (Entry::get_otp), the engine behind `trove show --totp`. `_merge` unlocks
 # Database::merge, the KDBX-standard merge behind `trove merge`.
 keepass = { workspace = true, features = ["save_kdbx4", "totp", "_merge"] }
+glob = "0.3"
 zeroize.workspace = true
 thiserror.workspace = true
 

@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use tempfile::TempDir;
-use trove_core::{Error, Vault, RECYCLE_BIN_GROUP};
+use trove_core::{Error, SearchFieldFilter, SearchQuery, Vault, RECYCLE_BIN_GROUP};
 
 const PW: &str = "test password";
 
@@ -190,4 +190,63 @@ fn search_matches_all_unprotected_surfaces_only() {
     assert_eq!(hit("work"), vec!["Work/GitHub".to_string()]); // group path
     assert!(hit("hunter2").is_empty(), "protected values must not match");
     assert!(hit("zzz-no-hit").is_empty());
+}
+
+#[test]
+fn search_discovers_custom_metadata_tags_and_attachment_names_with_exact_filters() {
+    let dir = TempDir::new().unwrap();
+    let mut v = new_vault(&dir);
+    v.add_group("Build").unwrap();
+    v.set_group_tags("Build", &["release".into()]).unwrap();
+    let id = v.add_entry("Build/certificate").unwrap();
+    v.set_field(&id, "Automation.Target", "MACOS_CERTIFICATE")
+        .unwrap();
+    v.set_field(&id, "Automation.Format", "base64").unwrap();
+    v.set_field(&id, "Password", "must-not-be-searchable")
+        .unwrap();
+    v.attach_binary(&id, "developer_id.p12", &[1, 2, 3])
+        .unwrap();
+
+    let hits = v
+        .search(&SearchQuery {
+            fields: vec![SearchFieldFilter {
+                name: "Automation.Target".into(),
+                value: Some("MACOS_CERTIFICATE".into()),
+            }],
+            tags: vec!["RELEASE".into()],
+            attachment_globs: vec!["*.p12".into()],
+            ..SearchQuery::default()
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].entry.display_path(), "Build/certificate");
+    assert!(hits[0].matched.contains(&"field Automation.Target".into()));
+    assert!(hits[0].matched.contains(&"tag release".into()));
+    assert!(hits[0]
+        .matched
+        .contains(&"attachment developer_id.p12".into()));
+
+    assert_eq!(
+        v.search(&SearchQuery {
+            term: Some("automation.target".into()),
+            ..SearchQuery::default()
+        })
+        .unwrap()
+        .len(),
+        1,
+        "substring search includes user-defined field names"
+    );
+    assert!(v
+        .search(&SearchQuery {
+            term: Some("must-not-be-searchable".into()),
+            ..SearchQuery::default()
+        })
+        .unwrap()
+        .is_empty());
+    assert!(v
+        .search(&SearchQuery {
+            attachment_globs: vec!["[broken".into()],
+            ..SearchQuery::default()
+        })
+        .is_err());
 }
