@@ -105,6 +105,7 @@ struct Cli {
     keychain: bool,
 
     /// Operate directly on this .kdbx file (offline mode), bypassing the daemon.
+    /// Defaults to TROVE_VAULT when set; an explicit --vault takes precedence.
     ///
     /// trove has two modes, selected by the presence of this flag:
     ///
@@ -564,10 +565,22 @@ enum Command {
     /// `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`. The child's exit
     /// code becomes trove's. Offline-only: requires `--vault`.
     ///
+    /// If an entry and group share a name, use `--entry PATH` or `--group PATH`.
     /// Example: `trove --vault v.kdbx exec Infra/kubeconfig-prod -- bash`
     Exec {
-        /// Entry path or group path whose secrets to inject.
-        scope: String,
+        /// Entry path or group path whose secrets to inject. If omitted, select
+        /// exactly one of `--entry` or `--group`.
+        #[arg(
+            conflicts_with_all = ["entry", "group"],
+            required_unless_present_any = ["entry", "group"]
+        )]
+        scope: Option<String>,
+        /// Select one entry explicitly when a name is ambiguous.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["scope", "group"])]
+        entry: Option<String>,
+        /// Select a group and all its entries explicitly when a name is ambiguous.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["scope", "entry"])]
+        group: Option<String>,
         /// The command to run (everything after `--`).
         #[arg(last = true, required = true)]
         command: Vec<std::ffi::OsString>,
@@ -610,7 +623,7 @@ enum Command {
         /// Remove the keyfile requirement (password-only afterwards).
         #[arg(long = "unset-key-file", conflicts_with = "set_key_file")]
         unset_key_file: bool,
-        /// Argon2 memory in MiB.
+        /// Argon2 memory in MiB (must be at least 1; KeePassXC bounds apply).
         #[arg(long = "kdf-memory", value_name = "MIB")]
         kdf_memory: Option<u64>,
         /// Argon2 iterations.
@@ -1319,7 +1332,8 @@ fn run(cli: Cli) -> Result<()> {
         let path = match given {
             Some(p) => resolve_env_file(&p),
             None => {
-                let candidates = env_file_candidates(vault_for_env_lookup(&cli));
+                let env_vault = vault_for_env_lookup(&cli);
+                let candidates = env_file_candidates(env_vault.as_deref());
                 candidates
                     .iter()
                     .find(|p| p.is_file())
@@ -1366,7 +1380,10 @@ fn run(cli: Cli) -> Result<()> {
     // `None` → use the daemon (for commands that have a daemon mode). Commands
     // with no daemon mode (init/materialize) require it via `require_vault`.
     // `unlock` ignores it and uses its own positional.
-    let vault = cli.vault.as_deref();
+    // Explicit CLI input wins over the environment; the latter may have been
+    // loaded from --env immediately above.
+    let selected_vault = cli.vault.clone().or_else(env_vault_path);
+    let vault = selected_vault.as_deref();
     match cli.command {
         Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
         Command::List { json, show_id } => cmd_list(vault, pw_stdin, json, show_id),
@@ -1516,9 +1533,19 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Estimate { password } => cmd_estimate(password.as_deref()),
         Command::Analyze { hibp } => cmd_analyze(require_vault(vault)?, &hibp, pw_stdin),
-        Command::Exec { scope, command } => {
-            cmd_exec(require_vault(vault)?, &scope, &command, pw_stdin)
-        }
+        Command::Exec {
+            scope,
+            entry,
+            group,
+            command,
+        } => cmd_exec(
+            require_vault(vault)?,
+            scope,
+            entry,
+            group,
+            &command,
+            pw_stdin,
+        ),
         Command::GitCredential { operation } => cmd_git_credential(vault, &operation, pw_stdin),
         Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
         Command::Merge {
@@ -3208,6 +3235,11 @@ const DEFAULT_ENV_FILE: &str = ".env.trove";
 /// is loaded too — `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths — so
 /// one file can carry a whole trove configuration, not just a secret.
 const PASSWORD_VAR: &str = "TROVE_VAULT_PASSWORD";
+const VAULT_VAR: &str = "TROVE_VAULT";
+
+fn env_vault_path() -> Option<PathBuf> {
+    std::env::var_os(VAULT_VAR).map(PathBuf::from)
+}
 /// Per-vault credentials loaded from a YAML `.env.trove`, keyed by exact
 /// filename (for example, `work.kdbx`).
 static VAULT_PASSWORDS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
@@ -3278,13 +3310,13 @@ fn env_file_candidates(vault: Option<&Path>) -> Vec<PathBuf> {
 
 /// The vault a bare `--env` should look next to: the global `--vault` when it
 /// is offline mode, or the one `unlock` was pointed at.
-fn vault_for_env_lookup(cli: &Cli) -> Option<&Path> {
+fn vault_for_env_lookup(cli: &Cli) -> Option<PathBuf> {
     if let Some(v) = cli.vault.as_deref() {
-        return Some(v);
+        return Some(v.to_path_buf());
     }
     match &cli.command {
-        Command::Unlock { vault, .. } => Some(vault.as_path()),
-        _ => None,
+        Command::Unlock { vault, .. } => Some(vault.clone()),
+        _ => env_vault_path(),
     }
 }
 
@@ -4809,11 +4841,19 @@ fn cmd_resolve(vault_path: &Path, reference: &str, pw_stdin: bool) -> Result<()>
 /// becomes ours (after cleanup), so pipelines and CI see the real result.
 fn cmd_exec(
     vault_path: &Path,
-    scope: &str,
+    scope: Option<String>,
+    entry: Option<String>,
+    group: Option<String>,
     command: &[std::ffi::OsString],
     pw_stdin: bool,
 ) -> Result<()> {
     let v = open_vault(vault_path, pw_stdin)?;
+    let scope = match (scope, entry, group) {
+        (Some(scope), None, None) => exec::Scope::Auto(scope),
+        (None, Some(entry), None) => exec::Scope::Entry(entry),
+        (None, None, Some(group)) => exec::Scope::Group(group),
+        _ => unreachable!("clap validates exec scope arguments"),
+    };
     let tmp = exec::private_tmp_dir()?;
     // Resolve + run inside a closure so EVERY exit path below funnels
     // through the wipe. (SIGKILL can't be caught; SIGINT is handled by the
@@ -4985,7 +5025,7 @@ fn cmd_db_edit(
 
     if any_kdf {
         v.set_argon2_params(
-            kdf_memory.map(|m| m * 1024),
+            kdf_memory.map(mib_to_kib).transpose()?,
             kdf_iterations,
             kdf_parallelism,
         )
@@ -4993,6 +5033,12 @@ fn cmd_db_edit(
         println!("KDF updated");
     }
     Ok(())
+}
+
+fn mib_to_kib(memory_mib: u64) -> Result<u64> {
+    memory_mib
+        .checked_mul(1024)
+        .ok_or_else(|| anyhow!("--kdf-memory is too large to convert from MiB to KiB"))
 }
 
 /// `trove db-info` — non-secret database facts.
@@ -6321,5 +6367,16 @@ mod add_password_stdin_tests {
         )
         .expect_err("daemon mode must reject the offline-only password flag");
         assert!(err.to_string().contains("only valid with --vault"));
+    }
+}
+
+#[cfg(test)]
+mod kdf_memory_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn mib_to_kib_checks_overflow() {
+        assert_eq!(mib_to_kib(64).unwrap(), 64 * 1024);
+        assert!(mib_to_kib(u64::MAX).is_err());
     }
 }
