@@ -42,7 +42,7 @@ Where could secrets leak from each delivery surface? One section per surface.
 - **Crash dumps.** OS crash reporting could capture secret state. Out-of-process attack surface; we don't disable core dumps (that's a deployment-time choice). On Linux, `prctl(PR_SET_DUMPABLE, 0)` would help; not yet implemented.
 - **Swap.** Linux swap and macOS swap can hit disk. We don't `mlock` decrypted regions today. Real concern; partially mitigated by tmpfs-only materialization defaults on Linux.
 - **Hibernation.** Same family as swap. Disable hibernation on machines that hold long-lived troved unlocks if you care.
-- **Other processes running as the user.** A process running as the same UID can `ptrace` us, read `/proc/self/mem`, or open our `0600` Unix sockets (we own them; same-UID can open them). This is the irreducible "secrets in user space" assumption — every password manager has it.
+- **Other processes running as the user.** A process running as the same UID can `ptrace` us, read `/proc/self/mem`, or open our `0600` Unix sockets (we own them; same-UID can open them). On Windows the named-pipe DACL grants the pipe owner access, so another process running as that same user can connect there too. This is the irreducible "secrets in user space" assumption — every password manager has it.
 - **Signing narrows that on macOS.** An ad-hoc linker-signed binary — what `cargo build` produces — can be attached to by any same-uid process; `task_for_pid` succeeds and the daemon's memory is readable. Apple's own `/usr/bin/ssh-agent` is SIP-protected and refuses. Signing with a Developer ID certificate and the hardened runtime, carrying no `get-task-allow` entitlement, puts `troved` in that second class. Release builds are signed in CI when the `APPLE_*` secrets are present; a locally-built daemon is not, so treat a dev build as readable by anything running as you. See [scripts/sign-macos.sh](../scripts/sign-macos.sh).
 
 ### SSH agent socket
@@ -60,7 +60,7 @@ Where could secrets leak from each delivery surface? One section per surface.
 
   We don't do that. Decryption goes through the `rsa` crate's checked PKCS#1 v1.5 path, which validates the padding in constant time, and the recovered session key is then re-wrapped with fresh random padding of the original length before it goes on the wire. gpg parses the reconstructed block to exactly the same session key — it scans past `PS` to the `0x00` separator, and padding bytes are random by definition — so compatibility is unaffected while a malformed ciphertext is *rejected* rather than answered.
 
-  Residual exposure is the same as for signing: anyone who can reach the socket can ask the agent to decrypt legitimate ciphertexts. That is adversary #4, bounded by `0600` perms plus `SO_PEERCRED` on Unix — and on Windows by the pipe ACL alone, since there is no `SO_PEERCRED` there (see [windows.md](windows.md)).
+  Residual exposure is the same as for signing: anyone who can reach the socket can ask the agent to decrypt legitimate ciphertexts. That is adversary #4, bounded by `0600` perms plus `SO_PEERCRED` on Unix — and by the owner-only pipe DACL on Windows, since there is no `SO_PEERCRED` there (see [windows.md](windows.md)).
 
 ### File materialization
 
