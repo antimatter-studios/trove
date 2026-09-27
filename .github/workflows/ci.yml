@@ -150,6 +150,9 @@ jobs:
       - name: cargo build (trove + troved)
         run: cargo build --locked -p trove-cli -p troved
 
+      - name: Test owner-only named-pipe ACL
+        run: cargo test --locked -p troved --lib ipc::windows_imp::security::tests::pipe_owner_can_connect_to_owner_only_pipe
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
