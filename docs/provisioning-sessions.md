@@ -79,6 +79,11 @@ On Windows the named pipe's owner-only DACL replaces the `SO_PEERCRED` check:
 other users cannot connect, but troved cannot distinguish two processes running
 as the same owner. The session code continues to gate extraction.
 
+The daemon holds the session mutex through each code-gated vault operation.
+Unlock, lock, and shutdown take that mutex before vault state as well, so a
+request cannot validate against one session and then access vault state after a
+concurrent transition. The shared lock order is session, then vault state.
+
 None is a hard wall on its own (the master password remains the root capability —
 a password holder can `unlock` and read the code). Together they make extraction
 during an unlocked session require an attacker to *actively* steal the code from
