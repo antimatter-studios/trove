@@ -66,15 +66,37 @@ fn url_host(url: &str) -> Option<String> {
         .unwrap_or(after_scheme);
     // Strip userinfo and port.
     let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    let host = host_port.split(':').next().unwrap_or(host_port);
-    let host = host.trim();
+    normalized_host(host_port)
+}
+
+/// Remove a port while preserving the brackets around an IPv6 literal.
+/// Git sends bracketed IPv6 authorities in its `host=` field as well.
+fn normalized_host(host_port: &str) -> Option<String> {
+    let host_port = host_port.trim();
+    let host = if host_port.starts_with('[') {
+        let close = host_port.find(']')?;
+        let suffix = &host_port[close + 1..];
+        if !suffix.is_empty()
+            && !(suffix.starts_with(':')
+                && !suffix[1..].is_empty()
+                && suffix[1..].bytes().all(|b| b.is_ascii_digit()))
+        {
+            return None;
+        }
+        &host_port[..=close]
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
     (!host.is_empty()).then(|| host.to_lowercase())
 }
 
 /// Find `(username, password)` for a git credential request.
 pub fn lookup(v: &Vault, req: &HashMap<String, String>) -> Result<Option<(String, String)>> {
     let host = match req.get("host") {
-        Some(h) => h.to_lowercase(),
+        Some(h) => match normalized_host(h) {
+            Some(host) => host,
+            None => return Ok(None),
+        },
         None => return Ok(None), // nothing to match on
     };
     let want_user = req.get("username").map(|u| u.as_str());
@@ -180,6 +202,11 @@ mod tests {
             url_host("ssh://git@gitlab.internal:2222").as_deref(),
             Some("gitlab.internal")
         );
+        assert_eq!(
+            url_host("https://[::1]:8443/repo.git").as_deref(),
+            Some("[::1]")
+        );
+        assert_eq!(normalized_host("[::1]:8443").as_deref(), Some("[::1]"));
         assert_eq!(url_host(""), None);
     }
 
@@ -322,6 +349,23 @@ mod tests {
         // No match → empty reply (git will prompt / try next helper).
         let out = get(&v, "protocol=https\nhost=bitbucket.org\n\n");
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn get_matches_bracketed_ipv6_host_and_ignores_port() {
+        let dir = TempDir::new().unwrap();
+        let mut v = Vault::create(&dir.path().join("ipv6.kdbx"), "pw").unwrap();
+        let id = v.add_entry("Git/local").unwrap();
+        v.set_field(&id, "UserName", "local-user").unwrap();
+        v.set_field(&id, "Password", "local-token").unwrap();
+        v.set_field(&id, "URL", "https://[::1]:8443/repo.git")
+            .unwrap();
+
+        let out = get(&v, "protocol=https\nhost=[::1]:8443\n\n");
+        assert!(
+            out.contains("username=local-user") && out.contains("password=local-token"),
+            "expected the IPv6 credential, got: {out}"
+        );
     }
 
     #[test]
