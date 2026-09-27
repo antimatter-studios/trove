@@ -75,6 +75,10 @@ bytes to the caller. That's what the **session code** gates.
 | **`SO_PEERCRED`** on the daemon socket (serve only the unlocking uid) | a *different user* on the box |
 | **session code** required for extraction | a *same-user ambient process* — the malicious-package adversary |
 
+On Windows the named pipe's owner-only DACL replaces the `SO_PEERCRED` check:
+other users cannot connect, but troved cannot distinguish two processes running
+as the same owner. The session code continues to gate extraction.
+
 None is a hard wall on its own (the master password remains the root capability —
 a password holder can `unlock` and read the code). Together they make extraction
 during an unlocked session require an attacker to *actively* steal the code from
