@@ -780,6 +780,12 @@ pub async fn handle(
             get_field(state, session, peer_uid, &path, &field, &code).await
         }
 
+        Request::GitCredential {
+            host,
+            username,
+            code,
+        } => git_credential(state, session, peer_uid, &host, username.as_deref(), &code).await,
+
         Request::AddPassword {
             path,
             username,
@@ -1479,6 +1485,79 @@ async fn get_field(
         Ok(None) => err_handled(format!("entry '{path}' has no field '{field}'")),
         Err(e) => err_handled(format!("reading field: {e}")),
     }
+}
+
+/// Code-gated HTTPS credential lookup used by Git's credential-helper
+/// protocol. The session guard stays held through the vault scan and secret
+/// read, just like the other protected operations.
+async fn git_credential(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    host: &str,
+    requested_user: Option<&str>,
+    code: &str,
+) -> Handled {
+    let sess = session.lock().await;
+    let authorized = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+    if !authorized {
+        return Handled {
+            response: Response::err(
+                "refused: vault locked, or session code missing/invalid for this uid",
+            ),
+            shutdown: false,
+        };
+    }
+    let guard = state.lock().await;
+    let requested_host = host.to_lowercase();
+    for (vault, filter) in guard.iter_with_filters() {
+        for entry in vault.list_entries() {
+            if !entry_matches_filter(&entry, filter) {
+                continue;
+            }
+            let Some(url) = entry.url.as_deref() else {
+                continue;
+            };
+            if credential_url_host(url).as_deref() != Some(requested_host.as_str()) {
+                continue;
+            }
+            let user = entry.username.unwrap_or_default();
+            if requested_user.is_some_and(|requested| requested != user) {
+                continue;
+            }
+            let secret = match git_secret(vault, &entry.id) {
+                Ok(Some(secret)) if !secret.is_empty() => secret,
+                Ok(_) => continue,
+                Err(e) => return err_handled(format!("reading git credential: {e}")),
+            };
+            return ok_handled(Response::ok_credential(user, secret));
+        }
+    }
+    ok_handled(Response::ok_empty())
+}
+
+fn credential_url_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host_port.split(':').next().unwrap_or(host_port).trim();
+    (!host.is_empty()).then(|| host.to_lowercase())
+}
+
+fn git_secret(vault: &Vault, id: &trove_core::EntryId) -> anyhow::Result<Option<String>> {
+    for name in vault.custom_field_names(id)? {
+        if name.eq_ignore_ascii_case("git.token") {
+            if let Some(token) = vault.get_field(id, &name)? {
+                if !token.is_empty() {
+                    return Ok(Some(token));
+                }
+            }
+        }
+    }
+    Ok(vault.get_field(id, "Password")?.filter(|p| !p.is_empty()))
 }
 
 /// Code-gated write: create a password entry (groups mkdir-p) and persist.
