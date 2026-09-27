@@ -72,13 +72,14 @@ A Windows box can have three ssh clients that do not agree on transport:
 The threat model's [three barriers](threat-model.md) are not all present here.
 
 - **No `SO_PEERCRED`.** Named pipes carry no peer credentials, so
-  `crates/troved/src/main.rs` uses a `u32::MAX` sentinel for `peer_uid`. The
-  "serve only the unlocking uid" barrier does not exist on Windows; extraction
-  is gated by the session code and the pipe ACL alone.
-- **Default pipe DACL.** `ipc.rs` notes this as known future hardening: the
-  default DACL grants the creating user's logon session, and no explicit
-  security descriptor is set. This matters more if we bind the well-known agent
-  pipe, since every ssh client on the machine would then reach for it.
+  `crates/troved/src/main.rs` uses a `u32::MAX` sentinel for `peer_uid`. An
+  explicit owner-only DACL blocks other users, but troved cannot check that a
+  connected client has the same user identity that unlocked the vault. A
+  process running as the pipe owner can connect; the session code still gates
+  extraction.
+- **Owner-only pipe DACL.** `ipc.rs` supplies an explicit protected DACL for
+  the control, SSH-agent, and GPG-agent pipes. It grants access to the pipe
+  owner and avoids the broad grants in Windows' default named-pipe descriptor.
 - **No `flock` singleton.** Windows relies on
   `ServerOptions::first_pipe_instance(true)` to reject a second binder instead
   of `crates/troved/src/singleton.rs`. Works, but means `trove daemons`
@@ -107,5 +108,4 @@ The threat model's [three barriers](threat-model.md) are not all present here.
    taken. Biggest win, no key material leaves troved.
 2. Port `ssh_agent::forward` to named pipes so the fallback exists.
 3. Settle the Git for Windows question and fix the README either way.
-4. Explicit pipe security descriptor.
-5. Investigate Gpg4win's assuan socket emulation before touching gpg on Windows.
+4. Investigate Gpg4win's assuan socket emulation before touching gpg on Windows.
