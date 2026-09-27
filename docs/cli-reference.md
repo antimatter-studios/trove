@@ -573,26 +573,52 @@ vendored EFF large wordlist (7776 words ≈ 12.9 bits/word; default 7 words
 ## trove estimate
 
 ```
-trove estimate [PASSWORD]
+trove estimate [PASSWORD] [--json]
 ```
 
 zxcvbn strength rating: length, entropy bits, 0–4 score, and the estimator's
 warning/suggestions. Omit the argument to read one line from stdin — the
 preferred form, since argv is visible in `ps` and shell history.
+`--json` emits `{length, guesses, entropy_bits, score, warning, suggestions}`;
+the password itself is never included.
 
 ## trove analyze
 
 ```
-trove --vault <PATH> analyze --hibp <FILE>
+trove --vault <PATH> analyze --hibp <FILE> [--json]
 ```
 
 Offline Have-I-Been-Pwned audit: every vault password is SHA-1-hashed and
 binary-searched in the sorted `pwned-passwords` dump at `<FILE>` (the multi-GB
 file is seeked, never loaded; nothing is ever sent anywhere). Breached entries
-print as `<path>  seen N times in breaches`. Entries with empty or missing
-passwords print as `<path>  empty password` and are counted separately from
-passwords checked against the dump. Exits 1 for either finding, so scripts can
-gate on the audit. Offline-only: requires `--vault`.
+ print as `<path>  seen N times in breaches`. Exits 1 when anything is
+ breached — scriptable as a CI gate. Offline-only: requires `--vault`.
+`--json` writes one object with `checked_passwords`, `breached_passwords`, and
+ `empty_passwords`, and `findings` to stdout, including when a finding is
+ present; the exit code remains nonzero in that case. Empty or missing
+ passwords print as `<path>  empty password` in human mode and are counted
+ separately from passwords checked against the dump. JSON findings identify
+ breached entries with `breach_count` and empty entries with
+ `finding: "empty_password"`.
+
+## Read and status commands
+
+These commands keep human-readable output by default. `--json` emits stable
+objects and arrays for scripts:
+
+| Command | JSON shape |
+| --- | --- |
+| `trove status --json` | `{daemon_running, vault_paths, idle_timeout_seconds, idle_remaining_seconds, ssh_key_count, gpg_key_count, materialized_file_count}`; absent daemon reports `false`, empty paths, zero counts, and null timers. |
+| `trove materialize-status --json` | `{materialized: [{title, target_path, vault, ttl_remaining_seconds, exists}, ...]}`; empty state is an empty array. |
+| `trove idle get --json` | `{timeout_seconds, remaining_seconds}`; `remaining_seconds` is null when no idle countdown is active. |
+| `trove ssh-agent list --json` | Array of `{algo, blob_b64, comment}` public identities; `[]` when no daemon is running. |
+| `trove gpg-agent list --json` | Array of `{keygrip, key_type, comment}`; `[]` when no daemon is running. |
+| `trove keychain status <VAULT> --json` | `{stored, vault}`; does not include the stored password. macOS only. |
+
+ For example, `trove status --json | jq '.ssh_key_count'` prints the current
+ identity count without parsing display text. Daemon-backed commands retain
+ their documented session and daemon requirements; JSON output does not grant
+ additional access.
 
 ## trove ssh-agent
 
