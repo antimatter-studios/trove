@@ -49,15 +49,12 @@ aliases (`IdentitiesOnly yes` + a `work-github` alias), not something trove does
 That pattern is documented today under
 [**Two accounts on one host**](cli-reference.md#two-accounts-on-one-host).
 
-**Future work — tag served keys by source vault.** Two same-host keys are still
-hard to tell apart in `ssh-add -l` / `trove ssh-agent list`: both show only the
-key comment, so which *vault* a key came from is invisible. When multi-vault
-lands, the served entries should be tagged with their source vault
-(`personal:github.com`, `work:github.com`) in that listing output, so a user can
-see at a glance which key is which and pick the right `~/.ssh/config` alias for
-it. This is display-only labelling — it doesn't change how the agent selects a
-key (that's still the host's choice per the union above); it just makes the
-choice legible. Tracked in [issue #54](https://github.com/antimatter-studios/trove/issues/54).
+The shared agent prefixes each SSH key comment with the source vault's filename
+without its extension. For example, keys from `personal.kdbx` and `work.kdbx`
+appear as `personal:github.com` and `work:github.com` in `ssh-add -l` and
+`trove ssh-agent list`. This is display-only labelling; it does not change which
+keys the agent offers. Use the labels to identify the public key to reference
+in your SSH host aliases, as described in [**Two accounts on one host**](cli-reference.md#two-accounts-on-one-host).
 
 ## Materialized files collide the *opposite* way from keys
 
