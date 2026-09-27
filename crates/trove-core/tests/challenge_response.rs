@@ -78,6 +78,30 @@ fn challenge_response_composes_with_keyfile() {
     ));
 }
 
+#[test]
+fn reload_reuses_the_challenge_response_provider() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cr-reload.kdbx");
+    let cr = local();
+    let mut app = Vault::create_with_challenge_response(&path, PW, None, cr.clone())
+        .expect("create with challenge-response");
+    app.add_entry("from-app").unwrap();
+    app.save().unwrap();
+
+    // Simulate a second KeePass client making an external write.
+    let mut other =
+        Vault::open_with_challenge_response(&path, PW, None, cr.clone()).expect("external open");
+    other.add_entry("from-external-writer").unwrap();
+    other.save().unwrap();
+    drop(other);
+
+    assert!(app.changed_on_disk());
+    app.reload()
+        .expect("reload with retained challenge-response provider");
+    assert!(app.find_by_title("from-external-writer").is_some());
+    assert!(!app.changed_on_disk());
+}
+
 /// Hardware validation — requires a YubiKey with an HMAC-SHA1 secret in
 /// slot 2. Run manually: `cargo test -p trove-core --features yubikey
 /// -- --ignored yubikey_hardware`. NOT claimed as validated by CI.
