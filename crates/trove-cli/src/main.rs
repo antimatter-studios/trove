@@ -5114,9 +5114,9 @@ fn cmd_estimate(password: Option<&str>) -> Result<()> {
 }
 
 /// `trove analyze --hibp <FILE>` — offline breach check of every password in
-/// the vault. Prints one line per breached entry (path + count); exits 0 with
-/// "no breached passwords" when clean. Exit 1 when breaches were found, so
-/// scripts and CI can gate on it.
+/// the vault. Prints one line per breached or empty-password entry; exits 0
+/// when clean. Exit 1 when either kind of finding is present, so scripts and
+/// CI can gate on it.
 fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()> {
     if !hibp_file.exists() {
         return Err(anyhow!("HIBP file not found: {}", hibp_file.display()));
@@ -5124,13 +5124,16 @@ fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()
     let v = open_vault(vault_path, pw_stdin)?;
     let mut breached = 0usize;
     let mut checked = 0usize;
+    let mut empty = 0usize;
     for entry in v.list_entries() {
-        let Some(pw) = v.get_field(&entry.id, "Password").ok().flatten() else {
+        let pw = v
+            .get_field(&entry.id, "Password")
+            .with_context(|| format!("reading Password for {}", entry.display_path()))?;
+        let Some(pw) = pw.filter(|pw| !pw.is_empty()) else {
+            empty += 1;
+            println!("{}  empty password", entry.display_path());
             continue;
         };
-        if pw.is_empty() {
-            continue;
-        }
         checked += 1;
         let hash = hibp::sha1_hex_upper(&pw);
         if let Some(count) = hibp::lookup(hibp_file, &hash)? {
@@ -5138,12 +5141,12 @@ fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()
             println!("{}  seen {count} times in breaches", entry.display_path());
         }
     }
-    eprintln!("checked {checked} passwords, {breached} breached");
-    if breached > 0 {
+    eprintln!("checked {checked} passwords, {breached} breached, {empty} empty");
+    if breached > 0 || empty > 0 {
         // Same DaemonClassified channel the daemon paths use: user-level
         // failure, exit 1 — CI can gate on `trove analyze`.
         return Err(DaemonClassified {
-            message: format!("{breached} breached password(s) found"),
+            message: format!("{breached} breached and {empty} empty password(s) found"),
             exit: EXIT_USER_ERROR,
         }
         .into());
