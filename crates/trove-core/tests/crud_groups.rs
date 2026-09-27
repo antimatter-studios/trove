@@ -69,6 +69,77 @@ fn move_entry_between_groups_persists() {
 }
 
 #[test]
+fn recursive_group_copy_preflights_preserves_metadata_and_drops_materialization() {
+    let dir = TempDir::new().unwrap();
+    let mut v = new_vault(&dir);
+    v.add_group("Apple/Empty").unwrap();
+    v.set_group_tags("Apple", &["signing".into()]).unwrap();
+    let id = v.add_entry("Apple/Keys/developer").unwrap();
+    v.set_field(&id, "Password", "secret").unwrap();
+    v.set_field(&id, "Materialize.cert.Target", "/tmp/signing.p12")
+        .unwrap();
+    v.set_field(&id, "Automation.Target", "CI_CERT").unwrap();
+    v.set_tags(&id, &["production".into()]).unwrap();
+    v.attach_binary(&id, "signing.p12", &[1, 2, 3]).unwrap();
+
+    let preview = v.plan_group_transfer("Apple", "Apple.Backup").unwrap();
+    assert_eq!(
+        preview.entries,
+        vec![(
+            "Apple/Keys/developer".into(),
+            "Apple.Backup/Keys/developer".into()
+        )]
+    );
+    assert_eq!(preview.materialize_fields_removed, 1);
+    let copied = v.copy_group("Apple", "Apple.Backup", false).unwrap();
+    assert_eq!(copied.entries, preview.entries);
+    assert!(v.group_exists("Apple.Backup/Empty"));
+    assert_eq!(
+        paths(&v),
+        vec!["Apple.Backup/Keys/developer", "Apple/Keys/developer"]
+    );
+    let copy_id = v.find_by_title("Apple.Backup/Keys/developer").unwrap();
+    assert_eq!(
+        v.get_field(&copy_id, "Password").unwrap().as_deref(),
+        Some("secret")
+    );
+    assert_eq!(
+        v.get_field(&copy_id, "Automation.Target")
+            .unwrap()
+            .as_deref(),
+        Some("CI_CERT")
+    );
+    assert_eq!(
+        v.get_field(&copy_id, "Materialize.cert.Target").unwrap(),
+        None
+    );
+    assert_eq!(
+        v.read_binary(&copy_id, "signing.p12").unwrap().unwrap(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(v.get_entry(&copy_id).unwrap().tags, vec!["production"]);
+    let copied_group = v
+        .list_groups()
+        .into_iter()
+        .find(|g| g.display_path() == "Apple.Backup")
+        .unwrap();
+    assert_eq!(copied_group.tags, vec!["signing"]);
+    v.add_group("Archive").unwrap();
+    let moved = v.move_group_to_path("Apple.Backup", "Archive").unwrap();
+    assert_eq!(moved.entries[0].1, "Archive/Apple.Backup/Keys/developer");
+    assert!(v.group_exists("Archive/Apple.Backup/Empty"));
+
+    v.copy_group("Apple", "Apple.Keep", true).unwrap();
+    let kept = v.find_by_title("Apple.Keep/Keys/developer").unwrap();
+    assert_eq!(
+        v.get_field(&kept, "Materialize.cert.Target")
+            .unwrap()
+            .as_deref(),
+        Some("/tmp/signing.p12")
+    );
+}
+
+#[test]
 fn rm_moves_to_recycle_bin_and_sets_meta_uuid() {
     let dir = TempDir::new().unwrap();
     let vault_path = dir.path().join("t.kdbx");

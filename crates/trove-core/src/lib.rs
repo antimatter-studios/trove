@@ -151,6 +151,17 @@ pub struct AttachmentDescription {
     pub size: usize,
 }
 
+/// A preflighted recursive group transfer, suitable for dry-run output.
+#[derive(Debug, Clone, Default)]
+pub struct GroupTransferPlan {
+    /// Source and destination paths for entries, in stable path order.
+    pub entries: Vec<(String, String)>,
+    /// Source and destination paths for groups, parent before child.
+    pub groups: Vec<(String, String)>,
+    /// Number of `Materialize.*` fields that a default copy would remove.
+    pub materialize_fields_removed: usize,
+}
+
 impl GroupSummary {
     pub fn display_path(&self) -> String {
         if self.path.is_empty() {
@@ -753,6 +764,61 @@ impl Vault {
         Ok(())
     }
 
+    fn copy_group_metadata(&mut self, source: &str, target: &str) -> Result<()> {
+        let source_id = self.resolve_group(source)?;
+        let (
+            notes,
+            tags,
+            times,
+            custom_data,
+            expanded,
+            autotype,
+            enable_autotype,
+            enable_searching,
+            icon,
+        ) = {
+            let group = self
+                .inner
+                .db
+                .group(source_id)
+                .ok_or_else(|| Error::GroupNotFound(source.into()))?;
+            (
+                group.notes.clone(),
+                group.tags.clone(),
+                group.times.clone(),
+                group.custom_data.clone(),
+                group.is_expanded,
+                group.default_autotype_sequence.clone(),
+                group.enable_autotype,
+                group.enable_searching,
+                group.icon().cloned(),
+            )
+        };
+        let target_id = self.resolve_group(target)?;
+        let mut group = self
+            .inner
+            .db
+            .group_mut(target_id)
+            .ok_or_else(|| Error::GroupNotFound(target.into()))?;
+        group.notes = notes;
+        group.tags = tags;
+        group.times = times;
+        group.custom_data = custom_data;
+        group.is_expanded = expanded;
+        group.default_autotype_sequence = autotype;
+        group.enable_autotype = enable_autotype;
+        group.enable_searching = enable_searching;
+        group.set_icon_none();
+        match icon {
+            Some(keepass::db::Icon::BuiltIn(id)) => group.set_icon_builtin(id),
+            Some(keepass::db::Icon::Custom(id)) => group
+                .set_icon_custom(id)
+                .map_err(|e| Error::Kdbx(format!("copying group icon: {e:?}")))?,
+            None => {}
+        }
+        Ok(())
+    }
+
     /// Look up an entry by ID. Returns `None` if no such entry exists.
     pub fn get_entry(&self, id: &EntryId) -> Option<EntrySummary> {
         self.inner
@@ -1111,6 +1177,191 @@ impl Vault {
         let (group_path, leaf) = parse_entry_path(&target)?;
         self.move_entry(id, &group_path.join("/"))?;
         self.set_field(id, "Title", &leaf)
+    }
+
+    /// Validate a recursive group copy or move and describe every affected path.
+    pub fn plan_group_transfer(&self, source: &str, dest: &str) -> Result<GroupTransferPlan> {
+        let source_parts = parse_group_path(source)?;
+        if source_parts.is_empty() || !self.group_exists(source) {
+            return Err(Error::GroupNotFound(source.to_string()));
+        }
+        if !self
+            .list_groups()
+            .iter()
+            .any(|g| paths_equal(&g.path, &source_parts))
+        {
+            return Err(Error::GroupNotFound(source.to_string()));
+        }
+        let (target_parts, _) = self.resolve_group_destination(&source_parts, dest)?;
+        if paths_equal(&source_parts, &target_parts) {
+            return Ok(GroupTransferPlan::default());
+        }
+        if target_parts.len() > source_parts.len() && path_starts_with(&target_parts, &source_parts)
+        {
+            return Err(Error::InvalidPath(
+                "cannot move or copy a group into itself".into(),
+            ));
+        }
+        let all_groups = self.list_groups();
+        let source_groups: Vec<_> = all_groups
+            .iter()
+            .filter(|g| path_starts_with(&g.path, &source_parts))
+            .cloned()
+            .collect();
+        let mut plan = GroupTransferPlan::default();
+        for group in &source_groups {
+            let suffix = &group.path[source_parts.len()..];
+            let mut target = target_parts.clone();
+            target.extend_from_slice(suffix);
+            let source_path = group.path.join("/");
+            let target_path = target.join("/");
+            if all_groups.iter().any(|g| paths_equal(&g.path, &target)) {
+                return Err(Error::GroupExists(target_path));
+            }
+            plan.groups.push((source_path, target_path));
+        }
+        let existing_entries = self.list_entries();
+        for entry in existing_entries
+            .iter()
+            .filter(|e| path_starts_with(&e.group_path, &source_parts))
+        {
+            let suffix = &entry.group_path[source_parts.len()..];
+            let mut target_group = target_parts.clone();
+            target_group.extend_from_slice(suffix);
+            let target = if target_group.is_empty() {
+                entry.title.clone()
+            } else {
+                format!("{}/{}", target_group.join("/"), entry.title)
+            };
+            if existing_entries.iter().any(|other| {
+                !path_starts_with(&other.group_path, &source_parts)
+                    && other.display_path().eq_ignore_ascii_case(&target)
+            }) {
+                return Err(Error::EntryExists(target.clone()));
+            }
+            let fields = self.fields_with_prefix(&entry.id, "")?;
+            plan.materialize_fields_removed += fields
+                .iter()
+                .filter(|name| name.starts_with("Materialize."))
+                .count();
+            plan.entries.push((entry.display_path(), target));
+        }
+        plan.groups
+            .sort_by_key(|(source, _)| source.matches('/').count());
+        plan.entries
+            .sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        Ok(plan)
+    }
+
+    /// Copy a whole group tree, preserving groups, direct tags, entries and attachments.
+    /// `keep_materialize` retains opt-in-to-disk fields; the safe default removes them.
+    pub fn copy_group(
+        &mut self,
+        source: &str,
+        dest: &str,
+        keep_materialize: bool,
+    ) -> Result<GroupTransferPlan> {
+        let plan = self.plan_group_transfer(source, dest)?;
+        if plan.groups.is_empty() {
+            return Ok(plan);
+        }
+        let source_parts = parse_group_path(source)?;
+        let (target_parts, _) = self.resolve_group_destination(&source_parts, dest)?;
+        let groups: Vec<_> = self
+            .list_groups()
+            .into_iter()
+            .filter(|g| path_starts_with(&g.path, &source_parts))
+            .collect();
+        let entries: Vec<_> = self
+            .list_entries()
+            .into_iter()
+            .filter(|e| path_starts_with(&e.group_path, &source_parts))
+            .collect();
+        let original_db = self.inner.db.clone();
+        let result = (|| {
+            for group in &groups {
+                let suffix = &group.path[source_parts.len()..];
+                let mut target = target_parts.clone();
+                target.extend_from_slice(suffix);
+                if !self.group_exists(&target.join("/")) {
+                    self.add_group(&target.join("/"))?;
+                }
+                self.copy_group_metadata(&group.path.join("/"), &target.join("/"))?;
+            }
+            for entry in &entries {
+                let suffix = &entry.group_path[source_parts.len()..];
+                let mut target_group = target_parts.clone();
+                target_group.extend_from_slice(suffix);
+                let target = if target_group.is_empty() {
+                    entry.title.clone()
+                } else {
+                    format!("{}/{}", target_group.join("/"), entry.title)
+                };
+                let dst_id = self.copy_entry(&entry.id, &target)?;
+                self.set_tags(&dst_id, &entry.tags)?;
+                if !keep_materialize {
+                    for field in self.fields_with_prefix(&dst_id, "Materialize.")? {
+                        self.remove_field(&dst_id, &field)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.inner.db = original_db;
+            return Err(error);
+        }
+        Ok(plan)
+    }
+
+    /// Move a whole group tree without changing its contents.
+    pub fn move_group_to_path(&mut self, source: &str, dest: &str) -> Result<GroupTransferPlan> {
+        let plan = self.plan_group_transfer(source, dest)?;
+        if plan.groups.is_empty() {
+            return Ok(plan);
+        }
+        let source_parts = parse_group_path(source)?;
+        let (target_parts, leaf) = self.resolve_group_destination(&source_parts, dest)?;
+        let parent = target_parts[..target_parts.len() - 1].join("/");
+        let parent_id = self.resolve_group(&parent)?;
+        let group_id = self.resolve_group(source)?;
+        let mut group = self
+            .inner
+            .db
+            .group_mut(group_id)
+            .ok_or_else(|| Error::GroupNotFound(source.into()))?;
+        group
+            .move_to(parent_id)
+            .map_err(|e| Error::Kdbx(format!("moving group: {e:?}")))?;
+        group.edit(|g| g.name = leaf);
+        Ok(plan)
+    }
+
+    fn resolve_group_destination(
+        &self,
+        source: &[String],
+        dest: &str,
+    ) -> Result<(Vec<String>, String)> {
+        if self.group_exists(dest) {
+            let mut target = parse_group_path(dest)?;
+            let leaf = source
+                .last()
+                .cloned()
+                .ok_or_else(|| Error::InvalidPath("cannot transfer root group".into()))?;
+            target.push(leaf.clone());
+            Ok((target, leaf))
+        } else {
+            let target = parse_group_path(dest)?;
+            let leaf = target
+                .last()
+                .cloned()
+                .ok_or_else(|| Error::InvalidPath("destination must name a group".into()))?;
+            let parent = target[..target.len() - 1].join("/");
+            if !self.group_exists(&parent) {
+                return Err(Error::GroupNotFound(parent));
+            }
+            Ok((target, leaf))
+        }
     }
 
     /// Work out the full entry path a `cp`/`mv` destination names, and refuse
@@ -1994,6 +2245,13 @@ fn parse_group_path(s: &str) -> Result<Vec<String>> {
     Ok(segs)
 }
 
+fn paths_equal(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
 fn path_starts_with(path: &[String], prefix: &[String]) -> bool {
     path.len() >= prefix.len()
         && path

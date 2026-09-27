@@ -288,6 +288,20 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
+    /// Code-gated recursive group move.
+    MoveGroup {
+        path: String,
+        dest: String,
+        code: String,
+    },
+    /// Code-gated recursive group copy or dry-run preflight.
+    CopyGroup {
+        path: String,
+        dest: String,
+        keep_materialize: bool,
+        dry_run: bool,
+        code: String,
+    },
     /// Code-gated write: create a group hierarchy (mkdir -p; errors if the
     /// leaf already exists).
     Mkdir {
@@ -497,6 +511,26 @@ impl std::fmt::Debug for Request {
                 .debug_struct("MoveEntry")
                 .field("path", path)
                 .field("group", group)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::MoveGroup { path, dest, .. } => f
+                .debug_struct("MoveGroup")
+                .field("path", path)
+                .field("dest", dest)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::CopyGroup {
+                path,
+                dest,
+                keep_materialize,
+                dry_run,
+                ..
+            } => f
+                .debug_struct("CopyGroup")
+                .field("path", path)
+                .field("dest", dest)
+                .field("keep_materialize", keep_materialize)
+                .field("dry_run", dry_run)
                 .field("code", &"<redacted>")
                 .finish(),
             Request::Mkdir { path, .. } => f
@@ -733,6 +767,12 @@ pub enum OkBody {
     Recycled {
         recycled: bool,
     },
+    /// Paths and materialization field count from a recursive group transfer.
+    GroupTransfer {
+        entries: Vec<(String, String)>,
+        groups: Vec<(String, String)>,
+        materialize_fields_removed: usize,
+    },
     /// Response to `GetTotp`: the ephemeral code and its validity window.
     Totp {
         totp_code: String,
@@ -894,6 +934,13 @@ impl Response {
     }
     pub fn ok_recycled(recycled: bool) -> Self {
         Response::Ok(OkBody::Recycled { recycled })
+    }
+    pub fn ok_group_transfer(plan: trove_core::GroupTransferPlan) -> Self {
+        Response::Ok(OkBody::GroupTransfer {
+            entries: plan.entries,
+            groups: plan.groups,
+            materialize_fields_removed: plan.materialize_fields_removed,
+        })
     }
     pub fn ok_totp(code: trove_core::TotpCode) -> Self {
         Response::Ok(OkBody::Totp {

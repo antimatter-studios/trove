@@ -24,7 +24,7 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use trove_core::{Error as CoreError, SearchFieldFilter, SearchQuery, Vault};
+use trove_core::{Error as CoreError, GroupTransferPlan, SearchFieldFilter, SearchQuery, Vault};
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -463,6 +463,12 @@ enum Command {
         /// exists, e.g. "Work/SSH" or "Work/SSH/github".
         #[arg(value_name = "DEST")]
         group_path: String,
+        /// Move an entire group tree.
+        #[arg(short, long)]
+        recursive: bool,
+        /// Print every entry path affected.
+        #[arg(short, long, requires = "recursive")]
+        verbose: bool,
     },
 
     /// Copy an entry, whole, to a new path — key material and all.
@@ -487,6 +493,18 @@ enum Command {
         /// Destination entry path, e.g. "homelab/ssh".
         #[arg(value_name = "DEST")]
         dest_path: String,
+        /// Copy an entire group tree.
+        #[arg(short, long)]
+        recursive: bool,
+        /// Print every entry path affected.
+        #[arg(short, long, requires = "recursive")]
+        verbose: bool,
+        /// Keep Materialize.* fields on copied entries (their targets may collide).
+        #[arg(long, requires = "recursive")]
+        keep_materialize: bool,
+        /// Show the preflighted transfer without changing the vault.
+        #[arg(long, requires = "recursive")]
+        dry_run: bool,
     },
 
     /// Create a group hierarchy. Intermediate groups are created as needed
@@ -1870,11 +1888,33 @@ fn run(cli: Cli) -> Result<()> {
         Command::Mv {
             entry_path,
             group_path,
-        } => cmd_mv(vault, &entry_path, &group_path, pw_stdin),
+            recursive,
+            verbose,
+        } => cmd_mv(
+            vault,
+            &entry_path,
+            &group_path,
+            recursive,
+            verbose,
+            pw_stdin,
+        ),
         Command::Cp {
             entry_path,
             dest_path,
-        } => cmd_cp(vault, &entry_path, &dest_path, pw_stdin),
+            recursive,
+            verbose,
+            keep_materialize,
+            dry_run,
+        } => cmd_cp(
+            vault,
+            &entry_path,
+            &dest_path,
+            recursive,
+            verbose,
+            keep_materialize,
+            dry_run,
+            pw_stdin,
+        ),
         Command::Mkdir { group_path } => cmd_mkdir(vault, &group_path, pw_stdin),
         Command::Rmdir {
             group_path,
@@ -4855,7 +4895,35 @@ fn cmd_rm(vault: Option<&Path>, entry_path: &str, permanent: bool, pw_stdin: boo
     Ok(())
 }
 
-fn cmd_mv(vault: Option<&Path>, entry_path: &str, group_path: &str, pw_stdin: bool) -> Result<()> {
+fn cmd_mv(
+    vault: Option<&Path>,
+    entry_path: &str,
+    group_path: &str,
+    recursive: bool,
+    verbose: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    if recursive {
+        let plan = match vault {
+            Some(path) => {
+                let mut v = open_vault(path, pw_stdin)?;
+                let plan = v.move_group_to_path(entry_path, group_path)?;
+                v.save().context("saving vault")?;
+                plan
+            }
+            None => {
+                let code = require_session_code()?;
+                let response = daemon_call(&daemon::Request::MoveGroup {
+                    path: entry_path.to_string(),
+                    dest: group_path.to_string(),
+                    code,
+                })?;
+                group_transfer_from_json(&response)?
+            }
+        };
+        print_group_transfer(&plan, "moved", verbose, false, false);
+        return Ok(());
+    }
     match vault {
         Some(path) => {
             let mut v = open_vault(path, pw_stdin)?;
@@ -4880,7 +4948,50 @@ fn cmd_mv(vault: Option<&Path>, entry_path: &str, group_path: &str, pw_stdin: bo
 }
 
 /// `trove cp <ENTRY> <DEST>` — duplicate an entry, whole, at a new path.
-fn cmd_cp(vault: Option<&Path>, entry_path: &str, dest_path: &str, pw_stdin: bool) -> Result<()> {
+fn cmd_cp(
+    vault: Option<&Path>,
+    entry_path: &str,
+    dest_path: &str,
+    recursive: bool,
+    verbose: bool,
+    keep_materialize: bool,
+    dry_run: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    if recursive {
+        let plan = match vault {
+            Some(path) => {
+                let mut v = open_vault(path, pw_stdin)?;
+                let plan = if dry_run {
+                    v.plan_group_transfer(entry_path, dest_path)?
+                } else {
+                    let plan = v.copy_group(entry_path, dest_path, keep_materialize)?;
+                    v.save().context("saving vault")?;
+                    plan
+                };
+                plan
+            }
+            None => {
+                let code = require_session_code()?;
+                let response = daemon_call(&daemon::Request::CopyGroup {
+                    path: entry_path.to_string(),
+                    dest: dest_path.to_string(),
+                    keep_materialize,
+                    dry_run,
+                    code,
+                })?;
+                group_transfer_from_json(&response)?
+            }
+        };
+        print_group_transfer(
+            &plan,
+            if dry_run { "would copy" } else { "copied" },
+            verbose,
+            !keep_materialize,
+            keep_materialize,
+        );
+        return Ok(());
+    }
     match vault {
         Some(path) => {
             let mut v = open_vault(path, pw_stdin)?;
@@ -4901,6 +5012,76 @@ fn cmd_cp(vault: Option<&Path>, entry_path: &str, dest_path: &str, pw_stdin: boo
     }
     println!("copied '{entry_path}' to '{dest_path}'");
     Ok(())
+}
+
+fn group_transfer_from_json(value: &Value) -> Result<GroupTransferPlan> {
+    let entries = value
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("malformed daemon response: missing group-transfer entries"))?;
+    let groups = value
+        .get("groups")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("malformed daemon response: missing group-transfer groups"))?;
+    let parse_pairs = |items: &[Value]| -> Result<Vec<(String, String)>> {
+        items
+            .iter()
+            .map(|item| {
+                let pair = item
+                    .as_array()
+                    .filter(|pair| pair.len() == 2)
+                    .ok_or_else(|| {
+                        anyhow!("malformed daemon response: invalid group-transfer path pair")
+                    })?;
+                let source = pair[0]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("malformed daemon response: invalid source path"))?;
+                let dest = pair[1].as_str().ok_or_else(|| {
+                    anyhow!("malformed daemon response: invalid destination path")
+                })?;
+                Ok((source.to_string(), dest.to_string()))
+            })
+            .collect()
+    };
+    Ok(GroupTransferPlan {
+        entries: parse_pairs(entries)?,
+        groups: parse_pairs(groups)?,
+        materialize_fields_removed: value
+            .get("materialize_fields_removed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+    })
+}
+
+fn print_group_transfer(
+    plan: &GroupTransferPlan,
+    action: &str,
+    verbose: bool,
+    report_materialize: bool,
+    keep_materialize: bool,
+) {
+    if verbose {
+        for (source, dest) in &plan.entries {
+            println!("{source} -> {dest}");
+        }
+    }
+    let materialize = if report_materialize && plan.materialize_fields_removed > 0 {
+        let verb = if action.starts_with("would") {
+            "would remove"
+        } else {
+            "removed"
+        };
+        format!(
+            "; {verb} {} Materialize.* fields",
+            plan.materialize_fields_removed
+        )
+    } else {
+        String::new()
+    };
+    println!("{} entries {action}{materialize}", plan.entries.len());
+    if keep_materialize && plan.materialize_fields_removed > 0 {
+        eprintln!("warning: copied Materialize.* fields may make multiple entries write to the same target");
+    }
 }
 
 fn cmd_group_list(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
