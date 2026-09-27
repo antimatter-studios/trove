@@ -4,7 +4,7 @@ A KeePassXC-compatible password manager that does the things upstream won't. **1
 
 ## Founding idea
 
-Treat the vault as more than passwords. Entries can carry **files** (kubeconfig, SSH keys, GPG keys, `.env`, TLS certs, signing keys) that **materialize to disk on unlock and are wiped on lock** — opt-in per entry, with a clear acknowledgement of the on-disk-exposure risk. The vault becomes the source of truth for "the secrets a developer machine needs to function."
+Treat the vault as more than passwords. Entries can carry **files** (kubeconfig, SSH keys, GPG keys, `.env`, TLS certs, signing keys) that **materialize to disk on unlock and are wiped on lock** — opt-in per entry, with a clear acknowledgement of the on-disk-exposure risk. Linux verifies tmpfs by default; macOS uses a soft path allowlist, and Windows does not enforce a memory-backed destination. Wiping is best effort on disk-backed filesystems. The vault becomes the source of truth for "the secrets a developer machine needs to function."
 
 ## Install
 
@@ -15,6 +15,10 @@ brew install antimatter-studios/tap/trove-cli
 ```
 
 That installs prebuilt `trove` + `troved` binaries from the [antimatter-studios/homebrew-tap](https://github.com/antimatter-studios/homebrew-tap) tap (macOS arm64/x86_64, Linux arm64/x86_64). The binaries are built and released by trove's own [release pipeline](.github/workflows/release.yml) — the tap just references them, so installs are a download, not a multi-minute compile.
+
+macOS CLI binaries use Developer ID signing and the hardened runtime when the
+release signing certificate is configured. A release without that certificate
+continues with unsigned CLI binaries.
 
 On macOS you can also install the desktop GUI as a cask, which pulls in the CLI:
 
@@ -401,7 +405,7 @@ It's tempting to argue file materialization weakens the "encrypted at rest" guar
 
 **Residual concerns and their mitigations:**
 
-- *Swap and hibernation* — write to `tmpfs` / memory-backed paths by default; refuse materialization to disk-backed paths unless the user opts in.
+- *Swap and hibernation* — Linux materialization refuses disk-backed paths by default; macOS has only a soft path allowlist, and Windows has no backing-store enforcement. `trove exec` uses the OS temp directory and does not verify its backing store. Prefer a known memory-backed path where available.
 - *Crash dumps and journals* — same: prefer locations the OS doesn't snapshot.
 - *Forgotten unlock sessions* — aggressive auto-lock (idle, lid-close, network event), and materialization TTL independent of vault lock state.
 - *Backup tooling capturing the materialized path* — document which paths are unsafe (e.g. `~/Documents` on macOS with iCloud); ship sane defaults.
