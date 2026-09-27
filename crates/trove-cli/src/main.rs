@@ -1909,10 +1909,12 @@ fn run(cli: Cli) -> Result<()> {
             vault,
             &entry_path,
             &dest_path,
-            recursive,
-            verbose,
-            keep_materialize,
-            dry_run,
+            GroupCopyOptions {
+                recursive,
+                verbose,
+                keep_materialize,
+                dry_run,
+            },
             pw_stdin,
         ),
         Command::Mkdir { group_path } => cmd_mkdir(vault, &group_path, pw_stdin),
@@ -4948,28 +4950,37 @@ fn cmd_mv(
 }
 
 /// `trove cp <ENTRY> <DEST>` — duplicate an entry, whole, at a new path.
-fn cmd_cp(
-    vault: Option<&Path>,
-    entry_path: &str,
-    dest_path: &str,
+struct GroupCopyOptions {
     recursive: bool,
     verbose: bool,
     keep_materialize: bool,
     dry_run: bool,
+}
+
+fn cmd_cp(
+    vault: Option<&Path>,
+    entry_path: &str,
+    dest_path: &str,
+    options: GroupCopyOptions,
     pw_stdin: bool,
 ) -> Result<()> {
+    let GroupCopyOptions {
+        recursive,
+        verbose,
+        keep_materialize,
+        dry_run,
+    } = options;
     if recursive {
         let plan = match vault {
             Some(path) => {
                 let mut v = open_vault(path, pw_stdin)?;
-                let plan = if dry_run {
+                if dry_run {
                     v.plan_group_transfer(entry_path, dest_path)?
                 } else {
                     let plan = v.copy_group(entry_path, dest_path, keep_materialize)?;
                     v.save().context("saving vault")?;
                     plan
-                };
-                plan
+                }
             }
             None => {
                 let code = require_session_code()?;
