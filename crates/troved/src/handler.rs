@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use trove_core::{EntrySummary, Vault};
+use trove_core::{EntrySummary, SearchFieldFilter, SearchHit, SearchQuery, Vault};
 
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::idle::{IdleState, IdleTracker};
@@ -299,6 +299,7 @@ pub async fn handle(
                     group_path: s.group_path,
                     tags: s.tags,
                     inherited_tags: s.inherited_tags,
+                    matched: Vec::new(),
                 })
                 .collect();
             Handled {
@@ -774,7 +775,12 @@ pub async fn handle(
 
         Request::ShowEntry { path } => show_entry(state, &path).await,
 
-        Request::Search { term } => search(state, &term).await,
+        Request::Search {
+            term,
+            fields,
+            tags,
+            attachments,
+        } => search(state, term, &fields, &tags, &attachments).await,
 
         Request::GetField { path, field, code } => {
             get_field(state, session, peer_uid, &path, &field, &code).await
@@ -1397,7 +1403,14 @@ fn entry_dto(s: EntrySummary) -> EntryDto {
         group_path: s.group_path,
         tags: s.tags,
         inherited_tags: s.inherited_tags,
+        matched: Vec::new(),
     }
+}
+
+fn search_hit_dto(hit: SearchHit) -> EntryDto {
+    let mut dto = entry_dto(hit.entry);
+    dto.matched = hit.matched;
+    dto
 }
 
 fn err_handled(msg: impl Into<String>) -> Handled {
@@ -1440,7 +1453,36 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
 }
 
 /// Ungated (like `List`): substring search over non-secret surfaces.
-async fn search(state: &SharedState, term: &str) -> Handled {
+async fn search(
+    state: &SharedState,
+    term: Option<String>,
+    fields: &[String],
+    tags: &[String],
+    attachments: &[String],
+) -> Handled {
+    let field_filters: Result<Vec<SearchFieldFilter>, String> = fields
+        .iter()
+        .map(|field| {
+            let (name, value) = match field.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (field.as_str(), None),
+            };
+            if name.is_empty() {
+                return Err("search field name cannot be empty".to_string());
+            }
+            Ok(SearchFieldFilter {
+                name: name.to_string(),
+                value,
+            })
+        })
+        .collect();
+    let field_filters = match field_filters {
+        Ok(filters) => filters,
+        Err(error) => return err_handled(error),
+    };
+    if term.is_none() && fields.is_empty() && tags.is_empty() && attachments.is_empty() {
+        return err_handled("search needs a term or at least one filter");
+    }
     let guard = state.lock().await;
     if guard.is_empty() {
         return err_handled("no vault unlocked");
@@ -1448,10 +1490,16 @@ async fn search(state: &SharedState, term: &str) -> Handled {
     // Searches the union — a hit in any unlocked vault counts. Unlike a
     // title-addressed read there is nothing to disambiguate: search returns
     // every match by design.
+    let query = SearchQuery {
+        term,
+        fields: field_filters,
+        tags: tags.to_vec(),
+        attachments: attachments.to_vec(),
+    };
     let entries: Vec<EntryDto> = guard
         .iter()
-        .flat_map(|vault| vault.search_entries(term))
-        .map(entry_dto)
+        .flat_map(|vault| vault.search_entries_with(&query))
+        .map(search_hit_dto)
         .collect();
     ok_handled(Response::ok_list(entries))
 }

@@ -110,6 +110,11 @@ fn seed_vault(dir: &TempDir) -> std::path::PathBuf {
     v.set_field(&id, "UserName", "alice").unwrap();
     v.set_field(&id, "Password", "hunter2").unwrap();
     v.set_field(&id, "URL", "https://github.com").unwrap();
+    v.set_field(&id, "About.Purpose", "Developer ID signing certificate")
+        .unwrap();
+    v.set_tags(&id, &["signing".into()]).unwrap();
+    v.attach_binary(&id, "AuthKey_1234.p8", b"private attachment")
+        .unwrap();
     v.save().expect("save");
     path
 }
@@ -137,7 +142,10 @@ async fn ungated_reads_work_unlocked_and_refuse_locked() {
     let resp = h
         .handle_as(
             Request::Search {
-                term: "github".into(),
+                term: Some("github".into()),
+                fields: vec![],
+                tags: vec![],
+                attachments: vec![],
             },
             OWNER,
         )
@@ -168,16 +176,51 @@ async fn ungated_reads_work_unlocked_and_refuse_locked() {
     let resp = h
         .handle_as(
             Request::Search {
-                term: "GITHUB".into(),
+                term: Some("GITHUB".into()),
+                fields: vec![],
+                tags: vec![],
+                attachments: vec![],
             },
             OTHER,
         )
         .await;
     assert_eq!(resp["entries"].as_array().map(Vec::len), Some(1), "{resp}");
+    assert_eq!(resp["entries"][0]["matched"][0], "title");
     let resp = h
         .handle_as(
             Request::Search {
-                term: "hunter2".into(),
+                term: Some("certificate".into()),
+                fields: vec![],
+                tags: vec![],
+                attachments: vec![],
+            },
+            OTHER,
+        )
+        .await;
+    assert_eq!(resp["entries"][0]["matched"][0], "field About.Purpose");
+    let resp = h
+        .handle_as(
+            Request::Search {
+                term: None,
+                fields: vec!["About.Purpose=Developer ID signing certificate".into()],
+                tags: vec!["signing".into()],
+                attachments: vec!["*.p8".into()],
+            },
+            OTHER,
+        )
+        .await;
+    assert_eq!(resp["entries"].as_array().map(Vec::len), Some(1), "{resp}");
+    assert!(resp["entries"][0]["matched"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("attachment AuthKey_1234.p8".into())));
+    let resp = h
+        .handle_as(
+            Request::Search {
+                term: Some("hunter2".into()),
+                fields: vec![],
+                tags: vec![],
+                attachments: vec![],
             },
             OTHER,
         )
