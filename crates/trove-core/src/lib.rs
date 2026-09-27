@@ -1248,8 +1248,7 @@ impl Vault {
         }
         plan.groups
             .sort_by_key(|(source, _)| source.matches('/').count());
-        plan.entries
-            .sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        plan.entries.sort_by_key(|a| a.0.to_lowercase());
         Ok(plan)
     }
 
