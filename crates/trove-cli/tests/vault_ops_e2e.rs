@@ -295,6 +295,8 @@ fn db_edit_rekey_kdf_and_db_info() {
     );
     assert!(info.contains("Entries:     1"), "{info}");
     assert!(info.contains("Argon2"), "{info}");
-    assert!(info.contains("131072"), "128 MiB in KiB: {info}");
+    // db-info reports KDBX's stored byte count (128 MiB), not the CLI's
+    // --kdf-memory input unit (MiB) or the setter's API unit (KiB).
+    assert!(info.contains("134217728"), "128 MiB in bytes: {info}");
     assert!(!info.contains("sekrit"), "db-info must not leak secrets");
 }
