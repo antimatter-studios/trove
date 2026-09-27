@@ -4213,6 +4213,9 @@ fn cmd_show(
                 // in the entry across the wire.
                 let mut fields = serde_json::Map::new();
                 for name in list("custom_fields") {
+                    if is_protected_field(&name) && !show_protected {
+                        continue;
+                    }
                     fields.insert(name, Value::Null);
                 }
                 println!(

@@ -75,7 +75,9 @@ trove [--vault <PATH>] show [OPTIONS] <ENTRY_PATH>
 ```
 
 Print an entry's details: path, title, username, URL, notes, custom-field
-*names* and attachment names. The password is masked unless `--show-protected`.
+*names* and attachment names. Protected fields (`Password`, `otp`) are hidden
+from `--json` field names unless `--show-protected` is set; the flag also
+reveals protected values where the selected mode returns them.
 
 | Flag | Description |
 | --- | --- |
