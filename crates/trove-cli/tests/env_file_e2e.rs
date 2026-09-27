@@ -43,6 +43,7 @@ fn run_in(
         .env_remove("TROVE_SESSION")
         .env_remove("TROVE_VAULT_PASSWORD")
         .env_remove("TROVE_VAULT")
+        .env_remove("TROVE_ENV_STRICT")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

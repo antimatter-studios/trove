@@ -715,7 +715,17 @@ fn list_names_the_ssh_key_and_ignores_keeagent_settings() {
 
     let key = dir.path().join("id_ed25519");
     std::fs::write(&key, b"-----BEGIN OPENSSH PRIVATE KEY-----\n").expect("write key");
-    for (name, src) in [("id_ed25519", &key), ("id_ed25519.pub", &key)] {
+    let settings = dir.path().join("KeeAgent.settings");
+    std::fs::write(
+        &settings,
+        b"<Configuration><AllowUseOfSshAgent>true</AllowUseOfSshAgent></Configuration>",
+    )
+    .expect("write KeeAgent settings");
+    for (name, src) in [
+        ("id_ed25519", &key),
+        ("id_ed25519.pub", &key),
+        ("KeeAgent.settings", &settings),
+    ] {
         assert_ok(
             &run_trove(
                 &trove,

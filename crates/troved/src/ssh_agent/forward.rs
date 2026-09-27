@@ -183,10 +183,15 @@ fn launchd_agent_socket() -> Option<PathBuf> {
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout)
+    parse_launchctl_listener(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_launchctl_listener(output: &str) -> Option<PathBuf> {
+    output
         .lines()
-        .filter_map(|l| l.trim().strip_prefix("path = "))
-        .find(|p| p.ends_with("/Listeners"))
+        .filter_map(|line| line.trim().strip_prefix("path = "))
+        .find(|path| path.ends_with("/Listeners"))
         .map(PathBuf::from)
 }
 
@@ -646,5 +651,26 @@ mod tests {
         let mut body = vec![0xAA];
         wire::append_lifetime_constraint(&mut body, 900);
         assert_eq!(body, vec![0xAA, 1, 0, 0, 0x03, 0x84]);
+    }
+
+    #[test]
+    fn launchctl_fixture_finds_the_ssh_agent_listener() {
+        let output = r#"
+gui/501/com.openssh.ssh-agent = {
+  state = running
+  sockets = {
+    Listeners = {
+      path = /private/tmp/com.apple.launchd.ABC123/Listeners
+    }
+  }
+}
+"#;
+        assert_eq!(
+            parse_launchctl_listener(output),
+            Some(PathBuf::from(
+                "/private/tmp/com.apple.launchd.ABC123/Listeners"
+            ))
+        );
+        assert_eq!(parse_launchctl_listener("state = running\n"), None);
     }
 }

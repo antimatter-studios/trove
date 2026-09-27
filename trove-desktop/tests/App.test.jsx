@@ -3,7 +3,8 @@
 // flow (unlock_vault) turns a locked vault into the live three-pane.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, fireEvent, waitFor } from '@testing-library/react';
+import { listen } from '@tauri-apps/api/event';
 
 // The native file dialog is unavailable under happy-dom; stub it.
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
@@ -118,6 +119,32 @@ describe('app chrome + theme', () => {
 const UNLOCK_WAIT = { timeout: 10000 };
 
 describe('real unlock flow', () => {
+  it('renders unlock progress events and drains queued steps before opening the vault', async () => {
+    let emitProgress;
+    listen.mockImplementation((_event, callback) => {
+      emitProgress = callback;
+      return Promise.resolve(() => {});
+    });
+    api.listVaults.mockResolvedValue([LOCKED_VAULT]);
+    const { container: c } = render(<App />);
+    const input = await waitFor(() => {
+      const el = c.querySelector('.unlock-card .ul-field input');
+      if (!el) throw new Error('no unlock input yet');
+      return el;
+    });
+    await waitFor(() => expect(emitProgress).toBeTypeOf('function'));
+    fireEvent.change(input, { target: { value: 'correct horse' } });
+    fireEvent.submit(c.querySelector('.unlock-card'));
+
+    act(() => emitProgress({ payload: { step: 'open', state: 'done' } }));
+    await waitFor(() => expect(c.querySelector('.ustep.done .ulabel')?.textContent).toBe('Decrypting the vault'));
+    act(() => emitProgress({ payload: { step: 'entries', state: 'done', detail: '2 entries' } }));
+    await waitFor(() => expect(c.querySelectorAll('.ustep.done')).toHaveLength(2), UNLOCK_WAIT);
+    expect(c.querySelector('.ustep.done .udetail')?.textContent).toBe('2 entries');
+
+    await waitFor(() => expect(c.querySelector('.body .pane.sidebar')).toBeTruthy(), UNLOCK_WAIT);
+  });
+
   it('unlocking a locked vault renders the live three-pane from unlock_vault', async () => {
     api.listVaults.mockResolvedValue([LOCKED_VAULT]);
     const { container: c } = render(<App />);
