@@ -611,7 +611,7 @@ enum Command {
         /// Remove the keyfile requirement (password-only afterwards).
         #[arg(long = "unset-key-file", conflicts_with = "set_key_file")]
         unset_key_file: bool,
-        /// Argon2 memory in MiB.
+        /// Argon2 memory in MiB (must be at least 1; KeePassXC bounds apply).
         #[arg(long = "kdf-memory", value_name = "MIB")]
         kdf_memory: Option<u64>,
         /// Argon2 iterations.
@@ -4995,7 +4995,7 @@ fn cmd_db_edit(
 
     if any_kdf {
         v.set_argon2_params(
-            kdf_memory.map(|m| m * 1024),
+            kdf_memory.map(mib_to_kib).transpose()?,
             kdf_iterations,
             kdf_parallelism,
         )
@@ -5003,6 +5003,12 @@ fn cmd_db_edit(
         println!("KDF updated");
     }
     Ok(())
+}
+
+fn mib_to_kib(memory_mib: u64) -> Result<u64> {
+    memory_mib
+        .checked_mul(1024)
+        .ok_or_else(|| anyhow!("--kdf-memory is too large to convert from MiB to KiB"))
 }
 
 /// `trove db-info` — non-secret database facts.
@@ -6331,5 +6337,16 @@ mod add_password_stdin_tests {
         )
         .expect_err("daemon mode must reject the offline-only password flag");
         assert!(err.to_string().contains("only valid with --vault"));
+    }
+}
+
+#[cfg(test)]
+mod kdf_memory_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn mib_to_kib_checks_overflow() {
+        assert_eq!(mib_to_kib(64).unwrap(), 64 * 1024);
+        assert!(mib_to_kib(u64::MAX).is_err());
     }
 }

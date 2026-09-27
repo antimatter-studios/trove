@@ -106,7 +106,7 @@ fn argon2_retune_persists_and_vault_reopens() {
     let v = Vault::open(&path, PW).expect("reopen after retune");
     let info = v.db_info();
     assert!(
-        info.kdf.contains("131072") || info.kdf.contains("128"),
+        info.kdf.contains("134217728"),
         "memory should reflect the retune: {}",
         info.kdf
     );
