@@ -76,8 +76,8 @@ fn normalized_host(host_port: &str) -> Option<String> {
     let host = if host_port.starts_with('[') {
         let close = host_port.find(']')?;
         let suffix = &host_port[close + 1..];
-        if !suffix.is_empty()
-            && !(suffix.starts_with(':')
+        if !(suffix.is_empty()
+            || suffix.starts_with(':')
                 && !suffix[1..].is_empty()
                 && suffix[1..].bytes().all(|b| b.is_ascii_digit()))
         {
