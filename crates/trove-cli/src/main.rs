@@ -105,6 +105,7 @@ struct Cli {
     keychain: bool,
 
     /// Operate directly on this .kdbx file (offline mode), bypassing the daemon.
+    /// Defaults to TROVE_VAULT when set; an explicit --vault takes precedence.
     ///
     /// trove has two modes, selected by the presence of this flag:
     ///
@@ -1320,7 +1321,8 @@ fn run(cli: Cli) -> Result<()> {
         let path = match given {
             Some(p) => resolve_env_file(&p),
             None => {
-                let candidates = env_file_candidates(vault_for_env_lookup(&cli));
+                let env_vault = vault_for_env_lookup(&cli);
+                let candidates = env_file_candidates(env_vault.as_deref());
                 candidates
                     .iter()
                     .find(|p| p.is_file())
@@ -1367,7 +1369,10 @@ fn run(cli: Cli) -> Result<()> {
     // `None` → use the daemon (for commands that have a daemon mode). Commands
     // with no daemon mode (init/materialize) require it via `require_vault`.
     // `unlock` ignores it and uses its own positional.
-    let vault = cli.vault.as_deref();
+    // Explicit CLI input wins over the environment; the latter may have been
+    // loaded from --env immediately above.
+    let selected_vault = cli.vault.clone().or_else(env_vault_path);
+    let vault = selected_vault.as_deref();
     match cli.command {
         Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
         Command::List { json, show_id } => cmd_list(vault, pw_stdin, json, show_id),
@@ -3209,6 +3214,11 @@ const DEFAULT_ENV_FILE: &str = ".env.trove";
 /// is loaded too — `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths — so
 /// one file can carry a whole trove configuration, not just a secret.
 const PASSWORD_VAR: &str = "TROVE_VAULT_PASSWORD";
+const VAULT_VAR: &str = "TROVE_VAULT";
+
+fn env_vault_path() -> Option<PathBuf> {
+    std::env::var_os(VAULT_VAR).map(PathBuf::from)
+}
 /// Per-vault credentials loaded from a YAML `.env.trove`, keyed by exact
 /// filename (for example, `work.kdbx`).
 static VAULT_PASSWORDS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
@@ -3279,13 +3289,13 @@ fn env_file_candidates(vault: Option<&Path>) -> Vec<PathBuf> {
 
 /// The vault a bare `--env` should look next to: the global `--vault` when it
 /// is offline mode, or the one `unlock` was pointed at.
-fn vault_for_env_lookup(cli: &Cli) -> Option<&Path> {
+fn vault_for_env_lookup(cli: &Cli) -> Option<PathBuf> {
     if let Some(v) = cli.vault.as_deref() {
-        return Some(v);
+        return Some(v.to_path_buf());
     }
     match &cli.command {
-        Command::Unlock { vault, .. } => Some(vault.as_path()),
-        _ => None,
+        Command::Unlock { vault, .. } => Some(vault.clone()),
+        _ => env_vault_path(),
     }
 }
 
