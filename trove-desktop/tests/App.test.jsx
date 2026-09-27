@@ -61,6 +61,8 @@ const ENTRIES = [
 ];
 const DETAIL = { notes: 'primary db', fields: [{ k: 'Host', v: 'db.prod' }], password: 'pg-Pr0d-8842!zQmx-vK' };
 const LOCKED_VAULT = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/vaults/personal.kdbx', locked: true };
+const OPEN_VAULT = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/vaults/personal.kdbx', locked: false };
+const SECOND_LOCKED_VAULT = { id: 'v2', name: 'Work', file: 'work.kdbx', path: '/vaults/work.kdbx', locked: true };
 
 beforeEach(() => {
   api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
@@ -202,6 +204,31 @@ describe('real unlock flow', () => {
       UNLOCK_WAIT,
     );
     expect(c.querySelector('.body .pane.sidebar')).toBeFalsy();
+  });
+});
+
+describe('app idle lock', () => {
+  it('continues counting down when the selected vault is locked but another is open', async () => {
+    api.listVaults.mockResolvedValue([OPEN_VAULT, SECOND_LOCKED_VAULT]);
+    api.getSettings.mockResolvedValue({
+      systemAgent: false,
+      systemAgentLifetime: 900,
+      systemAgentConfirm: false,
+      materialize: false,
+      idleLockMinutes: 0.01,
+    });
+    const { container: c } = render(<App />);
+
+    await waitFor(() => expect(c.querySelector('.body .pane.sidebar')).toBeTruthy());
+    // Switch to a registered but locked vault, reproducing the case where the
+    // active view used to tear down the app-wide idle timer.
+    fireEvent.keyDown(window, { key: '2', ctrlKey: true });
+    await waitFor(() => expect(c.querySelector('.unlock-card')).toBeTruthy());
+
+    await waitFor(
+      () => expect(api.lockVault).toHaveBeenCalledWith('v1', false),
+      { timeout: 4000 },
+    );
   });
 });
 

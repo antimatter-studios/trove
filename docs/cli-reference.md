@@ -10,7 +10,7 @@ trove [OPTIONS] <COMMAND>
 
 | Flag | Description |
 | --- | --- |
-| `--vault <PATH>` | Operate **offline** on this kdbx file, bypassing the daemon. Global — works before or after the subcommand. See "Operating modes" below. |
+| `--vault <PATH>` | Operate **offline** on this kdbx file, bypassing the daemon. Global — works before or after the subcommand. Defaults to `TROVE_VAULT` when set; an explicit flag wins. See "Operating modes" below. |
 | `--password-stdin` | Read the vault password from stdin (one line) instead of prompting. For `init`, the single line becomes the password without a confirm step. Global — works on every subcommand. |
 | `--key-file <PATH>` | Composite key: this keyfile PLUS the password, wherever a vault is opened — offline `--vault` commands, `init` (locks the new vault with the pair), and `unlock` (the daemon holds the bytes in memory so its re-saves keep the composite key). Any format KeePassXC accepts: XML v1/v2, raw 32-byte, hex-64, or an arbitrary file (SHA-256). A wrong/missing keyfile fails like a wrong password (exit 2). |
 | `--yubikey <SLOT>[:SERIAL]` | *(builds with `--features yubikey`; Linux-only for now — upstream keepass pins a USB backend that doesn't compile on macOS.)* HMAC-SHA1 challenge-response composited with the password/keyfile, KeePassXC's scheme. Applies to offline `--vault` commands and `init`. The device must stay connected while writing: every save answers a fresh challenge. |
@@ -19,10 +19,10 @@ trove [OPTIONS] <COMMAND>
 
 ### Operating modes
 
-`trove` has two modes, selected by the global `--vault` flag (both placements are equivalent: `trove --vault V list` == `trove list --vault V`):
+`trove` has two modes, selected by the global `--vault` flag or its `TROVE_VAULT` default (both flag placements are equivalent: `trove --vault V list` == `trove list --vault V`; the flag overrides the environment variable):
 
 - **Offline (`--vault <PATH>`)** — the command opens the kdbx file directly. The password comes from `--password-stdin` or a prompt (never the command line). No daemon, no `TROVE_SESSION`. This is the stateless path automation should use. `init` and `materialize` always operate this way; with `--vault`, so do `add ssh/gpg/file`, `generate ssh`, `get`, and `list`.
-- **Daemon (no `--vault`)** — `add ssh/gpg/file`, `generate ssh`, `get`, and `list` act on the vault unlocked in the running `troved`, gated by the `TROVE_SESSION` code `trove unlock` minted. `init` and `materialize` have no daemon mode and error without `--vault`.
+- **Daemon (no vault path selected)** — `add ssh/gpg/file`, `generate ssh`, `get`, and `list` act on the vault unlocked in the running `troved`, gated by the `TROVE_SESSION` code `trove unlock` minted. `init` and `materialize` have no daemon mode and error without a path from `--vault` or `TROVE_VAULT`.
 
 `unlock` is the exception: it is inherently daemon-directed, so it keeps its own positional `<VAULT>` and ignores `--vault`.
 
@@ -492,6 +492,10 @@ it). String secrets become environment variables; file attachments
 materialize into a private per-run directory (0700, files 0600) that is
 wiped — overwritten, then removed — the moment the command exits, including
 on Ctrl-C. The child's exit code becomes trove's.
+
+If a name matches both an entry and a group, `exec` reports the ambiguity.
+Select the intended scope with `--entry PATH` or `--group PATH`, for example
+`trove --vault v.kdbx exec --group Infra -- env`.
 
 Variable naming: an entry's `Exec.Env` custom field names the variable
 exactly (`Exec.Env=KUBECONFIG` on an attachment entry → `KUBECONFIG=<temp
@@ -1015,8 +1019,11 @@ configuration and a password, not a shell script. A variable **already set in th
 environment wins**, so the file supplies defaults rather than overriding its caller.
 
 Every trove variable can live in dotenv form, not just the password:
-`TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths. The YAML form is for the
-per-vault password map.
+`TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, and the socket paths. `TROVE_VAULT` selects
+the default offline vault for commands that accept `--vault`; `--vault <PATH>`
+overrides it. For bare `--env`, trove searches the working directory first and
+then beside an explicit `--vault` (or the positional vault for `unlock`). The
+YAML form is for the per-vault password map.
 
 ### Permissions
 
@@ -1067,6 +1074,7 @@ All env vars are read at process start.
 
 | Env var | Default | Effect |
 | --- | --- | --- |
+| `TROVE_VAULT` | (unset) | Default path for offline commands that accept `--vault`. An explicit `--vault <PATH>` takes precedence. `unlock` uses its positional vault argument. |
 | `TROVE_SOCK` | `$XDG_RUNTIME_DIR/trove.sock` or `${TMPDIR:-/tmp}/trove-$UID.sock` | Path of the control socket. |
 | `TROVE_SSH_SOCK` | `$XDG_RUNTIME_DIR/trove-ssh.sock` or `${TMPDIR:-/tmp}/trove-ssh-$UID.sock` | Path of the SSH agent socket. |
 | `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |

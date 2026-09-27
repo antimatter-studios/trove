@@ -23,6 +23,15 @@ pub struct Injection {
     pub value: String,
 }
 
+/// How to interpret an `exec` scope. `Auto` preserves the existing shorthand
+/// when only one interpretation exists, while explicit selectors resolve a
+/// name that exists as both an entry and a group.
+pub enum Scope {
+    Auto(String),
+    Entry(String),
+    Group(String),
+}
+
 /// Env-var-safe rendering of an entry title: uppercase, non-alphanumerics
 /// collapsed to single underscores.
 pub fn env_name_from_title(title: &str) -> String {
@@ -46,25 +55,36 @@ pub fn env_name_from_title(title: &str) -> String {
 /// Resolve the injections for `scope`: a single entry path, or a group whose
 /// direct and nested entries all contribute. `tmp` receives materialized
 /// attachment files (0600, inside a 0700 dir the caller owns).
-pub fn resolve(v: &Vault, scope: &str, tmp: &Path) -> Result<Vec<Injection>> {
+pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
     let all = v.list_entries();
-    let matches: Vec<&EntrySummary> = if v.find_by_title(scope).is_some() {
-        // Single entry addressed by path/title.
-        let id = v.find_by_title(scope).expect("just checked");
-        all.iter().filter(|e| e.id == id).collect()
-    } else {
-        // Group scope: every entry at or under the group path.
-        let hits: Vec<&EntrySummary> = all
-            .iter()
-            .filter(|e| {
-                let gp = e.group_path.join("/");
-                gp == scope || gp.starts_with(&format!("{scope}/"))
-            })
-            .collect();
-        if hits.is_empty() {
-            return Err(anyhow!("no entry or group matches '{scope}'"));
+    let (name, matches) = match scope {
+        Scope::Auto(name) => {
+            let entry = v.find_by_title(&name);
+            let group = group_matches(&all, &name);
+            match (entry, group.is_empty()) {
+                (Some(_), false) => {
+                    return Err(anyhow!(
+                        "'{name}' matches both an entry and a group; choose --entry '{name}' or --group '{name}'"
+                    ));
+                }
+                (Some(id), true) => (name, all.iter().filter(|e| e.id == id).collect()),
+                (None, false) => (name, group),
+                (None, true) => return Err(anyhow!("no entry or group matches '{name}'")),
+            }
         }
-        hits
+        Scope::Entry(name) => {
+            let id = v
+                .find_by_title(&name)
+                .ok_or_else(|| anyhow!("no entry matches '{name}'"))?;
+            (name, all.iter().filter(|e| e.id == id).collect())
+        }
+        Scope::Group(name) => {
+            let group = group_matches(&all, &name);
+            if group.is_empty() {
+                return Err(anyhow!("no group matches '{name}'"));
+            }
+            (name, group)
+        }
     };
 
     let mut out = Vec::new();
@@ -105,10 +125,19 @@ pub fn resolve(v: &Vault, scope: &str, tmp: &Path) -> Result<Vec<Injection>> {
     }
     if out.is_empty() {
         return Err(anyhow!(
-            "'{scope}' matched entries but none carry a password or attachment to inject"
+            "'{name}' matched entries but none carry a password or attachment to inject"
         ));
     }
     Ok(out)
+}
+
+fn group_matches<'a>(all: &'a [EntrySummary], scope: &str) -> Vec<&'a EntrySummary> {
+    all.iter()
+        .filter(|e| {
+            let group_path = e.group_path.join("/");
+            group_path == scope || group_path.starts_with(&format!("{scope}/"))
+        })
+        .collect()
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -225,7 +254,7 @@ mod tests {
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
 
-        let mut inj = resolve(&v, "Infra", &tmp).unwrap();
+        let mut inj = resolve(&v, Scope::Auto("Infra".into()), &tmp).unwrap();
         inj.sort_by(|a, b| a.name.cmp(&b.name));
         let names: Vec<&str> = inj.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(
@@ -253,12 +282,12 @@ mod tests {
         let tmp = dir.path().join("run2");
         std::fs::create_dir(&tmp).unwrap();
 
-        let inj = resolve(&v, "Infra/stripe", &tmp).unwrap();
+        let inj = resolve(&v, Scope::Auto("Infra/stripe".into()), &tmp).unwrap();
         assert_eq!(inj.len(), 1);
         assert_eq!(inj[0].name, "STRIPE_KEY");
         assert_eq!(inj[0].value, "sk_live_123");
 
-        assert!(resolve(&v, "No/Such", &tmp).is_err());
+        assert!(resolve(&v, Scope::Auto("No/Such".into()), &tmp).is_err());
         wipe_dir(&tmp);
     }
 }
