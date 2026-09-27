@@ -346,6 +346,9 @@ enum Command {
         /// --show-protected is given.
         #[arg(long, conflicts_with_all = ["attrs", "totp"])]
         json: bool,
+        /// Base64-encode the single value selected by --attr.
+        #[arg(long, requires = "attrs", conflicts_with_all = ["json", "totp"])]
+        base64: bool,
     },
 
     /// Search entries: case-insensitive substring match over title, username,
@@ -550,6 +553,9 @@ enum Command {
     Resolve {
         /// The trove:// reference to resolve.
         reference: String,
+        /// Base64-encode the resolved value.
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Run a command with secrets injected for exactly its lifetime — no
@@ -1114,6 +1120,9 @@ enum GetResource {
     Password {
         /// Entry path to look up, e.g. "github.com" or "Work/github".
         entry_path: String,
+        /// Base64-encode the password.
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Retrieve a stored SSH key by entry path.
@@ -1165,6 +1174,9 @@ enum GetResource {
         /// Write the bytes to this path (chmod 0600 on Unix). Stdout if omitted.
         #[arg(long = "out")]
         out: Option<PathBuf>,
+        /// Base64-encode the attachment instead of writing its raw bytes.
+        #[arg(long)]
+        base64: bool,
     },
 }
 
@@ -1439,8 +1451,21 @@ fn run(cli: Cli) -> Result<()> {
             resource: GetResource::Gpg { title, out },
         } => cmd_get_gpg(vault, &title, out.as_deref(), pw_stdin),
         Command::Get {
-            resource: GetResource::File { title, name, out },
-        } => cmd_get_file(vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
+            resource:
+                GetResource::File {
+                    title,
+                    name,
+                    out,
+                    base64,
+                },
+        } => cmd_get_file(
+            vault,
+            &title,
+            name.as_deref(),
+            out.as_deref(),
+            base64,
+            pw_stdin,
+        ),
         Command::SshAgent {
             op: SshAgentOp::Socket,
         } => cmd_ssh_agent_socket(),
@@ -1520,7 +1545,9 @@ fn run(cli: Cli) -> Result<()> {
             cmd_exec(require_vault(vault)?, &scope, &command, pw_stdin)
         }
         Command::GitCredential { operation } => cmd_git_credential(vault, &operation, pw_stdin),
-        Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
+        Command::Resolve { reference, base64 } => {
+            cmd_resolve(require_vault(vault)?, &reference, base64, pw_stdin)
+        }
         Command::Merge {
             source,
             source_key_file,
@@ -1596,11 +1623,20 @@ fn run(cli: Cli) -> Result<()> {
             show_protected,
             totp,
             json,
+            base64,
         } => {
             if totp {
                 cmd_show_totp(vault, &entry_path, pw_stdin)
             } else {
-                cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin, json)
+                cmd_show(
+                    vault,
+                    &entry_path,
+                    &attrs,
+                    show_protected,
+                    pw_stdin,
+                    json,
+                    base64,
+                )
             }
         }
         Command::Search {
@@ -1696,8 +1732,8 @@ fn run(cli: Cli) -> Result<()> {
             pw_stdin,
         ),
         Command::Get {
-            resource: GetResource::Password { entry_path },
-        } => cmd_get_password(vault, &entry_path, pw_stdin),
+            resource: GetResource::Password { entry_path, base64 },
+        } => cmd_get_password(vault, &entry_path, base64, pw_stdin),
         Command::Completions {
             shell,
             install,
@@ -2885,6 +2921,31 @@ fn write_secret_out(out: Option<&Path>, bytes: &[u8], what: &str) -> Result<()> 
     }
 }
 
+/// Write one value, optionally encoded as unwrapped RFC 4648 base64. Encoded
+/// output has no newline in a pipe or file, so it can be fed directly to a
+/// consumer; a terminal gets one final newline for readability.
+fn write_value_out(out: Option<&Path>, bytes: &[u8], what: &str, base64: bool) -> Result<()> {
+    if !base64 {
+        return write_secret_out(out, bytes, what);
+    }
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    match out {
+        Some(path) => write_private_file(path, encoded.as_bytes())
+            .with_context(|| format!("writing base64-encoded {what} to {}", path.display())),
+        None => {
+            use std::io::IsTerminal;
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            handle.write_all(encoded.as_bytes())?;
+            if stdout.is_terminal() {
+                handle.write_all(b"\n")?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Read an attachment by entry path directly from a kdbx file (offline mode).
 /// Opens the vault (password via `--password-stdin` or prompt), resolves the
 /// entry path, and returns the named attachment's bytes.
@@ -3654,6 +3715,7 @@ fn cmd_get_file(
     title: &str,
     name: Option<&str>,
     out: Option<&Path>,
+    base64: bool,
     pw_stdin: bool,
 ) -> Result<()> {
     let attachment = name.unwrap_or("blob");
@@ -3661,7 +3723,7 @@ fn cmd_get_file(
         Some(path) => offline_get_attachment(path, title, attachment, pw_stdin)?,
         None => daemon_get_attachment(title, attachment)?,
     };
-    write_secret_out(out, &bytes, "file")
+    write_value_out(out, &bytes, "file", base64)
 }
 
 // --- generic entry CRUD (G1) -------------------------------------------------
@@ -3807,8 +3869,13 @@ fn cmd_add_password(
     Ok(())
 }
 
-fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
-    match vault {
+fn cmd_get_password(
+    vault: Option<&Path>,
+    entry_path: &str,
+    base64: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    let password = match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
             let id = v
@@ -3818,7 +3885,7 @@ fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> R
                 .get_field(&id, "Password")
                 .context("reading Password")?
                 .ok_or_else(|| anyhow!("entry '{entry_path}' has no password"))?;
-            println!("{pw}");
+            pw
         }
         None => {
             let code = require_session_code()?;
@@ -3831,10 +3898,15 @@ fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> R
                 .get("value")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
-            println!("{pw}");
+            pw.to_string()
         }
+    };
+    if base64 {
+        write_value_out(None, password.as_bytes(), "password", true)
+    } else {
+        println!("{password}");
+        Ok(())
     }
-    Ok(())
 }
 
 /// Shared renderer for `show`'s summary view. `password` is `Some` only when
@@ -4025,7 +4097,11 @@ fn cmd_show(
     show_protected: bool,
     pw_stdin: bool,
     json: bool,
+    base64: bool,
 ) -> Result<()> {
+    if base64 && attrs.len() != 1 {
+        return Err(anyhow!("--base64 with show requires exactly one --attr"));
+    }
     // Refuse protected --attr without --show-protected up front, in both modes.
     if let Some(p) = attrs.iter().find(|a| is_protected_field(a)) {
         if !show_protected {
@@ -4046,7 +4122,11 @@ fn cmd_show(
                         .get_field(&id, attr)
                         .context("reading field")?
                         .ok_or_else(|| anyhow!("entry '{entry_path}' has no field '{attr}'"))?;
-                    println!("{value}");
+                    if base64 {
+                        write_value_out(None, value.as_bytes(), "field value", true)?;
+                    } else {
+                        println!("{value}");
+                    }
                 }
                 return Ok(());
             }
@@ -4115,7 +4195,11 @@ fn cmd_show(
                         .get("value")
                         .and_then(Value::as_str)
                         .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
-                    println!("{value}");
+                    if base64 {
+                        write_value_out(None, value.as_bytes(), "field value", true)?;
+                    } else {
+                        println!("{value}");
+                    }
                 }
                 return Ok(());
             }
@@ -4798,11 +4882,15 @@ fn cmd_git_credential(vault_path: Option<&Path>, operation: &str, pw_stdin: bool
 }
 
 /// `trove resolve trove://…` — print one referenced secret to stdout.
-fn cmd_resolve(vault_path: &Path, reference: &str, pw_stdin: bool) -> Result<()> {
+fn cmd_resolve(vault_path: &Path, reference: &str, base64: bool, pw_stdin: bool) -> Result<()> {
     let v = open_vault(vault_path, pw_stdin)?;
     let value = v.resolve_ref(reference).context("resolving reference")?;
-    println!("{value}");
-    Ok(())
+    if base64 {
+        write_value_out(None, value.as_bytes(), "resolved value", true)
+    } else {
+        println!("{value}");
+        Ok(())
+    }
 }
 
 /// `trove exec <SCOPE> -- cmd…` — inject, run, wipe. The child's exit code
