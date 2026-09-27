@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
 use trove_core::Vault;
 use troved::gpg_agent::GpgKeyStore;
-use troved::handler::{handle, SessionStore, SharedState};
+use troved::handler::{handle, Session, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize::MaterializedStore;
 use troved::protocol::{Request, Response};
@@ -393,6 +393,53 @@ async fn re_unlocking_the_same_vault_does_not_duplicate_its_keys() {
         "a re-unlock must replace the vault, not stack a second copy"
     );
     assert_eq!(d.state.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn git_credential_lookup_uses_the_unlocked_session_and_prefers_git_token() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("git.kdbx");
+    let mut vault = Vault::create(&path, PASSWORD).expect("create vault");
+    let id = vault.add_entry("GitHub").expect("add entry");
+    vault.set_field(&id, "URL", "https://github.com").unwrap();
+    vault.set_field(&id, "UserName", "octocat").unwrap();
+    vault.set_field(&id, "Password", "site-password").unwrap();
+    vault.set_field(&id, "git.token", "ghp-test-token").unwrap();
+    vault.save().unwrap();
+
+    let d = Daemon::new();
+    assert!(matches!(d.unlock(&path).await, Response::Ok(_)));
+    *d.session.lock().await = Some(Session {
+        code: "session-code".into(),
+        uid: TEST_UID,
+    });
+    let response = d
+        .handle(Request::GitCredentialGet {
+            host: "GITHUB.com".into(),
+            username: Some("octocat".into()),
+            code: "session-code".into(),
+        })
+        .await;
+    let body = serde_json::to_value(response).unwrap();
+    assert_eq!(body["password"], "ghp-test-token");
+    assert_eq!(body["username"], "octocat");
+}
+
+#[tokio::test]
+async fn git_credential_lookup_refuses_a_wrong_session_code() {
+    let d = Daemon::new();
+    *d.session.lock().await = Some(Session {
+        code: "session-code".into(),
+        uid: TEST_UID,
+    });
+    let response = d
+        .handle(Request::GitCredentialGet {
+            host: "github.com".into(),
+            username: None,
+            code: "wrong-code".into(),
+        })
+        .await;
+    assert!(err_message(&response).contains("refused: vault locked"));
 }
 
 #[tokio::test]

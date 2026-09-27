@@ -538,7 +538,8 @@ enum Command {
     /// (get/store/erase) and speaks its key=value protocol on stdin/stdout.
     /// `get` matches an entry by URL host (and username if git sends one) and
     /// replies with its username/password; store/erase are accepted and
-    /// ignored. Offline-only.
+    /// ignored. Uses the unlocked daemon in a trove session, or `--vault`
+    /// for offline access.
     GitCredential {
         /// The git operation: get, store, or erase.
         operation: String,
@@ -1521,7 +1522,7 @@ fn run(cli: Cli) -> Result<()> {
             cmd_exec(require_vault(vault)?, &scope, &command, pw_stdin)
         }
         Command::GitCredential { operation } => {
-            cmd_git_credential(require_vault(vault)?, &operation, pw_stdin)
+            cmd_git_credential(vault.as_deref(), &operation, pw_stdin)
         }
         Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
         Command::Merge {
@@ -4735,15 +4736,66 @@ fn cmd_clip(
 }
 
 /// `trove git-credential <op>` — a git credential helper over stdin/stdout.
-fn cmd_git_credential(vault_path: &Path, operation: &str, pw_stdin: bool) -> Result<()> {
-    let v = open_vault(vault_path, pw_stdin)?;
-    // git's request block arrives AFTER the vault password when
-    // --password-stdin is used; read_password_from_stdin already consumed
-    // exactly one line, so the rest of stdin is git's protocol.
+fn cmd_git_credential(vault_path: Option<&Path>, operation: &str, pw_stdin: bool) -> Result<()> {
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
+
+    if operation == "store" || operation == "erase" {
+        let _ = gitcred::parse_request(&mut reader)?;
+        return Ok(());
+    }
+    if operation != "get" {
+        anyhow::bail!("unknown git-credential operation '{operation}' (expected get/store/erase)");
+    }
+
+    // `--password-stdin` explicitly selects the offline flow, where the first
+    // stdin line is the vault password and the Git protocol follows it.
+    if !pw_stdin {
+        if let Ok(code) = std::env::var("TROVE_SESSION") {
+            let request = gitcred::parse_request(&mut reader)?;
+            let Some(host) = request.get("host") else {
+                return Ok(());
+            };
+            let daemon_request = daemon::Request::GitCredentialGet {
+                host: host.clone(),
+                username: request.get("username").cloned(),
+                code,
+            };
+            match daemon::send(&daemon_request) {
+                Ok(value) => {
+                    if value["status"] == "err" {
+                        anyhow::bail!(
+                            "{}",
+                            value["error"]
+                                .as_str()
+                                .unwrap_or("daemon refused Git credential request")
+                        );
+                    }
+                    let user = value["username"].as_str().unwrap_or_default();
+                    let pass = value["password"].as_str().unwrap_or_default();
+                    return gitcred::write_reply(&mut writer, user, pass);
+                }
+                Err(err) if vault_path.is_some() && daemon::is_daemon_not_running(&err) => {
+                    // An explicit --vault keeps the existing offline fallback.
+                    let v = open_vault(vault_path.expect("checked above"), pw_stdin)?;
+                    if let Some((user, pass)) = gitcred::lookup(&v, &request)? {
+                        return gitcred::write_reply(&mut writer, &user, &pass);
+                    }
+                    return Ok(());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    let Some(vault_path) = vault_path else {
+        anyhow::bail!(
+            "a trove session is required, or pass --vault <PATH> for offline credential lookup"
+        );
+    };
+    let v = open_vault(vault_path, pw_stdin)?;
     gitcred::run(&v, operation, &mut reader, &mut writer)
 }
 

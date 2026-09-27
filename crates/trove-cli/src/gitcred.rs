@@ -6,8 +6,9 @@
 //! `username=` / `password=` lines. `store` and `erase` are accepted and
 //! ignored — trove is a deliberate vault, not an auto-populated cache.
 //!
-//! Configure per-repo or globally:
-//!   git config credential.helper "trove --vault ~/v.kdbx git-credential"
+//! Configure per-repo or globally inside a trove session:
+//!   git config credential.helper "trove git-credential"
+//! Outside a session, add `--vault ~/v.kdbx` for offline lookup.
 //! (git appends the operation, so `get` etc. arrive as the last arg.)
 //!
 //! Matching: an entry matches when its `URL` host equals the requested
@@ -139,11 +140,7 @@ pub fn run(
         "get" => {
             let req = parse_request(reader)?;
             if let Some((user, pass)) = lookup(v, &req)? {
-                // Only fill what we have; echo the username so git records it.
-                if !user.is_empty() {
-                    writeln!(writer, "username={user}")?;
-                }
-                writeln!(writer, "password={pass}")?;
+                write_reply(writer, &user, &pass)?;
             }
             // No match → empty reply; git falls back to its next helper/prompt.
             Ok(())
@@ -157,6 +154,17 @@ pub fn run(
             "unknown git-credential operation '{other}' (expected get/store/erase)"
         )),
     }
+}
+
+/// Write one successful response in Git's credential-helper protocol.
+pub fn write_reply(writer: &mut impl Write, user: &str, pass: &str) -> Result<()> {
+    if !user.is_empty() {
+        writeln!(writer, "username={user}")?;
+    }
+    if !pass.is_empty() {
+        writeln!(writer, "password={pass}")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

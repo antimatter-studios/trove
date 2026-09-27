@@ -419,7 +419,7 @@ Reads any attachment by name. **Ignores** the `Materialize.*` fields — `--out`
 ## trove git-credential
 
 ```
-git config credential.helper "trove --vault ~/v.kdbx git-credential"
+git config credential.helper "trove git-credential"
 ```
 
 A git credential helper. git appends the operation and speaks its
@@ -428,8 +428,11 @@ A git credential helper. git appends the operation and speaks its
 and replies with that entry's `username`/`password`; no match yields an empty
 reply so git falls back to its next helper or prompt. `store`/`erase` are
 accepted and ignored — trove is a deliberate vault, not an autofilled cache.
-Offline-only. With `--password-stdin`, the vault password is stdin line 1 and
-git's request block follows.
+Inside a shell started by `trove unlock`, the helper reads the unlocked daemon
+and does not prompt or reopen the vault. Outside that session, pass
+`--vault ~/v.kdbx` to use the offline path. Add `--password-stdin` when the
+offline vault password is piped: the password is stdin line 1 and Git's request
+block follows it.
 
 ### Which secret is sent: `git.token`, else `Password`
 
