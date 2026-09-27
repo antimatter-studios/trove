@@ -67,6 +67,14 @@ fn generate_password_and_diceware_shapes() {
     assert_eq!(pw.len(), 20);
     assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()));
 
+    // Zero is a useful value for computed batch counts: do not emit an
+    // unrequested secret.
+    let out = ok(
+        &run_trove(&trove, &["generate", "password", "--count", "0"], ""),
+        "generate zero passwords",
+    );
+    assert!(out.is_empty(), "count zero should print nothing: {out:?}");
+
     // Policy flags + count.
     let out = ok(
         &run_trove(
@@ -124,6 +132,12 @@ fn generate_password_and_diceware_shapes() {
             .all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase())),
         "{out}"
     );
+
+    let out = ok(
+        &run_trove(&trove, &["generate", "diceware", "--count", "0"], ""),
+        "generate zero passphrases",
+    );
+    assert!(out.is_empty(), "count zero should print nothing: {out:?}");
 }
 
 #[test]
