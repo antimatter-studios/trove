@@ -411,10 +411,27 @@ impl Vault {
     ///
     /// For a caller that has noticed [`changed_on_disk`](Self::changed_on_disk)
     /// and has nothing of its own to lose — a GUI showing a list it did not
-    /// edit. The password and keyfile are reused, so the caller does not have
-    /// to ask for them again; anything unsaved in memory is gone, which is why
-    /// this is never automatic.
+    /// edit. The password, keyfile, and challenge-response provider are reused,
+    /// so the caller does not have to ask for them again; a hardware provider
+    /// must still be connected to answer the new challenge. Anything unsaved in
+    /// memory is gone, which is why this is never automatic.
     pub fn reload(&mut self) -> Result<()> {
+        #[cfg(feature = "yubikey")]
+        let mut fresh = if let Some(challenge_response) = &self.inner.challenge_response {
+            Self::open_with_challenge_response(
+                &self.inner.path,
+                &self.inner.password,
+                self.inner.keyfile.as_deref(),
+                challenge_response.clone(),
+            )?
+        } else {
+            Self::open_with_key(
+                &self.inner.path,
+                &self.inner.password,
+                self.inner.keyfile.as_deref(),
+            )?
+        };
+        #[cfg(not(feature = "yubikey"))]
         let mut fresh = Self::open_with_key(
             &self.inner.path,
             &self.inner.password,

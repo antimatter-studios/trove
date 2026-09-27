@@ -32,7 +32,11 @@ fn challenge_response_roundtrip_and_failure_modes() {
     drop(v);
 
     // Correct password + correct CR secret opens.
-    let v = Vault::open_with_challenge_response(&path, PW, None, local()).expect("reopen");
+    let mut v = Vault::open_with_challenge_response(&path, PW, None, local()).expect("reopen");
+    // `reload()` must reuse the provider held by this vault. Without it, the
+    // database is reopened with only password + keyfile and reports a bad key.
+    v.reload()
+        .expect("reload with retained challenge-response provider");
     let id = v.find_by_title("locked-by-cr").unwrap();
     assert_eq!(
         v.get_field(&id, "Password").unwrap().as_deref(),
