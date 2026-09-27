@@ -24,7 +24,7 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use trove_core::{Error as CoreError, Vault};
+use trove_core::{Error as CoreError, SearchFieldFilter, SearchQuery, Vault};
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -346,14 +346,27 @@ enum Command {
         /// --show-protected is given.
         #[arg(long, conflicts_with_all = ["attrs", "totp"])]
         json: bool,
+        /// Base64-encode the single value selected by --attr.
+        #[arg(long, requires = "attrs", conflicts_with_all = ["json", "totp"])]
+        base64: bool,
     },
 
-    /// Search entries: case-insensitive substring match over title, username,
-    /// URL, notes and group path. Protected values are never searched. Output
-    /// is `list`-shaped (id, path, attachments), one hit per line.
+    /// Search unprotected entry metadata. The optional term is a
+    /// case-insensitive substring; exact filters can be combined with it.
     Search {
-        /// The term to look for.
-        term: String,
+        /// Substring to find in unprotected fields, names, tags and paths.
+        #[arg(required = false)]
+        term: Option<String>,
+        /// Match an unprotected custom field by exact name, optionally exact
+        /// value (repeatable; matches any supplied field filter).
+        #[arg(long = "field", value_name = "NAME[=VALUE]")]
+        fields: Vec<String>,
+        /// Match a direct or inherited KeePass tag (repeatable; case-insensitive).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Match an attachment name using a glob (repeatable; case-sensitive).
+        #[arg(long = "attachment", value_name = "GLOB")]
+        attachments: Vec<String>,
         /// Machine-readable output: a JSON array of entry summaries.
         #[arg(long)]
         json: bool,
@@ -551,6 +564,9 @@ enum Command {
     Resolve {
         /// The trove:// reference to resolve.
         reference: String,
+        /// Base64-encode the resolved value.
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Run a command with secrets injected for exactly its lifetime — no
@@ -1115,6 +1131,9 @@ enum GetResource {
     Password {
         /// Entry path to look up, e.g. "github.com" or "Work/github".
         entry_path: String,
+        /// Base64-encode the password.
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Retrieve a stored SSH key by entry path.
@@ -1166,6 +1185,9 @@ enum GetResource {
         /// Write the bytes to this path (chmod 0600 on Unix). Stdout if omitted.
         #[arg(long = "out")]
         out: Option<PathBuf>,
+        /// Base64-encode the attachment instead of writing its raw bytes.
+        #[arg(long)]
+        base64: bool,
     },
 }
 
@@ -1440,8 +1462,21 @@ fn run(cli: Cli) -> Result<()> {
             resource: GetResource::Gpg { title, out },
         } => cmd_get_gpg(vault, &title, out.as_deref(), pw_stdin),
         Command::Get {
-            resource: GetResource::File { title, name, out },
-        } => cmd_get_file(vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
+            resource:
+                GetResource::File {
+                    title,
+                    name,
+                    out,
+                    base64,
+                },
+        } => cmd_get_file(
+            vault,
+            &title,
+            name.as_deref(),
+            out.as_deref(),
+            base64,
+            pw_stdin,
+        ),
         Command::SshAgent {
             op: SshAgentOp::Socket,
         } => cmd_ssh_agent_socket(),
@@ -1523,7 +1558,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::GitCredential { operation } => {
             cmd_git_credential(require_vault(vault)?, &operation, pw_stdin)
         }
-        Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
+        Command::Resolve { reference, base64 } => {
+            cmd_resolve(require_vault(vault)?, &reference, base64, pw_stdin)
+        }
         Command::Merge {
             source,
             source_key_file,
@@ -1599,18 +1636,39 @@ fn run(cli: Cli) -> Result<()> {
             show_protected,
             totp,
             json,
+            base64,
         } => {
             if totp {
                 cmd_show_totp(vault, &entry_path, pw_stdin)
             } else {
-                cmd_show(vault, &entry_path, &attrs, show_protected, pw_stdin, json)
+                cmd_show(
+                    vault,
+                    &entry_path,
+                    &attrs,
+                    show_protected,
+                    pw_stdin,
+                    json,
+                    base64,
+                )
             }
         }
         Command::Search {
             term,
+            fields,
+            tags,
+            attachments,
             json,
             show_id,
-        } => cmd_search(vault, &term, pw_stdin, json, show_id),
+        } => cmd_search(
+            vault,
+            term.as_deref(),
+            &fields,
+            &tags,
+            &attachments,
+            pw_stdin,
+            json,
+            show_id,
+        ),
         Command::Edit {
             entry_path,
             title,
@@ -1699,8 +1757,8 @@ fn run(cli: Cli) -> Result<()> {
             pw_stdin,
         ),
         Command::Get {
-            resource: GetResource::Password { entry_path },
-        } => cmd_get_password(vault, &entry_path, pw_stdin),
+            resource: GetResource::Password { entry_path, base64 },
+        } => cmd_get_password(vault, &entry_path, base64, pw_stdin),
         Command::Completions {
             shell,
             install,
@@ -2888,6 +2946,31 @@ fn write_secret_out(out: Option<&Path>, bytes: &[u8], what: &str) -> Result<()> 
     }
 }
 
+/// Write one value, optionally encoded as unwrapped RFC 4648 base64. Encoded
+/// output has no newline in a pipe or file, so it can be fed directly to a
+/// consumer; a terminal gets one final newline for readability.
+fn write_value_out(out: Option<&Path>, bytes: &[u8], what: &str, base64: bool) -> Result<()> {
+    if !base64 {
+        return write_secret_out(out, bytes, what);
+    }
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    match out {
+        Some(path) => write_private_file(path, encoded.as_bytes())
+            .with_context(|| format!("writing base64-encoded {what} to {}", path.display())),
+        None => {
+            use std::io::IsTerminal;
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            handle.write_all(encoded.as_bytes())?;
+            if stdout.is_terminal() {
+                handle.write_all(b"\n")?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Read an attachment by entry path directly from a kdbx file (offline mode).
 /// Opens the vault (password via `--password-stdin` or prompt), resolves the
 /// entry path, and returns the named attachment's bytes.
@@ -3655,6 +3738,7 @@ fn cmd_get_file(
     title: &str,
     name: Option<&str>,
     out: Option<&Path>,
+    base64: bool,
     pw_stdin: bool,
 ) -> Result<()> {
     let attachment = name.unwrap_or("blob");
@@ -3662,7 +3746,7 @@ fn cmd_get_file(
         Some(path) => offline_get_attachment(path, title, attachment, pw_stdin)?,
         None => daemon_get_attachment(title, attachment)?,
     };
-    write_secret_out(out, &bytes, "file")
+    write_value_out(out, &bytes, "file", base64)
 }
 
 // --- generic entry CRUD (G1) -------------------------------------------------
@@ -3805,8 +3889,13 @@ fn cmd_add_password(
     Ok(())
 }
 
-fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
-    match vault {
+fn cmd_get_password(
+    vault: Option<&Path>,
+    entry_path: &str,
+    base64: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    let password = match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
             let id = v
@@ -3816,7 +3905,7 @@ fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> R
                 .get_field(&id, "Password")
                 .context("reading Password")?
                 .ok_or_else(|| anyhow!("entry '{entry_path}' has no password"))?;
-            println!("{pw}");
+            pw
         }
         None => {
             let code = require_session_code()?;
@@ -3829,10 +3918,15 @@ fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> R
                 .get("value")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
-            println!("{pw}");
+            pw.to_string()
         }
+    };
+    if base64 {
+        write_value_out(None, password.as_bytes(), "password", true)
+    } else {
+        println!("{password}");
+        Ok(())
     }
-    Ok(())
 }
 
 /// Shared renderer for `show`'s summary view. `password` is `Some` only when
@@ -4023,7 +4117,11 @@ fn cmd_show(
     show_protected: bool,
     pw_stdin: bool,
     json: bool,
+    base64: bool,
 ) -> Result<()> {
+    if base64 && attrs.len() != 1 {
+        return Err(anyhow!("--base64 with show requires exactly one --attr"));
+    }
     // Refuse protected --attr without --show-protected up front, in both modes.
     if let Some(p) = attrs.iter().find(|a| is_protected_field(a)) {
         if !show_protected {
@@ -4044,7 +4142,11 @@ fn cmd_show(
                         .get_field(&id, attr)
                         .context("reading field")?
                         .ok_or_else(|| anyhow!("entry '{entry_path}' has no field '{attr}'"))?;
-                    println!("{value}");
+                    if base64 {
+                        write_value_out(None, value.as_bytes(), "field value", true)?;
+                    } else {
+                        println!("{value}");
+                    }
                 }
                 return Ok(());
             }
@@ -4113,7 +4215,11 @@ fn cmd_show(
                         .get("value")
                         .and_then(Value::as_str)
                         .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
-                    println!("{value}");
+                    if base64 {
+                        write_value_out(None, value.as_bytes(), "field value", true)?;
+                    } else {
+                        println!("{value}");
+                    }
                 }
                 return Ok(());
             }
@@ -4204,38 +4310,77 @@ fn cmd_show(
 
 fn cmd_search(
     vault: Option<&Path>,
-    term: &str,
+    term: Option<&str>,
+    field_args: &[String],
+    tags: &[String],
+    attachment_globs: &[String],
     pw_stdin: bool,
     json: bool,
     show_id: bool,
 ) -> Result<()> {
+    let fields = field_args
+        .iter()
+        .map(|arg| {
+            let (name, value) = match arg.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (arg.as_str(), None),
+            };
+            if name.is_empty() {
+                return Err(anyhow!("--field expects NAME or NAME=VALUE"));
+            }
+            Ok(SearchFieldFilter {
+                name: name.to_string(),
+                value,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if term.is_none() && fields.is_empty() && tags.is_empty() && attachment_globs.is_empty() {
+        return Err(anyhow!(
+            "search needs a term or at least one --field, --tag, or --attachment filter"
+        ));
+    }
+    if term.is_some_and(str::is_empty) {
+        return Err(anyhow!("search term must not be empty"));
+    }
+    let query = SearchQuery {
+        term: term.map(str::to_string),
+        fields: fields.clone(),
+        tags: tags.to_vec(),
+        attachment_globs: attachment_globs.to_vec(),
+    };
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
+            let hits = v.search(&query)?;
             if json {
-                let arr: Vec<Value> = v
-                    .search_entries(term)
-                    .iter()
-                    .map(entry_summary_json)
-                    .collect();
+                let arr: Vec<Value> = hits.iter().map(search_hit_json).collect();
                 println!("{}", serde_json::to_string_pretty(&arr)?);
                 return Ok(());
             }
-            let rows: Vec<ListRow> = v
-                .search_entries(term)
+            let rows: Vec<ListRow> = hits
                 .iter()
-                .map(|e| ListRow {
-                    id: e.id.to_string(),
-                    group_path: e.group_path.clone(),
-                    title: e.title.clone(),
-                    attachments: e.attachment_names.clone(),
+                .map(|hit| {
+                    let e = &hit.entry;
+                    ListRow {
+                        id: e.id.to_string(),
+                        group_path: e.group_path.clone(),
+                        title: e.title.clone(),
+                        attachments: e.attachment_names.clone(),
+                    }
                 })
                 .collect();
             print_entry_rows(rows, show_id, false);
         }
         None => {
-            let resp = daemon_call(&daemon::Request::Search {
-                term: term.to_string(),
+            let resp = daemon_call(&daemon::Request::SearchFiltered {
+                term: query.term,
+                fields: query
+                    .fields
+                    .into_iter()
+                    .map(|f| (f.name, f.value))
+                    .collect(),
+                tags: query.tags,
+                attachment_globs: query.attachment_globs,
             })?;
             let entries = resp
                 .get("entries")
@@ -4250,6 +4395,14 @@ fn cmd_search(
         }
     }
     Ok(())
+}
+
+fn search_hit_json(hit: &trove_core::SearchHit) -> Value {
+    let mut value = entry_summary_json(&hit.entry);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("matched".into(), Value::from(hit.matched.clone()));
+    }
+    value
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4748,11 +4901,15 @@ fn cmd_git_credential(vault_path: &Path, operation: &str, pw_stdin: bool) -> Res
 }
 
 /// `trove resolve trove://…` — print one referenced secret to stdout.
-fn cmd_resolve(vault_path: &Path, reference: &str, pw_stdin: bool) -> Result<()> {
+fn cmd_resolve(vault_path: &Path, reference: &str, base64: bool, pw_stdin: bool) -> Result<()> {
     let v = open_vault(vault_path, pw_stdin)?;
     let value = v.resolve_ref(reference).context("resolving reference")?;
-    println!("{value}");
-    Ok(())
+    if base64 {
+        write_value_out(None, value.as_bytes(), "resolved value", true)
+    } else {
+        println!("{value}");
+        Ok(())
+    }
 }
 
 /// `trove exec <SCOPE> -- cmd…` — inject, run, wipe. The child's exit code

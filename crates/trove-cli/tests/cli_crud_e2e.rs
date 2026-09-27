@@ -354,6 +354,52 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     let out = run_trove(&trove, &d.sock, None, &["search", SECRET], None).await;
     assert_eq!(ok(&out, "daemon search secret"), "");
 
+    ok(
+        &run_trove(
+            &trove,
+            &d.sock,
+            Some(&code),
+            &[
+                "edit",
+                "Web/github",
+                "--set",
+                "Automation.Target=CI_CERT",
+                "--tag",
+                "release",
+            ],
+            None,
+        )
+        .await,
+        "daemon metadata edit",
+    );
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        None,
+        &[
+            "search",
+            "--field",
+            "Automation.Target=CI_CERT",
+            "--tag",
+            "RELEASE",
+            "--json",
+        ],
+        None,
+    )
+    .await;
+    let found: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(found.as_array().unwrap().len(), 1);
+    assert!(found[0]["matched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "field Automation.Target"));
+
     // mkdir + mv + edit, then confirm ON DISK (the daemon must have saved).
     ok(
         &run_trove(&trove, &d.sock, Some(&code), &["mkdir", "Work/Infra"], None).await,

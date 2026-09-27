@@ -80,6 +80,7 @@ Print an entry's details: path, title, username, URL, notes, custom-field
 | Flag | Description |
 | --- | --- |
 | `--attr <NAME>` | Print only this attribute's raw value (repeatable, order kept). Any standard or custom field name. Protected attributes (`Password`, `otp`) additionally require `--show-protected`. |
+| `--base64` | With exactly one `--attr`, print its value as standard base64 with no wrapping. A terminal gets a final newline; a pipe gets none. |
 | `--show-protected` | Reveal protected values instead of masking/refusing. |
 | `--totp` | Print the entry's CURRENT TOTP code (from its `otp` otpauth URI, KeePassXC's format). Stdout is exactly the code (pipes cleanly); a TTY gets the remaining validity on stderr. Daemon mode uses the code-gated `GetTotp` RPC — only the ephemeral code crosses the wire, never the shared secret. |
 
@@ -90,11 +91,26 @@ through the code-gated `GetField` RPC (`TROVE_SESSION`).
 ## trove search
 
 ```
-trove [--vault <PATH>] search <TERM>
+trove [--vault <PATH>] search [TERM] [OPTIONS]
 ```
 
-Case-insensitive substring match over title, username, URL, notes and group
-path. Protected values are **never** searched. Output is `list`-shaped.
+Case-insensitive substring match across title, username, URL, notes, group
+path, unprotected custom-field names and values, attachment names, and direct
+or inherited tags. Protected values are **never** searched.
+
+| Flag | Description |
+| --- | --- |
+| `--field NAME[=VALUE]` | Match an unprotected custom field by exact name, and optionally exact value. Repeatable. |
+| `--tag TAG` | Match a direct or inherited tag, case-insensitively. Repeatable. |
+| `--attachment GLOB` | Match an attachment name using a case-sensitive glob (`*.p12`). Repeatable. |
+| `--json` | Return summaries with a `matched` array explaining which fields, tags, or attachment names matched. |
+| `--show-id` | Include each entry UUID in text output. |
+
+The term and each filter category combine with AND. Repeated filters in the
+same category combine with OR. For example,
+`trove search --field Automation.Target=MACOS_CERTIFICATE --tag release` finds
+entries with that unprotected custom-field value and tag. Trove does not assign
+meaning to custom field names or values; they remain user-defined metadata.
 
 ## trove edit
 
@@ -369,12 +385,14 @@ Subcommands: `password`, `ssh`, `gpg`, `file`, `help`. Each resolves the entry b
 ### trove get password
 
 ```
-trove [--vault <PATH>] get password <ENTRY_PATH>
+trove [--vault <PATH>] get password <ENTRY_PATH> [--base64]
 ```
 
 Print the entry's password to stdout — the script primitive
-(`trove get password api/stripe | …`). For a whole-entry view use `trove
-show`. Daemon mode routes through the code-gated `GetField` RPC.
+(`trove get password api/stripe | …`). `--base64` prints the standard
+base64-encoded UTF-8 value without wrapping; a terminal gets a final newline,
+while a pipe gets none. For a whole-entry view use `trove show`. Daemon mode
+routes through the code-gated `GetField` RPC.
 
 ### trove get ssh
 
@@ -411,6 +429,7 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 | `<TITLE>` | Entry path or title to look up. |
 | `--name <NAME>` | Attachment name to read (e.g. `id.pub`). Default: `"blob"`. Pass it for any entry that does not use the conventional `blob` slot. |
 | `--out <OUT>` | Write to this path. Stdout if omitted. |
+| `--base64` | Write the standard base64 encoding instead of raw attachment bytes. No wrapping; a final newline is added only when writing to a terminal. Encoded files still use mode `0600`. |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
@@ -463,10 +482,12 @@ which secret is being sent before assuming the credential is stale.
 ## trove resolve
 
 ```
-trove --vault <PATH> resolve trove://<entry-path>[/<field>]
+trove --vault <PATH> resolve [--base64] trove://<entry-path>[/<field>]
 ```
 
-Print one referenced secret to stdout. The field defaults to `Password`;
+Print one referenced secret to stdout. `--base64` prints its standard base64
+encoding without wrapping; a terminal gets a final newline, a pipe does not.
+The field defaults to `Password`;
 `trove://Infra/prod/postgres/UserName` names it explicitly (last `/`-segment
 when the whole path isn't itself an entry). The scripting primitive for
 config templating: `export PGPASSWORD=$(trove --vault v resolve
