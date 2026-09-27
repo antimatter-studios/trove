@@ -205,6 +205,14 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
+    /// Code-gated Git credential lookup across every unlocked vault.
+    GitCredential {
+        host: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
     /// Code-gated write: create a password entry at `path` (groups mkdir-p).
     AddPassword {
         path: String,
@@ -424,6 +432,12 @@ impl std::fmt::Debug for Request {
                 .debug_struct("GetField")
                 .field("path", path)
                 .field("field", field)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::GitCredential { host, username, .. } => f
+                .debug_struct("GitCredential")
+                .field("host", host)
+                .field("username", username)
                 .field("code", &"<redacted>")
                 .finish(),
             Request::AddPassword {
@@ -681,6 +695,11 @@ pub enum OkBody {
     Value {
         value: String,
     },
+    /// Response to `GitCredential`: the session-gated username/password pair.
+    Credential {
+        username: String,
+        password: String,
+    },
     /// Response to `RemoveEntry` / `Rmdir`: whether the target was moved to
     /// the recycle bin (`true`) or destroyed (`false`).
     Recycled {
@@ -837,6 +856,10 @@ impl Response {
     }
     pub fn ok_value(value: String) -> Self {
         Response::Ok(OkBody::Value { value })
+    }
+
+    pub fn ok_credential(username: String, password: String) -> Self {
+        Response::Ok(OkBody::Credential { username, password })
     }
     pub fn ok_recycled(recycled: bool) -> Self {
         Response::Ok(OkBody::Recycled { recycled })
