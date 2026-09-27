@@ -300,6 +300,33 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     )
     .await;
     ok(&out, "daemon add totp");
+    ok(
+        &run_trove(
+            &trove,
+            &d.sock,
+            Some(&code),
+            &[
+                "edit",
+                "Web/github",
+                "--set",
+                "About.Purpose=Developer ID signing",
+            ],
+            None,
+        )
+        .await,
+        "set descriptive metadata",
+    );
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        None,
+        &["describe", "Web/github", "--json"],
+        None,
+    )
+    .await;
+    let described = ok(&out, "daemon describe (ungated)");
+    assert!(described.contains("About.Purpose"));
+    assert!(!described.contains(SECRET));
 
     // get password round-trips.
     let out = run_trove(

@@ -187,6 +187,10 @@ pub enum Request {
     },
     /// Search unprotected metadata; protected values never match or leave the
     /// vault. Older clients send a string `term`; omitted filters default empty.
+    /// Read safe discovery metadata for an entry or every entry in a group.
+    Describe {
+        path: String,
+    },
     /// Ungated beyond "a vault is unlocked", exactly like `List`.
     Search {
         term: Option<String>,
@@ -428,6 +432,7 @@ impl std::fmt::Debug for Request {
                 .field("tags", tags)
                 .field("attachments", attachments)
                 .finish(),
+            Request::Describe { path } => f.debug_struct("Describe").field("path", path).finish(),
             Request::GetField { path, field, .. } => f
                 .debug_struct("GetField")
                 .field("path", path)
@@ -550,6 +555,25 @@ pub struct EntryDto {
     pub matched: Vec<String>,
 }
 
+/// Metadata-only description returned by `Describe`.
+#[derive(Debug, Serialize)]
+pub struct DescribeEntryDto {
+    pub path: String,
+    pub username: Option<String>,
+    pub url: Option<String>,
+    pub notes: Option<String>,
+    pub has_password: bool,
+    pub attributes: std::collections::BTreeMap<String, String>,
+    pub attachments: Vec<DescribeAttachmentDto>,
+}
+
+/// Attachment name and byte size, without contents.
+#[derive(Debug, Serialize)]
+pub struct DescribeAttachmentDto {
+    pub name: String,
+    pub size: usize,
+}
+
 /// Full non-secret view of one entry, for `ShowEntry`. Everything here is
 /// safe to print without a session code: protected values (Password et al.)
 /// are represented only by their *names* in `custom_fields`, never by value.
@@ -609,6 +633,10 @@ pub enum OkBody {
     },
     List {
         entries: Vec<EntryDto>,
+    },
+    /// Response to `Describe`.
+    Describe {
+        descriptions: Vec<DescribeEntryDto>,
     },
     MaterializeStatus {
         materialized: Vec<crate::materialize::MaterializeStatus>,
@@ -759,6 +787,9 @@ impl Response {
     }
     pub fn ok_list(entries: Vec<EntryDto>) -> Self {
         Response::Ok(OkBody::List { entries })
+    }
+    pub fn ok_describe(descriptions: Vec<DescribeEntryDto>) -> Self {
+        Response::Ok(OkBody::Describe { descriptions })
     }
     pub fn ok_materialize_status(items: Vec<crate::materialize::MaterializeStatus>) -> Self {
         Response::Ok(OkBody::MaterializeStatus {

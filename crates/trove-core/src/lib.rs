@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use keepass::config::DatabaseVersion;
@@ -128,6 +129,26 @@ pub struct GroupSummary {
     pub tags: Vec<String>,
     /// Tags inherited from ancestor groups, root → nearest parent.
     pub inherited_tags: Vec<String>,
+}
+
+/// Safe metadata for agent discovery. Values are limited to unprotected
+/// `About.*` fields; password and attachment contents are never included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryDescription {
+    pub path: String,
+    pub username: Option<String>,
+    pub url: Option<String>,
+    pub notes: Option<String>,
+    pub has_password: bool,
+    pub attributes: BTreeMap<String, String>,
+    pub attachments: Vec<AttachmentDescription>,
+}
+
+/// Attachment name and byte size, without the attachment contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentDescription {
+    pub name: String,
+    pub size: usize,
 }
 
 impl GroupSummary {
@@ -632,6 +653,73 @@ impl Vault {
             .db
             .iter_all_entries()
             .map(|e| summarise(&e))
+            .collect()
+    }
+
+    /// Describe one entry or every entry under a group. The view includes
+    /// only unprotected `About.*` values and metadata; protected values and
+    /// attachment contents are never returned.
+    pub fn describe(&self, path: &str) -> Result<Vec<EntryDescription>> {
+        let selected: Vec<EntrySummary> = if let Some(id) = self.find_by_title(path) {
+            vec![self
+                .get_entry(&id)
+                .ok_or_else(|| Error::EntryNotFound(path.into()))?]
+        } else {
+            let group = parse_group_path(path)?;
+            if !self.group_exists(path) {
+                return Err(Error::GroupNotFound(path.into()));
+            }
+            self.list_entries()
+                .into_iter()
+                .filter(|entry| path_starts_with(&entry.group_path, &group))
+                .collect()
+        };
+        selected
+            .iter()
+            .map(|summary| {
+                let id = self.lookup_entry_id(&summary.id)?;
+                let entry = self
+                    .inner
+                    .db
+                    .entry(id)
+                    .ok_or_else(|| Error::EntryNotFound(summary.display_path()))?;
+                let string_field = |name: &str| match entry.fields.get(name) {
+                    Some(Value::Unprotected(value)) => Some(value.clone()),
+                    _ => None,
+                };
+                let attributes = entry
+                    .fields
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        name.strip_prefix("About.")?;
+                        match value {
+                            Value::Unprotected(value) => Some((name.clone(), value.clone())),
+                            Value::Protected(_) => None,
+                        }
+                    })
+                    .collect();
+                let attachments = summary
+                    .attachment_names
+                    .iter()
+                    .filter_map(|name| {
+                        entry
+                            .attachment_by_name(name)
+                            .map(|attachment| AttachmentDescription {
+                                name: name.clone(),
+                                size: attachment.data.get().len(),
+                            })
+                    })
+                    .collect();
+                Ok(EntryDescription {
+                    path: summary.display_path(),
+                    username: string_field("UserName"),
+                    url: string_field("URL"),
+                    notes: string_field("Notes"),
+                    has_password: entry.get("Password").is_some(),
+                    attributes,
+                    attachments,
+                })
+            })
             .collect()
     }
 
@@ -1906,6 +1994,14 @@ fn parse_group_path(s: &str) -> Result<Vec<String>> {
     Ok(segs)
 }
 
+fn path_starts_with(path: &[String], prefix: &[String]) -> bool {
+    path.len() >= prefix.len()
+        && path
+            .iter()
+            .zip(prefix)
+            .all(|(part, expected)| part.eq_ignore_ascii_case(expected))
+}
+
 fn open_err_to_error(e: keepass::error::DatabaseOpenError) -> Error {
     use keepass::error::{DatabaseKeyError, DatabaseOpenError};
     match e {
@@ -1966,4 +2062,49 @@ fn apply_default_meta_policy(meta: &mut keepass::db::Meta) {
     meta.history_max_items.get_or_insert(10);
     meta.history_max_size.get_or_insert(6 * 1024 * 1024);
     meta.recyclebin_enabled.get_or_insert(true);
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    #[test]
+    fn describe_returns_unprotected_about_fields_and_attachment_sizes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("describe.kdbx");
+        let mut vault = Vault::create(&path, "test password").unwrap();
+        let id = vault.add_entry("Apple/signing").unwrap();
+        vault.set_field(&id, "UserName", "team-id").unwrap();
+        vault
+            .set_field(&id, "Password", "private-password")
+            .unwrap();
+        vault
+            .set_field(&id, "About.Kind", "certificate bundle")
+            .unwrap();
+        let raw_id = vault.lookup_entry_id(&id).unwrap();
+        vault
+            .inner
+            .db
+            .entry_mut(raw_id)
+            .unwrap()
+            .set_protected("About.Private", "must-not-appear");
+        vault
+            .attach_binary(&id, "signing.p12", &[1, 2, 3, 4])
+            .unwrap();
+
+        let descriptions = vault.describe("Apple").unwrap();
+        assert_eq!(descriptions.len(), 1);
+        let description = &descriptions[0];
+        assert_eq!(description.path, "Apple/signing");
+        assert_eq!(description.username.as_deref(), Some("team-id"));
+        assert!(description.has_password);
+        assert_eq!(
+            description.attributes.get("About.Kind").map(String::as_str),
+            Some("certificate bundle")
+        );
+        assert!(!description.attributes.contains_key("About.Private"));
+        assert!(!description.attributes.contains_key("Password"));
+        assert_eq!(description.attachments[0].name, "signing.p12");
+        assert_eq!(description.attachments[0].size, 4);
+    }
 }

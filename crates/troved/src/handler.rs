@@ -24,7 +24,7 @@ use trove_core::{EntrySummary, SearchFieldFilter, SearchHit, SearchQuery, Vault}
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::idle::{IdleState, IdleTracker};
 use crate::materialize::{self, MaterializedFile, MaterializedStore};
-use crate::protocol::{EntryDto, Request, Response};
+use crate::protocol::{DescribeAttachmentDto, DescribeEntryDto, EntryDto, Request, Response};
 use crate::ssh_agent::scoped::{self, ScopedAgents};
 use crate::ssh_agent::{self, hostkey, keeagent, keys as ssh_keys, KeyStore, LoadedKey};
 use crate::vaults::VaultSet;
@@ -83,6 +83,7 @@ pub async fn handle(
         | Request::GetIdleTimeout
         | Request::GetVersion
         | Request::MaterializeStatus
+        | Request::Describe { .. }
         | Request::SshAgentList
         | Request::SshAgentWhich { .. }
         | Request::GpgAgentList => {}
@@ -760,6 +761,39 @@ pub async fn handle(
         }
 
         Request::ShowEntry { path } => show_entry(state, &path).await,
+
+        Request::Describe { path } => {
+            let mut guard = state.lock().await;
+            let vault = match guard.sole_mut() {
+                Ok(vault) => vault,
+                Err(e) => return err_handled(e.to_string()),
+            };
+            let descriptions = match vault.describe(&path) {
+                Ok(descriptions) => descriptions,
+                Err(e) => return err_handled(e.to_string()),
+            };
+            ok_handled(Response::ok_describe(
+                descriptions
+                    .into_iter()
+                    .map(|description| DescribeEntryDto {
+                        path: description.path,
+                        username: description.username,
+                        url: description.url,
+                        notes: description.notes,
+                        has_password: description.has_password,
+                        attributes: description.attributes,
+                        attachments: description
+                            .attachments
+                            .into_iter()
+                            .map(|attachment| DescribeAttachmentDto {
+                                name: attachment.name,
+                                size: attachment.size,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            ))
+        }
 
         Request::Search {
             term,
