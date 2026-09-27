@@ -75,7 +75,9 @@ trove [--vault <PATH>] show [OPTIONS] <ENTRY_PATH>
 ```
 
 Print an entry's details: path, title, username, URL, notes, custom-field
-*names* and attachment names. The password is masked unless `--show-protected`.
+*names* and attachment names. Protected fields (`Password`, `otp`) are hidden
+from `--json` field names unless `--show-protected` is set; the flag also
+reveals protected values where the selected mode returns them.
 
 | Flag | Description |
 | --- | --- |
@@ -587,8 +589,10 @@ trove --vault <PATH> analyze --hibp <FILE>
 Offline Have-I-Been-Pwned audit: every vault password is SHA-1-hashed and
 binary-searched in the sorted `pwned-passwords` dump at `<FILE>` (the multi-GB
 file is seeked, never loaded; nothing is ever sent anywhere). Breached entries
-print as `<path>  seen N times in breaches`. Exits 1 when anything is
-breached — scriptable as a CI gate. Offline-only: requires `--vault`.
+print as `<path>  seen N times in breaches`. Entries with empty or missing
+passwords print as `<path>  empty password` and are counted separately from
+passwords checked against the dump. Exits 1 for either finding, so scripts can
+gate on the audit. Offline-only: requires `--vault`.
 
 ## trove ssh-agent
 

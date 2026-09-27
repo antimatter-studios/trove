@@ -17,7 +17,7 @@ mod xml_export;
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -3458,11 +3458,11 @@ fn env_strict() -> bool {
 ///
 /// Unix only: Windows has no comparable mode bits.
 #[cfg(unix)]
-fn check_env_file_perms(path: &Path) -> Result<()> {
+fn check_env_file_perms(path: &Path, file: &std::fs::File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Ok(()); // the read that follows will report this properly
-    };
+    let meta = file
+        .metadata()
+        .with_context(|| format!("checking permissions on env file {}", path.display()))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 == 0 {
         return Ok(());
@@ -3482,13 +3482,26 @@ fn check_env_file_perms(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn check_env_file_perms(_path: &Path) -> Result<()> {
+fn check_env_file_perms(_path: &Path, _file: &std::fs::File) -> Result<()> {
     Ok(())
 }
 
 fn load_env_file(path: &Path) -> Result<usize> {
-    check_env_file_perms(path)?;
-    let text = std::fs::read_to_string(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // The permission check and read must refer to the same file. Also
+        // refuse a symlink so an attacker cannot redirect the checked path.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening env file {}", path.display()))?;
+    check_env_file_perms(path, &file)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
         .with_context(|| format!("reading env file {}", path.display()))?;
     let first = text
         .lines()
@@ -4300,6 +4313,9 @@ fn cmd_show(
                 // in the entry across the wire.
                 let mut fields = serde_json::Map::new();
                 for name in list("custom_fields") {
+                    if is_protected_field(&name) && !show_protected {
+                        continue;
+                    }
                     fields.insert(name, Value::Null);
                 }
                 println!(
@@ -5198,9 +5214,9 @@ fn cmd_estimate(password: Option<&str>) -> Result<()> {
 }
 
 /// `trove analyze --hibp <FILE>` — offline breach check of every password in
-/// the vault. Prints one line per breached entry (path + count); exits 0 with
-/// "no breached passwords" when clean. Exit 1 when breaches were found, so
-/// scripts and CI can gate on it.
+/// the vault. Prints one line per breached or empty-password entry; exits 0
+/// when clean. Exit 1 when either kind of finding is present, so scripts and
+/// CI can gate on it.
 fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()> {
     if !hibp_file.exists() {
         return Err(anyhow!("HIBP file not found: {}", hibp_file.display()));
@@ -5208,13 +5224,16 @@ fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()
     let v = open_vault(vault_path, pw_stdin)?;
     let mut breached = 0usize;
     let mut checked = 0usize;
+    let mut empty = 0usize;
     for entry in v.list_entries() {
-        let Some(pw) = v.get_field(&entry.id, "Password").ok().flatten() else {
+        let pw = v
+            .get_field(&entry.id, "Password")
+            .with_context(|| format!("reading Password for {}", entry.display_path()))?;
+        let Some(pw) = pw.filter(|pw| !pw.is_empty()) else {
+            empty += 1;
+            println!("{}  empty password", entry.display_path());
             continue;
         };
-        if pw.is_empty() {
-            continue;
-        }
         checked += 1;
         let hash = hibp::sha1_hex_upper(&pw);
         if let Some(count) = hibp::lookup(hibp_file, &hash)? {
@@ -5222,12 +5241,12 @@ fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()
             println!("{}  seen {count} times in breaches", entry.display_path());
         }
     }
-    eprintln!("checked {checked} passwords, {breached} breached");
-    if breached > 0 {
+    eprintln!("checked {checked} passwords, {breached} breached, {empty} empty");
+    if breached > 0 || empty > 0 {
         // Same DaemonClassified channel the daemon paths use: user-level
         // failure, exit 1 — CI can gate on `trove analyze`.
         return Err(DaemonClassified {
-            message: format!("{breached} breached password(s) found"),
+            message: format!("{breached} breached and {empty} empty password(s) found"),
             exit: EXIT_USER_ERROR,
         }
         .into());
