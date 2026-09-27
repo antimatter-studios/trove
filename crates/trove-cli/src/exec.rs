@@ -169,9 +169,9 @@ pub fn wipe_dir(dir: &Path) {
 /// attacker-owned directory.
 pub fn private_tmp_dir() -> Result<PathBuf> {
     use rand::RngCore;
-    let mut rand = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut rand);
-    let suffix: String = rand.iter().map(|b| format!("{b:02x}")).collect();
+    let mut rng = rand::rngs::OsRng;
+    let suffix =
+        private_tmp_suffix(|bytes| rng.try_fill_bytes(bytes).map_err(anyhow::Error::from))?;
     let dir = std::env::temp_dir().join(format!("trove-exec-{}-{suffix}", std::process::id()));
     #[cfg(unix)]
     {
@@ -186,6 +186,12 @@ pub fn private_tmp_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+fn private_tmp_suffix(fill: impl FnOnce(&mut [u8]) -> Result<()>) -> Result<String> {
+    let mut bytes = [0u8; 12];
+    fill(&mut bytes).context("getting OS randomness for private exec directory")?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +202,23 @@ mod tests {
         assert_eq!(env_name_from_title("kubeconfig-prod"), "KUBECONFIG_PROD");
         assert_eq!(env_name_from_title("api.stripe (live)"), "API_STRIPE_LIVE");
         assert_eq!(env_name_from_title("__x__"), "X");
+    }
+
+    #[test]
+    fn private_tmp_name_returns_os_randomness_errors_with_context() {
+        let err = private_tmp_suffix(|_| Err(anyhow!("OS random source unavailable")))
+            .expect_err("an RNG failure must be returned, not panic");
+        assert!(
+            err.to_string()
+                .contains("getting OS randomness for private exec directory"),
+            "missing context: {err}"
+        );
+        assert!(
+            err.root_cause()
+                .to_string()
+                .contains("OS random source unavailable"),
+            "missing RNG error: {err:#}"
+        );
     }
 
     fn vault_for_exec(dir: &TempDir) -> Vault {
