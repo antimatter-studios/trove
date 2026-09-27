@@ -487,6 +487,10 @@ materialize into a private per-run directory (0700, files 0600) that is
 wiped — overwritten, then removed — the moment the command exits, including
 on Ctrl-C. The child's exit code becomes trove's.
 
+If a name matches both an entry and a group, `exec` reports the ambiguity.
+Select the intended scope with `--entry PATH` or `--group PATH`, for example
+`trove --vault v.kdbx exec --group Infra -- env`.
+
 Variable naming: an entry's `Exec.Env` custom field names the variable
 exactly (`Exec.Env=KUBECONFIG` on an attachment entry → `KUBECONFIG=<temp
 path>`; on a password entry → that variable carries the password). Without
