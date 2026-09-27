@@ -86,6 +86,7 @@ function App() {
   const [vaults, setVaults] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const vault = vaults.find((v) => v.id === activeId) || vaults[0] || NO_VAULT;
+  const hasUnlockedVault = vaults.some((v) => !v.locked);
   const patch = useCallback((p) => {
     setVaults((vs) => vs.map((v) => v.id === activeId ? { ...v, ...(typeof p === "function" ? p(v) : p) } : v));
   }, [activeId]);
@@ -154,17 +155,17 @@ function App() {
   const appLockAt = useRef(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (vault.locked) return undefined;
+    if (!hasUnlockedVault) return undefined;
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [vault.locked]);
+  }, [hasUnlockedVault]);
 
   const openCount = vaults.filter((v) => !v.locked).length;
   const agentKeys = vaults.reduce((n, v) => n + (v.agentKeys || 0), 0);
   const idleMins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
   // Counts down to the window locking; resets on every interaction, so it also
   // shows that trove noticed you are still here.
-  const appLockLeft = idleMins > 0 && !locked && appLockAt.current
+  const appLockLeft = idleMins > 0 && hasUnlockedVault && appLockAt.current
     ? Math.max(0, appLockAt.current - now)
     : null;
   const idleLabel = idleMins > 0
@@ -533,7 +534,7 @@ function App() {
   // yanking them because nobody clicked this window for five minutes would kill
   // a `git push` running in a terminal. An explicit Lock still retracts them.
   useEffect(() => {
-    if (vault.locked || vault.id == null) return;
+    if (!hasUnlockedVault) return;
     let t;
     const mins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
     if (mins <= 0) return undefined; // 0 = never lock on idle
@@ -546,7 +547,7 @@ function App() {
     evs.forEach((ev) => window.addEventListener(ev, reset, { passive: true }));
     reset();
     return () => { clearTimeout(t); evs.forEach((ev) => window.removeEventListener(ev, reset)); };
-  }, [vault.locked, vault.id, appLock, settings]);
+  }, [hasUnlockedVault, appLock, settings]);
 
   const paletteActions = [
     { label: "New entry", icon: "plus", kbd: "⌘N", run: openNew },
