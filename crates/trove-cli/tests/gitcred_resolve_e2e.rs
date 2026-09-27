@@ -153,6 +153,41 @@ fn resolve_prints_referenced_value() {
     );
     assert_eq!(out.trim_end(), "ghp_token_e2e");
 
+    let out = ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                &vs,
+                "--password-stdin",
+                "resolve",
+                "--base64",
+                "trove://Git/github",
+            ],
+            &pw,
+        ),
+        "resolve Base64",
+    );
+    assert_eq!(out, "Z2hwX3Rva2VuX2UyZQ==");
+
+    let out = ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                &vs,
+                "--password-stdin",
+                "get",
+                "password",
+                "--base64",
+                "Git/github",
+            ],
+            &pw,
+        ),
+        "get password Base64",
+    );
+    assert_eq!(out, "Z2hwX3Rva2VuX2UyZQ==");
+
     // Named field.
     let out = ok(
         &run_trove(

@@ -547,6 +547,58 @@ fn show_json_is_structured_and_hides_protected_values() {
         "add file",
     );
 
+    let encoded = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "get",
+            "file",
+            "svc/api",
+            "--name",
+            "odd,name.txt",
+            "--base64",
+        ],
+        &pw_line,
+    );
+    assert_ok(&encoded, "get file --base64");
+    assert_eq!(encoded.stdout, b"cGF5bG9hZA==");
+
+    let encoded_path = dir.path().join("encoded.txt");
+    let encoded_path_s = encoded_path.to_str().expect("utf8 path");
+    let encoded_file = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "get",
+            "file",
+            "svc/api",
+            "--name",
+            "odd,name.txt",
+            "--base64",
+            "--out",
+            encoded_path_s,
+        ],
+        &pw_line,
+    );
+    assert_ok(&encoded_file, "get file --base64 --out");
+    assert_eq!(std::fs::read(&encoded_path).unwrap(), b"cGF5bG9hZA==");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&encoded_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
     let out = run_trove(
         &trove,
         &[

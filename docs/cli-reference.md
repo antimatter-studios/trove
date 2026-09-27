@@ -369,12 +369,13 @@ Subcommands: `password`, `ssh`, `gpg`, `file`, `help`. Each resolves the entry b
 ### trove get password
 
 ```
-trove [--vault <PATH>] get password <ENTRY_PATH>
+trove [--vault <PATH>] get password [--base64] <ENTRY_PATH>
 ```
 
 Print the entry's password to stdout — the script primitive
 (`trove get password api/stripe | …`). For a whole-entry view use `trove
 show`. Daemon mode routes through the code-gated `GetField` RPC.
+`--base64` writes standard, unwrapped Base64 (without a newline when piped).
 
 ### trove get ssh
 
@@ -386,6 +387,7 @@ trove [--vault <PATH>] get ssh [OPTIONS] <ENTRY_PATH>
 | --- | --- |
 | `<ENTRY_PATH>` | Entry path to look up, e.g. `"github.com"` or `"Work/SSH/github"`. |
 | `--public` | Emit the public key (authorized_keys line) instead of the private key. |
+| `--base64` | Emit the selected key as standard, unwrapped Base64. With `--out`, writes only that value and does not create a `.pub` companion file. |
 | `--out <OUT>` | Write to this path (private → 0600, plus `<OUT>.pub` → 0644). Stdout if omitted. |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
@@ -398,7 +400,7 @@ Reads the `id` (and `id.pub`) attachments; the public key falls back to being de
 trove [--vault <PATH>] get gpg [OPTIONS] <TITLE>
 ```
 
-Reads the `gpg-priv` attachment. `--vault` → offline; otherwise daemon (`TROVE_SESSION`). `--out` writes to a path (0600), else stdout.
+Reads the `gpg-priv` attachment. `--vault` → offline; otherwise daemon (`TROVE_SESSION`). `--out` writes to a path (0600), else stdout. `--base64` emits standard, unwrapped Base64.
 
 ### trove get file
 
@@ -411,6 +413,7 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 | `<TITLE>` | Entry path or title to look up. |
 | `--name <NAME>` | Attachment name to read (e.g. `id.pub`). Default: `"blob"`. Pass it for any entry that does not use the conventional `blob` slot. |
 | `--out <OUT>` | Write to this path. Stdout if omitted. |
+| `--base64` | Emit the attachment as standard, unwrapped Base64. An output file remains private (0600). |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
@@ -463,7 +466,7 @@ which secret is being sent before assuming the credential is stale.
 ## trove resolve
 
 ```
-trove --vault <PATH> resolve trove://<entry-path>[/<field>]
+trove --vault <PATH> resolve [--base64] trove://<entry-path>[/<field>]
 ```
 
 Print one referenced secret to stdout. The field defaults to `Password`;
@@ -471,6 +474,7 @@ Print one referenced secret to stdout. The field defaults to `Password`;
 when the whole path isn't itself an entry). The scripting primitive for
 config templating: `export PGPASSWORD=$(trove --vault v resolve
 trove://Infra/prod/postgres)`. Offline-only.
+`--base64` emits standard, unwrapped Base64 (without a newline when piped).
 
 ## trove exec
 

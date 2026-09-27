@@ -551,6 +551,9 @@ enum Command {
     Resolve {
         /// The trove:// reference to resolve.
         reference: String,
+        /// Encode the resolved value with standard Base64.
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Run a command with secrets injected for exactly its lifetime — no
@@ -1115,6 +1118,9 @@ enum GetResource {
     Password {
         /// Entry path to look up, e.g. "github.com" or "Work/github".
         entry_path: String,
+        /// Encode the password with standard Base64.
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Retrieve a stored SSH key by entry path.
@@ -1135,6 +1141,10 @@ enum GetResource {
         /// Write to this path instead of stdout (see the command help).
         #[arg(long = "out")]
         out: Option<PathBuf>,
+        /// Encode the selected key with standard Base64. With --out, writes only
+        /// the encoded value (no companion .pub file).
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Retrieve a stored GPG secret-key export (the `gpg-priv` attachment).
@@ -1147,6 +1157,9 @@ enum GetResource {
         /// Write the export to this path (chmod 0600 on Unix). Stdout if omitted.
         #[arg(long = "out")]
         out: Option<PathBuf>,
+        /// Encode the key export with standard Base64.
+        #[arg(long)]
+        base64: bool,
     },
 
     /// Read a named attachment to disk WITHOUT going through materialization.
@@ -1166,6 +1179,9 @@ enum GetResource {
         /// Write the bytes to this path (chmod 0600 on Unix). Stdout if omitted.
         #[arg(long = "out")]
         out: Option<PathBuf>,
+        /// Encode the attachment with standard Base64.
+        #[arg(long)]
+        base64: bool,
     },
 }
 
@@ -1434,14 +1450,28 @@ fn run(cli: Cli) -> Result<()> {
                     entry_path,
                     public,
                     out,
+                    base64,
                 },
-        } => cmd_get_ssh(&entry_path, public, out.as_deref(), vault, pw_stdin),
+        } => cmd_get_ssh(&entry_path, public, out.as_deref(), base64, vault, pw_stdin),
         Command::Get {
-            resource: GetResource::Gpg { title, out },
-        } => cmd_get_gpg(vault, &title, out.as_deref(), pw_stdin),
+            resource: GetResource::Gpg { title, out, base64 },
+        } => cmd_get_gpg(vault, &title, out.as_deref(), base64, pw_stdin),
         Command::Get {
-            resource: GetResource::File { title, name, out },
-        } => cmd_get_file(vault, &title, name.as_deref(), out.as_deref(), pw_stdin),
+            resource:
+                GetResource::File {
+                    title,
+                    name,
+                    out,
+                    base64,
+                },
+        } => cmd_get_file(
+            vault,
+            &title,
+            name.as_deref(),
+            out.as_deref(),
+            base64,
+            pw_stdin,
+        ),
         Command::SshAgent {
             op: SshAgentOp::Socket,
         } => cmd_ssh_agent_socket(),
@@ -1523,7 +1553,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::GitCredential { operation } => {
             cmd_git_credential(require_vault(vault)?, &operation, pw_stdin)
         }
-        Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
+        Command::Resolve { reference, base64 } => {
+            cmd_resolve(require_vault(vault)?, &reference, base64, pw_stdin)
+        }
         Command::Merge {
             source,
             source_key_file,
@@ -1699,8 +1731,8 @@ fn run(cli: Cli) -> Result<()> {
             pw_stdin,
         ),
         Command::Get {
-            resource: GetResource::Password { entry_path },
-        } => cmd_get_password(vault, &entry_path, pw_stdin),
+            resource: GetResource::Password { entry_path, base64 },
+        } => cmd_get_password(vault, &entry_path, base64, pw_stdin),
         Command::Completions {
             shell,
             install,
@@ -2888,6 +2920,26 @@ fn write_secret_out(out: Option<&Path>, bytes: &[u8], what: &str) -> Result<()> 
     }
 }
 
+/// Write a secret value as unwrapped standard Base64. Piped output has no
+/// trailing newline; a terminal gets one for readability.
+fn write_base64_out(out: Option<&Path>, bytes: &[u8], what: &str) -> Result<()> {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    match out {
+        Some(path) => write_private_file(path, encoded.as_bytes())
+            .with_context(|| format!("writing Base64 {what} to {}", path.display())),
+        None => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            handle.write_all(encoded.as_bytes())?;
+            if stdout.is_terminal() {
+                handle.write_all(b"\n")?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Read an attachment by entry path directly from a kdbx file (offline mode).
 /// Opens the vault (password via `--password-stdin` or prompt), resolves the
 /// entry path, and returns the named attachment's bytes.
@@ -2911,13 +2963,18 @@ fn cmd_get_gpg(
     vault: Option<&Path>,
     title: &str,
     out: Option<&Path>,
+    base64: bool,
     pw_stdin: bool,
 ) -> Result<()> {
     let bytes = match vault {
         Some(path) => offline_get_attachment(path, title, GPG_KEY_ATTACHMENT, pw_stdin)?,
         None => daemon_get_attachment(title, GPG_KEY_ATTACHMENT)?,
     };
-    write_secret_out(out, &bytes, "gpg secret key")
+    if base64 {
+        write_base64_out(out, &bytes, "gpg secret key")
+    } else {
+        write_secret_out(out, &bytes, "gpg secret key")
+    }
 }
 
 /// Fetch an entry's SSH public key: prefer the persisted `id.pub` attachment
@@ -2937,22 +2994,33 @@ fn cmd_get_ssh(
     entry_path: &str,
     public: bool,
     out: Option<&Path>,
+    base64: bool,
     vault: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
     match vault {
-        Some(vault_path) => cmd_get_ssh_offline(vault_path, entry_path, public, out, pw_stdin),
-        None => cmd_get_ssh_daemon(entry_path, public, out),
+        Some(vault_path) => {
+            cmd_get_ssh_offline(vault_path, entry_path, public, out, base64, pw_stdin)
+        }
+        None => cmd_get_ssh_daemon(entry_path, public, out, base64),
     }
 }
 
 /// Daemon path for `get ssh`: served by the running `troved`, gated by
 /// `TROVE_SESSION`.
-fn cmd_get_ssh_daemon(entry_path: &str, public: bool, out: Option<&Path>) -> Result<()> {
+fn cmd_get_ssh_daemon(
+    entry_path: &str,
+    public: bool,
+    out: Option<&Path>,
+    base64: bool,
+) -> Result<()> {
     // Public-key request: hand back the persisted id.pub (deriving only as a
     // fallback for legacy entries).
     if public {
         let pub_bytes = fetch_ssh_public(entry_path)?;
+        if base64 {
+            return write_base64_out(out, &pub_bytes, "public ssh key");
+        }
         return match out {
             None => {
                 print!("{}", String::from_utf8_lossy(&pub_bytes));
@@ -2965,6 +3033,9 @@ fn cmd_get_ssh_daemon(entry_path: &str, public: bool, out: Option<&Path>) -> Res
 
     // Private-key request.
     let priv_bytes = daemon_get_attachment(entry_path, SSH_KEY_ATTACHMENT)?;
+    if base64 {
+        return write_base64_out(out, &priv_bytes, "ssh key");
+    }
     match out {
         // Private key straight to stdout.
         None => write_secret_out(None, &priv_bytes, "ssh key"),
@@ -2993,6 +3064,7 @@ fn cmd_get_ssh_offline(
     entry_path: &str,
     public: bool,
     out: Option<&Path>,
+    base64: bool,
     pw_stdin: bool,
 ) -> Result<()> {
     let vault = open_vault(vault_path, pw_stdin)?;
@@ -3019,6 +3091,9 @@ fn cmd_get_ssh_offline(
             Some(b) => b,
             None => ssh_public_line(&read_priv()?, entry_path)?.into_bytes(),
         };
+        if base64 {
+            return write_base64_out(out, &pub_bytes, "public ssh key");
+        }
         return match out {
             None => {
                 print!("{}", String::from_utf8_lossy(&pub_bytes));
@@ -3030,6 +3105,9 @@ fn cmd_get_ssh_offline(
     }
 
     let priv_bytes = read_priv()?;
+    if base64 {
+        return write_base64_out(out, &priv_bytes, "ssh key");
+    }
     match out {
         None => write_secret_out(None, &priv_bytes, "ssh key"),
         Some(p) => {
@@ -3655,6 +3733,7 @@ fn cmd_get_file(
     title: &str,
     name: Option<&str>,
     out: Option<&Path>,
+    base64: bool,
     pw_stdin: bool,
 ) -> Result<()> {
     let attachment = name.unwrap_or("blob");
@@ -3662,7 +3741,11 @@ fn cmd_get_file(
         Some(path) => offline_get_attachment(path, title, attachment, pw_stdin)?,
         None => daemon_get_attachment(title, attachment)?,
     };
-    write_secret_out(out, &bytes, "file")
+    if base64 {
+        write_base64_out(out, &bytes, "file")
+    } else {
+        write_secret_out(out, &bytes, "file")
+    }
 }
 
 // --- generic entry CRUD (G1) -------------------------------------------------
@@ -3805,7 +3888,12 @@ fn cmd_add_password(
     Ok(())
 }
 
-fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
+fn cmd_get_password(
+    vault: Option<&Path>,
+    entry_path: &str,
+    base64: bool,
+    pw_stdin: bool,
+) -> Result<()> {
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
@@ -3816,7 +3904,11 @@ fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> R
                 .get_field(&id, "Password")
                 .context("reading Password")?
                 .ok_or_else(|| anyhow!("entry '{entry_path}' has no password"))?;
-            println!("{pw}");
+            if base64 {
+                write_base64_out(None, pw.as_bytes(), "password")?;
+            } else {
+                println!("{pw}");
+            }
         }
         None => {
             let code = require_session_code()?;
@@ -3829,7 +3921,11 @@ fn cmd_get_password(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> R
                 .get("value")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("malformed daemon response: missing 'value'"))?;
-            println!("{pw}");
+            if base64 {
+                write_base64_out(None, pw.as_bytes(), "password")?;
+            } else {
+                println!("{pw}");
+            }
         }
     }
     Ok(())
@@ -4748,10 +4844,14 @@ fn cmd_git_credential(vault_path: &Path, operation: &str, pw_stdin: bool) -> Res
 }
 
 /// `trove resolve trove://…` — print one referenced secret to stdout.
-fn cmd_resolve(vault_path: &Path, reference: &str, pw_stdin: bool) -> Result<()> {
+fn cmd_resolve(vault_path: &Path, reference: &str, base64: bool, pw_stdin: bool) -> Result<()> {
     let v = open_vault(vault_path, pw_stdin)?;
     let value = v.resolve_ref(reference).context("resolving reference")?;
-    println!("{value}");
+    if base64 {
+        write_base64_out(None, value.as_bytes(), "resolved value")?;
+    } else {
+        println!("{value}");
+    }
     Ok(())
 }
 
