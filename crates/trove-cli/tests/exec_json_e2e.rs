@@ -200,6 +200,91 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         &pw,
     );
     assert!(!out.status.success());
+
+    // An entry can share a name with a group. The shorthand must refuse to
+    // guess, while explicit selectors retain access to either interpretation.
+    ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                &vs,
+                "--password-stdin",
+                "add",
+                "password",
+                "Infra",
+                "--secret-stdin",
+            ],
+            &format!("{PW}\nroot_infra_secret\n"),
+        ),
+        "add colliding root entry",
+    );
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            &vs,
+            "--password-stdin",
+            "exec",
+            "Infra",
+            "--",
+            "sh",
+            "-c",
+            "true",
+        ],
+        &pw,
+    );
+    assert!(!out.status.success(), "ambiguous shorthand must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("matches both an entry and a group"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--entry 'Infra'"), "{stderr}");
+    assert!(stderr.contains("--group 'Infra'"), "{stderr}");
+
+    let entry_out = ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                &vs,
+                "--password-stdin",
+                "exec",
+                "--entry",
+                "Infra",
+                "--",
+                "sh",
+                "-c",
+                "printf %s \"$TROVE_INFRA_PASSWORD\"",
+            ],
+            &pw,
+        ),
+        "exec explicit colliding entry",
+    );
+    assert_eq!(entry_out, "root_infra_secret");
+
+    let group_out = ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                &vs,
+                "--password-stdin",
+                "exec",
+                "--group",
+                "Infra",
+                "--",
+                "sh",
+                "-c",
+                "printf %s \"$STRIPE_KEY\"",
+            ],
+            &pw,
+        ),
+        "exec explicit colliding group",
+    );
+    assert_eq!(group_out, "sk_live_e2e");
 }
 
 #[test]
