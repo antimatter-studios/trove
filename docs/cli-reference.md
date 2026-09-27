@@ -240,7 +240,7 @@ trove [--vault <PATH>] add password [OPTIONS] <ENTRY_PATH>
 | `--username <U>` / `--url <U>` / `--notes <N>` | Optional standard fields. |
 | `--generate` | Mint the password (OS CSPRNG, letters+digits) and print it once to stdout — the only echo, so it pipes. |
 | `--length <N>` | Length for `--generate` (default 20). |
-| `--secret-stdin` | Read the password from stdin. With the global `--password-stdin`, the vault password is line 1 and this secret line 2. |
+| `--secret-stdin` | Read the password from stdin. Offline only; with global `--password-stdin`, the vault password is line 1 and this secret line 2. |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 
 Without `--generate`/`--secret-stdin` the secret is prompted for (hidden,

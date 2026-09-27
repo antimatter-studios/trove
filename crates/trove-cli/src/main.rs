@@ -982,8 +982,8 @@ enum AddResource {
         /// Length of the generated password (with --generate; default 20).
         #[arg(long, requires = "generate")]
         length: Option<usize>,
-        /// Read the password from stdin instead of prompting. When the global
-        /// `--password-stdin` is also set, the VAULT password is line 1 and
+        /// Read the password from stdin instead of prompting. Offline only;
+        /// with global `--password-stdin`, the vault password is line 1 and
         /// this secret is line 2.
         #[arg(long = "secret-stdin")]
         secret_stdin: bool,
@@ -3751,6 +3751,9 @@ fn cmd_add_password(
     secret_stdin: bool,
     pw_stdin: bool,
 ) -> Result<()> {
+    if vault.is_none() && pw_stdin {
+        anyhow::bail!("--password-stdin is only valid with --vault for `add password`; the unlocked daemon does not need the vault password");
+    }
     // Offline mode opens the vault FIRST so that with `--password-stdin
     // --secret-stdin` the vault password is line 1 and the secret line 2.
     let mut offline_vault = match vault {
@@ -6247,5 +6250,27 @@ mod unlock_mode_tests {
         // A quote closes, escapes and reopens — the one case naive quoting
         // gets wrong, and the one that would end the quoted region early.
         assert_eq!(sh_single_quote("it's"), r"'it'\''s'");
+    }
+}
+
+#[cfg(test)]
+mod add_password_stdin_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_add_password_rejects_vault_password_stdin_before_reading_secret() {
+        let err = cmd_add_password(
+            None,
+            "github.com",
+            None,
+            None,
+            None,
+            false,
+            None,
+            true,
+            true,
+        )
+        .expect_err("daemon mode must reject the offline-only password flag");
+        assert!(err.to_string().contains("only valid with --vault"));
     }
 }
