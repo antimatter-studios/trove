@@ -11,10 +11,9 @@
 //! it with [`tokio::io::split`] rather than a socket-specific `into_split`, so
 //! the same handler code drives either transport.
 //!
-//! Owner-only access: Unix sets `0600` after bind. On Windows a named pipe's
-//! default DACL grants the creating user's logon session; tightening it with
-//! an explicit security descriptor is future hardening, noted here so it isn't
-//! mistaken for parity.
+//! Owner-only access: Unix sets `0600` after bind. Windows supplies an explicit
+//! DACL granting access only to the pipe owner. Neither transport isolates
+//! processes running as that same user.
 
 use std::io;
 use std::path::Path;
@@ -134,9 +133,7 @@ mod windows_imp {
         let name = pipe_name(path);
         // `first_pipe_instance` makes this fail if another daemon already owns
         // the name — the named-pipe analogue of EADDRINUSE.
-        let pending = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&name)?;
+        let pending = security::create_server(&name, true)?;
         Ok(Listener {
             name,
             pending: Some(pending),
@@ -153,8 +150,104 @@ mod windows_imp {
                 .take()
                 .expect("listener always holds a pending instance");
             server.connect().await?;
-            self.pending = Some(ServerOptions::new().create(&self.name)?);
+            self.pending = Some(security::create_server(&self.name, false)?);
             Ok(server)
+        }
+    }
+
+    // Tokio only exposes raw SECURITY_ATTRIBUTES for named pipes. Keep its
+    // unsafe lifetime boundary in this small module; the rest of troved stays
+    // under the crate-wide unsafe-code denial.
+    #[allow(unsafe_code)]
+    mod security {
+        use super::*;
+        use std::ffi::OsStr;
+        use std::mem::size_of;
+        use std::ptr::{null_mut, NonNull};
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+        /// The OWNER RIGHTS SID resolves to the security descriptor's owner.
+        /// A protected DACL prevents inherited broad grants on the pipe.
+        const OWNER_ONLY_DACL: &str = "D:P(A;;GA;;;OW)";
+
+        struct OwnedSecurityDescriptor(NonNull<std::ffi::c_void>);
+
+        impl Drop for OwnedSecurityDescriptor {
+            fn drop(&mut self) {
+                // SAFETY: ConvertStringSecurityDescriptorToSecurityDescriptorW
+                // allocated this pointer with LocalAlloc-compatible storage.
+                unsafe {
+                    LocalFree(self.0.as_ptr());
+                }
+            }
+        }
+
+        fn security_descriptor() -> io::Result<OwnedSecurityDescriptor> {
+            let sddl: Vec<u16> = OWNER_ONLY_DACL.encode_utf16().chain(Some(0)).collect();
+            let mut descriptor = null_mut();
+            // SAFETY: `sddl` is NUL-terminated and both output pointers are
+            // valid for the duration of this call.
+            let ok = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let descriptor = NonNull::new(descriptor)
+                .ok_or_else(|| io::Error::other("Windows returned a null security descriptor"))?;
+            Ok(OwnedSecurityDescriptor(descriptor))
+        }
+
+        pub fn create_server(
+            name: &OsStr,
+            first_pipe_instance: bool,
+        ) -> io::Result<NamedPipeServer> {
+            let descriptor = security_descriptor()?;
+            let mut attributes = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0.as_ptr(),
+                bInheritHandle: 0,
+            };
+            // SAFETY: `attributes` and its descriptor remain alive for the
+            // synchronous create call. Tokio creates the pipe before return.
+            unsafe {
+                ServerOptions::new()
+                    .first_pipe_instance(first_pipe_instance)
+                    .create_with_security_attributes_raw(
+                        name,
+                        &mut attributes as *mut SECURITY_ATTRIBUTES as *mut std::ffi::c_void,
+                    )
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[tokio::test]
+            async fn pipe_owner_can_connect_to_owner_only_pipe() {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let name = super::super::pipe_name(&dir.path().join("owner-only"));
+                let server = create_server(&name, true).expect("create secured pipe");
+                let waiting = tokio::spawn(async move { server.connect().await });
+                let client = ClientOptions::new()
+                    .open(&name)
+                    .expect("owner can connect to the pipe");
+                let server = waiting
+                    .await
+                    .expect("connect task does not panic")
+                    .expect("server accepts the owner");
+                drop((client, server));
+            }
         }
     }
 

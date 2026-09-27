@@ -4,7 +4,9 @@
 //!
 //! The binary lives in `src/main.rs` and re-imports from this library.
 
-#![forbid(unsafe_code)]
+// Unsafe remains denied crate-wide. The Windows IPC module has one narrowly
+// scoped allowance for Tokio's raw SECURITY_ATTRIBUTES API.
+#![deny(unsafe_code)]
 
 /// Enumerate + reap trove control daemons across the runtime dirs (Unix only;
 /// builds on the singleton flock, which has no Windows analogue).
