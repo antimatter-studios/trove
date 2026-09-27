@@ -103,7 +103,9 @@ mod unix_imp {
 mod windows_imp {
     use super::*;
     use std::ffi::OsString;
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer};
+    use tokio::net::windows::named_pipe::{
+        ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+    };
 
     pub type Stream = NamedPipeServer;
     pub type ClientStream = NamedPipeClient;
