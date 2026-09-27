@@ -17,7 +17,7 @@ mod xml_export;
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -3358,11 +3358,11 @@ fn env_strict() -> bool {
 ///
 /// Unix only: Windows has no comparable mode bits.
 #[cfg(unix)]
-fn check_env_file_perms(path: &Path) -> Result<()> {
+fn check_env_file_perms(path: &Path, file: &std::fs::File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Ok(()); // the read that follows will report this properly
-    };
+    let meta = file
+        .metadata()
+        .with_context(|| format!("checking permissions on env file {}", path.display()))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 == 0 {
         return Ok(());
@@ -3382,13 +3382,26 @@ fn check_env_file_perms(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn check_env_file_perms(_path: &Path) -> Result<()> {
+fn check_env_file_perms(_path: &Path, _file: &std::fs::File) -> Result<()> {
     Ok(())
 }
 
 fn load_env_file(path: &Path) -> Result<usize> {
-    check_env_file_perms(path)?;
-    let text = std::fs::read_to_string(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // The permission check and read must refer to the same file. Also
+        // refuse a symlink so an attacker cannot redirect the checked path.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening env file {}", path.display()))?;
+    check_env_file_perms(path, &file)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
         .with_context(|| format!("reading env file {}", path.display()))?;
     let first = text
         .lines()
