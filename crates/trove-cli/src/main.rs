@@ -535,11 +535,10 @@ enum Command {
     },
 
     /// Act as a git credential helper (`git config credential.helper "trove
-    /// --vault ~/v.kdbx git-credential"`). git appends the operation
-    /// (get/store/erase) and speaks its key=value protocol on stdin/stdout.
-    /// `get` matches an entry by URL host (and username if git sends one) and
-    /// replies with its username/password; store/erase are accepted and
-    /// ignored. Offline-only.
+    /// git-credential"`). git appends the operation (get/store/erase) and
+    /// speaks its key=value protocol on stdin/stdout. By default, `get` reads
+    /// from the unlocked daemon using TROVE_SESSION; pass `--vault` for offline
+    /// mode. `store`/`erase` are accepted and ignored.
     GitCredential {
         /// The git operation: get, store, or erase.
         operation: String,
@@ -983,8 +982,8 @@ enum AddResource {
         /// Length of the generated password (with --generate; default 20).
         #[arg(long, requires = "generate")]
         length: Option<usize>,
-        /// Read the password from stdin instead of prompting. When the global
-        /// `--password-stdin` is also set, the VAULT password is line 1 and
+        /// Read the password from stdin instead of prompting. Offline only;
+        /// with global `--password-stdin`, the vault password is line 1 and
         /// this secret is line 2.
         #[arg(long = "secret-stdin")]
         secret_stdin: bool,
@@ -1525,9 +1524,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Exec { scope, command } => {
             cmd_exec(require_vault(vault)?, &scope, &command, pw_stdin)
         }
-        Command::GitCredential { operation } => {
-            cmd_git_credential(require_vault(vault)?, &operation, pw_stdin)
-        }
+        Command::GitCredential { operation } => cmd_git_credential(vault, &operation, pw_stdin),
         Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
         Command::Merge {
             source,
@@ -3184,7 +3181,9 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     } else if let Some(p) = password_from_keychain(Some(path))? {
         p
     } else {
-        rpassword::prompt_password("Vault password: ").context("reading vault password")?
+        rpassword::prompt_password("Vault password: ").context(
+            "reading vault password (use --password-stdin when no terminal is available)",
+        )?
     };
     #[cfg(feature = "yubikey")]
     if let Some(cr) = global_challenge_response() {
@@ -3761,6 +3760,9 @@ fn cmd_add_password(
     secret_stdin: bool,
     pw_stdin: bool,
 ) -> Result<()> {
+    if vault.is_none() && pw_stdin {
+        anyhow::bail!("--password-stdin is only valid with --vault for `add password`; the unlocked daemon does not need the vault password");
+    }
     // Offline mode opens the vault FIRST so that with `--password-stdin
     // --secret-stdin` the vault password is line 1 and the secret line 2.
     let mut offline_vault = match vault {
@@ -4745,16 +4747,64 @@ fn cmd_clip(
 }
 
 /// `trove git-credential <op>` — a git credential helper over stdin/stdout.
-fn cmd_git_credential(vault_path: &Path, operation: &str, pw_stdin: bool) -> Result<()> {
-    let v = open_vault(vault_path, pw_stdin)?;
-    // git's request block arrives AFTER the vault password when
-    // --password-stdin is used; read_password_from_stdin already consumed
-    // exactly one line, so the rest of stdin is git's protocol.
+fn cmd_git_credential(vault_path: Option<&Path>, operation: &str, pw_stdin: bool) -> Result<()> {
+    if let Some(vault_path) = vault_path {
+        let v = open_vault(vault_path, pw_stdin)?;
+        // When --password-stdin is used, open_vault consumes only the first
+        // line; Git's credential request remains available to the helper.
+        let stdin = std::io::stdin();
+        let mut reader = stdin.lock();
+        let stdout = std::io::stdout();
+        let mut writer = stdout.lock();
+        return gitcred::run(&v, operation, &mut reader, &mut writer);
+    }
+    if pw_stdin {
+        return Err(anyhow!("--password-stdin requires --vault in offline mode"));
+    }
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
-    gitcred::run(&v, operation, &mut reader, &mut writer)
+    if operation == "store" || operation == "erase" {
+        let _ = gitcred::parse_request(&mut reader)?;
+        return Ok(());
+    }
+    if operation != "get" {
+        return Err(anyhow!(
+            "unknown git-credential operation '{operation}' (expected get/store/erase)"
+        ));
+    }
+    let request = gitcred::parse_request(&mut reader)?;
+    let Some(host) = request.get("host") else {
+        return Ok(());
+    };
+    let code = require_session_code()?;
+    let response = match daemon::send(&daemon::Request::GitCredential {
+        host: host.clone(),
+        username: request.get("username").cloned(),
+        code,
+    }) {
+        Ok(response) => response,
+        Err(error) if daemon::is_daemon_not_running(&error) => {
+            return Err(anyhow!(
+                "no trove daemon is running; run `trove unlock <VAULT>` first, or pass `--vault <PATH>` for offline mode"
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(error) = daemon::response_error(&response) {
+        return Err(anyhow!(error));
+    }
+    if let (Some(username), Some(password)) = (
+        response.get("username").and_then(serde_json::Value::as_str),
+        response.get("password").and_then(serde_json::Value::as_str),
+    ) {
+        if !username.is_empty() {
+            writeln!(writer, "username={username}")?;
+        }
+        writeln!(writer, "password={password}")?;
+    }
+    Ok(())
 }
 
 /// `trove resolve trove://…` — print one referenced secret to stdout.
@@ -5194,7 +5244,9 @@ fn cmd_unlock(
     } else if let Some(p) = password_from_keychain(Some(&vault_abs))? {
         p
     } else {
-        rpassword::prompt_password("Vault password: ").context("reading vault password")?
+        rpassword::prompt_password("Vault password: ").context(
+            "reading vault password (use --password-stdin when no terminal is available)",
+        )?
     };
 
     let req = daemon::Request::Unlock {
@@ -6257,5 +6309,27 @@ mod unlock_mode_tests {
         // A quote closes, escapes and reopens — the one case naive quoting
         // gets wrong, and the one that would end the quoted region early.
         assert_eq!(sh_single_quote("it's"), r"'it'\''s'");
+    }
+}
+
+#[cfg(test)]
+mod add_password_stdin_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_add_password_rejects_vault_password_stdin_before_reading_secret() {
+        let err = cmd_add_password(
+            None,
+            "github.com",
+            None,
+            None,
+            None,
+            false,
+            None,
+            true,
+            true,
+        )
+        .expect_err("daemon mode must reject the offline-only password flag");
+        assert!(err.to_string().contains("only valid with --vault"));
     }
 }
