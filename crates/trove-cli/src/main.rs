@@ -1572,7 +1572,7 @@ fn run(cli: Cli) -> Result<()> {
                 special,
                 exclude,
             };
-            for _ in 0..count.max(1) {
+            for _ in 0..count {
                 println!("{}", pwgen::generate(&opts)?);
             }
             Ok(())
@@ -1580,7 +1580,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Generate {
             resource: GenerateResource::Diceware { words, count },
         } => {
-            for _ in 0..count.max(1) {
+            for _ in 0..count {
                 println!("{}", pwgen::diceware(words)?);
             }
             Ok(())
