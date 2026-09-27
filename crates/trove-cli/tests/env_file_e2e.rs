@@ -585,3 +585,82 @@ fn the_space_separated_form_says_what_to_type_instead() {
         "the error should show the exact fix: {stderr}"
     );
 }
+
+#[test]
+fn dotenv_trove_vault_selects_the_default_offline_vault() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    std::fs::write(
+        tmp.path().join(".env.trove"),
+        format!(
+            "TROVE_VAULT_PASSWORD={PASSWORD}\nTROVE_VAULT={}\n",
+            vault.display()
+        ),
+    )
+    .expect("write .env.trove");
+
+    let out = run_in(&trove, tmp.path(), &["db-info", "--json", "--env"], "", &[]);
+    assert!(
+        out.status.success(),
+        "TROVE_VAULT should select the offline vault: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON db-info");
+    assert_eq!(info["path"], vault.to_string_lossy().as_ref());
+}
+
+#[test]
+fn explicit_vault_flag_overrides_trove_vault_from_env_file() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    std::fs::write(
+        tmp.path().join(".env.trove"),
+        format!("TROVE_VAULT_PASSWORD={PASSWORD}\nTROVE_VAULT=/does/not/exist.kdbx\n"),
+    )
+    .expect("write .env.trove");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &[
+            "db-info",
+            "--json",
+            "--vault",
+            vault.to_str().unwrap(),
+            "--env",
+        ],
+        "",
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "--vault must win over TROVE_VAULT: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON db-info");
+    assert_eq!(info["path"], vault.to_string_lossy().as_ref());
+}
+
+#[test]
+fn exported_trove_vault_selects_offline_mode_without_env_file() {
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["db-info", "--json", "--password-stdin"],
+        &format!("{PASSWORD}\n"),
+        &[("TROVE_VAULT", vault.to_str().unwrap())],
+    );
+    assert!(
+        out.status.success(),
+        "exported TROVE_VAULT should select the offline vault: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let info: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON db-info");
+    assert_eq!(info["path"], vault.to_string_lossy().as_ref());
+}
