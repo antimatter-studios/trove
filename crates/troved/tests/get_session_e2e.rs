@@ -171,6 +171,47 @@ async fn get_requires_session_code_and_unlocking_uid() {
 }
 
 #[tokio::test]
+async fn git_credentials_require_the_session_and_match_unlocked_vaults() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = tmp.path().join("git-credential.kdbx");
+    let mut db = Vault::create(&vault, PASSWORD).expect("create vault");
+    let id = db.add_entry("Git/work").expect("add entry");
+    db.set_field(&id, "URL", "https://GitHub.com/work").unwrap();
+    db.set_field(&id, "UserName", "work-bot").unwrap();
+    db.set_field(&id, "Password", "web-login").unwrap();
+    db.set_field(&id, "git.token", "git-token").unwrap();
+    db.save().unwrap();
+    let h = Harness::new();
+
+    let unlocked = h.handle_as(unlock(&vault), OWNER).await;
+    let code = unlocked["code"].as_str().expect("session code");
+    let response = h
+        .handle_as(
+            Request::GitCredential {
+                host: "github.com".to_string(),
+                username: Some("work-bot".to_string()),
+                code: code.to_string(),
+            },
+            OWNER,
+        )
+        .await;
+    assert_eq!(response["username"], "work-bot");
+    assert_eq!(response["password"], "git-token");
+
+    let refused = h
+        .handle_as(
+            Request::GitCredential {
+                host: "github.com".to_string(),
+                username: None,
+                code: code.to_string(),
+            },
+            OTHER,
+        )
+        .await;
+    assert_eq!(refused["status"], "err");
+}
+
+#[tokio::test]
 async fn lock_invalidates_then_reunlock_rotates_code() {
     let tmp = TempDir::new().expect("tempdir");
     let vault = tmp.path().join("v.kdbx");
