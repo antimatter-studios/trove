@@ -267,6 +267,75 @@ fn analyze_flags_breached_and_gates_exit_code() {
     assert_eq!(out.status.code(), Some(0), "clean vault must exit 0");
     assert!(String::from_utf8_lossy(&out.stdout).contains("no breached passwords"));
 
+    // Empty and absent Password fields must be visible and fail the audit,
+    // without being counted as HIBP lookups.
+    for (entry, edit_arg) in [("blank-one", "Password="), ("missing-one", "")] {
+        ok(
+            &run_trove(
+                &trove,
+                &[
+                    "--vault",
+                    vault,
+                    "--password-stdin",
+                    "add",
+                    "password",
+                    entry,
+                    "--secret-stdin",
+                ],
+                &format!("{PASSWORD}\ntemporary-secret\n"),
+            ),
+            entry,
+        );
+        let edit_args = if edit_arg.is_empty() {
+            vec![
+                "--vault",
+                vault,
+                "--password-stdin",
+                "edit",
+                entry,
+                "--unset",
+                "Password",
+            ]
+        } else {
+            vec![
+                "--vault",
+                vault,
+                "--password-stdin",
+                "edit",
+                entry,
+                "--set",
+                edit_arg,
+            ]
+        };
+        ok(&run_trove(&trove, &edit_args, &pw), "clear password");
+    }
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "analyze",
+            "--hibp",
+            hibps,
+        ],
+        &pw,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "empty passwords must fail audit"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("blank-one  empty password"), "{stdout}");
+    assert!(stdout.contains("missing-one  empty password"), "{stdout}");
+    assert!(!stdout.contains("no breached passwords"), "{stdout}");
+    assert!(
+        stderr.contains("checked 1 passwords, 0 breached, 2 empty"),
+        "{stderr}"
+    );
+
     // Missing dump file is a clean error.
     let out = run_trove(
         &trove,
