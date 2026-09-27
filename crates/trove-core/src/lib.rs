@@ -415,6 +415,21 @@ impl Vault {
     /// to ask for them again; anything unsaved in memory is gone, which is why
     /// this is never automatic.
     pub fn reload(&mut self) -> Result<()> {
+        #[cfg(feature = "yubikey")]
+        let mut fresh = match &self.inner.challenge_response {
+            Some(challenge_response) => Self::open_with_challenge_response(
+                &self.inner.path,
+                &self.inner.password,
+                self.inner.keyfile.as_deref(),
+                challenge_response.clone(),
+            )?,
+            None => Self::open_with_key(
+                &self.inner.path,
+                &self.inner.password,
+                self.inner.keyfile.as_deref(),
+            )?,
+        };
+        #[cfg(not(feature = "yubikey"))]
         let mut fresh = Self::open_with_key(
             &self.inner.path,
             &self.inner.password,
@@ -1653,6 +1668,10 @@ fn open_err_to_error(e: keepass::error::DatabaseOpenError) -> Error {
     match e {
         DatabaseOpenError::Io(io) => Error::Io(io),
         DatabaseOpenError::Key(DatabaseKeyError::IncorrectKey) => Error::BadPassword,
+        #[cfg(feature = "yubikey")]
+        DatabaseOpenError::Key(DatabaseKeyError::ChallengeResponse(err)) => {
+            Error::ChallengeResponse(err.to_string())
+        }
         DatabaseOpenError::Key(other) => Error::Kdbx(other.to_string()),
         DatabaseOpenError::UnsupportedVersion => {
             Error::Kdbx("unsupported kdbx version".to_string())
