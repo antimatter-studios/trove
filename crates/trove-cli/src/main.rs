@@ -564,10 +564,22 @@ enum Command {
     /// `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`. The child's exit
     /// code becomes trove's. Offline-only: requires `--vault`.
     ///
+    /// If an entry and group share a name, use `--entry PATH` or `--group PATH`.
     /// Example: `trove --vault v.kdbx exec Infra/kubeconfig-prod -- bash`
     Exec {
-        /// Entry path or group path whose secrets to inject.
-        scope: String,
+        /// Entry path or group path whose secrets to inject. If omitted, select
+        /// exactly one of `--entry` or `--group`.
+        #[arg(
+            conflicts_with_all = ["entry", "group"],
+            required_unless_present_any = ["entry", "group"]
+        )]
+        scope: Option<String>,
+        /// Select one entry explicitly when a name is ambiguous.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["scope", "group"])]
+        entry: Option<String>,
+        /// Select a group and all its entries explicitly when a name is ambiguous.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["scope", "entry"])]
+        group: Option<String>,
         /// The command to run (everything after `--`).
         #[arg(last = true, required = true)]
         command: Vec<std::ffi::OsString>,
@@ -1516,9 +1528,19 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Estimate { password } => cmd_estimate(password.as_deref()),
         Command::Analyze { hibp } => cmd_analyze(require_vault(vault)?, &hibp, pw_stdin),
-        Command::Exec { scope, command } => {
-            cmd_exec(require_vault(vault)?, &scope, &command, pw_stdin)
-        }
+        Command::Exec {
+            scope,
+            entry,
+            group,
+            command,
+        } => cmd_exec(
+            require_vault(vault)?,
+            scope,
+            entry,
+            group,
+            &command,
+            pw_stdin,
+        ),
         Command::GitCredential { operation } => cmd_git_credential(vault, &operation, pw_stdin),
         Command::Resolve { reference } => cmd_resolve(require_vault(vault)?, &reference, pw_stdin),
         Command::Merge {
@@ -4809,11 +4831,19 @@ fn cmd_resolve(vault_path: &Path, reference: &str, pw_stdin: bool) -> Result<()>
 /// becomes ours (after cleanup), so pipelines and CI see the real result.
 fn cmd_exec(
     vault_path: &Path,
-    scope: &str,
+    scope: Option<String>,
+    entry: Option<String>,
+    group: Option<String>,
     command: &[std::ffi::OsString],
     pw_stdin: bool,
 ) -> Result<()> {
     let v = open_vault(vault_path, pw_stdin)?;
+    let scope = match (scope, entry, group) {
+        (Some(scope), None, None) => exec::Scope::Auto(scope),
+        (None, Some(entry), None) => exec::Scope::Entry(entry),
+        (None, None, Some(group)) => exec::Scope::Group(group),
+        _ => unreachable!("clap validates exec scope arguments"),
+    };
     let tmp = exec::private_tmp_dir()?;
     // Resolve + run inside a closure so EVERY exit path below funnels
     // through the wipe. (SIGKILL can't be caught; SIGINT is handled by the
