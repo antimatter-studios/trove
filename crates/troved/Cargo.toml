@@ -70,6 +70,16 @@ base64 = "0.22"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = {
+    version = "0.61",
+    features = [
+        "Win32_Foundation",
+        "Win32_Security",
+        "Win32_Security_Authorization",
+    ],
+}
+
 [build-dependencies]
 # Formats the dev-build timestamp (0.2.0-dev-YYYYMMDDHHMMSS) in build.rs.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
