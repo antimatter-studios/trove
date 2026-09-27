@@ -4815,6 +4815,11 @@ fn cmd_edit(
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
+            for field in unsets {
+                if v.get_field(&id, field)?.is_none() {
+                    return Err(anyhow!("entry '{entry_path}' has no field '{field}'"));
+                }
+            }
             for (field, value) in &sets {
                 v.set_field(&id, field, value)
                     .with_context(|| format!("setting {field}"))?;

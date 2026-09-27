@@ -14,6 +14,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use trove_core::Vault;
 
 const PASSWORD: &str = "correct horse battery staple";
 const SECRET: &str = "hunter2-but-longer";
@@ -378,12 +379,35 @@ fn offline_crud_lifecycle() {
                 "--set",
                 "Env=prod",
                 "--set",
+                "RemoveMe=temporary",
+                "--set",
                 "About.Purpose=Developer ID signing",
             ],
             &pw_line,
         ),
         "edit",
     );
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                vault,
+                "--password-stdin",
+                "edit",
+                "Web/github",
+                "--unset",
+                "RemoveMe",
+            ],
+            &pw_line,
+        ),
+        "edit --unset existing field",
+    );
+    {
+        let v = Vault::open(std::path::Path::new(vault), PASSWORD).unwrap();
+        let id = v.find_by_title("Web/github").unwrap();
+        assert_eq!(v.get_field(&id, "RemoveMe").unwrap(), None);
+    }
     let out = run_trove(
         &trove,
         &[
@@ -423,6 +447,26 @@ fn offline_crud_lifecycle() {
         "Developer ID signing"
     );
     assert!(description[0].get("Password").is_none());
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "edit",
+            "Web/github",
+            "--set",
+            "Env=should-not-persist",
+            "--unset",
+            "NoSuchField",
+        ],
+        &pw_line,
+    );
+    assert_fails(&out, "edit with missing --unset field");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("NoSuchField"));
+    let v = Vault::open(std::path::Path::new(vault), PASSWORD).unwrap();
+    let id = v.find_by_title("Web/github").unwrap();
+    assert_eq!(v.get_field(&id, "Env").unwrap().as_deref(), Some("prod"));
 
     // edit with nothing to change is a user error.
     assert_fails(

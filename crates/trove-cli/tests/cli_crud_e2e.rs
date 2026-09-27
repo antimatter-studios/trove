@@ -458,13 +458,24 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
                 "bob",
                 "--set",
                 "Env=prod",
-                "--unset",
-                "NoSuchField",
+                "--set",
+                "RemoveMe=temporary",
             ],
             None,
         )
         .await,
         "daemon edit",
+    );
+    ok(
+        &run_trove(
+            &trove,
+            &d.sock,
+            Some(&code),
+            &["edit", "Work/Infra/github", "--unset", "RemoveMe"],
+            None,
+        )
+        .await,
+        "daemon edit --unset existing field",
     );
     {
         let v = reopen(&d.vault);
@@ -476,6 +487,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
             Some("bob")
         );
         assert_eq!(v.get_field(&id, "Env").unwrap().as_deref(), Some("prod"));
+        assert_eq!(v.get_field(&id, "RemoveMe").unwrap(), None);
         assert_eq!(
             v.get_field(&id, "Password").unwrap().as_deref(),
             Some(SECRET)
@@ -571,6 +583,30 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     assert!(reopen(&d.vault)
         .find_by_title("Archive/Source.Backup/sub/token")
         .is_some());
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        Some(&code),
+        &[
+            "edit",
+            "Work/Infra/github",
+            "--set",
+            "Env=should-not-persist",
+            "--unset",
+            "NoSuchField",
+        ],
+        None,
+    )
+    .await;
+    assert!(!out.status.success(), "missing --unset field should fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("NoSuchField"),
+        "error should name missing field: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = reopen(&d.vault);
+    let id = v.find_by_title("Work/Infra/github").unwrap();
+    assert_eq!(v.get_field(&id, "Env").unwrap().as_deref(), Some("prod"));
 
     // rm recycles; rmdir recycles the rest; both persist.
     let out = run_trove(
