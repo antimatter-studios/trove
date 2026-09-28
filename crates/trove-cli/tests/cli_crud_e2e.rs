@@ -283,6 +283,24 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     .await;
     ok(&out, "daemon add password");
 
+    // Add a protected custom field: its name should stay hidden from ungated
+    // JSON just as it does in the offline branch.
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        Some(&code),
+        &[
+            "add",
+            "totp",
+            "Web/github",
+            "--uri",
+            "otpauth://totp/github?secret=JBSWY3DPEHPK3PXP",
+        ],
+        None,
+    )
+    .await;
+    ok(&out, "daemon add totp");
+
     // get password round-trips.
     let out = run_trove(
         &trove,
@@ -299,6 +317,37 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     let shown = ok(&out, "daemon show (ungated)");
     assert!(shown.contains("UserName: alice"), "{shown}");
     assert!(!shown.contains(SECRET), "summary must mask the secret");
+
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        None,
+        &["show", "--json", "Web/github"],
+        None,
+    )
+    .await;
+    let hidden: serde_json::Value =
+        serde_json::from_str(&ok(&out, "daemon show --json")).expect("JSON summary");
+    assert!(
+        hidden["fields"].get("otp").is_none(),
+        "protected field name leaked: {hidden}"
+    );
+
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        Some(&code),
+        &["show", "--json", "--show-protected", "Web/github"],
+        None,
+    )
+    .await;
+    let revealed: serde_json::Value =
+        serde_json::from_str(&ok(&out, "daemon show --json --show-protected"))
+            .expect("JSON summary");
+    assert!(
+        revealed["fields"].get("otp").is_some(),
+        "protected field name missing: {revealed}"
+    );
 
     // …but --attr Password is code-gated: refused without a session.
     let out = run_trove(
