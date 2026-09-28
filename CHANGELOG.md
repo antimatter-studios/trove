@@ -4,6 +4,22 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.21.0 — 2026-09-28
+
+**More output for scripts and agents.** Read and status commands now support
+`--json`, including daemon status, idle time, materialized files, SSH/GPG agent
+keys, keychain status, and password audits. `trove describe` reports safe entry
+metadata, including user-defined `About.*` attributes, without revealing
+secrets. Search can filter unprotected custom fields (including exact
+`NAME=VALUE` matches), tags, and attachment names. Value-printing commands can
+emit Base64 for reliable piping.
+
+**Recursive group copy and move.** `cp -r` and `mv -r` operate on complete
+group trees; copy supports dry runs and drops `Materialize.*` settings by
+default. `edit --unset` now reports an error when the named field is absent,
+instead of claiming success. The test fixtures now exercise the behavior their
+names describe.
+
 ## v0.20.0 — 2026-09-25
 
 **Unlock can select a password for each vault from `.env.trove`.** Use a YAML
