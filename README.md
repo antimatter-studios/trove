@@ -430,6 +430,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.21.0
+Read and status commands support `--json`; `trove describe` exposes safe metadata for agent discovery; search filters unprotected fields, tags, and attachment names; value commands support Base64 output. Group `cp` and `mv` can recurse, and `edit --unset` reports missing fields.
+
 ### v0.20.0
 `trove unlock --env` selects the right password for each database in a directory. Use a YAML map keyed by vault filename or dotenv profiles pairing `TROVE_VAULT_<NAME>_FILE` with `TROVE_VAULT_<NAME>_PASSWORD`; the existing `TROVE_VAULT_PASSWORD` still works for a shared password.
 
