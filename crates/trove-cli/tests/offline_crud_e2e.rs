@@ -33,12 +33,17 @@ fn run_trove(trove: &std::path::Path, args: &[&str], stdin: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn trove");
-    child
+    if let Err(error) = child
         .stdin
         .take()
         .expect("child stdin")
         .write_all(stdin.as_bytes())
-        .expect("write stdin");
+    {
+        // Some commands reject daemon-mode requests before reading stdin.
+        // Their early exit closes the pipe; the child output carries the
+        // useful error and should still be asserted by the caller.
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "write stdin");
+    }
     child.wait_with_output().expect("wait trove")
 }
 
