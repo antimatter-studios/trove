@@ -377,6 +377,8 @@ fn offline_crud_lifecycle() {
                 "bob",
                 "--set",
                 "Env=prod",
+                "--set",
+                "About.Purpose=Developer ID signing",
             ],
             &pw_line,
         ),
@@ -399,6 +401,28 @@ fn offline_crud_lifecycle() {
     );
     assert_ok(&out, "show edited attrs");
     assert_eq!(stdout_str(&out), "bob\nprod\n");
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "describe",
+            "Web/github",
+            "--json",
+        ],
+        &pw_line,
+    );
+    assert_ok(&out, "describe entry");
+    let description: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(description[0]["path"], "Web/github");
+    assert_eq!(description[0]["has_password"], true);
+    assert_eq!(
+        description[0]["attributes"]["About.Purpose"],
+        "Developer ID signing"
+    );
+    assert!(description[0].get("Password").is_none());
 
     // edit with nothing to change is a user error.
     assert_fails(

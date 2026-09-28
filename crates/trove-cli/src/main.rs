@@ -360,6 +360,15 @@ enum Command {
         base64: bool,
     },
 
+    /// Describe one entry or a group's entries using safe discovery metadata.
+    Describe {
+        /// Entry path or group path.
+        path: String,
+        /// Machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Search unprotected entry metadata: standard/custom fields, attachments,
     /// tags and group paths. Protected values are never searched.
     Search {
@@ -1807,6 +1816,7 @@ fn run(cli: Cli) -> Result<()> {
                 )
             }
         }
+        Command::Describe { path, json } => cmd_describe(vault, &path, pw_stdin, json),
         Command::Search {
             term,
             fields,
@@ -4624,6 +4634,93 @@ fn parse_search_fields(fields: &[String]) -> Result<Vec<SearchFieldFilter>> {
             })
         })
         .collect()
+}
+
+fn cmd_describe(vault: Option<&Path>, path: &str, pw_stdin: bool, json: bool) -> Result<()> {
+    let descriptions = match vault {
+        Some(path_to_vault) => {
+            let v = open_vault(path_to_vault, pw_stdin)?;
+            v.describe(path)?
+                .into_iter()
+                .map(|description| {
+                    serde_json::json!({
+                        "path": description.path,
+                        "username": description.username,
+                        "url": description.url,
+                        "notes": description.notes,
+                        "has_password": description.has_password,
+                        "attributes": description.attributes,
+                        "attachments": description.attachments.into_iter().map(|attachment| serde_json::json!({
+                            "name": attachment.name,
+                            "size": attachment.size,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        }
+        None => {
+            let response = daemon_call(&daemon::Request::Describe {
+                path: path.to_string(),
+            })?;
+            response
+                .get("descriptions")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| anyhow!("malformed daemon response: missing 'descriptions'"))?
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&descriptions)?);
+    } else {
+        print_descriptions(&descriptions);
+    }
+    Ok(())
+}
+
+fn print_descriptions(descriptions: &[Value]) {
+    for (index, item) in descriptions.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        println!(
+            "Entry: {}",
+            item.get("path").and_then(Value::as_str).unwrap_or("?")
+        );
+        for (label, key) in [("Username", "username"), ("URL", "url"), ("Notes", "notes")] {
+            if let Some(value) = item.get(key).and_then(Value::as_str) {
+                println!("  {label}: {value}");
+            }
+        }
+        println!(
+            "  Password: {}",
+            if item
+                .get("has_password")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "present"
+            } else {
+                "absent"
+            }
+        );
+        if let Some(attributes) = item.get("attributes").and_then(Value::as_object) {
+            for (name, value) in attributes {
+                if let Some(value) = value.as_str() {
+                    println!("  {name}: {value}");
+                }
+            }
+        }
+        if let Some(attachments) = item.get("attachments").and_then(Value::as_array) {
+            for attachment in attachments {
+                let name = attachment
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let size = attachment.get("size").and_then(Value::as_u64).unwrap_or(0);
+                println!("  Attachment: {name} ({size} bytes)");
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

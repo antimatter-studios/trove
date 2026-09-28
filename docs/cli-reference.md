@@ -90,6 +90,24 @@ Daemon mode: the summary view uses the ungated `ShowEntry` RPC (which never
 carries protected values); `--attr` values and the revealed password go
 through the code-gated `GetField` RPC (`TROVE_SESSION`).
 
+## trove describe
+
+```
+trove [--vault <PATH>] describe [--json] <ENTRY_OR_GROUP_PATH>
+```
+
+Print safe discovery metadata for an entry or every entry in a group. This
+includes the path, username, URL, unprotected notes, whether a password is
+present, attachment names and sizes, and unprotected custom fields whose names
+start with `About.`. Protected values and attachment contents are never
+returned. `About.*` is an optional naming convention, not a fixed schema:
+Trove does not validate field names or interpret their meanings. Use `--json`
+for structured output suitable for agents.
+
+The daemon view is read-only and does not require `TROVE_SESSION`; with multiple
+vaults unlocked, Trove asks you to leave only one open to disambiguate group
+paths.
+
 ## trove search
 
 ```
