@@ -33,12 +33,17 @@ fn run_trove(trove: &std::path::Path, args: &[&str], stdin: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn trove");
-    child
+    if let Err(error) = child
         .stdin
         .take()
         .expect("child stdin")
         .write_all(stdin.as_bytes())
-        .expect("write stdin");
+    {
+        // Some commands reject daemon-mode requests before reading stdin.
+        // Their early exit closes the pipe; the child output carries the
+        // useful error and should still be asserted by the caller.
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "write stdin");
+    }
     child.wait_with_output().expect("wait trove")
 }
 
@@ -879,7 +884,17 @@ fn list_names_the_ssh_key_and_ignores_keeagent_settings() {
 
     let key = dir.path().join("id_ed25519");
     std::fs::write(&key, b"-----BEGIN OPENSSH PRIVATE KEY-----\n").expect("write key");
-    for (name, src) in [("id_ed25519", &key), ("id_ed25519.pub", &key)] {
+    let settings = dir.path().join("KeeAgent.settings");
+    std::fs::write(
+        &settings,
+        b"<Configuration><AllowUseOfSshAgent>true</AllowUseOfSshAgent></Configuration>",
+    )
+    .expect("write KeeAgent settings");
+    for (name, src) in [
+        ("id_ed25519", &key),
+        ("id_ed25519.pub", &key),
+        ("KeeAgent.settings", &settings),
+    ] {
         assert_ok(
             &run_trove(
                 &trove,

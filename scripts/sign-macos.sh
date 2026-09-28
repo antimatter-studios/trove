@@ -10,8 +10,9 @@
 # the hardened runtime, and without the get-task-allow entitlement, puts troved
 # in the same class: debuggers are refused.
 #
-# Notarization is NOT done here — it's a distribution step, and the protection
-# above comes from the signature alone. Release CI notarizes.
+# This script signs CLI/daemon binaries; it does not notarize them. Release
+# signing is conditional on APPLE_CERTIFICATE being configured. Desktop bundle
+# notarization is handled separately by the desktop release workflow.
 #
 # Usage:
 #   scripts/sign-macos.sh <path> [path...]

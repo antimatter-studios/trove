@@ -102,6 +102,8 @@ jobs:
           shared-key: test
 
       - name: cargo test
+        env:
+          TROVE_REQUIRE_KEEPASSXC: "1"
         run: cargo test --workspace --locked
 
       - name: Conformance matrix (keepass-spec-tests)

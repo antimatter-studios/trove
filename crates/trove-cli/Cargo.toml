@@ -73,3 +73,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "tim
 # compiles to a clear "macOS only" error there.
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

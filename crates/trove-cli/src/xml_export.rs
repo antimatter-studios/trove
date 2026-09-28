@@ -5,7 +5,7 @@
 //! per entry. The caller owns the "this is all your secrets in the clear"
 //! warning.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use trove_core::Vault;
@@ -19,6 +19,27 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// XML 1.0 cannot represent most C0 controls (there is no numeric-escape
+/// workaround for them). Refuse the export with a source location rather than
+/// silently dropping data or writing a document importers reject.
+fn validate_xml_text(s: &str, location: &str) -> Result<()> {
+    if let Some(ch) = s.chars().find(|ch| {
+        let c = *ch as u32;
+        !(c == 0x9
+            || c == 0xA
+            || c == 0xD
+            || (0x20..=0xD7FF).contains(&c)
+            || (0xE000..=0xFFFD).contains(&c)
+            || (0x10000..=0x10FFFF).contains(&c))
+    }) {
+        bail!(
+            "cannot export XML: {location} contains XML 1.0-forbidden character U+{:04X}",
+            ch as u32
+        );
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -60,6 +81,10 @@ pub fn export_xml(v: &Vault) -> Result<String> {
     for summary in v.list_entries() {
         let mut node = &mut root;
         for seg in &summary.group_path {
+            validate_xml_text(
+                seg,
+                &format!("group name for entry '{}'", summary.display_path()),
+            )?;
             node = node.child_mut(seg);
         }
 
@@ -72,9 +97,12 @@ pub fn export_xml(v: &Vault) -> Result<String> {
         let mut names = v.fields_with_prefix(&summary.id, "")?;
         names.sort();
         for name in names {
+            let path = summary.display_path();
+            validate_xml_text(&name, &format!("field name on entry '{path}'"))?;
             let Some(value) = v.get_field(&summary.id, &name)? else {
                 continue;
             };
+            validate_xml_text(&value, &format!("field '{name}' on entry '{path}'"))?;
             let protect = if PROTECTED.contains(&name.as_str()) {
                 " ProtectInMemory=\"True\""
             } else {
@@ -88,6 +116,10 @@ pub fn export_xml(v: &Vault) -> Result<String> {
         }
 
         for att in &summary.attachment_names {
+            validate_xml_text(
+                att,
+                &format!("attachment name on entry '{}'", summary.display_path()),
+            )?;
             if let Some(bytes) = v.read_binary(&summary.id, att)? {
                 let id = pool.len();
                 pool.push(bytes);
@@ -149,5 +181,25 @@ mod tests {
         assert!(xml.contains("<Value ProtectInMemory=\"True\">s&lt;e&gt;cret</Value>"));
         assert!(xml.contains("<Binary ID=\"0\""));
         assert!(xml.contains("<Key>blob.bin</Key><Value Ref=\"0\"/>"));
+    }
+
+    #[test]
+    fn rejects_xml_10_control_characters_with_entry_and_field_context() {
+        let dir = TempDir::new().unwrap();
+        let mut v = Vault::create(&dir.path().join("control.kdbx"), "pw").unwrap();
+        let id = v.add_entry("Web/login").unwrap();
+        v.set_field(&id, "Notes", "before\u{1}after").unwrap();
+
+        let err = export_xml(&v).expect_err("XML 1.0 cannot contain U+0001");
+        let message = err.to_string();
+        assert!(
+            message.contains("Web/login"),
+            "missing entry path: {message}"
+        );
+        assert!(message.contains("Notes"), "missing field name: {message}");
+        assert!(
+            message.contains("U+0001"),
+            "missing offending code point: {message}"
+        );
     }
 }
