@@ -305,6 +305,42 @@ async fn trove_status_round_trip_against_real_daemon() {
         "expected 'Idle remaining' line when unlocked:\n{stdout}"
     );
 
+    let out = tokio::process::Command::new(&trove)
+        .args(["status", "--json"])
+        .env("TROVE_SOCK", &sock)
+        .output()
+        .await
+        .expect("run trove status JSON");
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status JSON");
+    assert_eq!(value["daemon_running"], true);
+    assert!(value["vault_paths"][0]
+        .as_str()
+        .expect("vault path string")
+        .ends_with("/v.kdbx"));
+    assert!(value["idle_timeout_seconds"].as_u64().is_some());
+    assert!(value["ssh_key_count"].as_u64().is_some());
+
+    let out = tokio::process::Command::new(&trove)
+        .args(["idle", "get", "--json"])
+        .env("TROVE_SOCK", &sock)
+        .output()
+        .await
+        .expect("run idle get JSON");
+    let idle: serde_json::Value = serde_json::from_slice(&out.stdout).expect("idle JSON");
+    assert!(idle["timeout_seconds"].as_u64().is_some());
+    assert!(idle["remaining_seconds"].as_u64().is_some());
+
+    let out = tokio::process::Command::new(&trove)
+        .args(["materialize-status", "--json"])
+        .env("TROVE_SOCK", &sock)
+        .output()
+        .await
+        .expect("run materialize status JSON");
+    let materialized: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("materialize status JSON");
+    assert_eq!(materialized["materialized"], serde_json::json!([]));
+
     // trove lock.
     let out = tokio::process::Command::new(&trove)
         .arg("lock")
@@ -371,4 +407,32 @@ async fn trove_status_against_no_daemon_reports_locked() {
         stdout.contains("not running"),
         "expected 'not running' daemon line in output:\n{stdout}"
     );
+
+    let out = tokio::process::Command::new(&trove)
+        .args(["status", "--json"])
+        .env("TROVE_SOCK", &sock)
+        .env("TROVE_NO_AUTOSPAWN", "1")
+        .output()
+        .await
+        .expect("run JSON status without daemon");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("locked status JSON");
+    assert_eq!(value["daemon_running"], false);
+    assert_eq!(value["vault_paths"], serde_json::json!([]));
+    assert_eq!(value["ssh_key_count"], 0);
+
+    for command in [
+        ["ssh-agent", "list", "--json"],
+        ["gpg-agent", "list", "--json"],
+    ] {
+        let out = tokio::process::Command::new(&trove)
+            .args(command)
+            .env("TROVE_SOCK", &sock)
+            .output()
+            .await
+            .expect("run empty agent list JSON");
+        assert!(out.status.success());
+        let value: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("agent list JSON");
+        assert_eq!(value, serde_json::json!([]));
+    }
 }
