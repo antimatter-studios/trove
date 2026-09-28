@@ -4,6 +4,15 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.21.1 — 2026-09-28
+
+**Cleaner local development builds.** Optional Chore tasks run a guarded,
+background sweep of Cargo artifacts older than seven days. The lifecycle hook
+runs for Chore commands; direct Cargo, IDE, and CI builds remain unchanged.
+
+**Pinned workflow actions.** GitHub Actions now use immutable commit SHAs, with
+weekly Dependabot updates to keep those pins current.
+
 ## v0.21.0 — 2026-09-28
 
 **More output for scripts and agents.** Read and status commands now support
