@@ -437,6 +437,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.21.1
+Chore tasks can run a guarded background cleanup of stale Cargo artifacts; GitHub Actions are pinned to commit SHAs and updated weekly by Dependabot.
+
 ### v0.21.0
 Read and status commands support `--json`; `trove describe` exposes safe metadata for agent discovery; search filters unprotected fields, tags, and attachment names; value commands support Base64 output. Group `cp` and `mv` can recurse, and `edit --unset` reports missing fields.
 
@@ -463,9 +466,3 @@ The git credential helper sends an entry's `git.token` attribute when it has one
 
 ### v0.17.0
 `trove cp <ENTRY> <DEST>` duplicates an entry — private key, derived `id.pub`, `KeeAgent.settings`, custom fields, attachments — so one SSH key reused across machines can carry a second, accurate name without being exported to disk and re-added. The copy is independent and nothing records that the two entries share a key: a recorded link invites tooling that rotates one and takes the other with it, which is the accident copying exists to prevent. `trove mv` now renames while it moves, Unix-style — an existing group means move into it, a new leaf means move and rename, and a destination whose parent does not exist is still an error. Both refuse a path another entry occupies, and both carry an alias (`cp`/`copy`, `mv`/`move`).
-
-### v0.16.0
-An agent holding more than six keys can lock you out of a server: `sshd`'s `MaxAuthTries` defaults to 6, counted per connection, and every key the agent lists is offered and counted against it even though the query phase carries no signature — so a key sitting past the sixth is never reached, and from the fourth offer `sshd` is writing the lines `fail2ban` counts. Two ways out. `trove ssh-agent empty` prints a new private agent socket serving nothing and `trove ssh-agent add <entry>` puts one named entry's key on it, so a script offers exactly what it chose; each `empty` is a separate socket, the keys never leave the daemon, and the sockets go on `lock`. Or an entry can name the servers its key is for in an `SshAgent.HostKeys` field — paste `ssh-keyscan` output in unedited — and the agent then offers only the keys that claim the host `ssh` is connecting to, which it learns from the host key `ssh` hands it before asking for identities. Nothing claims the host, everything is offered as before, so switching it on cannot take a working setup away; `trove ssh-agent which <host>` shows what would be offered without connecting, and `TROVE_SSH_STRICT_HOSTKEYS=1` makes a miss offer nothing instead.
-
-### v0.15.0
-Attachments added or edited in the desktop app are written to the vault file — they were changed in memory only, and lasted as long as the window stayed open. Because a KDBX write re-derives the key with Argon2 every time, a save now shows a progress bar sized by what this vault's own writes actually cost, and a picked file appears in the list immediately rather than after the write. Attachments are identified by their bytes rather than their file names: images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, AVIF, HEIC, SVG) are shown as pictures, and PDF, Zip, gzip, SQLite, ELF, Mach-O and DER are named. Adding a file is one button plus a link for a blank one, where it used to be two buttons that read alike.
