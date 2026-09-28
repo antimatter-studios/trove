@@ -913,8 +913,9 @@ pub async fn handle(
         }
 
         Request::MoveGroup { path, dest, code } => {
-            if let Some(refused) = session_gate(session, peer_uid, &code).await {
-                return refused;
+            let session_guard = session.lock().await;
+            if !session_matches(&session_guard, peer_uid, &code) {
+                return session_refused();
             }
             let mut guard = state.lock().await;
             let vault = match guard.sole_mut() {
@@ -939,8 +940,9 @@ pub async fn handle(
             dry_run,
             code,
         } => {
-            if let Some(refused) = session_gate(session, peer_uid, &code).await {
-                return refused;
+            let session_guard = session.lock().await;
+            if !session_matches(&session_guard, peer_uid, &code) {
+                return session_refused();
             }
             let mut guard = state.lock().await;
             let vault = match guard.sole_mut() {
