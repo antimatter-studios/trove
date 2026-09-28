@@ -102,8 +102,12 @@ precise and do not echo secret values.
 `exec`'s wipe and the materialize wipe overwrite-then-unlink. On
 copy-on-write / wear-leveled storage (APFS, SSDs) overwrite does not
 guarantee the old bytes are unrecoverable. This is the same limitation
-KeePassXC's own file handling carries and is documented in the threat model;
-the tmpfs guard (Linux) is the real mitigation for materialized files.
+KeePassXC's own file handling carries and is documented in the threat model.
+On Linux, the tmpfs guard applies to `materialize`, not `exec`: `exec` writes
+under `std::env::temp_dir()` without checking the backing store. macOS uses a
+soft allowlist for materialization, and Windows does not enforce a
+memory-backed destination. These paths therefore do not guarantee that
+plaintext avoids persistent storage.
 
 ## Conclusion
 

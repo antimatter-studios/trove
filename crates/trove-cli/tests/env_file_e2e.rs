@@ -380,6 +380,41 @@ fn a_world_readable_env_file_warns_but_still_works() {
     assert!(err.contains("chmod 600"), "and the fix: {err}");
 }
 
+/// Strict mode checks and reads one opened file, and the Unix open refuses a
+/// symlink that could redirect the credential path.
+#[cfg(unix)]
+#[test]
+fn env_file_does_not_follow_symlinks() {
+    use std::os::unix::fs::symlink;
+    let Some(trove) = find_trove() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = fixture(&trove, tmp.path());
+    std::fs::rename(
+        tmp.path().join(".env.trove"),
+        tmp.path().join("credentials.env"),
+    )
+    .expect("rename env file");
+    symlink(
+        tmp.path().join("credentials.env"),
+        tmp.path().join(".env.trove"),
+    )
+    .expect("symlink env file");
+
+    let out = run_in(
+        &trove,
+        tmp.path(),
+        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        "",
+        &[],
+    );
+    assert!(!out.status.success(), "env file symlinks must be rejected");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("opening env file"),
+        "expected an open error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `TROVE_ENV_STRICT=1` opts into ssh's behaviour — refuse rather than warn.
 #[cfg(unix)]
 #[test]

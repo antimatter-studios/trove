@@ -480,9 +480,11 @@ The macOS release asset is now `Trove_<version>_universal.dmg`.
 **Unlocking in the desktop app no longer freezes the window.** Every
 `#[tauri::command]` was synchronous, so it ran on the main thread and blocked
 the event loop for the whole Argon2 derivation — on a vault tuned to 50 rounds
-and 64 MB that is seconds of a dead window and a spinning cursor. All sixteen
+and 64 MB that is seconds of a dead window and a spinning cursor. Fifteen
 commands now run off the main thread, and the unlock reports each step as it
-happens rather than going dark and finishing all at once.
+happens rather than going dark and finishing all at once. Vault creation
+remains synchronous during its Argon2 derivation and can still block the
+window.
 
 **Locking is two ideas now, because one button was doing both.** *App lock*
 hides the window and takes nothing back from the machine; it is what the idle
