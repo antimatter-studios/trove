@@ -187,6 +187,7 @@ semantics, resolved against what already exists:
 trove mv "a/key" "homelab"       # homelab is a group      -> homelab/key
 trove mv "a/key" "homelab/ssh"   # ssh does not exist      -> homelab/ssh
 trove mv "a/key" "typo/ssh"      # typo does not exist     -> error
+trove mv -r "Apple.Backup" "Archive" # move a whole group tree
 ```
 
 The destination's **parent** is never created implicitly, so a typo still
@@ -198,6 +199,9 @@ Renaming in place is still `trove edit --title`; this is for when the entry
 moves as well, which used to take two commands and left a window where the
 entry sat in the right group under the wrong name.
 
+`mv -r` moves a whole group tree, including empty subgroups, in one operation.
+The destination follows the same existing-group or new-group-path rules.
+
 ## trove cp
 
 ```
@@ -208,6 +212,8 @@ Duplicate an entry, whole, at a new path — **key material and all**.
 
 ```sh
 trove cp "antimatter-studios/gitea" "homelab/ssh"
+trove cp -rv "Apple" "Apple.Backup"
+trove cp -r "Apple" "Archive" --dry-run
 ```
 
 The case this exists for: one SSH key reused across several machines ends up
@@ -237,6 +243,14 @@ them as one thing — and then rotating the first key would take the second with
 it before anyone had rotated that one, which is precisely the accident copying
 exists to prevent. Two names for one key is the transitional state; rotating
 them apart afterwards is the point.
+
+`cp -r` copies a whole group tree, including empty subgroups, and refuses
+destination conflicts before writing. It drops `Materialize.*` fields from
+copies by default so originals and backups do not claim the same output paths.
+`--keep-materialize` retains those fields and prints a warning about possible
+target collisions. `--dry-run` prints the preflighted entry paths without
+changing the vault; `-v` prints each source-to-destination path. `mv -r` moves
+the corresponding group tree.
 
 ## trove mkdir
 

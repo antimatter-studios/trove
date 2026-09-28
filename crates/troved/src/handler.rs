@@ -912,6 +912,61 @@ pub async fn handle(
             .await
         }
 
+        Request::MoveGroup { path, dest, code } => {
+            let session_guard = session.lock().await;
+            if !session_matches(&session_guard, peer_uid, &code) {
+                return session_refused();
+            }
+            let mut guard = state.lock().await;
+            let vault = match guard.sole_mut() {
+                Ok(vault) => vault,
+                Err(e) => return err_handled(e.to_string()),
+            };
+            let plan = match vault.move_group_to_path(&path, &dest) {
+                Ok(plan) => plan,
+                Err(e) => return err_handled(format!("moving group: {e}")),
+            };
+            if let Err(e) = vault.save() {
+                return err_handled(format!("saving vault: {e}"));
+            }
+            rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
+            ok_handled(Response::ok_group_transfer(plan))
+        }
+
+        Request::CopyGroup {
+            path,
+            dest,
+            keep_materialize,
+            dry_run,
+            code,
+        } => {
+            let session_guard = session.lock().await;
+            if !session_matches(&session_guard, peer_uid, &code) {
+                return session_refused();
+            }
+            let mut guard = state.lock().await;
+            let vault = match guard.sole_mut() {
+                Ok(vault) => vault,
+                Err(e) => return err_handled(e.to_string()),
+            };
+            let plan = if dry_run {
+                vault.plan_group_transfer(&path, &dest)
+            } else {
+                vault.copy_group(&path, &dest, keep_materialize)
+            };
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(e) => return err_handled(format!("copying group: {e}")),
+            };
+            if !dry_run {
+                if let Err(e) = vault.save() {
+                    return err_handled(format!("saving vault: {e}"));
+                }
+                rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
+            }
+            ok_handled(Response::ok_group_transfer(plan))
+        }
+
         Request::Mkdir { path, code } => mkdir(state, session, peer_uid, &path, &code).await,
 
         Request::Rmdir {

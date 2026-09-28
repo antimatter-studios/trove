@@ -482,6 +482,96 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
         );
     }
 
+    // Recursive group copy preflights, then copies through the daemon while
+    // removing opt-in-to-disk fields. Recursive move keeps the copied tree.
+    ok(
+        &run_trove(&trove, &d.sock, Some(&code), &["mkdir", "Source/sub"], None).await,
+        "mkdir recursive source",
+    );
+    ok(
+        &run_trove(&trove, &d.sock, Some(&code), &["mkdir", "Archive"], None).await,
+        "mkdir recursive archive",
+    );
+    ok(
+        &run_trove(
+            &trove,
+            &d.sock,
+            Some(&code),
+            &["add", "password", "Source/sub/token", "--secret-stdin"],
+            Some(SECRET),
+        )
+        .await,
+        "add recursive source entry",
+    );
+    ok(
+        &run_trove(
+            &trove,
+            &d.sock,
+            Some(&code),
+            &[
+                "edit",
+                "Source/sub/token",
+                "--set",
+                "Materialize.backup.Target=/tmp/token",
+            ],
+            None,
+        )
+        .await,
+        "set source materialization field",
+    );
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        Some(&code),
+        &["cp", "-rv", "Source", "Source.Backup", "--dry-run"],
+        None,
+    )
+    .await;
+    assert!(ok(&out, "recursive copy dry run").contains("would copy"));
+    assert_eq!(
+        reopen(&d.vault).find_by_title("Source.Backup/sub/token"),
+        None
+    );
+    let out = run_trove(
+        &trove,
+        &d.sock,
+        Some(&code),
+        &["cp", "-rv", "Source", "Source.Backup"],
+        None,
+    )
+    .await;
+    assert!(
+        ok(&out, "recursive copy").contains("Materialize.* fields"),
+        "copy summary: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    {
+        let v = reopen(&d.vault);
+        let copied = v.find_by_title("Source.Backup/sub/token").unwrap();
+        assert_eq!(
+            v.get_field(&copied, "Materialize.backup.Target").unwrap(),
+            None
+        );
+        assert_eq!(
+            v.get_field(&copied, "Password").unwrap().as_deref(),
+            Some(SECRET)
+        );
+    }
+    ok(
+        &run_trove(
+            &trove,
+            &d.sock,
+            Some(&code),
+            &["mv", "-r", "Source.Backup", "Archive"],
+            None,
+        )
+        .await,
+        "recursive move",
+    );
+    assert!(reopen(&d.vault)
+        .find_by_title("Archive/Source.Backup/sub/token")
+        .is_some());
+
     // rm recycles; rmdir recycles the rest; both persist.
     let out = run_trove(
         &trove,
