@@ -185,11 +185,17 @@ pub enum Request {
     ShowEntry {
         path: String,
     },
-    /// Case-insensitive substring search over unprotected fields and group
-    /// paths. Returns `List`-shaped summaries; never matches secret values.
+    /// Search unprotected metadata; protected values never match or leave the
+    /// vault. Older clients send a string `term`; omitted filters default empty.
     /// Ungated beyond "a vault is unlocked", exactly like `List`.
     Search {
-        term: String,
+        term: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// Code-gated single-field read (this is how Password values leave the
     /// daemon). Same session gate as `Get`.
@@ -404,7 +410,24 @@ impl std::fmt::Debug for Request {
                 .field("code", &"<redacted>")
                 .finish(),
             Request::ShowEntry { path } => f.debug_struct("ShowEntry").field("path", path).finish(),
-            Request::Search { term } => f.debug_struct("Search").field("term", term).finish(),
+            Request::Search {
+                term,
+                fields,
+                tags,
+                attachments,
+            } => f
+                .debug_struct("Search")
+                .field("term", &term.as_ref().map(|_| "<redacted>"))
+                .field(
+                    "fields",
+                    &fields
+                        .iter()
+                        .map(|field| field.split('=').next().unwrap_or(field))
+                        .collect::<Vec<_>>(),
+                )
+                .field("tags", tags)
+                .field("attachments", attachments)
+                .finish(),
             Request::GetField { path, field, .. } => f
                 .debug_struct("GetField")
                 .field("path", path)
@@ -522,6 +545,9 @@ pub struct EntryDto {
     /// Tags inherited from containing groups, root → nearest parent.
     #[serde(default)]
     pub inherited_tags: Vec<String>,
+    /// Safe metadata surfaces that caused a search hit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched: Vec<String>,
 }
 
 /// Full non-secret view of one entry, for `ShowEntry`. Everything here is

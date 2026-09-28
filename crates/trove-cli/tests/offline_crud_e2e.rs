@@ -68,6 +68,170 @@ fn stdout_str(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+#[test]
+fn search_finds_unprotected_metadata_and_exact_filters() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("search.kdbx");
+    let vault_arg = vault.to_str().expect("utf8 path");
+    let pw_line = format!("{PASSWORD}\n");
+    assert_ok(
+        &run_trove(
+            &trove,
+            &["--vault", vault_arg, "--password-stdin", "init"],
+            &pw_line,
+        ),
+        "init",
+    );
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                vault_arg,
+                "--password-stdin",
+                "add",
+                "password",
+                "Apple/signing-cert",
+                "--secret-stdin",
+            ],
+            &format!("{PASSWORD}\nhunter2-secret\n"),
+        ),
+        "add secret",
+    );
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                vault_arg,
+                "--password-stdin",
+                "edit",
+                "Apple/signing-cert",
+                "--set",
+                "About.Purpose=Developer ID signing certificate",
+                "--tag",
+                "signing",
+            ],
+            &pw_line,
+        ),
+        "edit metadata",
+    );
+    let attachment = dir.path().join("AuthKey_1234.p8");
+    std::fs::write(&attachment, b"not-a-real-private-key").expect("write fixture");
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                vault_arg,
+                "--password-stdin",
+                "add",
+                "file",
+                "Apple/signing-cert",
+                "--src",
+                attachment.to_str().unwrap(),
+                "--target",
+                "/tmp/unused-search-fixture",
+                "--name",
+                "AuthKey_1234.p8",
+            ],
+            &pw_line,
+        ),
+        "add attachment",
+    );
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault_arg,
+            "--password-stdin",
+            "search",
+            "Developer ID",
+            "--json",
+        ],
+        &pw_line,
+    );
+    assert_ok(&out, "search custom metadata");
+    let hits: serde_json::Value = serde_json::from_slice(&out.stdout).expect("search JSON");
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert!(hits[0]["matched"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::Value::String("field About.Purpose".into())));
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault_arg,
+            "--password-stdin",
+            "search",
+            "--field",
+            "About.Purpose=Developer ID signing certificate",
+            "--tag",
+            "signing",
+            "--attachment",
+            "*.p8",
+            "--json",
+        ],
+        &pw_line,
+    );
+    assert_ok(&out, "exact search filters");
+    let hits: serde_json::Value = serde_json::from_slice(&out.stdout).expect("filtered JSON");
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault_arg,
+            "--password-stdin",
+            "search",
+            "hunter2-secret",
+        ],
+        &pw_line,
+    );
+    assert_ok(&out, "protected field search");
+    assert!(
+        stdout_str(&out).is_empty(),
+        "protected values must not match"
+    );
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault_arg,
+            "--password-stdin",
+            "search",
+            "--field",
+            "Password=hunter2-secret",
+            "--json",
+        ],
+        &pw_line,
+    );
+    assert_ok(&out, "protected exact field search");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap(),
+        serde_json::json!([])
+    );
+
+    let out = run_trove(
+        &trove,
+        &["--vault", vault_arg, "--password-stdin", "search"],
+        &pw_line,
+    );
+    assert!(
+        !out.status.success(),
+        "search with no term or filter must error"
+    );
+}
+
 /// The whole CRUD lifecycle against one vault file, one process per step.
 #[test]
 fn offline_crud_lifecycle() {

@@ -92,11 +92,27 @@ through the code-gated `GetField` RPC (`TROVE_SESSION`).
 ## trove search
 
 ```
-trove [--vault <PATH>] search <TERM>
+trove [--vault <PATH>] search [TERM] [--field NAME[=VALUE]] [--tag TAG] [--attachment GLOB] [--json]
 ```
 
-Case-insensitive substring match over title, username, URL, notes and group
-path. Protected values are **never** searched. Output is `list`-shaped.
+Case-insensitive substring search across title, username, URL, notes, group
+path, unprotected custom field names/values, attachment names and entry or
+inherited group tags. Protected values are **never** searched. A term may be
+combined with filters; each supplied filter category narrows results, while
+repeated filters within a category are alternatives.
+
+- `--field NAME` matches any unprotected field with that name (field names
+  compare case-insensitively).
+- `--field NAME=VALUE` requires an exact, case-sensitive value match.
+- `--tag TAG` matches an entry tag or an inherited group tag, case-insensitively.
+- `--attachment GLOB` matches attachment names with case-insensitive `*` and
+  `?` wildcards, e.g. `--attachment '*.p8'`.
+
+Without a term, at least one filter is required. Human output remains
+list-shaped. `--json` returns entry summaries with a `matched` array naming
+the safe surfaces that caused each hit, such as `field About.Purpose`,
+`tag signing`, or `attachment AuthKey_1234.p8`. Protected names and values do
+not participate in substring or exact field searches.
 
 ## trove edit
 

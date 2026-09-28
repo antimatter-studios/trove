@@ -94,6 +94,30 @@ pub struct EntrySummary {
     pub modified: Option<String>,
 }
 
+/// Exact field constraint for a vault search. Names compare without case;
+/// values compare exactly and only unprotected fields are eligible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFieldFilter {
+    pub name: String,
+    pub value: Option<String>,
+}
+
+/// Filters shared by offline and daemon-backed entry search.
+#[derive(Debug, Clone, Default)]
+pub struct SearchQuery {
+    pub term: Option<String>,
+    pub fields: Vec<SearchFieldFilter>,
+    pub tags: Vec<String>,
+    pub attachments: Vec<String>,
+}
+
+/// An entry summary and the safe metadata surfaces that caused it to match.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub entry: EntrySummary,
+    pub matched: Vec<String>,
+}
+
 /// Non-secret summary of a group and its direct/inherited KeePass tags.
 #[derive(Debug, Clone)]
 pub struct GroupSummary {
@@ -1241,25 +1265,182 @@ impl Vault {
         Ok(true)
     }
 
-    /// Case-insensitive substring search over title, username, URL, notes
-    /// and the group path. Protected values are never searched.
+    /// Case-insensitive substring search over unprotected metadata.
     pub fn search_entries(&self, term: &str) -> Vec<EntrySummary> {
-        let needle = term.to_lowercase();
+        self.search_entries_with(&SearchQuery {
+            term: Some(term.to_string()),
+            ..SearchQuery::default()
+        })
+        .into_iter()
+        .map(|hit| hit.entry)
+        .collect()
+    }
+
+    /// Search unprotected metadata and apply optional exact field/tag and
+    /// glob attachment filters. Different filter categories combine with
+    /// AND; multiple values within one category combine with OR.
+    pub fn search_entries_with(&self, query: &SearchQuery) -> Vec<SearchHit> {
+        let needle = query.term.as_deref().map(str::to_lowercase);
         self.inner
             .db
             .iter_all_entries()
-            .filter(|e| {
-                let hay = |s: Option<&str>| s.is_some_and(|v| v.to_lowercase().contains(&needle));
-                hay(e.get_title())
-                    || hay(e.get_username())
-                    || hay(e.get_url())
-                    || hay(e.get("Notes"))
-                    || build_group_path(e)
-                        .join("/")
-                        .to_lowercase()
-                        .contains(&needle)
+            .filter_map(|e| {
+                let mut matched = Vec::new();
+                let mut term_matched = false;
+                let unprotected = |name: &str| {
+                    e.fields
+                        .get(name)
+                        .filter(|value| !value.is_protected())
+                        .map(|value| value.get().as_str())
+                };
+
+                add_search_match(
+                    &mut matched,
+                    &mut term_matched,
+                    &needle,
+                    "title".into(),
+                    unprotected("Title").unwrap_or(""),
+                );
+                if let Some(value) = unprotected("UserName") {
+                    add_search_match(
+                        &mut matched,
+                        &mut term_matched,
+                        &needle,
+                        "username".into(),
+                        value,
+                    );
+                }
+                if let Some(value) = unprotected("URL") {
+                    add_search_match(
+                        &mut matched,
+                        &mut term_matched,
+                        &needle,
+                        "url".into(),
+                        value,
+                    );
+                }
+                if let Some(value) = unprotected("Notes") {
+                    add_search_match(
+                        &mut matched,
+                        &mut term_matched,
+                        &needle,
+                        "notes".into(),
+                        value,
+                    );
+                }
+                let group_path = build_group_path(&e);
+                add_search_match(
+                    &mut matched,
+                    &mut term_matched,
+                    &needle,
+                    "group_path".into(),
+                    &group_path.join("/"),
+                );
+
+                let mut fields_match = query.fields.is_empty();
+                for (name, value) in &e.fields {
+                    if value.is_protected()
+                        || ["Password", "otp"]
+                            .iter()
+                            .any(|secret| name.eq_ignore_ascii_case(secret))
+                    {
+                        continue;
+                    }
+                    if !["Title", "UserName", "Password", "URL", "Notes"]
+                        .iter()
+                        .any(|standard| name.eq_ignore_ascii_case(standard))
+                    {
+                        add_search_match(
+                            &mut matched,
+                            &mut term_matched,
+                            &needle,
+                            format!("field {name}"),
+                            value.get(),
+                        );
+                    }
+                    for filter in &query.fields {
+                        if name.eq_ignore_ascii_case(&filter.name)
+                            && filter
+                                .value
+                                .as_ref()
+                                .is_none_or(|wanted| wanted == value.get())
+                        {
+                            fields_match = true;
+                            matched.push(format!("field {name}"));
+                        }
+                    }
+                }
+
+                let inherited_tags = build_inherited_tags(Some(e.parent()));
+                let all_tags: Vec<&String> = e.tags.iter().chain(inherited_tags.iter()).collect();
+                for tag in &all_tags {
+                    add_search_match(
+                        &mut matched,
+                        &mut term_matched,
+                        &needle,
+                        format!("tag {tag}"),
+                        tag,
+                    );
+                }
+                let tags_match = query.tags.is_empty()
+                    || query
+                        .tags
+                        .iter()
+                        .any(|filter| all_tags.iter().any(|tag| tag.eq_ignore_ascii_case(filter)));
+                if !query.tags.is_empty() {
+                    for tag in &all_tags {
+                        if query
+                            .tags
+                            .iter()
+                            .any(|filter| tag.eq_ignore_ascii_case(filter))
+                        {
+                            matched.push(format!("tag {tag}"));
+                        }
+                    }
+                }
+
+                let attachment_names: Vec<String> = e
+                    .attachments_named()
+                    .map(|(name, _)| name.to_string())
+                    .collect();
+                for name in &attachment_names {
+                    add_search_match(
+                        &mut matched,
+                        &mut term_matched,
+                        &needle,
+                        format!("attachment {name}"),
+                        name,
+                    );
+                }
+                let attachments_match = query.attachments.is_empty()
+                    || query.attachments.iter().any(|pattern| {
+                        attachment_names
+                            .iter()
+                            .any(|name| glob_matches(pattern, name))
+                    });
+                if !query.attachments.is_empty() {
+                    for name in &attachment_names {
+                        if query
+                            .attachments
+                            .iter()
+                            .any(|pattern| glob_matches(pattern, name))
+                        {
+                            matched.push(format!("attachment {name}"));
+                        }
+                    }
+                }
+
+                let term_matches = needle.is_none() || term_matched;
+                if !term_matches || !fields_match || !tags_match || !attachments_match {
+                    return None;
+                }
+                matched.sort();
+                matched.dedup();
+                Some(SearchHit {
+                    entry: summarise(&e),
+                    matched,
+                })
             })
-            .map(|e| summarise(&e))
             .collect()
     }
 
@@ -1550,6 +1731,45 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
             .last_modification
             .map(|dt| dt.and_utc().to_rfc3339()),
     }
+}
+
+fn add_search_match(
+    matched: &mut Vec<String>,
+    term_matched: &mut bool,
+    needle: &Option<String>,
+    label: String,
+    value: &str,
+) {
+    if needle
+        .as_ref()
+        .is_some_and(|needle| value.to_lowercase().contains(needle))
+    {
+        *term_matched = true;
+        matched.push(label);
+    }
+}
+
+/// Case-insensitive glob match for attachment names. Supports `*` and `?`.
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let value: Vec<char> = value.to_lowercase().chars().collect();
+    let mut previous = vec![false; value.len() + 1];
+    previous[0] = true;
+    for p in pattern {
+        let mut current = vec![false; value.len() + 1];
+        if p == '*' {
+            current[0] = previous[0];
+            for index in 1..=value.len() {
+                current[index] = previous[index] || current[index - 1];
+            }
+        } else {
+            for index in 1..=value.len() {
+                current[index] = previous[index - 1] && (p == '?' || p == value[index - 1]);
+            }
+        }
+        previous = current;
+    }
+    previous[value.len()]
 }
 
 fn summarise_group(group: &keepass::db::GroupRef<'_>) -> GroupSummary {

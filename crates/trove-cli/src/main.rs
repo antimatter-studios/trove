@@ -24,7 +24,7 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use trove_core::{Error as CoreError, Vault};
+use trove_core::{Error as CoreError, SearchFieldFilter, SearchQuery, Vault};
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -357,12 +357,20 @@ enum Command {
         json: bool,
     },
 
-    /// Search entries: case-insensitive substring match over title, username,
-    /// URL, notes and group path. Protected values are never searched. Output
-    /// is `list`-shaped (id, path, attachments), one hit per line.
+    /// Search unprotected entry metadata: standard/custom fields, attachments,
+    /// tags and group paths. Protected values are never searched.
     Search {
-        /// The term to look for.
-        term: String,
+        /// Case-insensitive substring term. May be omitted when filters are used.
+        term: Option<String>,
+        /// Match an unprotected field by name, or exactly by NAME=VALUE. Repeatable.
+        #[arg(long = "field", value_name = "NAME[=VALUE]")]
+        fields: Vec<String>,
+        /// Match an entry or inherited group tag. Repeatable.
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Match an attachment name using `*` and `?` wildcards. Repeatable.
+        #[arg(long = "attachment", value_name = "GLOB")]
+        attachments: Vec<String>,
         /// Machine-readable output: a JSON array of entry summaries.
         #[arg(long)]
         json: bool,
@@ -1765,9 +1773,23 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Search {
             term,
+            fields,
+            tags,
+            attachments,
             json,
             show_id,
-        } => cmd_search(vault, &term, pw_stdin, json, show_id),
+        } => cmd_search(
+            vault,
+            SearchOptions {
+                term,
+                fields,
+                tags,
+                attachments,
+                json,
+                show_id,
+            },
+            pw_stdin,
+        ),
         Command::Edit {
             entry_path,
             title,
@@ -4420,54 +4442,104 @@ fn cmd_show(
     Ok(())
 }
 
-fn cmd_search(
-    vault: Option<&Path>,
-    term: &str,
-    pw_stdin: bool,
+struct SearchOptions {
+    term: Option<String>,
+    fields: Vec<String>,
+    tags: Vec<String>,
+    attachments: Vec<String>,
     json: bool,
     show_id: bool,
-) -> Result<()> {
+}
+
+fn cmd_search(vault: Option<&Path>, options: SearchOptions, pw_stdin: bool) -> Result<()> {
+    let fields = parse_search_fields(&options.fields)?;
+    if options.term.is_none()
+        && fields.is_empty()
+        && options.tags.is_empty()
+        && options.attachments.is_empty()
+    {
+        return Err(anyhow!(
+            "search needs a term or at least one --field, --tag, or --attachment filter"
+        ));
+    }
+    let query = SearchQuery {
+        term: options.term.clone(),
+        fields: fields.clone(),
+        tags: options.tags.clone(),
+        attachments: options.attachments.clone(),
+    };
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
-            if json {
-                let arr: Vec<Value> = v
-                    .search_entries(term)
+            let hits = v.search_entries_with(&query);
+            if options.json {
+                let arr: Vec<Value> = hits
                     .iter()
-                    .map(entry_summary_json)
+                    .map(|hit| {
+                        let mut value = entry_summary_json(&hit.entry);
+                        value["matched"] = serde_json::json!(hit.matched);
+                        value
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&arr)?);
                 return Ok(());
             }
-            let rows: Vec<ListRow> = v
-                .search_entries(term)
+            let rows: Vec<ListRow> = hits
                 .iter()
-                .map(|e| ListRow {
-                    id: e.id.to_string(),
-                    group_path: e.group_path.clone(),
-                    title: e.title.clone(),
-                    attachments: e.attachment_names.clone(),
+                .map(|hit| ListRow {
+                    id: hit.entry.id.to_string(),
+                    group_path: hit.entry.group_path.clone(),
+                    title: hit.entry.title.clone(),
+                    attachments: hit.entry.attachment_names.clone(),
                 })
                 .collect();
-            print_entry_rows(rows, show_id, false);
+            print_entry_rows(rows, options.show_id, false);
         }
         None => {
             let resp = daemon_call(&daemon::Request::Search {
-                term: term.to_string(),
+                term: options.term,
+                fields: fields
+                    .iter()
+                    .map(|f| match &f.value {
+                        Some(value) => format!("{}={value}", f.name),
+                        None => f.name.clone(),
+                    })
+                    .collect(),
+                tags: options.tags,
+                attachments: options.attachments,
             })?;
             let entries = resp
                 .get("entries")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            if json {
+            if options.json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
                 return Ok(());
             }
-            print_entry_rows(rows_from_json(&entries), show_id, false);
+            print_entry_rows(rows_from_json(&entries), options.show_id, false);
         }
     }
     Ok(())
+}
+
+fn parse_search_fields(fields: &[String]) -> Result<Vec<SearchFieldFilter>> {
+    fields
+        .iter()
+        .map(|field| {
+            let (name, value) = match field.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (field.as_str(), None),
+            };
+            if name.is_empty() {
+                return Err(anyhow!("search field name cannot be empty"));
+            }
+            Ok(SearchFieldFilter {
+                name: name.to_string(),
+                value,
+            })
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
