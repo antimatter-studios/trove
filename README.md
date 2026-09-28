@@ -63,6 +63,13 @@ cargo build --release
 # Run from there directly, or copy / symlink onto PATH.
 ```
 
+If you use the Chore task runner, [`chores.yml`](chores.yml) provides `chore build`,
+`chore build:release`, `chore test`, and `chore desktop`. With `cargo-sweep` installed,
+Chore starts a guarded background cleanup after each task (including failed tasks); it
+removes Cargo artifacts older than seven days by default. Set `TROVE_SWEEP_DAYS` to change
+that age. This hook runs only for Chore commands; direct Cargo, IDE, and CI builds do not
+trigger it.
+
 ## Quickstart
 
 Linux + macOS. The daemon (`troved`) is the long-running process; `trove` is a thin CLI client.
