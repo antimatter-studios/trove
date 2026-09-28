@@ -1367,7 +1367,7 @@ mod challenge_response_routing_tests {
             None
         ));
         assert!(!challenge_response_uses_offline_vault(
-            &Command::Status,
+            &Command::Status { json: false },
             Some(vault)
         ));
         assert!(!challenge_response_uses_offline_vault(
