@@ -55,12 +55,12 @@ jobs:
     if: ${{ !inputs.crate_only }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Install system tools
         # keepassxc-cli is the mandatory cross-tool conformance oracle — the
@@ -75,7 +75,7 @@ jobs:
             keepassxc
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2.7.3
+        uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
         with:
           shared-key: release-test
 
@@ -122,17 +122,17 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2.7.3
+        uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
         with:
           key: release-${{ matrix.target }}
 
@@ -218,7 +218,7 @@ jobs:
           Compress-Archive -Path staging/* -DestinationPath "$name.zip" -Force
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.label }}
           path: |
@@ -258,21 +258,21 @@ jobs:
         working-directory: trove-desktop
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: trove-desktop/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.rust-targets }}
 
-      - uses: Swatinem/rust-cache@v2.7.3
+      - uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
         with:
           workspaces: trove-desktop/src-tauri
           key: release-desktop-${{ matrix.label }}
@@ -337,7 +337,7 @@ jobs:
 
       - name: Build desktop bundles — signed macOS (cert present)
         if: matrix.label == 'macos-universal' && steps.signing.outputs.have_cert == 'true'
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           # Signing identity + team come from secrets, not the source, so a fork
           # never references this account. KEYCHAIN_PASSWORD is inherited from
@@ -354,7 +354,7 @@ jobs:
 
       - name: Build desktop bundles — unsigned (Linux/Windows, or macOS w/o cert)
         if: matrix.label != 'macos-universal' || steps.signing.outputs.have_cert != 'true'
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         with:
           projectPath: trove-desktop
           args: ${{ matrix.args }}
@@ -370,7 +370,7 @@ jobs:
           ls -la bundles/
 
       - name: Upload desktop artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: desktop-${{ matrix.label }}
           path: trove-desktop/bundles/*
@@ -384,12 +384,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (CHANGELOG.md + release-notes tooling)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -425,7 +425,7 @@ jobs:
           output-file: release-notes.md
 
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: trove ${{ github.event.inputs.tag || github.ref_name }}
