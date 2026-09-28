@@ -1888,6 +1888,13 @@ async fn edit_entry(
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
+    for field in unsets {
+        match vault.get_field(&id, field) {
+            Ok(Some(_)) => {}
+            Ok(None) => return err_handled(format!("entry '{path}' has no field '{field}'")),
+            Err(e) => return err_handled(format!("checking field {field}: {e}")),
+        }
+    }
     for (field, value) in sets {
         if let Err(e) = vault.set_field(&id, field, value) {
             return err_handled(format!("setting {field}: {e}"));
