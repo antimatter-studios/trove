@@ -271,9 +271,9 @@
         <h3>trove's moat — the runtime</h3>
         <ul class="pts">
           <li><b>exec &lt;scope&gt; -- cmd</b> — secrets scoped to one process tree, wiped on exit. <span style="color:var(--faint)">A shell with a kubeconfig that vanishes when it closes.</span></li>
-          <li><b>Headless SSH + GPG agents</b> — keys served from daemon memory; <code style="font-family:var(--mono);font-size:12px">git commit -S</code> works. keepassxc needs the GUI.</li>
+          <li><b>Headless SSH + GPG agents</b> — SSH keys and supported Ed25519 OpenPGP signing keys are served from daemon memory; <code style="font-family:var(--mono);font-size:12px">git commit -S</code> works with a supported Ed25519 key. keepassxc needs the GUI.</li>
           <li><b>Unlock-once daemon</b> — one KDF, then instant ops. keepassxc-cli re-runs Argon2 per invocation.</li>
-          <li><b>File materialization</b> — decrypt-to-disk on unlock, wipe on lock, tmpfs-guarded.</li>
+          <li><b>File materialization</b> — decrypt-to-disk on unlock, wipe on lock; Linux refuses non-tmpfs destinations by default. macOS uses a soft path allowlist, and Windows does not enforce memory-backed storage.</li>
           <li><b>git-credential, --json, trove://</b> refs — CI-native scripting keepassxc-cli has no answer for.</li>
         </ul>
       </div>
@@ -295,7 +295,7 @@
       <div class="limit"><span class="k">XML import</span><span class="v">Out of scope: the keepass crate exposes no public XML→database parser. Export (re-importable) ships; import stays with keepassxc-cli.</span></div>
       <div class="limit"><span class="k">YubiKey / macOS</span><span class="v">The feature builds and is CI-tested on Linux only — upstream pins a USB backend that doesn't compile on macOS. Hardware round-trip is verified by a software provider; a physical-key test ships but is unrun.</span></div>
       <div class="limit"><span class="k">Steam TOTP</span><span class="v">The non-standard 5-character Steam variant isn't implemented; standard RFC 6238 (SHA1/256/512, 6–8 digits) is.</span></div>
-      <div class="limit"><span class="k">Secure erase</span><span class="v">exec/materialize wipes overwrite-then-unlink; on copy-on-write / wear-leveled storage that isn't a guarantee — the same caveat KeePassXC carries. tmpfs is the real mitigation.</span></div>
+      <div class="limit"><span class="k">Secure erase</span><span class="v">exec/materialize wipes overwrite-then-unlink; on copy-on-write / wear-leveled storage that isn't a guarantee — the same caveat KeePassXC carries. Linux's tmpfs check applies to materialization, not exec; macOS and Windows do not guarantee memory-backed storage.</span></div>
     </div>
   </section>
 
@@ -311,7 +311,7 @@
 
   <footer>
     <p>Parity landed in trove v0.5.0 (10 stacked PRs, #28–#38); current release is v0.6.0. Parity plan: <a href="https://github.com/antimatter-studios/trove/blob/main/docs/parity-plan.md">docs/parity-plan.md</a> · security review: <a href="https://github.com/antimatter-studios/trove/blob/main/docs/security-review-2026-07-04.md">docs/security-review-2026-07-04.md</a>.</p>
-    <p>Comparison baseline: keepassxc-cli 2.7.x. trove remains 100% kdbx-compatible — the same vault opens in KeePassXC, KeePassDX, Strongbox, or KeePass2 without data loss.</p>
+    <p>Comparison baseline: keepassxc-cli 2.7.x. The KDBX format is designed for interoperability. Continuous round-trip coverage uses keepassxc-cli and the keepass crate; KeePassDX, Strongbox, and KeePass2 are not part of this test suite, so compatibility with those clients is expected but not continuously verified here.</p>
   </footer>
 
 </div>
