@@ -67,6 +67,14 @@ fn generate_password_and_diceware_shapes() {
     assert_eq!(pw.len(), 20);
     assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()));
 
+    // Zero is a useful value for computed batch counts: do not emit an
+    // unrequested secret.
+    let out = ok(
+        &run_trove(&trove, &["generate", "password", "--count", "0"], ""),
+        "generate zero passwords",
+    );
+    assert!(out.is_empty(), "count zero should print nothing: {out:?}");
+
     // Policy flags + count.
     let out = ok(
         &run_trove(
@@ -124,6 +132,12 @@ fn generate_password_and_diceware_shapes() {
             .all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase())),
         "{out}"
     );
+
+    let out = ok(
+        &run_trove(&trove, &["generate", "diceware", "--count", "0"], ""),
+        "generate zero passphrases",
+    );
+    assert!(out.is_empty(), "count zero should print nothing: {out:?}");
 }
 
 #[test]
@@ -148,6 +162,20 @@ fn estimate_rates_weak_below_strong() {
     let strong = score("vXk9$mQz2!pLr7@wN4hT");
     assert!(weak <= 1, "'password' must rate 0-1, got {weak}");
     assert_eq!(strong, 4, "random 20-char must rate 4");
+
+    let out = ok(
+        &run_trove(&trove, &["estimate", "--json"], "password\n"),
+        "JSON estimate",
+    );
+    let value: serde_json::Value = serde_json::from_str(&out).expect("estimate JSON");
+    assert_eq!(value["length"], 8);
+    assert!(value["score"].as_u64().is_some());
+    assert!(value["entropy_bits"].as_f64().is_some());
+    assert!(value["suggestions"].is_array());
+    assert!(
+        value.get("password").is_none(),
+        "JSON must not echo secrets"
+    );
 }
 
 #[test]
@@ -209,6 +237,7 @@ fn analyze_flags_breached_and_gates_exit_code() {
             "analyze",
             "--hibp",
             hibps,
+            "--json",
         ],
         &pw,
     );
@@ -221,6 +250,11 @@ fn analyze_flags_breached_and_gates_exit_code() {
     assert!(stdout.contains("breached-one"), "{stdout}");
     assert!(stdout.contains("1337"), "{stdout}");
     assert!(!stdout.contains("clean-one"), "{stdout}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("analyze JSON");
+    assert_eq!(value["checked_passwords"], 2);
+    assert_eq!(value["breached_passwords"], 1);
+    assert_eq!(value["findings"][0]["entry_path"], "breached-one");
+    assert_eq!(value["findings"][0]["breach_count"], 1337);
 
     // Clean vault → exit 0.
     ok(
@@ -247,11 +281,84 @@ fn analyze_flags_breached_and_gates_exit_code() {
             "analyze",
             "--hibp",
             hibps,
+            "--json",
         ],
         &pw,
     );
     assert_eq!(out.status.code(), Some(0), "clean vault must exit 0");
-    assert!(String::from_utf8_lossy(&out.stdout).contains("no breached passwords"));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("clean analyze JSON");
+    assert_eq!(value["checked_passwords"], 1);
+    assert_eq!(value["breached_passwords"], 0);
+    assert_eq!(value["findings"], serde_json::json!([]));
+
+    // Empty and absent Password fields must be visible and fail the audit,
+    // without being counted as HIBP lookups.
+    for (entry, edit_arg) in [("blank-one", "Password="), ("missing-one", "")] {
+        ok(
+            &run_trove(
+                &trove,
+                &[
+                    "--vault",
+                    vault,
+                    "--password-stdin",
+                    "add",
+                    "password",
+                    entry,
+                    "--secret-stdin",
+                ],
+                &format!("{PASSWORD}\ntemporary-secret\n"),
+            ),
+            entry,
+        );
+        let edit_args = if edit_arg.is_empty() {
+            vec![
+                "--vault",
+                vault,
+                "--password-stdin",
+                "edit",
+                entry,
+                "--unset",
+                "Password",
+            ]
+        } else {
+            vec![
+                "--vault",
+                vault,
+                "--password-stdin",
+                "edit",
+                entry,
+                "--set",
+                edit_arg,
+            ]
+        };
+        ok(&run_trove(&trove, &edit_args, &pw), "clear password");
+    }
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "analyze",
+            "--hibp",
+            hibps,
+        ],
+        &pw,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "empty passwords must fail audit"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("blank-one  empty password"), "{stdout}");
+    assert!(stdout.contains("missing-one  empty password"), "{stdout}");
+    assert!(!stdout.contains("no breached passwords"), "{stdout}");
+    assert!(
+        stderr.contains("checked 1 passwords, 0 breached, 2 empty"),
+        "{stderr}"
+    );
 
     // Missing dump file is a clean error.
     let out = run_trove(

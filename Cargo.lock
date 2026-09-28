@@ -2500,6 +2500,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "libc",
  "rand 0.8.7",
  "rpassword",
  "security-framework",

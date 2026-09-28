@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use trove_core::{EntrySummary, Vault};
+use trove_core::{EntrySummary, SearchFieldFilter, SearchHit, SearchQuery, Vault};
 
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::idle::{IdleState, IdleTracker};
@@ -163,16 +163,28 @@ pub async fn handle(
                         g.extend(materialized);
                     }
 
-                    // Add to the open set, then rebuild both agent key stores
-                    // from the union of every open vault. Rebuilding (rather
-                    // than appending) is what keeps a re-unlock from
-                    // accumulating stale keys, now that a vault can be replaced
-                    // in place.
+                    // Mint before publishing the new vault. Hold session before
+                    // state, matching protected requests and lock transitions,
+                    // so a lock cannot land between vault insertion and session
+                    // update.
+                    let code = if mint_session == Some(false) {
+                        None
+                    } else {
+                        Some(mint_session_code())
+                    };
+                    let mut sess = session.lock().await;
                     let (ssh, gpg) = {
                         let mut guard = state.lock().await;
                         guard.insert_with_filter(vault, filter.clone());
+                        if let Some(code) = &code {
+                            *sess = Some(Session {
+                                code: code.clone(),
+                                uid: peer_uid,
+                            });
+                        }
                         union_agent_keys(&guard)
                     };
+                    drop(sess);
 
                     // Arm the idle-lock timer. If the unlock request carried
                     // an explicit `timeout`, that value also becomes the new
@@ -228,32 +240,6 @@ pub async fn handle(
                         *gkeys = gpg;
                     }
 
-                    // Mint the session code, bound to the uid that unlocked.
-                    // Extraction (`Get`) will demand both. Returned to the CLI,
-                    // which emits it as `export TROVE_SESSION=…`.
-                    //
-                    // `session: Some(false)` — `unlock --detach` — declines.
-                    // The caller has nowhere to put a code (no subshell, no
-                    // `eval`), and a code nobody holds is not harmless: it is a
-                    // live extraction capability sitting in daemon memory for
-                    // the life of the unlock. Not minting means the gate is
-                    // never opened rather than opened and abandoned.
-                    //
-                    // Declining also leaves any EXISTING session alone. Unlock
-                    // is additive across vaults, so overwriting here would
-                    // revoke the session of a shell that is still using it —
-                    // detaching a new vault must not log out the old one.
-                    let code = if mint_session == Some(false) {
-                        None
-                    } else {
-                        let code = mint_session_code();
-                        let mut sess = session.lock().await;
-                        *sess = Some(Session {
-                            code: code.clone(),
-                            uid: peer_uid,
-                        });
-                        Some(code)
-                    };
                     Handled {
                         response: Response::ok_unlocked(
                             code,
@@ -299,6 +285,7 @@ pub async fn handle(
                     group_path: s.group_path,
                     tags: s.tags,
                     inherited_tags: s.inherited_tags,
+                    matched: Vec::new(),
                 })
                 .collect();
             Handled {
@@ -313,6 +300,9 @@ pub async fn handle(
             // through the same lock callback, but cancelling here is cheaper
             // and clearer.
             idle.cancel();
+            // Lock transitions serialize with code-gated operations. Lock order
+            // is session -> vault state everywhere these locks are combined.
+            let mut session_guard = session.lock().await;
 
             // What we may have to claw back out of the *user's own* ssh-agent.
             // Snapshot before touching anything: the per-entry
@@ -417,8 +407,7 @@ pub async fn handle(
                 // The session code is a daemon-wide capability, not a per-vault
                 // one (docs/multi-vault.md), so it survives locking one of
                 // several vaults and dies only when nothing is left unlocked.
-                let mut sess = session.lock().await;
-                *sess = None;
+                *session_guard = None;
             }
             // The daemon exists only to hold unlocked vaults and to clean up
             // materialized files. Once the last vault is locked and its files
@@ -438,6 +427,7 @@ pub async fn handle(
 
         Request::Shutdown => {
             idle.cancel();
+            let mut session_guard = session.lock().await;
 
             // Shutdown is a lock that never comes back, so the forwarded copies
             // have to go too — otherwise the only thing left holding them is
@@ -464,10 +454,7 @@ pub async fn handle(
                 gkeys.clear();
             }
             scoped::clear_all(scoped_agents).await;
-            {
-                let mut sess = session.lock().await;
-                *sess = None;
-            }
+            *session_guard = None;
             Handled {
                 response: Response::ok_empty(),
                 shutdown: true,
@@ -774,7 +761,12 @@ pub async fn handle(
 
         Request::ShowEntry { path } => show_entry(state, &path).await,
 
-        Request::Search { term } => search(state, &term).await,
+        Request::Search {
+            term,
+            fields,
+            tags,
+            attachments,
+        } => search(state, term, &fields, &tags, &attachments).await,
 
         Request::GetField { path, field, code } => {
             get_field(state, session, peer_uid, &path, &field, &code).await
@@ -930,17 +922,10 @@ async fn get_secret(
     attachment: &str,
     code: &str,
 ) -> Handled {
-    {
-        let sess = session.lock().await;
-        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
-        if !ok {
-            return Handled {
-                response: Response::err(
-                    "refused: vault locked, or session code missing/invalid for this uid",
-                ),
-                shutdown: false,
-            };
-        }
+    // Keep authorization stable until the vault read completes.
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let guard = state.lock().await;
     let (vault, id) = match guard.find_entry(title) {
@@ -991,17 +976,10 @@ async fn add_ssh(
     user: Option<&str>,
     code: &str,
 ) -> Handled {
-    {
-        let sess = session.lock().await;
-        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
-        if !ok {
-            return Handled {
-                response: Response::err(
-                    "refused: vault locked, or session code missing/invalid for this uid",
-                ),
-                shutdown: false,
-            };
-        }
+    // Keep authorization stable through the vault mutation (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
 
     let key_bytes = {
@@ -1119,17 +1097,10 @@ async fn add_gpg(
     key_b64: &str,
     code: &str,
 ) -> Handled {
-    {
-        let sess = session.lock().await;
-        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
-        if !ok {
-            return Handled {
-                response: Response::err(
-                    "refused: vault locked, or session code missing/invalid for this uid",
-                ),
-                shutdown: false,
-            };
-        }
+    // Keep authorization stable through the vault mutation (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
 
     let key_bytes = {
@@ -1374,22 +1345,19 @@ async fn materialize_from_vault(
     (materialized, warnings)
 }
 
-/// Validate the provisioning session for a code-gated request: vault unlocked
-/// by this uid + matching code. Returns the standard deliberately-generic
-/// refusal (`Some(Handled)`) on failure so callers can `return` it — the
-/// message must not be an oracle for "locked" vs "wrong code".
-async fn session_gate(session: &SessionStore, peer_uid: u32, code: &str) -> Option<Handled> {
-    let sess = session.lock().await;
-    let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
-    if ok {
-        None
-    } else {
-        Some(Handled {
-            response: Response::err(
-                "refused: vault locked, or session code missing/invalid for this uid",
-            ),
-            shutdown: false,
-        })
+/// Check a session while its mutex remains held through the corresponding
+/// vault access. Protected requests and lock transitions acquire session before
+/// vault state, so authorization cannot change between check and use.
+fn session_matches(sess: &Option<Session>, peer_uid: u32, code: &str) -> bool {
+    matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid)
+}
+
+fn session_refused() -> Handled {
+    Handled {
+        response: Response::err(
+            "refused: vault locked, or session code missing/invalid for this uid",
+        ),
+        shutdown: false,
     }
 }
 
@@ -1403,7 +1371,14 @@ fn entry_dto(s: EntrySummary) -> EntryDto {
         group_path: s.group_path,
         tags: s.tags,
         inherited_tags: s.inherited_tags,
+        matched: Vec::new(),
     }
+}
+
+fn search_hit_dto(hit: SearchHit) -> EntryDto {
+    let mut dto = entry_dto(hit.entry);
+    dto.matched = hit.matched;
+    dto
 }
 
 fn err_handled(msg: impl Into<String>) -> Handled {
@@ -1446,7 +1421,36 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
 }
 
 /// Ungated (like `List`): substring search over non-secret surfaces.
-async fn search(state: &SharedState, term: &str) -> Handled {
+async fn search(
+    state: &SharedState,
+    term: Option<String>,
+    fields: &[String],
+    tags: &[String],
+    attachments: &[String],
+) -> Handled {
+    let field_filters: Result<Vec<SearchFieldFilter>, String> = fields
+        .iter()
+        .map(|field| {
+            let (name, value) = match field.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (field.as_str(), None),
+            };
+            if name.is_empty() {
+                return Err("search field name cannot be empty".to_string());
+            }
+            Ok(SearchFieldFilter {
+                name: name.to_string(),
+                value,
+            })
+        })
+        .collect();
+    let field_filters = match field_filters {
+        Ok(filters) => filters,
+        Err(error) => return err_handled(error),
+    };
+    if term.is_none() && fields.is_empty() && tags.is_empty() && attachments.is_empty() {
+        return err_handled("search needs a term or at least one filter");
+    }
     let guard = state.lock().await;
     if guard.is_empty() {
         return err_handled("no vault unlocked");
@@ -1454,10 +1458,16 @@ async fn search(state: &SharedState, term: &str) -> Handled {
     // Searches the union — a hit in any unlocked vault counts. Unlike a
     // title-addressed read there is nothing to disambiguate: search returns
     // every match by design.
+    let query = SearchQuery {
+        term,
+        fields: field_filters,
+        tags: tags.to_vec(),
+        attachments: attachments.to_vec(),
+    };
     let entries: Vec<EntryDto> = guard
         .iter()
-        .flat_map(|vault| vault.search_entries(term))
-        .map(entry_dto)
+        .flat_map(|vault| vault.search_entries_with(&query))
+        .map(search_hit_dto)
         .collect();
     ok_handled(Response::ok_list(entries))
 }
@@ -1472,8 +1482,10 @@ async fn get_field(
     field: &str,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let guard = state.lock().await;
     let (vault, id) = match guard.find_entry(path) {
@@ -1573,8 +1585,10 @@ async fn add_password(
     password: &str,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     // `route_upsert` hands back the entry when it already exists — in ANY open
@@ -1775,8 +1789,10 @@ async fn edit_entry(
     clear_tags: bool,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     let (vault, id) = match guard.find_entry_mut(path) {
@@ -1843,8 +1859,10 @@ async fn remove_entry(
     permanent: bool,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     let (vault, id) = match guard.find_entry_mut(path) {
@@ -1875,8 +1893,10 @@ async fn move_entry(
     group: &str,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     let (vault, id) = match guard.find_entry_mut(path) {
@@ -1916,8 +1936,10 @@ async fn copy_entry(
     dest: &str,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     let (vault, id) = match guard.find_entry_mut(path) {
@@ -1942,8 +1964,10 @@ async fn mkdir(
     path: &str,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     // A group has no entry title to route on, so this needs an unambiguous
@@ -1975,8 +1999,10 @@ async fn rmdir(
     recursive: bool,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     let vault = match guard.sole_mut() {
@@ -2003,8 +2029,10 @@ async fn get_totp(
     path: &str,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let guard = state.lock().await;
     let (vault, id) = match guard.find_entry(path) {
@@ -2027,8 +2055,10 @@ async fn add_totp(
     uri: &str,
     code: &str,
 ) -> Handled {
-    if let Some(refused) = session_gate(session, peer_uid, code).await {
-        return refused;
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
     }
     let mut guard = state.lock().await;
     let (vault, existing) = match guard.route_upsert(path) {

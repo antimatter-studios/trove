@@ -13,7 +13,7 @@ trove [OPTIONS] <COMMAND>
 | `--vault <PATH>` | Operate **offline** on this kdbx file, bypassing the daemon. Global — works before or after the subcommand. Defaults to `TROVE_VAULT` when set; an explicit flag wins. See "Operating modes" below. |
 | `--password-stdin` | Read the vault password from stdin (one line) instead of prompting. For `init`, the single line becomes the password without a confirm step. Global — works on every subcommand. |
 | `--key-file <PATH>` | Composite key: this keyfile PLUS the password, wherever a vault is opened — offline `--vault` commands, `init` (locks the new vault with the pair), and `unlock` (the daemon holds the bytes in memory so its re-saves keep the composite key). Any format KeePassXC accepts: XML v1/v2, raw 32-byte, hex-64, or an arbitrary file (SHA-256). A wrong/missing keyfile fails like a wrong password (exit 2). |
-| `--yubikey <SLOT>[:SERIAL]` | *(builds with `--features yubikey`; Linux-only for now — upstream keepass pins a USB backend that doesn't compile on macOS.)* HMAC-SHA1 challenge-response composited with the password/keyfile, KeePassXC's scheme. Applies to offline `--vault` commands and `init`. The device must stay connected while writing: every save answers a fresh challenge. |
+| `--yubikey <SLOT>[:SERIAL]` | *(builds with `--features yubikey`; Linux-only for now — upstream keepass pins a USB backend that doesn't compile on macOS.)* HMAC-SHA1 challenge-response composited with the password/keyfile, KeePassXC's scheme. Applies to offline `--vault` commands and `init`; daemon-backed commands, including `unlock`, reject it as unsupported. The device must stay connected while writing: every save answers a fresh challenge. |
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
 
@@ -75,7 +75,9 @@ trove [--vault <PATH>] show [OPTIONS] <ENTRY_PATH>
 ```
 
 Print an entry's details: path, title, username, URL, notes, custom-field
-*names* and attachment names. The password is masked unless `--show-protected`.
+*names* and attachment names. Protected fields (`Password`, `otp`) are hidden
+from `--json` field names unless `--show-protected` is set; the flag also
+reveals protected values where the selected mode returns them.
 
 | Flag | Description |
 | --- | --- |
@@ -91,11 +93,27 @@ through the code-gated `GetField` RPC (`TROVE_SESSION`).
 ## trove search
 
 ```
-trove [--vault <PATH>] search <TERM>
+trove [--vault <PATH>] search [TERM] [--field NAME[=VALUE]] [--tag TAG] [--attachment GLOB] [--json]
 ```
 
-Case-insensitive substring match over title, username, URL, notes and group
-path. Protected values are **never** searched. Output is `list`-shaped.
+Case-insensitive substring search across title, username, URL, notes, group
+path, unprotected custom field names/values, attachment names and entry or
+inherited group tags. Protected values are **never** searched. A term may be
+combined with filters; each supplied filter category narrows results, while
+repeated filters within a category are alternatives.
+
+- `--field NAME` matches any unprotected field with that name (field names
+  compare case-insensitively).
+- `--field NAME=VALUE` requires an exact, case-sensitive value match.
+- `--tag TAG` matches an entry tag or an inherited group tag, case-insensitively.
+- `--attachment GLOB` matches attachment names with case-insensitive `*` and
+  `?` wildcards, e.g. `--attachment '*.p8'`.
+
+Without a term, at least one filter is required. Human output remains
+list-shaped. `--json` returns entry summaries with a `matched` array naming
+the safe surfaces that caused each hit, such as `field About.Purpose`,
+`tag signing`, or `attachment AuthKey_1234.p8`. Protected names and values do
+not participate in substring or exact field searches.
 
 ## trove edit
 
@@ -577,24 +595,52 @@ vendored EFF large wordlist (7776 words ≈ 12.9 bits/word; default 7 words
 ## trove estimate
 
 ```
-trove estimate [PASSWORD]
+trove estimate [PASSWORD] [--json]
 ```
 
 zxcvbn strength rating: length, entropy bits, 0–4 score, and the estimator's
 warning/suggestions. Omit the argument to read one line from stdin — the
 preferred form, since argv is visible in `ps` and shell history.
+`--json` emits `{length, guesses, entropy_bits, score, warning, suggestions}`;
+the password itself is never included.
 
 ## trove analyze
 
 ```
-trove --vault <PATH> analyze --hibp <FILE>
+trove --vault <PATH> analyze --hibp <FILE> [--json]
 ```
 
 Offline Have-I-Been-Pwned audit: every vault password is SHA-1-hashed and
 binary-searched in the sorted `pwned-passwords` dump at `<FILE>` (the multi-GB
 file is seeked, never loaded; nothing is ever sent anywhere). Breached entries
-print as `<path>  seen N times in breaches`. Exits 1 when anything is
-breached — scriptable as a CI gate. Offline-only: requires `--vault`.
+ print as `<path>  seen N times in breaches`. Exits 1 when anything is
+ breached — scriptable as a CI gate. Offline-only: requires `--vault`.
+`--json` writes one object with `checked_passwords`, `breached_passwords`, and
+ `empty_passwords`, and `findings` to stdout, including when a finding is
+ present; the exit code remains nonzero in that case. Empty or missing
+ passwords print as `<path>  empty password` in human mode and are counted
+ separately from passwords checked against the dump. JSON findings identify
+ breached entries with `breach_count` and empty entries with
+ `finding: "empty_password"`.
+
+## Read and status commands
+
+These commands keep human-readable output by default. `--json` emits stable
+objects and arrays for scripts:
+
+| Command | JSON shape |
+| --- | --- |
+| `trove status --json` | `{daemon_running, vault_paths, idle_timeout_seconds, idle_remaining_seconds, ssh_key_count, gpg_key_count, materialized_file_count}`; absent daemon reports `false`, empty paths, zero counts, and null timers. |
+| `trove materialize-status --json` | `{materialized: [{title, target_path, vault, ttl_remaining_seconds, exists}, ...]}`; empty state is an empty array. |
+| `trove idle get --json` | `{timeout_seconds, remaining_seconds}`; `remaining_seconds` is null when no idle countdown is active. |
+| `trove ssh-agent list --json` | Array of `{algo, blob_b64, comment}` public identities; `[]` when no daemon is running. |
+| `trove gpg-agent list --json` | Array of `{keygrip, key_type, comment}`; `[]` when no daemon is running. |
+| `trove keychain status <VAULT> --json` | `{stored, vault}`; does not include the stored password. macOS only. |
+
+ For example, `trove status --json | jq '.ssh_key_count'` prints the current
+ identity count without parsing display text. Daemon-backed commands retain
+ their documented session and daemon requirements; JSON output does not grant
+ additional access.
 
 ## trove ssh-agent
 

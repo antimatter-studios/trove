@@ -17,14 +17,14 @@ mod xml_export;
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use trove_core::{Error as CoreError, Vault};
+use trove_core::{Error as CoreError, SearchFieldFilter, SearchQuery, Vault};
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -284,7 +284,11 @@ enum Command {
     /// Print a human-readable summary of the running `troved`'s state:
     /// vault path (if unlocked), idle-lock state, and counts of SSH keys,
     /// GPG keys, and materialized files in memory.
-    Status,
+    Status {
+        /// Print the status as a JSON object.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// List every trove daemon on the system — not just the one on the expected
     /// socket — and, with `kill`, stop a straggler. Where `status` probes a
@@ -312,7 +316,11 @@ enum Command {
 
     /// One line per active materialization: title, target path, TTL
     /// remaining, and whether the file is still on disk.
-    MaterializeStatus,
+    MaterializeStatus {
+        /// Print materialization status as a JSON object.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Print an entry's details: title, username, URL, notes, custom-field
     /// names and attachment names. The password (and any other protected
@@ -352,12 +360,20 @@ enum Command {
         base64: bool,
     },
 
-    /// Search entries: case-insensitive substring match over title, username,
-    /// URL, notes and group path. Protected values are never searched. Output
-    /// is `list`-shaped (id, path, attachments), one hit per line.
+    /// Search unprotected entry metadata: standard/custom fields, attachments,
+    /// tags and group paths. Protected values are never searched.
     Search {
-        /// The term to look for.
-        term: String,
+        /// Case-insensitive substring term. May be omitted when filters are used.
+        term: Option<String>,
+        /// Match an unprotected field by name, or exactly by NAME=VALUE. Repeatable.
+        #[arg(long = "field", value_name = "NAME[=VALUE]")]
+        fields: Vec<String>,
+        /// Match an entry or inherited group tag. Repeatable.
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Match an attachment name using `*` and `?` wildcards. Repeatable.
+        #[arg(long = "attachment", value_name = "GLOB")]
+        attachments: Vec<String>,
         /// Machine-readable output: a JSON array of entry summaries.
         #[arg(long)]
         json: bool,
@@ -525,6 +541,9 @@ enum Command {
         /// The password to rate. PREFER stdin (omit this) — argv is visible
         /// in `ps` and shell history.
         password: Option<String>,
+        /// Print a structured result without including the password.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Check every password in the vault against an OFFLINE Have-I-Been-Pwned
@@ -535,6 +554,9 @@ enum Command {
         /// Path to the sorted pwned-passwords dump.
         #[arg(long, value_name = "FILE", required = true)]
         hibp: PathBuf,
+        /// Print checked and breached entry counts as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Act as a git credential helper (`git config credential.helper "trove
@@ -769,7 +791,11 @@ enum IdleOp {
     /// Print the current idle-lock state. `disabled` if timeout is 0,
     /// otherwise `<N>s (remaining: <M>s)` while the timer is running, or
     /// `<N>s (vault locked)` while it isn't.
-    Get,
+    Get {
+        /// Print the idle-lock state as a JSON object.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -790,7 +816,11 @@ enum GpgAgentOp {
     ///
     /// Reads the running daemon; if it isn't running (nothing unlocked) it
     /// prints nothing and exits 0. One key per line, tab-separated.
-    List,
+    List {
+        /// Print served public key metadata as a JSON array.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -809,7 +839,11 @@ enum SshAgentOp {
     /// equivalent of `ssh-add -L` (`<algo> <base64-key> <comment>`, one per
     /// line). Reads the running daemon; prints nothing and exits 0 if it isn't
     /// running (nothing unlocked).
-    List,
+    List {
+        /// Print served public key metadata as a JSON array.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Print the path to a NEW, private agent socket that serves no keys.
     ///
@@ -907,6 +941,9 @@ enum KeychainAction {
     Status {
         /// The .kdbx to check.
         vault: PathBuf,
+        /// Print keychain status as a JSON object.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1274,6 +1311,99 @@ fn require_vault(vault: Option<&Path>) -> Result<&Path> {
     })
 }
 
+#[cfg(any(feature = "yubikey", test))]
+fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>) -> bool {
+    match command {
+        // These commands always open a local vault directly.
+        Command::Init
+        | Command::Materialize
+        | Command::Group { .. }
+        | Command::Exec { .. }
+        | Command::Analyze { .. }
+        | Command::GitCredential { .. }
+        | Command::Resolve { .. }
+        | Command::Merge { .. }
+        | Command::Export { .. }
+        | Command::DbEdit { .. }
+        | Command::DbInfo { .. } => true,
+        // These route to troved when no explicit offline vault was selected.
+        Command::List { .. }
+        | Command::Add { .. }
+        | Command::Get { .. }
+        | Command::Clip { .. }
+        | Command::Show { .. }
+        | Command::Search { .. }
+        | Command::Edit { .. }
+        | Command::Rm { .. }
+        | Command::Mv { .. }
+        | Command::Cp { .. }
+        | Command::Mkdir { .. }
+        | Command::Rmdir { .. }
+        | Command::RenameAttachment { .. } => vault.is_some(),
+        Command::Generate {
+            resource: GenerateResource::Ssh { .. },
+        } => vault.is_some(),
+        // Includes unlock: its positional vault is always opened by troved.
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod challenge_response_routing_tests {
+    use super::*;
+
+    #[test]
+    fn challenge_response_is_allowed_only_on_offline_vault_paths() {
+        let vault = Path::new("vault.kdbx");
+        assert!(challenge_response_uses_offline_vault(
+            &Command::Init,
+            Some(vault)
+        ));
+        assert!(challenge_response_uses_offline_vault(
+            &Command::Materialize,
+            Some(vault)
+        ));
+        assert!(challenge_response_uses_offline_vault(
+            &Command::Exec {
+                scope: Some(String::from("Infra")),
+                entry: None,
+                group: None,
+                command: vec!["true".into()],
+            },
+            Some(vault)
+        ));
+        assert!(challenge_response_uses_offline_vault(
+            &Command::List {
+                json: false,
+                show_id: false,
+            },
+            Some(vault)
+        ));
+        assert!(!challenge_response_uses_offline_vault(
+            &Command::List {
+                json: false,
+                show_id: false,
+            },
+            None
+        ));
+        assert!(!challenge_response_uses_offline_vault(
+            &Command::Status { json: false },
+            Some(vault)
+        ));
+        assert!(!challenge_response_uses_offline_vault(
+            &Command::Unlock {
+                vault: PathBuf::from("vault.kdbx"),
+                timeout: None,
+                filter: None,
+                export: false,
+                shell: false,
+                detach: false,
+            },
+            Some(vault)
+        ));
+    }
+}
+
 /// The `--key-file` bytes, read once in `run()` before any command executes.
 /// A read-only global mirroring the flag's global scope (same trust model as
 /// the `TROVE_SOCK` env override) — every vault-opening path consults it via
@@ -1375,8 +1505,23 @@ fn run(cli: Cli) -> Result<()> {
         None => None,
     };
     KEY_FILE.set(keyfile_bytes).expect("run() is called once");
+    // The global offline selector. `Some` → operate on this file directly;
+    // `None` → use the daemon (for commands that have a daemon mode).
+    // `unlock` ignores it and uses its own positional vault.
+    // Explicit CLI input wins over the environment; the latter may have been
+    // loaded from --env immediately above.
+    let selected_vault = cli.vault.clone().or_else(env_vault_path);
+    let vault = selected_vault.as_deref();
     #[cfg(feature = "yubikey")]
     {
+        let challenge_response_requested = cli.yubikey.is_some() || cli.cr_secret_hex.is_some();
+        if challenge_response_requested
+            && !challenge_response_uses_offline_vault(&cli.command, vault)
+        {
+            return Err(anyhow!(
+                "YubiKey challenge-response is supported only when trove opens a vault offline; daemon-backed commands, including `unlock`, do not support it"
+            ));
+        }
         // Fail fast: a missing/ambiguous device or bad hex should surface
         // before any password prompt.
         let cr = match (&cli.yubikey, &cli.cr_secret_hex) {
@@ -1388,14 +1533,6 @@ fn run(cli: Cli) -> Result<()> {
         };
         CHALLENGE_RESPONSE.set(cr).expect("run() is called once");
     }
-    // The global offline selector. `Some` → operate on this file directly;
-    // `None` → use the daemon (for commands that have a daemon mode). Commands
-    // with no daemon mode (init/materialize) require it via `require_vault`.
-    // `unlock` ignores it and uses its own positional.
-    // Explicit CLI input wins over the environment; the latter may have been
-    // loaded from --env immediately above.
-    let selected_vault = cli.vault.clone().or_else(env_vault_path);
-    let vault = selected_vault.as_deref();
     match cli.command {
         Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
         Command::List { json, show_id } => cmd_list(vault, pw_stdin, json, show_id),
@@ -1487,8 +1624,8 @@ fn run(cli: Cli) -> Result<()> {
             op: SshAgentOp::Socket,
         } => cmd_ssh_agent_socket(),
         Command::SshAgent {
-            op: SshAgentOp::List,
-        } => cmd_ssh_agent_list(),
+            op: SshAgentOp::List { json },
+        } => cmd_ssh_agent_list(json),
         Command::SshAgent {
             op: SshAgentOp::Empty,
         } => cmd_ssh_agent_empty(),
@@ -1502,8 +1639,8 @@ fn run(cli: Cli) -> Result<()> {
             op: GpgAgentOp::Socket,
         } => cmd_gpg_agent_socket(),
         Command::GpgAgent {
-            op: GpgAgentOp::List,
-        } => cmd_gpg_agent_list(),
+            op: GpgAgentOp::List { json },
+        } => cmd_gpg_agent_list(json),
         Command::Materialize => cmd_materialize(require_vault(vault)?, pw_stdin),
         Command::Group {
             op: GroupOp::List { json },
@@ -1535,7 +1672,7 @@ fn run(cli: Cli) -> Result<()> {
             detach,
         } => cmd_unlock(&vault, timeout, filter, export, shell, detach, pw_stdin),
         Command::Lock { vault } => cmd_lock(vault.as_deref()),
-        Command::Status => cmd_status(),
+        Command::Status { json } => cmd_status(json),
         #[cfg(unix)]
         Command::Daemons { op } => match op.unwrap_or(DaemonsOp::List { json: false }) {
             DaemonsOp::List { json } => cmd_daemons_list(json),
@@ -1544,8 +1681,10 @@ fn run(cli: Cli) -> Result<()> {
         Command::Idle {
             op: IdleOp::Set { seconds },
         } => cmd_idle_set(seconds),
-        Command::Idle { op: IdleOp::Get } => cmd_idle_get(),
-        Command::MaterializeStatus => cmd_materialize_status(),
+        Command::Idle {
+            op: IdleOp::Get { json },
+        } => cmd_idle_get(json),
+        Command::MaterializeStatus { json } => cmd_materialize_status(json),
         Command::Clip {
             entry_path,
             attr,
@@ -1556,8 +1695,10 @@ fn run(cli: Cli) -> Result<()> {
             clip::run_clearer(secs, &hash)?;
             Ok(())
         }
-        Command::Estimate { password } => cmd_estimate(password.as_deref()),
-        Command::Analyze { hibp } => cmd_analyze(require_vault(vault)?, &hibp, pw_stdin),
+        Command::Estimate { password, json } => cmd_estimate(password.as_deref(), json),
+        Command::Analyze { hibp, json } => {
+            cmd_analyze(require_vault(vault)?, &hibp, pw_stdin, json)
+        }
         Command::Exec {
             scope,
             entry,
@@ -1623,7 +1764,7 @@ fn run(cli: Cli) -> Result<()> {
                 special,
                 exclude,
             };
-            for _ in 0..count.max(1) {
+            for _ in 0..count {
                 println!("{}", pwgen::generate(&opts)?);
             }
             Ok(())
@@ -1631,7 +1772,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Generate {
             resource: GenerateResource::Diceware { words, count },
         } => {
-            for _ in 0..count.max(1) {
+            for _ in 0..count {
                 println!("{}", pwgen::diceware(words)?);
             }
             Ok(())
@@ -1668,9 +1809,23 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Search {
             term,
+            fields,
+            tags,
+            attachments,
             json,
             show_id,
-        } => cmd_search(vault, &term, pw_stdin, json, show_id),
+        } => cmd_search(
+            vault,
+            SearchOptions {
+                term,
+                fields,
+                tags,
+                attachments,
+                json,
+                show_id,
+            },
+            pw_stdin,
+        ),
         Command::Edit {
             entry_path,
             title,
@@ -2076,7 +2231,7 @@ fn ssh_socket_tmp_fallback() -> PathBuf {
 /// `<algo> <base64-key> <comment>` line per served key. Reads the running
 /// daemon without autospawning; if it isn't running (nothing unlocked), there
 /// are no served keys, so we print nothing and exit 0.
-fn cmd_ssh_agent_list() -> Result<()> {
+fn cmd_ssh_agent_list(json: bool) -> Result<()> {
     match daemon::send(&daemon::Request::SshAgentList) {
         Ok(resp) => {
             if let Some(msg) = daemon::response_error(&resp) {
@@ -2086,19 +2241,31 @@ fn cmd_ssh_agent_list() -> Result<()> {
                 }
                 .into());
             }
-            if let Some(keys) = resp.get("ssh_keys").and_then(Value::as_array) {
-                for k in keys {
-                    let algo = k.get("algo").and_then(Value::as_str).unwrap_or("");
-                    let blob = k.get("blob_b64").and_then(Value::as_str).unwrap_or("");
-                    let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
-                    println!("{algo} {blob} {comment}");
-                }
+            let keys = resp
+                .get("ssh_keys")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&keys)?);
+                return Ok(());
+            }
+            for k in keys {
+                let algo = k.get("algo").and_then(Value::as_str).unwrap_or("");
+                let blob = k.get("blob_b64").and_then(Value::as_str).unwrap_or("");
+                let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
+                println!("{algo} {blob} {comment}");
             }
             Ok(())
         }
         // No daemon ⇒ nothing unlocked ⇒ nothing served. Like `status`, don't
         // autospawn and don't error — just print nothing.
-        Err(e) if daemon::is_daemon_not_running(&e) => Ok(()),
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            if json {
+                println!("[]");
+            }
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }
@@ -2351,7 +2518,7 @@ fn cmd_ssh_agent_which(target: &str) -> Result<()> {
 /// `trove gpg-agent list` — list the GPG keys the running agent serves, one per
 /// line: `<keygrip>\t<type>\t<comment>`. Same daemon-or-nothing semantics as
 /// `ssh-agent list`.
-fn cmd_gpg_agent_list() -> Result<()> {
+fn cmd_gpg_agent_list(json: bool) -> Result<()> {
     match daemon::send(&daemon::Request::GpgAgentList) {
         Ok(resp) => {
             if let Some(msg) = daemon::response_error(&resp) {
@@ -2361,17 +2528,29 @@ fn cmd_gpg_agent_list() -> Result<()> {
                 }
                 .into());
             }
-            if let Some(keys) = resp.get("gpg_keys").and_then(Value::as_array) {
-                for k in keys {
-                    let keygrip = k.get("keygrip").and_then(Value::as_str).unwrap_or("");
-                    let key_type = k.get("key_type").and_then(Value::as_str).unwrap_or("");
-                    let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
-                    println!("{keygrip}\t{key_type}\t{comment}");
-                }
+            let keys = resp
+                .get("gpg_keys")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&keys)?);
+                return Ok(());
+            }
+            for k in keys {
+                let keygrip = k.get("keygrip").and_then(Value::as_str).unwrap_or("");
+                let key_type = k.get("key_type").and_then(Value::as_str).unwrap_or("");
+                let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
+                println!("{keygrip}\t{key_type}\t{comment}");
             }
             Ok(())
         }
-        Err(e) if daemon::is_daemon_not_running(&e) => Ok(()),
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            if json {
+                println!("[]");
+            }
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }
@@ -3419,11 +3598,11 @@ fn env_strict() -> bool {
 ///
 /// Unix only: Windows has no comparable mode bits.
 #[cfg(unix)]
-fn check_env_file_perms(path: &Path) -> Result<()> {
+fn check_env_file_perms(path: &Path, file: &std::fs::File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Ok(()); // the read that follows will report this properly
-    };
+    let meta = file
+        .metadata()
+        .with_context(|| format!("checking permissions on env file {}", path.display()))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 == 0 {
         return Ok(());
@@ -3443,13 +3622,26 @@ fn check_env_file_perms(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn check_env_file_perms(_path: &Path) -> Result<()> {
+fn check_env_file_perms(_path: &Path, _file: &std::fs::File) -> Result<()> {
     Ok(())
 }
 
 fn load_env_file(path: &Path) -> Result<usize> {
-    check_env_file_perms(path)?;
-    let text = std::fs::read_to_string(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // The permission check and read must refer to the same file. Also
+        // refuse a symlink so an attacker cannot redirect the checked path.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening env file {}", path.display()))?;
+    check_env_file_perms(path, &file)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
         .with_context(|| format!("reading env file {}", path.display()))?;
     let first = text
         .lines()
@@ -4112,10 +4304,21 @@ fn cmd_keychain(action: &KeychainAction, pw_stdin: bool) -> Result<()> {
             }
             Ok(())
         }
-        KeychainAction::Status { vault } => {
-            match keychain::load(vault)? {
-                Some(_) => println!("stored: {}", keychain::describe(vault)?),
-                None => println!("not stored: {}", keychain::describe(vault)?),
+        KeychainAction::Status { vault, json } => {
+            let stored = keychain::load(vault)?.is_some();
+            let description = keychain::describe(vault)?;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "stored": stored,
+                        "vault": description,
+                    }))?
+                );
+            } else if stored {
+                println!("stored: {description}");
+            } else {
+                println!("not stored: {description}");
             }
             Ok(())
         }
@@ -4284,6 +4487,9 @@ fn cmd_show(
                 // in the entry across the wire.
                 let mut fields = serde_json::Map::new();
                 for name in list("custom_fields") {
+                    if is_protected_field(&name) && !show_protected {
+                        continue;
+                    }
                     fields.insert(name, Value::Null);
                 }
                 println!(
@@ -4320,54 +4526,104 @@ fn cmd_show(
     Ok(())
 }
 
-fn cmd_search(
-    vault: Option<&Path>,
-    term: &str,
-    pw_stdin: bool,
+struct SearchOptions {
+    term: Option<String>,
+    fields: Vec<String>,
+    tags: Vec<String>,
+    attachments: Vec<String>,
     json: bool,
     show_id: bool,
-) -> Result<()> {
+}
+
+fn cmd_search(vault: Option<&Path>, options: SearchOptions, pw_stdin: bool) -> Result<()> {
+    let fields = parse_search_fields(&options.fields)?;
+    if options.term.is_none()
+        && fields.is_empty()
+        && options.tags.is_empty()
+        && options.attachments.is_empty()
+    {
+        return Err(anyhow!(
+            "search needs a term or at least one --field, --tag, or --attachment filter"
+        ));
+    }
+    let query = SearchQuery {
+        term: options.term.clone(),
+        fields: fields.clone(),
+        tags: options.tags.clone(),
+        attachments: options.attachments.clone(),
+    };
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
-            if json {
-                let arr: Vec<Value> = v
-                    .search_entries(term)
+            let hits = v.search_entries_with(&query);
+            if options.json {
+                let arr: Vec<Value> = hits
                     .iter()
-                    .map(entry_summary_json)
+                    .map(|hit| {
+                        let mut value = entry_summary_json(&hit.entry);
+                        value["matched"] = serde_json::json!(hit.matched);
+                        value
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&arr)?);
                 return Ok(());
             }
-            let rows: Vec<ListRow> = v
-                .search_entries(term)
+            let rows: Vec<ListRow> = hits
                 .iter()
-                .map(|e| ListRow {
-                    id: e.id.to_string(),
-                    group_path: e.group_path.clone(),
-                    title: e.title.clone(),
-                    attachments: e.attachment_names.clone(),
+                .map(|hit| ListRow {
+                    id: hit.entry.id.to_string(),
+                    group_path: hit.entry.group_path.clone(),
+                    title: hit.entry.title.clone(),
+                    attachments: hit.entry.attachment_names.clone(),
                 })
                 .collect();
-            print_entry_rows(rows, show_id, false);
+            print_entry_rows(rows, options.show_id, false);
         }
         None => {
             let resp = daemon_call(&daemon::Request::Search {
-                term: term.to_string(),
+                term: options.term,
+                fields: fields
+                    .iter()
+                    .map(|f| match &f.value {
+                        Some(value) => format!("{}={value}", f.name),
+                        None => f.name.clone(),
+                    })
+                    .collect(),
+                tags: options.tags,
+                attachments: options.attachments,
             })?;
             let entries = resp
                 .get("entries")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            if json {
+            if options.json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
                 return Ok(());
             }
-            print_entry_rows(rows_from_json(&entries), show_id, false);
+            print_entry_rows(rows_from_json(&entries), options.show_id, false);
         }
     }
     Ok(())
+}
+
+fn parse_search_fields(fields: &[String]) -> Result<Vec<SearchFieldFilter>> {
+    fields
+        .iter()
+        .map(|field| {
+            let (name, value) = match field.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (field.as_str(), None),
+            };
+            if name.is_empty() {
+                return Err(anyhow!("search field name cannot be empty"));
+            }
+            Ok(SearchFieldFilter {
+                name: name.to_string(),
+                value,
+            })
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5160,7 +5416,7 @@ fn cmd_db_info(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
 
 /// `trove estimate` — zxcvbn strength rating. Stdin (one line) when no
 /// argument; the report goes to stdout, never echoing the password back.
-fn cmd_estimate(password: Option<&str>) -> Result<()> {
+fn cmd_estimate(password: Option<&str>, json: bool) -> Result<()> {
     let owned;
     let password = match password {
         Some(p) => p,
@@ -5171,14 +5427,37 @@ fn cmd_estimate(password: Option<&str>) -> Result<()> {
     };
     let e = zxcvbn::zxcvbn(password, &[]);
     let guesses = e.guesses();
-    println!("Length:      {}", password.chars().count());
-    println!("Entropy:     {:.1} bits", (guesses as f64).log2());
-    println!("Score:       {}/4", u8::from(e.score()));
+    let length = password.chars().count();
+    let entropy_bits = (guesses as f64).log2();
+    let score = u8::from(e.score());
+    let mut warning = None;
+    let mut suggestions = Vec::new();
     if let Some(fb) = e.feedback() {
         if let Some(w) = fb.warning() {
+            warning = Some(w.to_string());
+        }
+        suggestions.extend(fb.suggestions().iter().map(|s| s.to_string()));
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "length": length,
+                "guesses": guesses,
+                "entropy_bits": entropy_bits,
+                "score": score,
+                "warning": warning,
+                "suggestions": suggestions,
+            }))?
+        );
+    } else {
+        println!("Length:      {length}");
+        println!("Entropy:     {entropy_bits:.1} bits");
+        println!("Score:       {score}/4");
+        if let Some(w) = warning {
             println!("Warning:     {w}");
         }
-        for s in fb.suggestions() {
+        for s in suggestions {
             println!("Suggestion:  {s}");
         }
     }
@@ -5189,38 +5468,69 @@ fn cmd_estimate(password: Option<&str>) -> Result<()> {
 /// the vault. Prints one line per breached entry (path + count); exits 0 with
 /// "no breached passwords" when clean. Exit 1 when breaches were found, so
 /// scripts and CI can gate on it.
-fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool) -> Result<()> {
+fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool, json: bool) -> Result<()> {
     if !hibp_file.exists() {
         return Err(anyhow!("HIBP file not found: {}", hibp_file.display()));
     }
     let v = open_vault(vault_path, pw_stdin)?;
     let mut breached = 0usize;
     let mut checked = 0usize;
+    let mut empty = 0usize;
+    let mut findings = Vec::new();
     for entry in v.list_entries() {
-        let Some(pw) = v.get_field(&entry.id, "Password").ok().flatten() else {
+        let pw = v
+            .get_field(&entry.id, "Password")
+            .with_context(|| format!("reading Password for {}", entry.display_path()))?;
+        let Some(pw) = pw.filter(|pw| !pw.is_empty()) else {
+            empty += 1;
+            if json {
+                findings.push(serde_json::json!({
+                    "entry_path": entry.display_path(),
+                    "finding": "empty_password",
+                }));
+            } else {
+                println!("{}  empty password", entry.display_path());
+            }
             continue;
         };
-        if pw.is_empty() {
-            continue;
-        }
         checked += 1;
         let hash = hibp::sha1_hex_upper(&pw);
         if let Some(count) = hibp::lookup(hibp_file, &hash)? {
             breached += 1;
-            println!("{}  seen {count} times in breaches", entry.display_path());
+            findings.push(serde_json::json!({
+                "entry_path": entry.display_path(),
+                "breach_count": count,
+            }));
+            if !json {
+                println!("{}  seen {count} times in breaches", entry.display_path());
+            }
         }
     }
-    eprintln!("checked {checked} passwords, {breached} breached");
-    if breached > 0 {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "checked_passwords": checked,
+                "breached_passwords": breached,
+                "empty_passwords": empty,
+                "findings": findings,
+            }))?
+        );
+    } else {
+        eprintln!("checked {checked} passwords, {breached} breached, {empty} empty");
+    }
+    if breached > 0 || empty > 0 {
         // Same DaemonClassified channel the daemon paths use: user-level
         // failure, exit 1 — CI can gate on `trove analyze`.
         return Err(DaemonClassified {
-            message: format!("{breached} breached password(s) found"),
+            message: format!("{breached} breached and {empty} empty password(s) found"),
             exit: EXIT_USER_ERROR,
         }
         .into());
     }
-    println!("no breached passwords");
+    if !json {
+        println!("no breached passwords");
+    }
     Ok(())
 }
 
@@ -5628,7 +5938,7 @@ fn cmd_lock(vault: Option<&std::path::Path>) -> Result<()> {
 }
 
 /// `trove status` — pretty-print the daemon's `Status` response.
-fn cmd_status() -> Result<()> {
+fn cmd_status(json: bool) -> Result<()> {
     // `status` never autospawns. The daemon runs only while a vault is unlocked
     // (or materialized files still need cleanup), so "no daemon" is itself the
     // answer: nothing is unlocked. A live daemon gives the real state; otherwise
@@ -5642,22 +5952,58 @@ fn cmd_status() -> Result<()> {
                 }
                 .into());
             }
-            println!("Daemon:          running");
-            print_status(&resp);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&status_json(&resp, true))?
+                );
+            } else {
+                println!("Daemon:          running");
+                print_status(&resp);
+            }
             // Diagnostic command — a natural place to surface CLI↔daemon drift
             // (a stale sibling troved speaking a slightly different protocol).
             daemon::check_running_daemon_version();
         }
         Err(e) if daemon::is_daemon_not_running(&e) => {
-            println!("Daemon:          not running (nothing unlocked)");
-            println!("Vault:           no vault unlocked");
-            println!("SSH keys:        0 loaded");
-            println!("GPG keys:        0 loaded");
-            println!("Materialized:    0 files");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&status_json(&Value::Null, false))?
+                );
+            } else {
+                println!("Daemon:          not running (nothing unlocked)");
+                println!("Vault:           no vault unlocked");
+                println!("SSH keys:        0 loaded");
+                println!("GPG keys:        0 loaded");
+                println!("Materialized:    0 files");
+            }
         }
         Err(e) => return Err(e),
     }
     Ok(())
+}
+
+fn status_json(resp: &Value, daemon_running: bool) -> Value {
+    let vault_paths = resp
+        .get("vault_paths")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| {
+            resp.get("vault_path")
+                .and_then(Value::as_str)
+                .map(|path| vec![Value::String(path.to_string())])
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "daemon_running": daemon_running,
+        "vault_paths": vault_paths,
+        "idle_timeout_seconds": resp.get("idle_timeout_secs").cloned().unwrap_or(Value::Null),
+        "idle_remaining_seconds": resp.get("idle_remaining_secs").cloned().unwrap_or(Value::Null),
+        "ssh_key_count": resp.get("ssh_keys").and_then(Value::as_u64).unwrap_or(0),
+        "gpg_key_count": resp.get("gpg_keys").and_then(Value::as_u64).unwrap_or(0),
+        "materialized_file_count": resp.get("materialized").and_then(Value::as_u64).unwrap_or(0),
+    })
 }
 
 fn print_status(resp: &Value) {
@@ -5900,7 +6246,7 @@ fn cmd_idle_set(seconds: u64) -> Result<()> {
 }
 
 /// `trove idle get`. Pretty-prints the current state.
-fn cmd_idle_get() -> Result<()> {
+fn cmd_idle_get(json: bool) -> Result<()> {
     let resp = match daemon::send_autospawn(&daemon::Request::GetIdleTimeout) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
@@ -5921,7 +6267,15 @@ fn cmd_idle_get() -> Result<()> {
     }
     let secs = resp.get("seconds").and_then(Value::as_u64).unwrap_or(0);
     let remaining = resp.get("remaining").and_then(Value::as_u64);
-    if secs == 0 {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "timeout_seconds": secs,
+                "remaining_seconds": remaining,
+            }))?
+        );
+    } else if secs == 0 {
         println!("disabled");
     } else if let Some(r) = remaining {
         println!("{secs}s (remaining: {r}s)");
@@ -5932,7 +6286,7 @@ fn cmd_idle_get() -> Result<()> {
 }
 
 /// `trove materialize-status` — list of active materializations, one per line.
-fn cmd_materialize_status() -> Result<()> {
+fn cmd_materialize_status(json: bool) -> Result<()> {
     let resp = match daemon::send_autospawn(&daemon::Request::MaterializeStatus) {
         Ok(v) => v,
         Err(e) if daemon::is_daemon_not_running(&e) => {
@@ -5956,6 +6310,13 @@ fn cmd_materialize_status() -> Result<()> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "materialized": arr }))?
+        );
+        return Ok(());
+    }
     if arr.is_empty() {
         println!("(no active materializations)");
         return Ok(());

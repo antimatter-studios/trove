@@ -64,11 +64,12 @@ any tag whose commit is not contained in `main` (see below). For each release:
 2. Tag the merged commit on `main` and push it:
    `git checkout main && git pull && git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-The tag fires one workflow, `release.yml`, with two jobs in sequence:
-- `release` — builds and attaches `trove`/`troved` binaries, and the desktop
-  bundles, to a GitHub Release.
-- `publish-crate` — publishes `trove-core vX.Y.Z` to crates.io via OIDC. It
-  `needs: release`, so a failed build never reaches crates.io.
+The tag fires one workflow, `release.yml`, with five jobs: `test` gates the
+release build; `build` creates CLI/daemon binaries for each platform;
+`build-desktop` creates the desktop bundles; `release` attaches the artifacts
+to a GitHub Release; and `publish-crate` publishes `trove-core vX.Y.Z` to
+crates.io via OIDC. The final two jobs depend on successful builds, so a failed
+build never reaches publication.
 
 The two were separate workflows until #23 folded them together, because one
 version and one tag produce one release; splitting them meant two places to

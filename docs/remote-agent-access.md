@@ -29,9 +29,11 @@ So the shape is settled, and this document records it rather than relitigating:
   application on the machine can then sign — your terminal, VS Code, anything
   launched from the Dock, and an agent process driving that machine remotely.
   Lock, idle-lock and shutdown take them back out.
-- **Two gates decide *which* keys**, as in KeePassXC: forwarding is enabled
-  (`TROVE_SSH_FORWARD` for the daemon, a setting for the desktop app), *and* the
-  entry's `KeeAgent.settings` ask for agent loading.
+- **Forwarding is controlled by configuration and entry metadata.** When
+  `KeeAgent.settings` is present, its load policy controls forwarding. Entries
+  without that attachment fall back to content scanning, and supported keys
+  found that way are also forwarded. Forwarding must also be enabled
+  (`TROVE_SSH_FORWARD` for the daemon, a setting for the desktop app).
 - **Containment lives elsewhere** — in the signature, not in the socket. See
   "What actually bounds the exposure" below.
 
@@ -70,12 +72,16 @@ trade, and [threat-model.md](threat-model.md) states it. What does *not* change:
 the agent protocol has no read-key message, so a process that can use a
 forwarded key still cannot export it.
 
-**Extraction stays gated.** `get` and `materialize` hand out real private bytes
-and require the session code plus `SO_PEERCRED` (see
-[provisioning-sessions.md](provisioning-sessions.md)). A remote-originated
-request must never obtain them: a forwarded signature is a bounded act, an
-extraction is a permanent loss. If the daemon later grows a remote path, it must
-mark those connections and refuse extraction on them.
+**Daemon extraction stays gated.** Daemon-backed `get` and `materialize` hand
+out real private bytes and require the session code plus a local-peer check:
+`SO_PEERCRED` on Unix, or the owner-only named-pipe ACL on Windows (see
+[provisioning-sessions.md](provisioning-sessions.md) and [windows.md](windows.md)).
+A standalone offline command instead opens the vault with its own credentials
+and does not use the daemon session gate. A remote-originated daemon request
+must never obtain them:
+a forwarded signature is a bounded act, an extraction is a permanent loss. If
+the daemon later grows a remote path, it must mark those connections and refuse
+extraction on them.
 
 ## Gap: unlocking from afar without sending the password
 
@@ -132,7 +138,9 @@ incident work this feature exists for.
 
 So: approve at *unlock*, not per signature. The per-entry
 `UseConfirmConstraintWhenSigning` in `KeeAgent.settings` is honoured and passed
-to the OS agent for anyone who wants the prompt on a specific key, but it is not
+to the OS agent when an askpass helper is available. Without one, trove
+withholds that key from OS-agent forwarding (it remains available through
+trove's own agent); stock macOS has no askpass helper by default. This is not
 the mechanism this design leans on.
 
 ## What actually bounds the exposure
