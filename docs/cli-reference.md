@@ -770,6 +770,9 @@ agent you get a warning — that is exactly where the original failure returns.
 Confirmation and warnings go to stderr; stdout stays empty so the command
 composes in a script.
 
+For the design rationale and alternatives considered, see
+[the scoped SSH-agent socket design note](ssh-agent-empty-add.md).
+
 ### Telling the agent which server a key is for
 
 `sshd`'s `MaxAuthTries` defaults to **6**, counted per connection, and every key

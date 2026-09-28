@@ -1,0 +1,62 @@
+version: "3"
+
+# 0.6.0 is the floor: `defer:` steps and the `after_all` lifecycle hook both
+# need to survive a cancelled run, which arrived in 0.6.0. On an older runner
+# a Ctrl-C would skip every teardown at the one moment it matters.
+chore_min_version: 0.6.0
+
+# WHY THIS FILE EXISTS AT ALL, since trove built fine with bare cargo for a year.
+#
+# cargo never deletes anything. Every build emits codegen-unit objects named by
+# a content hash and leaves the previous set in place; `target/debug/deps` on a
+# five-crate project was measured holding 14,312 files. This repo reached
+# 56 GB against 698 MB of source — 37 GB in target/, 11 GB in the Tauri app,
+# and 8.1 GB in two agent worktrees under .claude/worktrees/ — and filled a
+# 238 GB volume to 100%, at which point Gradle and cargo stop failing and start
+# HANGING: 0.1% CPU, nothing written, no error to read.
+#
+# The sweep below is the whole point of the file. The tasks are here so there is
+# something for the lifecycle to hang on.
+lifecycle:
+  # Runs once on the way out, whether the task passed or failed — a build that
+  # BREAKS is exactly when someone rebuilds ten times and makes the most
+  # garbage, so a success-only hook would stop working when it is needed most.
+  #
+  # It cannot mask a failure: after_all does not change the invoked task's exit
+  # status, and the script exits 0 whenever it declines to run. This wraps only
+  # `chore` invocations; direct Cargo, IDE, and CI commands bypass the hook.
+  after_all:
+    - task: sweep
+
+tasks:
+  build:
+    desc: Debug build of the workspace
+    cmds: ['cargo build']
+
+  build:release:
+    desc: Release build of the workspace
+    cmds: ['cargo build --release']
+
+  test:
+    desc: Run the workspace test suite
+    cmds: ['cargo test']
+
+  desktop:
+    desc: Run the Tauri desktop app
+    dir: trove-desktop
+    cmds: ['cargo tauri dev']
+
+  sweep:
+    desc: Reap cargo artifacts untouched for 7+ days; requires cargo-sweep on PATH
+    # DETACHED on purpose. Chris's requirement was that this happen "in the
+    # latent time which doesn't block the user", and a sweep over 14,000 files
+    # is not instant. The script takes its own lock and refuses to run while a
+    # cargo build is live under this root, so firing it after every invocation
+    # is safe even when invocations overlap.
+    cmds:
+      - 'nohup ./scripts/sweep-target.sh >/dev/null 2>&1 &'
+    silent: true
+
+  sweep:now:
+    desc: Run the guarded sweep in the foreground (TROVE_SWEEP_DAYS overrides the 7-day default)
+    cmds: ['./scripts/sweep-target.sh']
