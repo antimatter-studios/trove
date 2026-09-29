@@ -91,3 +91,42 @@ fn decrypt_to_xml(path: &Path, password: &str) -> String {
     let xml = keepass::Database::get_xml(&mut f, key).expect("decrypt xml");
     String::from_utf8_lossy(&xml).into_owned()
 }
+
+/// Removing one entry's attachment must not change what other entries'
+/// attachments read back as. keepass-rs wrote attachment ids into the file
+/// while storing the bytes by position, so after a removal every later
+/// attachment read back as the next one's data (sseemayer/keepass-rs#374,
+/// fixed on the fork trove pins).
+#[test]
+fn removing_one_attachment_leaves_the_others_intact() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.kdbx");
+    {
+        let mut vault = Vault::create(&path, "pw").unwrap();
+        for (title, bytes) in [
+            ("a", b"AAAA"),
+            ("b", b"BBBB"),
+            ("c", b"CCCC"),
+            ("d", b"DDDD"),
+        ] {
+            let id = vault.add_entry(title).unwrap();
+            vault.attach_binary(&id, "f", bytes).unwrap();
+        }
+        vault.save().unwrap();
+    }
+    {
+        let mut vault = Vault::open(&path, "pw").unwrap();
+        let b = vault.find_by_title("b").unwrap();
+        vault.remove_binary(&b, "f").unwrap();
+        vault.save().unwrap();
+    }
+    let vault = Vault::open(&path, "pw").unwrap();
+    let read = |title: &str| {
+        let id = vault.find_by_title(title).unwrap();
+        vault.read_binary(&id, "f").unwrap()
+    };
+    assert_eq!(read("a").as_deref(), Some(&b"AAAA"[..]));
+    assert_eq!(read("b"), None);
+    assert_eq!(read("c").as_deref(), Some(&b"CCCC"[..]));
+    assert_eq!(read("d").as_deref(), Some(&b"DDDD"[..]));
+}
