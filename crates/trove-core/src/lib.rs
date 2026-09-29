@@ -17,7 +17,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use keepass::config::DatabaseVersion;
@@ -274,7 +274,35 @@ pub(crate) struct VaultInner {
     /// disk, and the other side's changes are gone with nothing said. `None`
     /// only for a vault created in memory that has never touched disk.
     pub(crate) stamp: Option<FileStamp>,
+    /// Entries as they were before trove's first change to each since the last
+    /// save. `save()` files each one as a history version.
+    pub(crate) history: HistoryTracker,
     pub(crate) db: keepass::Database,
+}
+
+/// What `save()` needs to give every entry trove changed one history version,
+/// the way KeePassXC does on each edit.
+///
+/// One version per entry per save rather than per call: a single edit is often
+/// several calls (`trove edit` sets each flag's field in turn, the desktop form
+/// sets every field), and each call becoming a version would push real history
+/// out of the 10-item cap.
+#[derive(Default)]
+pub(crate) struct HistoryTracker {
+    before: HashMap<keepass::db::EntryId, EntryBefore>,
+    /// Entries created since the last save: they have no earlier version.
+    created: HashSet<keepass::db::EntryId>,
+}
+
+struct EntryBefore {
+    entry: keepass::db::Entry,
+    /// The attachments the earlier version points at, with the bytes each held
+    /// at the time. keepass-rs frees an attachment's data once no *current*
+    /// entry uses it, even if a history version still points at it
+    /// (keepass-rs#360), and then hands the freed id to the next attachment
+    /// added. `save()` checks each id still holds these bytes before filing
+    /// the version.
+    attachments: Vec<(keepass::db::AttachmentId, zeroize::Zeroizing<Vec<u8>>)>,
 }
 
 /// A cheap identity for the vault file, used to notice that something else
@@ -330,6 +358,19 @@ fn touch_location(entry: &mut keepass::db::EntryMut<'_>) {
     entry.times.location_changed = Some(keepass::db::Times::now());
 }
 
+/// Rough size of one history version, for the vault's `HistoryMaxSize`:
+/// field names and values, tags, and attachment bytes.
+fn history_version_size(version: &keepass::db::EntryRef<'_>) -> usize {
+    let fields: usize = version
+        .fields
+        .iter()
+        .map(|(k, v)| k.len() + v.get().len())
+        .sum();
+    let tags: usize = version.tags.iter().map(String::len).sum();
+    let attachments: usize = version.attachments().map(|a| a.data.get().len()).sum();
+    fields + tags + attachments
+}
+
 /// Build the composite `DatabaseKey` from a password and optional keyfile
 /// bytes — the one place the two are combined, shared by open/create/save.
 fn database_key(password: &str, keyfile: Option<&[u8]>) -> Result<keepass::DatabaseKey> {
@@ -369,6 +410,7 @@ impl Vault {
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 #[cfg(feature = "yubikey")]
                 challenge_response: None,
+                history: HistoryTracker::default(),
                 db,
             },
         };
@@ -397,6 +439,7 @@ impl Vault {
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 challenge_response: Some(challenge_response),
+                history: HistoryTracker::default(),
                 db: keepass::Database::new(),
             },
         };
@@ -429,6 +472,7 @@ impl Vault {
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 challenge_response: Some(challenge_response),
+                history: HistoryTracker::default(),
                 db,
             },
         })
@@ -458,6 +502,7 @@ impl Vault {
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 #[cfg(feature = "yubikey")]
                 challenge_response: None,
+                history: HistoryTracker::default(),
                 db,
             },
         })
@@ -496,6 +541,8 @@ impl Vault {
         // old database away and zeroizes on the way.
         std::mem::swap(&mut self.inner.db, &mut fresh.inner.db);
         self.inner.stamp = fresh.inner.stamp.clone();
+        // Unsaved edits are gone, so there is nothing to file history for.
+        self.inner.history = HistoryTracker::default();
         Ok(())
     }
 
@@ -519,6 +566,115 @@ impl Vault {
             return Err(Error::StaleWrite(self.inner.path.clone()));
         }
         Ok(())
+    }
+
+    /// Remember an entry as it is now, before trove's first change to it since
+    /// the last save. Later calls for the same entry keep the first state.
+    fn remember_before_edit(&mut self, id: keepass::db::EntryId) {
+        let inner = &mut self.inner;
+        if inner.history.created.contains(&id) || inner.history.before.contains_key(&id) {
+            return;
+        }
+        let Some(current) = inner.db.entry(id) else {
+            return;
+        };
+        let attachments = current
+            .attachments()
+            .map(|a| (a.id(), zeroize::Zeroizing::new(a.data.get().clone())))
+            .collect();
+        let mut entry: keepass::db::Entry = (*current).clone();
+        entry.history = None;
+        inner
+            .history
+            .before
+            .insert(id, EntryBefore { entry, attachments });
+    }
+
+    /// File one history version for every entry trove changed since the last
+    /// save, then trim each to the vault's `HistoryMaxItems` / `HistoryMaxSize`
+    /// — what KeePassXC does on each edit. An entry that ends up unchanged gets
+    /// no version.
+    fn record_history(&mut self) {
+        let tracker = std::mem::take(&mut self.inner.history);
+        let max_items = self.inner.db.meta.history_max_items;
+        let max_size = self.inner.db.meta.history_max_size;
+        for (id, before) in tracker.before {
+            // The earlier version would point at attachment data that is gone
+            // or has been reused for other bytes (keepass-rs#360). Skip it
+            // rather than write a version that reads the wrong attachment.
+            let attachments_intact = before.attachments.iter().all(|(att, bytes)| {
+                self.inner
+                    .db
+                    .attachment(*att)
+                    .is_some_and(|a| a.data.get() == &**bytes)
+            });
+            if !attachments_intact {
+                continue;
+            }
+            let Some(current) = self.inner.db.entry(id) else {
+                continue; // deleted since
+            };
+            let mut now: keepass::db::Entry = (*current).clone();
+            now.history = None;
+            now.times = before.entry.times.clone();
+            if now == before.entry {
+                continue;
+            }
+
+            // KeePassXC keeps history oldest-first and trims from the front;
+            // keepass-rs inserts new versions at the front. Order the existing
+            // versions by modification time (ties keep file order), put the
+            // version being filed last — it is the newest by definition — keep
+            // the newest the vault's limits allow, and write them oldest-first
+            // so both tools read the same history.
+            let count = current
+                .history
+                .as_ref()
+                .map_or(0, |h| h.get_entries().len());
+            let mut versions: Vec<(keepass::db::Entry, usize)> = (0..count)
+                .filter_map(|i| current.historical(i))
+                .map(|v| ((*v).clone(), history_version_size(&v)))
+                .collect();
+            versions.sort_by_key(|(v, _)| v.times.last_modification);
+            let new_size = before
+                .entry
+                .fields
+                .iter()
+                .map(|(k, v)| k.len() + v.get().len())
+                .sum::<usize>()
+                + before.entry.tags.iter().map(String::len).sum::<usize>()
+                + before
+                    .attachments
+                    .iter()
+                    .map(|(_, b)| b.len())
+                    .sum::<usize>();
+            versions.push((before.entry, new_size));
+            let item_cap = max_items
+                .filter(|m| *m >= 0)
+                .map_or(usize::MAX, |m| m as usize);
+            let size_cap = max_size
+                .filter(|m| *m >= 0)
+                .map_or(usize::MAX, |m| m as usize);
+            let mut kept = Vec::new();
+            let mut total = 0usize;
+            for (version, size) in versions.into_iter().rev() {
+                if kept.len() >= item_cap
+                    || (!kept.is_empty() && total.saturating_add(size) > size_cap)
+                {
+                    break;
+                }
+                total = total.saturating_add(size);
+                kept.push(version);
+            }
+            // `kept` is newest-first; `add_entry` inserts at the front, so
+            // adding in this order leaves the history oldest-first.
+            let mut ordered = keepass::db::History::default();
+            for version in kept {
+                ordered.add_entry(version);
+            }
+            let mut entry = self.inner.db.entry_mut(id).expect("entry exists");
+            entry.history = Some(ordered);
+        }
     }
 
     /// Persist in-memory state back to the original path (atomic replace).
@@ -553,6 +709,8 @@ impl Vault {
         // without this the last writer wins silently, taking the other's
         // changes with it.
         self.check_not_stale()?;
+
+        self.record_history();
 
         let dir = self
             .inner
@@ -655,7 +813,9 @@ impl Vault {
             .expect("leaf GroupId always resolves");
         let mut entry = leaf_group.add_entry();
         entry.set_unprotected("Title", &leaf);
-        Ok(EntryId(entry.id().uuid().to_string()))
+        let id = entry.id();
+        self.inner.history.created.insert(id);
+        Ok(EntryId(id.uuid().to_string()))
     }
 
     /// List all entries in the vault (recursively across all groups).
@@ -851,6 +1011,7 @@ impl Vault {
     /// Replace an entry's native KDBX tags, preserving the caller's order.
     pub fn set_entry_tags(&mut self, id: &EntryId, tags: Vec<String>) -> Result<()> {
         let entry_id = self.lookup_entry_id(id)?;
+        self.remember_before_edit(entry_id);
         let mut entry = self
             .inner
             .db
@@ -901,6 +1062,7 @@ impl Vault {
     pub fn set_field(&mut self, id: &EntryId, field: &str, value: &str) -> Result<()> {
         const PROTECTED_FIELDS: [&str; 2] = ["Password", "otp"];
         let entry_id = self.lookup_entry_id(id)?;
+        self.remember_before_edit(entry_id);
         let mut entry = self
             .inner
             .db
@@ -918,6 +1080,7 @@ impl Vault {
     /// Replace the KeePass-native tags on an entry.
     pub fn set_tags(&mut self, id: &EntryId, tags: &[String]) -> Result<()> {
         let entry_id = self.lookup_entry_id(id)?;
+        self.remember_before_edit(entry_id);
         let mut entry = self
             .inner
             .db
@@ -937,6 +1100,7 @@ impl Vault {
     /// likewise stores SSH private keys without it.
     pub fn attach_binary(&mut self, id: &EntryId, name: &str, bytes: &[u8]) -> Result<()> {
         let entry_id = self.lookup_entry_id(id)?;
+        self.remember_before_edit(entry_id);
         let mut entry = self
             .inner
             .db
@@ -1041,6 +1205,7 @@ impl Vault {
     /// Remove an attachment from an entry. No-op if the attachment is missing.
     pub fn remove_binary(&mut self, id: &EntryId, name: &str) -> Result<()> {
         let entry_id = self.lookup_entry_id(id)?;
+        self.remember_before_edit(entry_id);
         let mut entry = self
             .inner
             .db
@@ -1114,12 +1279,15 @@ impl Vault {
     /// Remove a string field from an entry. No-op if the field is absent.
     pub fn remove_field(&mut self, id: &EntryId, field: &str) -> Result<()> {
         let entry_id = self.lookup_entry_id(id)?;
+        self.remember_before_edit(entry_id);
         let mut entry = self
             .inner
             .db
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        entry.fields.remove(field);
+        if entry.fields.remove(field).is_some() {
+            touch_modified(&mut entry);
+        }
         Ok(())
     }
 
