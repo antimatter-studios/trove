@@ -182,6 +182,66 @@ fn field_edits_keep_attachments_in_history() {
     );
 }
 
+#[test]
+fn replacing_an_attachment_keeps_the_old_one_in_history() {
+    let dir = TempDir::new().unwrap();
+    let (path, mut vault, id) = vault_with_entry(&dir);
+    vault.attach_binary(&id, "key", b"old key").unwrap();
+    vault.save().unwrap();
+    vault.attach_binary(&id, "key", b"new key").unwrap();
+    vault.save().unwrap();
+
+    let history = history_of(&path, "e");
+    assert_eq!(
+        history.last().unwrap().1,
+        vec![("key".to_string(), b"old key".to_vec())]
+    );
+    let reopened = Vault::open(&path, PW).unwrap();
+    assert_eq!(
+        reopened.read_binary(&id, "key").unwrap().as_deref(),
+        Some(&b"new key"[..])
+    );
+}
+
+#[test]
+fn removing_an_attachment_keeps_it_in_history() {
+    let dir = TempDir::new().unwrap();
+    let (path, mut vault, id) = vault_with_entry(&dir);
+    vault.attach_binary(&id, "key", b"old key").unwrap();
+    vault.save().unwrap();
+    vault.remove_binary(&id, "key").unwrap();
+    vault.save().unwrap();
+
+    let history = history_of(&path, "e");
+    assert_eq!(
+        history.last().unwrap().1,
+        vec![("key".to_string(), b"old key".to_vec())]
+    );
+    let reopened = Vault::open(&path, PW).unwrap();
+    assert_eq!(reopened.read_binary(&id, "key").unwrap(), None);
+}
+
+#[test]
+fn an_attachment_only_trimmed_history_used_leaves_the_file() {
+    let dir = TempDir::new().unwrap();
+    let (path, mut vault, id) = vault_with_entry(&dir);
+    vault.attach_binary(&id, "key", b"old key").unwrap();
+    vault.save().unwrap();
+    vault.remove_binary(&id, "key").unwrap();
+    vault.save().unwrap();
+    assert_eq!(open_raw(&path).num_attachments(), 1);
+
+    // The default cap is 10 versions: enough edits push the one with the key out.
+    for i in 0..12 {
+        vault
+            .set_field(&id, "UserName", &format!("user{i}"))
+            .unwrap();
+        vault.save().unwrap();
+    }
+    assert!(history_of(&path, "e").iter().all(|(_, a)| a.is_empty()));
+    assert_eq!(open_raw(&path).num_attachments(), 0);
+}
+
 /// An entry whose attachment lives on only in its history, as a file saved by
 /// another client can have it: `key` is in the version filed by the username
 /// edit, and the current version no longer has it. trove's own removal drops
