@@ -280,8 +280,8 @@ function App() {
   // ---- notice when something else writes the vault file ----
   // A vault is one file with several writers: the CLI, KeePassXC, and the same
   // file synced onto another Mac. Without this the window shows a list that
-  // stopped being true, and — before the core refused it — saving over it threw
-  // the other writer's work away.
+  // stopped being true. Saving is safe either way (the core merges the other
+  // writer's changes in), but the list should show them.
   //
   // Polled rather than watched. It is one `stat` per interval, it only runs
   // while a vault is actually open and this window is visible, and there is no

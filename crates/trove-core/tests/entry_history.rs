@@ -301,3 +301,25 @@ fn a_destroyed_group_takes_its_entries_history_attachments_with_it() {
 
     assert_eq!(open_raw(&path).num_attachments(), 0);
 }
+
+/// `HistoryMaxSize` counts an attachment's data once per history, and not at
+/// all while the entry itself still holds it, as KeePassXC does. Counting a
+/// 2 MiB key file in every version filled the default 6 MiB after three edits
+/// and dropped older versions KeePassXC keeps.
+#[test]
+fn an_unchanged_attachment_does_not_use_up_the_history_size() {
+    let dir = TempDir::new().unwrap();
+    let (path, mut vault, id) = vault_with_entry(&dir);
+    let key_file: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    vault.attach_binary(&id, "key", &key_file).unwrap();
+    vault.save().unwrap();
+    for user in ["bob", "carol", "dave", "erin", "frank"] {
+        vault.set_field(&id, "UserName", user).unwrap();
+        vault.save().unwrap();
+    }
+
+    assert_eq!(
+        users(&history_of(&path, "e")),
+        ["alice", "alice", "bob", "carol", "dave", "erin"]
+    );
+}
