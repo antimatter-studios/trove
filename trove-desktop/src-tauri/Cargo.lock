@@ -2081,9 +2081,8 @@ dependencies = [
 
 [[package]]
 name = "keepass"
-version = "0.13.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2765eb6c9966956f5b421f44657140856accd7a769151dd47811d81ff2d8e8df"
+version = "0.13.16"
+source = "git+https://github.com/antimatter-studios/keepass-rs?rev=dd2bc7dca5795ee28a33f6e550986d6926a09d68#dd2bc7dca5795ee28a33f6e550986d6926a09d68"
 dependencies = [
  "aes 0.9.2",
  "base32",
@@ -2100,7 +2099,6 @@ dependencies = [
  "hex-literal",
  "hmac 0.13.0",
  "hybrid-array",
- "indexmap 2.14.0",
  "js-sys",
  "quick-xml",
  "rust-argon2",
