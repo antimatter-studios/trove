@@ -437,6 +437,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.22.0
+The desktop sidebar pencil opens Edit Folder: tags plus Delete folder, which lists every entry in the tree before you confirm (an empty tree goes without asking). The recycle bin is pinned at the bottom of the sidebar and lists everything in it; folder badges count every entry beneath them once, and clicking a folder opens or closes it. GitHub Actions move to their current major versions.
+
 ### v0.21.1
 Chore tasks can run a guarded background cleanup of stale Cargo artifacts; GitHub Actions are pinned to commit SHAs and updated weekly by Dependabot.
 
@@ -463,6 +466,3 @@ The git credential helper sends an entry's `git.token` attribute when it has one
 
 ### v0.17.1
 `--env` no longer eats the subcommand: `trove --vault v --env git-credential get` read `git-credential` as the path and ran `trove get` instead, which broke the git credential helper — the one command `--env` exists to serve. Bare `--env` still searches for `.env.trove`; naming a file is now `--env=<PATH>`, and the space-separated form explains itself rather than failing as an unknown subcommand. A `credential.helper` line needs no change.
-
-### v0.17.0
-`trove cp <ENTRY> <DEST>` duplicates an entry — private key, derived `id.pub`, `KeeAgent.settings`, custom fields, attachments — so one SSH key reused across machines can carry a second, accurate name without being exported to disk and re-added. The copy is independent and nothing records that the two entries share a key: a recorded link invites tooling that rotates one and takes the other with it, which is the accident copying exists to prevent. `trove mv` now renames while it moves, Unix-style — an existing group means move into it, a new leaf means move and rename, and a destination whose parent does not exist is still an error. Both refuse a path another entry occupies, and both carry an alias (`cp`/`copy`, `mv`/`move`).

@@ -4,6 +4,27 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.22.0 — 2026-09-29
+
+**Edit and delete folders in the desktop app.** The sidebar pencil opens Edit
+Folder, which holds the folder's tags and a Delete folder button. Deleting
+lists every entry in the folder's tree before asking you to confirm; a tree with
+no entries is deleted straight away. A deleted folder goes to the recycle bin,
+contents and all, or is destroyed if it is already there.
+
+**The recycle bin stands apart.** It is pinned at the bottom of the sidebar,
+above Data lock, instead of sitting among the folders, and selecting it lists
+everything in it, including entries inside deleted folders. It is found by the
+vault's recycle-bin setting, so a folder that happens to be named "Recycle Bin"
+stays an ordinary folder. `trove-core` gains `Vault::recycle_bin_path`.
+
+**Folder badges count the whole tree.** A folder's badge counts every entry
+under it once, so a folder holding only subfolders no longer shows 0, and Root
+no longer counts what is in the bin. Clicking a folder also opens or closes it.
+
+**Current GitHub Actions.** Checkout, setup-node, the artifact actions and
+tauri-action move to their current major versions.
+
 ## v0.21.1 — 2026-09-28
 
 **Cleaner local development builds.** Optional Chore tasks run a guarded,
