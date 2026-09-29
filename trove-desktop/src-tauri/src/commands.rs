@@ -270,6 +270,8 @@ pub struct GroupDto {
     pub path: Vec<String>,
     pub tags: Vec<String>,
     pub inherited_tags: Vec<String>,
+    /// This group is the vault's recycle bin (the UI pins it apart).
+    pub recycle_bin: bool,
 }
 
 /// Result of [`save_entry`]: the fresh list plus the saved entry's id (for
@@ -280,6 +282,16 @@ pub struct SaveResult {
     pub entries: Vec<EntryDto>,
     pub groups: Vec<GroupDto>,
     pub id: String,
+}
+
+/// Result of [`delete_group`]: the fresh lists plus whether the folder went to
+/// the recycle bin (`false` means it was destroyed outright).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteGroupResult {
+    pub entries: Vec<EntryDto>,
+    pub groups: Vec<GroupDto>,
+    pub recycled: bool,
 }
 
 // --- id / path helpers -----------------------------------------------------
@@ -850,10 +862,12 @@ fn build_entry_dtos(vault: &Vault) -> Vec<EntryDto> {
 }
 
 fn build_group_dtos(vault: &Vault) -> Vec<GroupDto> {
+    let bin = vault.recycle_bin_path();
     vault
         .list_groups()
         .into_iter()
         .map(|group| GroupDto {
+            recycle_bin: bin.as_ref() == Some(&group.path),
             path: group.path,
             tags: group.tags,
             inherited_tags: group.inherited_tags,
@@ -2196,6 +2210,30 @@ pub async fn set_group_tags(
             .set_group_tags(&path, &tags)
             .map_err(|e| e.to_string())?;
         Ok(build_group_dtos(vault))
+    })
+    .await
+}
+
+/// Remove a folder and everything under it, save, return the fresh lists.
+///
+/// Recycled like a deleted entry; destroyed outright only when the folder is
+/// already in the bin or the bin is disabled. The UI has already shown what is
+/// inside, so the subtree goes whole (`recursive`).
+#[tauri::command]
+pub async fn delete_group(
+    app: AppHandle,
+    id: String,
+    path: String,
+) -> Result<DeleteGroupResult, String> {
+    on_vault_write(app, id, move |vault| {
+        let recycled = vault
+            .remove_group(&path, false, true)
+            .map_err(|e| e.to_string())?;
+        Ok(DeleteGroupResult {
+            entries: build_entry_dtos(vault),
+            groups: build_group_dtos(vault),
+            recycled,
+        })
     })
     .await
 }

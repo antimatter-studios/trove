@@ -3,7 +3,7 @@
 // case-insensitive), regardless of the order entries arrive in.
 
 import { describe, it, expect } from 'vitest';
-import { buildTree, resolveEntryPath, displayEntryPath, isVisibleIn } from '../src/tree.js';
+import { buildTree, splitRecycleBin, resolveEntryPath, displayEntryPath, isVisibleIn, recycleBinPath } from '../src/tree.js';
 
 const entry = (group) => ({ group, groupPath: group.join('/'), path: `${group.join('/')}/x`, title: 'x' });
 
@@ -23,6 +23,27 @@ describe('buildTree', () => {
     // Nested children are sorted too (the recursion applies at every depth).
     const alpha = tree[0].children.find((n) => n.name === 'Alpha');
     expect(alpha.children.map((n) => n.name)).toEqual(['sub-a', 'sub-z']);
+  });
+});
+
+describe('splitRecycleBin', () => {
+  it('lifts the bin out of the tree and marks its contents as in the bin', () => {
+    const tree = buildTree(
+      [entry(['Work']), entry(['Recycle Bin', 'Old'])],
+      [{ path: ['Recycle Bin'], tags: [], inheritedTags: [], recycleBin: true }],
+    );
+    const { tree: rest, bin } = splitRecycleBin(tree);
+    expect(rest[0].children.map((n) => n.name)).toEqual(['Work']);
+    expect(bin.name).toBe('Recycle Bin');
+    expect(bin.recycleBin).toBe(true);
+    expect(bin.children[0].inRecycleBin).toBe(true);
+    expect(rest[0].children[0].inRecycleBin).toBe(false);
+  });
+
+  it('a folder merely named "Recycle Bin" is not the bin', () => {
+    const { tree: rest, bin } = splitRecycleBin(buildTree([entry(['Recycle Bin'])]));
+    expect(bin).toBeNull();
+    expect(rest[0].children.map((n) => n.name)).toEqual(['Recycle Bin']);
   });
 });
 
@@ -109,6 +130,32 @@ describe('saving only navigates when the entry leaves the view', () => {
   });
 });
 
+describe('the recycle bin lists everything in it', () => {
+  const at = (groupPath) => ({ groupPath });
+  const groups = [{ path: ['Recycle Bin'], recycleBin: true }, { path: ['Work'] }];
+
+  it('includes entries inside deleted folders, however deep', () => {
+    const bin = recycleBinPath(groups);
+    expect(bin).toBe('Recycle Bin');
+    expect(isVisibleIn(at('Recycle Bin'), bin, bin)).toBe(true);
+    expect(isVisibleIn(at('Recycle Bin/absolute/path/to'), bin, bin)).toBe(true);
+    expect(isVisibleIn(at('Recycle Binge'), bin, bin)).toBe(false);
+    expect(isVisibleIn(at('Work'), bin, bin)).toBe(false);
+  });
+
+  it('a folder inside the bin still lists only its own entries', () => {
+    const bin = recycleBinPath(groups);
+    expect(isVisibleIn(at('Recycle Bin/absolute'), 'Recycle Bin/absolute', bin)).toBe(true);
+    expect(isVisibleIn(at('Recycle Bin/absolute/path'), 'Recycle Bin/absolute', bin)).toBe(false);
+  });
+
+  it('a folder merely named "Recycle Bin" lists only its own entries', () => {
+    const bin = recycleBinPath([{ path: ['Recycle Bin'] }]);
+    expect(bin).toBeNull();
+    expect(isVisibleIn(at('Recycle Bin/sub'), 'Recycle Bin', bin)).toBe(false);
+  });
+});
+
 describe('folder counts match what clicking shows', () => {
   const e = (group) => ({ group, path: group.concat('x').join('/'), title: 'x' });
 
@@ -128,6 +175,69 @@ describe('folder counts match what clicking shows', () => {
     const infra = t[0].children.find((n) => n.name === 'Infra');
     expect(infra.own).toBe(0);
     expect(infra.count).toBe(1);
+  });
+});
+
+// Every folder's badge is the number of entries somewhere under it — each
+// entry once, however deep. The expected numbers come from a brute-force count
+// over the flat entry list, not from the tree code. The cases are shaped to
+// tempt a counter into counting one entry more than once: chains of folders
+// that hold nothing but the next folder, entries at several depths of one
+// branch, repeated names, folders that exist only as groups, and a recycle bin
+// inside Root (shown on its own row, so Root must not count it as well).
+describe('folder badges count each entry once', () => {
+  const e = (group) => ({ group, groupPath: group.join('/'), path: group.concat('x').join('/'), title: 'x' });
+  const BIN = { path: ['Recycle Bin'], tags: [], inheritedTags: [], recycleBin: true };
+  const g = (...path) => ({ path, tags: [], inheritedTags: [] });
+
+  const under = (entries, path) => entries.filter((x) => x.groupPath === path || x.groupPath.startsWith(path + '/'));
+  const expected = (entries, node) => node.path === '__root'
+    ? entries.filter((x) => under([x], 'Recycle Bin').length === 0).length
+    : under(entries, node.path).length;
+  const allNodes = (nodes) => nodes.flatMap((n) => [n, ...allNodes(n.children)]);
+
+  const CASES = {
+    'one entry at the end of a chain of empty folders': {
+      entries: [e(['absolute', 'path', 'to'])],
+    },
+    'two chains that each end in one entry': {
+      entries: [e(['absolute', 'path', 'to']), e(['some', 'relative'])],
+    },
+    'entries at every depth of one branch': {
+      entries: [e([]), e(['a']), e(['a', 'b']), e(['a', 'b', 'c']), e(['a', 'b', 'c'])],
+    },
+    'the same name repeated down a branch': {
+      entries: [e(['a', 'a', 'a']), e(['a'])],
+    },
+    'empty folders that exist only as groups': {
+      entries: [e(['kept'])],
+      groups: [g('empty'), g('empty', 'deeper'), g('kept', 'hollow')],
+    },
+    'a bin holding deleted chains and a loose entry': {
+      entries: [e(['live']), e(['Recycle Bin', 'absolute', 'path', 'to']), e(['Recycle Bin', 'some', 'relative']), e(['Recycle Bin'])],
+      groups: [BIN],
+    },
+  };
+
+  for (const [name, { entries, groups = [] }] of Object.entries(CASES)) {
+    it(name, () => {
+      const { tree, bin } = splitRecycleBin(buildTree(entries, groups));
+      for (const node of allNodes(bin ? [...tree, bin] : tree)) {
+        expect(node.count, node.path).toBe(expected(entries, node));
+      }
+    });
+  }
+
+  it('each folder in a chain shows the one entry at its end', () => {
+    const { tree } = splitRecycleBin(buildTree([e(['absolute', 'path', 'to'])]));
+    const counts = Object.fromEntries(allNodes(tree).map((n) => [n.path, n.count]));
+    expect(counts).toEqual({ __root: 1, absolute: 1, 'absolute/path': 1, 'absolute/path/to': 1 });
+  });
+
+  it('Root does not count what is in the bin', () => {
+    const { tree, bin } = splitRecycleBin(buildTree([e(['live']), e(['Recycle Bin'])], [BIN]));
+    expect(tree[0].count).toBe(1);
+    expect(bin.count).toBe(1);
   });
 });
 

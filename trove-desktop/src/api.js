@@ -58,6 +58,15 @@ export function setGroupTags(id, path, tags) {
   return invoke('set_group_tags', { id, path, tags });
 }
 
+// delete_group(id, path) -> { entries, groups, recycled }  (whole subtree)
+export function deleteGroup(id, path) {
+  return invoke('delete_group', { id, path }).then((res) => ({
+    entries: normEntries(res.entries),
+    groups: res.groups || [],
+    recycled: res.recycled,
+  }));
+}
+
 /* ---- Reading one entry (secrets, on demand) ---- */
 
 // get_field(id, entryId, field) -> Option<String>

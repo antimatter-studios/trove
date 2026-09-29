@@ -1,10 +1,10 @@
 import React from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { Icon } from './icons.jsx';
-import { buildTree, resolveEntryPath, isVisibleIn } from './tree.js';
+import { buildTree, resolveEntryPath, isVisibleIn, recycleBinPath } from './tree.js';
 import * as api from './api.js';
 import { Sidebar, EntryList, Detail } from './views.jsx';
-import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal, GroupTagsModal } from './overlays.jsx';
+import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal, EditFolderModal } from './overlays.jsx';
 // Trove — main app (multi-vault, backed by real .kdbx files via src/api.js)
 
 const { useState, useEffect, useRef, useCallback } = React;
@@ -211,10 +211,11 @@ function App() {
   // ---- tree, filtered + sorted list ----
   const tree = React.useMemo(() => buildTree(entries, vault.groups), [entries, vault.groups]);
   const favCount = entries.filter((e) => e.fav).length;
+  const binPath = recycleBinPath(vault.groups);
 
   const filtered = React.useMemo(() => {
     let out = entries;
-    out = out.filter((e) => isVisibleIn(e, group));
+    out = out.filter((e) => isVisibleIn(e, group, binPath));
     const q = query.trim().toLowerCase();
     if (q) out = out.filter((e) => e.path.toLowerCase().includes(q) || e.username.toLowerCase().includes(q) || (e.url || "").toLowerCase().includes(q));
     out = out.slice().sort((a, b) => {
@@ -224,7 +225,7 @@ function App() {
       return 0;
     });
     return out;
-  }, [entries, group, query, sort]);
+  }, [entries, group, query, sort, binPath]);
 
   // Keep the selection inside the list that is on screen. An empty list must
   // clear it, not keep the old one: the detail pane resolves `selId` against
@@ -508,7 +509,7 @@ function App() {
       entries: res.entries,
       groups: res.groups,
       selId: res.id,
-      group: isVisibleIn(saved, v.group) ? v.group : (saved && saved.groupPath) || "__all",
+      group: isVisibleIn(saved, v.group, recycleBinPath(res.groups)) ? v.group : (saved && saved.groupPath) || "__all",
     }));
     setForm(null);
     flashPlain(orig ? "Entry saved" : "Entry added");
@@ -519,7 +520,21 @@ function App() {
     const entries = await api.listEntries(vault.id);
     patch({ groups, entries });
     setGroupEditor(null);
-    flashPlain("Group tags saved");
+    flashPlain("Folder tags saved");
+  };
+  const deleteFolder = async (folder) => {
+    const path = folder.groupPath.join("/");
+    let res;
+    try { res = await api.deleteGroup(vault.id, path); } catch (err) { flashPlain("Delete failed"); throw err; }
+    const gone = (g) => g === path || (typeof g === "string" && g.startsWith(path + "/"));
+    patch((v) => ({
+      entries: res.entries,
+      groups: res.groups,
+      group: gone(v.group) ? "__all" : v.group,
+      selId: res.entries.some((x) => x.id === v.selId) ? v.selId : (res.entries[0] ? res.entries[0].id : null),
+    }));
+    setGroupEditor(null);
+    flashPlain(res.recycled ? "Folder moved to recycle bin" : "Folder deleted");
   };
   const doDelete = async (e) => {
     let list;
@@ -712,7 +727,7 @@ function App() {
         {/* overlays */}
         {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => patch({ selId: id, group: "__all" })} />}
         {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onDelete={(e) => { setForm(null); setDel(e); }} />}
-        {groupEditor && <GroupTagsModal group={groupEditor} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} />}
+        {groupEditor && <EditFolderModal group={groupEditor} entries={entries} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} onDelete={deleteFolder} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}
         {help && <HelpModal onClose={() => setHelp(false)} />}
         {settingsOpen && settings && <SettingsModal settings={settings} onChange={saveSettings} onClose={() => setSettingsOpen(false)} />}

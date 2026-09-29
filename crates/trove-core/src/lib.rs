@@ -752,6 +752,15 @@ impl Vault {
         groups
     }
 
+    /// Path of the recycle-bin group, root → bin, if the vault has one.
+    /// Located by `Meta/RecycleBinUUID`, not by name.
+    pub fn recycle_bin_path(&self) -> Option<Vec<String>> {
+        self.inner
+            .db
+            .recycle_bin()
+            .map(|bin| build_group_path_from_group(&bin))
+    }
+
     /// Replace the KeePass-native tags assigned directly to a group.
     /// Group modification time is updated as KeePass expects.
     pub fn set_group_tags(&mut self, path: &str, tags: &[String]) -> Result<()> {
