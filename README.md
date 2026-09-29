@@ -243,7 +243,7 @@ the commands.
 - **Generation + audit** — `generate password`/`diceware`, `estimate`
   (zxcvbn), `analyze --hibp` (offline breach check).
 - **Clipboard** — `clip` with a hash-guarded detached auto-clear.
-- **Vault ops** — `merge`, `export xml|csv`, `db-edit`, `db-info`.
+- **Vault ops** — `merge`, `sync`, `export xml|csv`, `db-edit`, `db-info`.
 
 Beyond what `keepassxc-cli` offers:
 

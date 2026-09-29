@@ -568,6 +568,34 @@ password (line 2). The global `--key-file` applies to the target;
 refused with a clean error — merge reconciles copies, it doesn't import.
 Offline-only.
 
+## trove sync
+
+```
+trove --vault <VAULT> sync <OTHER> [--other-key-file <PATH>]
+```
+
+Two-way sync with another copy of the same vault, such as one in a synced
+folder, on a USB stick or on a network share. The other copy is merged into
+`--vault` (the same merge as `trove merge`), then the result replaces the
+other copy atomically, so both end equal. A missing copy is created from
+`--vault` with the same password and key file; a copy that already has
+everything is left untouched. `--vault` is authoritative for vault settings
+such as the KDF, but what only the other copy has (custom data such as
+KeePassXC-Browser keys, its recycle bin, deletions) is kept. For an existing
+copy two secrets arrive in order: `--vault`'s password (line 1 with
+`--password-stdin`), then the other copy's (line 2). The global `--key-file` applies to `--vault`;
+`--other-key-file` to the other copy. Prints what was pulled and what was
+pushed. Offline-only.
+
+A sync service that could not merge two edits leaves a second file next to
+the vault, such as Dropbox's `vault (… conflicted copy …).kdbx` or Syncthing's
+`vault.sync-conflict-….kdbx`. Sync it into the vault with
+`trove --vault vault.kdbx sync '<conflicted copy>'`, then delete the copy.
+
+Writes to either file that land during the sync are merged in, not
+overwritten. Every trove save does this: when the vault file changed since it
+was opened, the other writer's changes are merged in before writing.
+
 ## trove export
 
 ```

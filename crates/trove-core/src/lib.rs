@@ -235,6 +235,19 @@ impl MergeSummary {
     }
 }
 
+/// What a [`Vault::sync_with`] did in each direction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyncSummary {
+    /// Changes the other copy brought into this vault.
+    pub pulled: MergeSummary,
+    /// Changes this vault brought into the other copy.
+    pub pushed: MergeSummary,
+    /// The other copy did not exist, and was created from this vault.
+    pub created: bool,
+    /// The other copy was rewritten. False when it already held everything.
+    pub other_written: bool,
+}
+
 /// Non-secret database facts for `db-info`.
 #[derive(Debug, Clone)]
 pub struct DbInfo {
@@ -523,8 +536,13 @@ fn merge_settings(base: &DiskBase, ours: &mut keepass::Database, theirs: &keepas
         }
     }
 
-    // Deletions the other writer recorded for things this copy never had: kept,
-    // so a third copy that still has them loses them on its next merge too.
+    adopt_deletions(ours, theirs);
+}
+
+/// Deletions the other copy recorded for things this one does not have: kept,
+/// so a third copy that still has them loses them on its next merge too. The
+/// KDBX merge only carries over a deletion it acts on.
+fn adopt_deletions(ours: &mut keepass::Database, theirs: &keepass::Database) {
     for (uuid, deleted) in &theirs.deleted_objects {
         let present = ours.entry(keepass::db::EntryId::from_uuid(*uuid)).is_some()
             || ours.group(keepass::db::GroupId::from_uuid(*uuid)).is_some();
@@ -533,6 +551,84 @@ fn merge_settings(base: &DiskBase, ours: &mut keepass::Database, theirs: &keepas
             if *deleted > *known {
                 *known = *deleted;
             }
+        }
+    }
+}
+
+/// Settings of another copy of the vault that `sync_with` keeps, though this
+/// vault is authoritative for settings: there is no common base to tell which
+/// side changed what, so nothing the other copy has is dropped. Custom data
+/// keys this vault lacks are added (the newer item wins where both have one),
+/// and its recycle bin and name are taken when this vault has none.
+fn adopt_other_settings(ours: &mut keepass::Database, theirs: &keepass::Database) {
+    for (key, item) in &theirs.meta.custom_data {
+        match ours.meta.custom_data.get(key) {
+            Some(mine) if mine.last_modification_time >= item.last_modification_time => {}
+            _ => {
+                ours.meta.custom_data.insert(key.clone(), item.clone());
+            }
+        }
+    }
+    let their_bin_is_here = theirs
+        .meta
+        .recyclebin_uuid
+        .is_some_and(|u| ours.group(keepass::db::GroupId::from_uuid(u)).is_some());
+    if ours.recycle_bin().is_none() && their_bin_is_here {
+        ours.meta.recyclebin_uuid = theirs.meta.recyclebin_uuid;
+        ours.meta.recyclebin_enabled = theirs.meta.recyclebin_enabled;
+        ours.meta.recyclebin_changed = theirs.meta.recyclebin_changed;
+    }
+    if ours.meta.database_name.is_none() && theirs.meta.database_name.is_some() {
+        ours.meta.database_name = theirs.meta.database_name.clone();
+        ours.meta.database_name_changed = theirs.meta.database_name_changed;
+    }
+    adopt_deletions(ours, theirs);
+}
+
+/// Serialize `db` under `key` into a temporary file next to `path`, returning
+/// the temporary path and its stamp — which a rename carries over to `path`.
+fn write_temp_file(
+    db: &keepass::Database,
+    path: &Path,
+    key: keepass::DatabaseKey,
+) -> Result<(PathBuf, FileStamp)> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "vault path has no file name",
+            ))
+        })?
+        .to_owned();
+
+    // Unique per save, not just per process: two handles on one vault in one
+    // process (the desktop hosting the daemon, say) must not share it.
+    static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tmp_name = std::ffi::OsString::from(&file_name);
+    tmp_name.push(format!(".tmp.{}.{n}", std::process::id()));
+    let tmp_path = dir.join(&tmp_name);
+
+    // Scope the file handle so it is closed (and thus fully flushed by the OS)
+    // before the rename. We also fsync explicitly for crash-safety on POSIX.
+    let written = (|| {
+        let mut tmp = std::fs::File::create(&tmp_path)?;
+        db.save(&mut tmp, key).map_err(save_err_to_error)?;
+        tmp.sync_all()?;
+        Ok(FileStamp::of(&tmp.metadata()?))
+    })();
+    match written {
+        Ok(stamp) => Ok((tmp_path, stamp)),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(e)
         }
     }
 }
@@ -1043,53 +1139,7 @@ impl Vault {
     /// temporary path and its stamp — which the rename carries over to the
     /// vault path.
     fn write_temp(&self) -> Result<(PathBuf, FileStamp)> {
-        let dir = self
-            .inner
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let file_name = self
-            .inner
-            .path
-            .file_name()
-            .ok_or_else(|| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "vault path has no file name",
-                ))
-            })?
-            .to_owned();
-
-        // Unique per save, not just per process: two handles on one vault in
-        // one process (the desktop hosting the daemon, say) must not share it.
-        static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut tmp_name = std::ffi::OsString::from(&file_name);
-        tmp_name.push(format!(".tmp.{}.{n}", std::process::id()));
-        let tmp_path = dir.join(&tmp_name);
-
-        // Scope the file handle so it is closed (and thus fully flushed by the
-        // OS) before the rename. We also fsync explicitly for crash-safety on
-        // POSIX.
-        let written = (|| {
-            let mut tmp = std::fs::File::create(&tmp_path)?;
-            self.inner
-                .db
-                .save(&mut tmp, self.current_key()?)
-                .map_err(save_err_to_error)?;
-            tmp.sync_all()?;
-            Ok(FileStamp::of(&tmp.metadata()?))
-        })();
-        match written {
-            Ok(stamp) => Ok((tmp_path, stamp)),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                Err(e)
-            }
-        }
+        write_temp_file(&self.inner.db, &self.inner.path, self.current_key()?)
     }
 
     /// Persist in-memory state back to the original path (atomic replace).
@@ -2567,6 +2617,123 @@ impl Vault {
         Ok(summary)
     }
 
+    /// Two-way sync with another copy of this vault: one in a synced folder,
+    /// on a USB stick, on a network share. The other copy is merged into this
+    /// one, which is saved (merging this file's own writers, as
+    /// [`save`](Self::save) does); the result then replaces the other copy, so
+    /// both end equal. Unsaved edits are saved first.
+    ///
+    /// This vault is authoritative for vault settings such as the KDF, which
+    /// the other copy takes over; what the other copy has that this one lacks
+    /// (custom data, a recycle bin, deletions) is kept. A vault with a
+    /// challenge-response key uses it for the other copy too.
+    ///
+    /// The other copy is replaced atomically and checked before and after the
+    /// rename, like this vault's own file: a write that lands there in between
+    /// is merged in on another round. A missing copy is created. A copy that
+    /// already holds everything is left untouched, and this vault is only
+    /// saved when the other copy brought something.
+    pub fn sync_with(
+        &mut self,
+        other: &Path,
+        other_password: &str,
+        other_keyfile: Option<&[u8]>,
+    ) -> Result<SyncSummary> {
+        #[cfg(feature = "yubikey")]
+        let challenge_response = self.inner.challenge_response.clone();
+        let other_key = || -> Result<keepass::DatabaseKey> {
+            #[allow(unused_mut)]
+            let mut key = database_key(other_password, other_keyfile)?;
+            #[cfg(feature = "yubikey")]
+            if let Some(cr) = &challenge_response {
+                key = key.with_challenge_response_key(cr.clone());
+            }
+            Ok(key)
+        };
+        if !self.inner.history.before.is_empty() || !self.inner.history.created.is_empty() {
+            self.save()?;
+        }
+        let mut summary = SyncSummary::default();
+        for _ in 0..SAVE_ATTEMPTS {
+            let (theirs, stamp) = match std::fs::File::open(other) {
+                Ok(mut file) => {
+                    let stamp = FileStamp::of(&file.metadata()?);
+                    let theirs = keepass::Database::open(&mut file, other_key()?)
+                        .map_err(open_err_to_error)?;
+                    if theirs.root().id() != self.inner.db.root().id() {
+                        return Err(Error::Kdbx(
+                            "the other file is not a copy of this vault (different root \
+                             UUID); sync reconciles copies of one vault"
+                                .to_string(),
+                        ));
+                    }
+                    (Some(theirs), Some(stamp))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
+                Err(e) => return Err(e.into()),
+            };
+
+            if let Some(theirs) = &theirs {
+                // Into a copy, so a merge that fails leaves this handle as it was.
+                let mut merged = self.inner.db.clone();
+                let log = merged
+                    .merge(theirs)
+                    .map_err(|e| Error::Kdbx(format!("merge: {e}")))?;
+                let meta_before = merged.meta.clone();
+                let deletions_before = merged.deleted_objects.len();
+                adopt_other_settings(&mut merged, theirs);
+                let brought = !log.events.is_empty()
+                    || merged.meta != meta_before
+                    || merged.deleted_objects.len() != deletions_before;
+                self.inner.db = merged;
+                self.settle_merged_histories(&log);
+                summary.pulled.count(&log);
+                if brought {
+                    self.save()?;
+                }
+                if self.holds_all_of_ours(theirs) {
+                    return Ok(summary);
+                }
+            }
+
+            let mut pushing = MergeSummary::default();
+            if let Some(theirs) = &theirs {
+                let mut probe = theirs.clone();
+                if let Ok(log) = probe.merge(&self.inner.db) {
+                    pushing.count(&log);
+                }
+            }
+            let (tmp_path, written) = write_temp_file(&self.inner.db, other, other_key()?)?;
+            #[cfg(test)]
+            save_race_tests::run_hook(&save_race_tests::BEFORE_RENAME, other);
+            // Something wrote the other copy since it was read: merge that too
+            // rather than rename over it.
+            if FileStamp::read(other) != stamp {
+                let _ = std::fs::remove_file(&tmp_path);
+                continue;
+            }
+            if let Err(e) = std::fs::rename(&tmp_path, other) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(Error::Io(e));
+            }
+            summary.pushed = pushing;
+            summary.created |= theirs.is_none();
+            summary.other_written = true;
+            #[cfg(test)]
+            save_race_tests::run_hook(&save_race_tests::AFTER_RENAME, other);
+            // And afterwards: a writer that renamed over it in the same instant
+            // never saw this vault's changes. The next round reads it again,
+            // and ends there if it holds everything.
+            if FileStamp::read(other) == Some(written) {
+                return Ok(summary);
+            }
+        }
+        Err(Error::Kdbx(format!(
+            "{} kept changing while syncing; try again",
+            other.display()
+        )))
+    }
+
     /// The password this vault was opened/created with. For rekey flows that
     /// change only one credential (e.g. adding a keyfile, keeping the
     /// password) — the caller already presented it to open the vault.
@@ -3006,7 +3173,8 @@ mod save_race_tests {
     use std::cell::RefCell;
     use std::thread::LocalKey;
 
-    type Hook = RefCell<Option<Box<dyn FnOnce(&Path)>>>;
+    /// A hook, and the path it is for (any path when `None`).
+    type Hook = RefCell<Option<(Option<PathBuf>, Box<dyn FnOnce(&Path)>)>>;
 
     thread_local! {
         pub(super) static BEFORE_RENAME: Hook = RefCell::new(None);
@@ -3015,13 +3183,25 @@ mod save_race_tests {
     }
 
     pub(super) fn run_hook(hook: &'static LocalKey<Hook>, path: &Path) {
-        if let Some(f) = hook.with(|h| h.borrow_mut().take()) {
+        let due = hook.with(|h| {
+            let mut h = h.borrow_mut();
+            match h.as_ref() {
+                Some((Some(target), _)) if target != path => None,
+                Some(_) => h.take(),
+                None => None,
+            }
+        });
+        if let Some((_, f)) = due {
             f(path);
         }
     }
 
     fn set_hook(hook: &'static LocalKey<Hook>, f: impl FnOnce(&Path) + 'static) {
-        hook.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+        hook.with(|h| *h.borrow_mut() = Some((None, Box::new(f))));
+    }
+
+    fn set_hook_for(hook: &'static LocalKey<Hook>, path: &Path, f: impl FnOnce(&Path) + 'static) {
+        hook.with(|h| *h.borrow_mut() = Some((Some(path.to_path_buf()), Box::new(f))));
     }
 
     const PW: &str = "pw";
@@ -3109,6 +3289,60 @@ mod save_race_tests {
         app.add_entry("from-the-app").expect("add");
         app.save().expect("the handle can still save");
         assert_eq!(titles(&path), ["from-the-app", "from-the-cli"]);
+    }
+
+    /// A writer lands on the other copy while sync is writing it: merged in on
+    /// another round, not renamed over.
+    #[test]
+    fn sync_merges_a_write_landing_on_the_other_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.kdbx");
+        let copy = dir.path().join("copy.kdbx");
+        Vault::create(&path, PW).expect("create");
+        std::fs::copy(&path, &copy).expect("copy");
+        let mut app = Vault::open(&path, PW).expect("open");
+        app.add_entry("from-the-app").expect("add");
+        app.save().expect("save");
+        let mut other = Vault::open(&copy, PW).expect("open copy");
+        other.add_entry("landed-on-the-copy").expect("add");
+        set_hook_for(&BEFORE_RENAME, &copy, move |_| {
+            other.save().expect("other saves")
+        });
+
+        let summary = app.sync_with(&copy, PW, None).expect("sync");
+        assert_eq!(titles(&copy), ["from-the-app", "landed-on-the-copy"]);
+        assert_eq!(titles(&path), ["from-the-app", "landed-on-the-copy"]);
+        assert_eq!(summary.pushed.created, 1);
+    }
+
+    /// A writer that never saw the sync renames its file over the other copy
+    /// right after sync's rename: the next round merges it and writes again,
+    /// and the counts still report what was pushed.
+    #[test]
+    fn sync_merges_a_write_replacing_the_other_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.kdbx");
+        let copy = dir.path().join("copy.kdbx");
+        Vault::create(&path, PW).expect("create");
+        std::fs::copy(&path, &copy).expect("copy");
+        let theirs = dir.path().join("theirs.kdbx");
+        std::fs::copy(&copy, &theirs).expect("copy");
+        let mut other = Vault::open(&theirs, PW).expect("open");
+        other.add_entry("replaced-the-copy").expect("add");
+        other.save().expect("save");
+        drop(other);
+        let mut app = Vault::open(&path, PW).expect("open");
+        app.add_entry("from-the-app").expect("add");
+        app.save().expect("save");
+        set_hook_for(&AFTER_RENAME, &copy, move |copy| {
+            std::fs::rename(&theirs, copy).expect("replace");
+        });
+
+        let summary = app.sync_with(&copy, PW, None).expect("sync");
+        assert_eq!(titles(&copy), ["from-the-app", "replaced-the-copy"]);
+        assert_eq!(titles(&path), ["from-the-app", "replaced-the-copy"]);
+        assert!(summary.other_written);
+        assert_eq!(summary.pushed.created, 1);
     }
 
     /// Another writer renames a file that never saw this save's changes over

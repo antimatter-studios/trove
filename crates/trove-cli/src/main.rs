@@ -655,6 +655,23 @@ enum Command {
         source_key_file: Option<PathBuf>,
     },
 
+    /// Two-way sync `--vault` with another copy of it — one in a synced
+    /// folder, on a USB stick, on a network share. Each side's changes are
+    /// merged into the other (as `merge` does), and the other copy is
+    /// replaced atomically, so both end equal; it is created if missing.
+    /// `--vault` is authoritative for vault settings such as the KDF. A new
+    /// copy gets `--vault`'s own credentials. Offline-only. An existing OTHER
+    /// copy's password is prompted separately (with `--password-stdin` it is
+    /// stdin line 2; `--vault`'s password line 1).
+    Sync {
+        /// Path to the other copy of the vault.
+        other: PathBuf,
+        /// Keyfile for the OTHER copy, when it uses a composite key.
+        /// (The global --key-file applies to `--vault`.)
+        #[arg(long = "other-key-file", value_name = "PATH")]
+        other_key_file: Option<PathBuf>,
+    },
+
     /// Export the vault: `xml` (the decrypted KeePass XML, importable by any
     /// KeePass tool) or `csv` (KeePassXC's column convention). Offline-only,
     /// stdout. THE OUTPUT CONTAINS EVERY SECRET IN PLAINTEXT.
@@ -1378,6 +1395,7 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
         | Command::GitCredential { .. }
         | Command::Resolve { .. }
         | Command::Merge { .. }
+        | Command::Sync { .. }
         | Command::Export { .. }
         | Command::DbEdit { .. }
         | Command::DbInfo { .. } => true,
@@ -1784,6 +1802,15 @@ fn run(cli: Cli) -> Result<()> {
             require_vault(vault)?,
             &source,
             source_key_file.as_deref(),
+            pw_stdin,
+        ),
+        Command::Sync {
+            other,
+            other_key_file,
+        } => cmd_sync(
+            require_vault(vault)?,
+            &other,
+            other_key_file.as_deref(),
             pw_stdin,
         ),
         Command::Export { format } => cmd_export(require_vault(vault)?, format, pw_stdin),
@@ -5704,6 +5731,69 @@ fn cmd_merge(
         s.relocated,
         s.deleted
     );
+    Ok(())
+}
+
+/// `trove sync` — two-way merge with another copy, leaving both equal.
+fn cmd_sync(
+    vault_path: &Path,
+    other: &Path,
+    other_key_file: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let mut v = open_vault(vault_path, pw_stdin)?;
+    // A new copy is an exact copy: same password and key file, so it is
+    // neither weaker than the vault nor locked by a mistyped password.
+    let (other_password, other_keyfile) = if !other.exists() {
+        (
+            v.current_password().to_string(),
+            v.current_keyfile().map(<[u8]>::to_vec),
+        )
+    } else {
+        let password = if pw_stdin {
+            read_password_from_stdin()
+                .context("reading OTHER vault password from stdin (line 2)")?
+        } else {
+            rpassword::prompt_password("Other copy's password: ")
+                .context("reading the other copy's password")?
+        };
+        let keyfile = match other_key_file {
+            Some(p) => Some(
+                std::fs::read(p)
+                    .with_context(|| format!("reading other key file {}", p.display()))?,
+            ),
+            None => None,
+        };
+        (password, keyfile)
+    };
+    let s = v
+        .sync_with(other, &other_password, other_keyfile.as_deref())
+        .with_context(|| format!("syncing with {}", other.display()))?;
+    let counts = |m: trove_core::MergeSummary| {
+        format!(
+            "{} created, {} updated, {} relocated, {} deleted",
+            m.created, m.updated, m.relocated, m.deleted
+        )
+    };
+    if s.created {
+        println!(
+            "created {} from this vault, with the same credentials",
+            other.display()
+        );
+    } else if s.other_written {
+        println!(
+            "synced {}: pulled {}; pushed {}",
+            other.display(),
+            counts(s.pulled),
+            counts(s.pushed)
+        );
+    } else {
+        println!(
+            "synced {}: pulled {}; it already had everything from this vault",
+            other.display(),
+            counts(s.pulled)
+        );
+    }
     Ok(())
 }
 
