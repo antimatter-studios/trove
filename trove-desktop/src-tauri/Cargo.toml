@@ -76,4 +76,4 @@ security-framework = "3"
 
 # Same keepass-rs fork as the root workspace; keep the two pins identical.
 [patch.crates-io]
-keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "dd2bc7dca5795ee28a33f6e550986d6926a09d68" }
+keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "0e983962283dede355f92a866191b3ffa9951e07" }
