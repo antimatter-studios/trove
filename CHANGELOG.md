@@ -4,6 +4,26 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.24.0 — 2026-09-29
+
+**Drag and drop in the desktop sidebar.** Drag a folder to reorder it among its
+siblings or to move it into another folder; drag an entry from the list onto a
+folder to file it there. Dragging moves; holding Option (Ctrl on Windows and
+Linux) copies. The carried card says move or copy and turns green or red for
+whether the folder under it takes the drop. Resting on a closed folder for a
+second opens it. Folder order is stored per group in `CustomData` under
+`Trove.Position`, since keepass-rs keeps no order of its own; trove-core gains
+`Vault::set_group_order` and `GroupSummary::position`. The window also stops
+behaving like a web page: text is selectable only where it is worth copying,
+and right click no longer opens the webview's page menu. (#325)
+
+**Entry history kept on trove's own edits.** Like KeePassXC, saving now files
+an entry's previous state as a history version for every entry trove changed,
+trimmed to the vault's `HistoryMaxItems` / `HistoryMaxSize`. Before this, an
+edit in trove silently dropped the value it replaced from a vault shared with
+KeePassXC. Removing a field now updates the entry's modification time, so merges
+see it. (#326)
+
 ## v0.23.0 — 2026-09-29
 
 **Close one private SSH agent socket.** `trove ssh-agent close [SOCKET]` tears
