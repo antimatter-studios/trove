@@ -437,6 +437,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.24.0
+Drag and drop in the desktop sidebar: reorder folders or move them into another, and drag entries from the list onto a folder. Dragging moves, Option (Ctrl on Windows/Linux) copies, and the carried card turns green or red for whether the drop is taken. Text is selectable only where it is worth copying, and right click no longer opens the webview's page menu. Edits made in trove now keep the replaced value as entry history, as KeePassXC does.
+
 ### v0.23.0
 `trove ssh-agent close [SOCKET]` closes one private socket from `trove ssh-agent empty` (`$SSH_AUTH_SOCK` by default) and leaves the rest alone, so a script run repeatedly against an unlocked vault no longer reaches the 32-socket limit. `trove ssh-agent sockets` lists the open private sockets and the keys on each.
 
@@ -463,6 +466,3 @@ Desktop entry paths are relative to the folder you are in — typing `ssh` insid
 
 ### v0.17.3
 The desktop app can edit an entry's attributes, not just show and copy them — name/value rows in the edit form, with add and remove. Needed because a `git.token` attribute is how the credential helper is told to send a token rather than the web login, and there was no way to create one from the app that stores it. Reserved keys (`_Trove*`, `Materialize.*`) survive a save that never showed them, attributes cannot be named after the five standard fields, and names are stored exactly as typed.
-
-### v0.17.2
-The git credential helper sends an entry's `git.token` attribute when it has one, falling back to `Password`. A self-hosted forge entry is usually the web login too, and forges increasingly want a token rather than a password for git over HTTPS — so both secrets now live on one entry, each used where it belongs. `git.token` is an ordinary KDBX attribute, editable in KeePassXC, matched case-insensitively.
