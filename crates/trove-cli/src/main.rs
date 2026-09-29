@@ -892,9 +892,10 @@ enum SshAgentOp {
     ///
     /// Each call returns a separate socket with its own keys, so parallel
     /// callers can't disturb each other. The daemon owns the lifetime — the
-    /// sockets go on `trove lock`, and there is nothing to clean up. One daemon
-    /// hands out at most 32 of them; a caller looping on this has a bug, and a
-    /// refusal is friendlier than exhausting its file descriptors.
+    /// sockets go on `trove lock` — but a caller that runs repeatedly against
+    /// an unlocked daemon should hand its socket back with `trove ssh-agent
+    /// close` when done. One daemon holds at most 32 at once; past that `empty`
+    /// is refused rather than exhausting the daemon's file descriptors.
     ///
     /// Requires a daemon that is already running: a socket served by a daemon
     /// with no vault unlocked could never be filled.
@@ -910,6 +911,33 @@ enum SshAgentOp {
         /// Entry path (`Infra/s1`), or `Infra/s1:deploy` when the entry holds
         /// more than one key.
         entry: String,
+    },
+
+    /// Close a private agent socket that `trove ssh-agent empty` handed out.
+    ///
+    /// Stops serving it, drops its keys and removes the socket file. Other
+    /// private sockets, and the main agent, are left alone. Without an
+    /// argument it closes the socket named by `$SSH_AUTH_SOCK`, so a script
+    /// can release what it made:
+    ///
+    ///     sock=$(trove ssh-agent empty) || exit 1
+    ///     trap 'trove ssh-agent close "$sock"' EXIT
+    ///
+    /// Only sockets from `empty` can be closed; the main agent socket is
+    /// refused.
+    Close {
+        /// Socket path to close. Defaults to `$SSH_AUTH_SOCK`.
+        socket: Option<String>,
+    },
+
+    /// List the private agent sockets the daemon serves, and the keys on each.
+    ///
+    /// One socket path per line, followed by the keys it serves as indented
+    /// `ssh-add -L` lines. Prints nothing and exits 0 if no daemon is running.
+    Sockets {
+        /// Print `[{socket, keys: [{algo, blob_b64, comment}]}]` as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show which keys would be offered to a server, without connecting to it.
@@ -1659,6 +1687,12 @@ fn run(cli: Cli) -> Result<()> {
         Command::SshAgent {
             op: SshAgentOp::Add { entry },
         } => cmd_ssh_agent_add(&entry),
+        Command::SshAgent {
+            op: SshAgentOp::Close { socket },
+        } => cmd_ssh_agent_close(socket),
+        Command::SshAgent {
+            op: SshAgentOp::Sockets { json },
+        } => cmd_ssh_agent_sockets(json),
         Command::SshAgent {
             op: SshAgentOp::Which { target },
         } => cmd_ssh_agent_which(&target),
@@ -2424,6 +2458,107 @@ fn cmd_ssh_agent_add(entry: &str) -> Result<()> {
     if let Some(warnings) = resp.get("ssh_warnings").and_then(Value::as_array) {
         for w in warnings.iter().filter_map(Value::as_str) {
             eprintln!("trove: warning: {w}");
+        }
+    }
+    Ok(())
+}
+
+/// `trove ssh-agent close [socket]` — tear down one private agent socket,
+/// `$SSH_AUTH_SOCK` when none is named.
+///
+/// Deliberately does NOT autospawn: a daemon that wasn't running serves no
+/// private sockets, so there would be nothing to close.
+fn cmd_ssh_agent_close(socket: Option<String>) -> Result<()> {
+    let socket = socket.filter(|s| !s.is_empty()).or_else(|| {
+        std::env::var("SSH_AUTH_SOCK")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
+    let Some(socket) = socket else {
+        return Err(DaemonClassified {
+            message: "no socket named and SSH_AUTH_SOCK is not set, so there is nothing \
+                      to close; pass the path `trove ssh-agent empty` printed"
+                .to_string(),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    };
+    let req = daemon::Request::SshAgentClose {
+        socket: socket.clone(),
+    };
+    let resp = match daemon::send(&req) {
+        Ok(r) => r,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: format!(
+                    "no trove daemon is running, so {socket} is not being served \
+                     and there is nothing to close"
+                ),
+                exit: EXIT_USER_ERROR,
+            }
+            .into())
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let released = resp
+        .get("ssh_released")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    // stdout stays empty, as for `add`; the confirmation is a note.
+    let keys = if released == 1 { "key" } else { "keys" };
+    eprintln!("ssh-agent: closed {socket} ({released} {keys} dropped)");
+    Ok(())
+}
+
+/// `trove ssh-agent sockets` — every private agent socket and the keys on it.
+/// Like `list`, reads the running daemon without autospawning and prints
+/// nothing when there isn't one.
+fn cmd_ssh_agent_sockets(json: bool) -> Result<()> {
+    let resp = match daemon::send(&daemon::Request::SshAgentSockets) {
+        Ok(r) => r,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            if json {
+                println!("[]");
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let sockets = resp
+        .get("ssh_sockets")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&sockets)?);
+        return Ok(());
+    }
+    for s in sockets {
+        println!("{}", s.get("socket").and_then(Value::as_str).unwrap_or(""));
+        for k in s
+            .get("keys")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let algo = k.get("algo").and_then(Value::as_str).unwrap_or("");
+            let blob = k.get("blob_b64").and_then(Value::as_str).unwrap_or("");
+            let comment = k.get("comment").and_then(Value::as_str).unwrap_or("");
+            println!("  {algo} {blob} {comment}");
         }
     }
     Ok(())

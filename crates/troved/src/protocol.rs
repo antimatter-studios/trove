@@ -100,6 +100,20 @@ pub enum Request {
         socket: String,
         entry: String,
     },
+    /// Tear down the private agent listening at `socket`: stop serving it,
+    /// drop its keys and unlink the socket file. The other private agents, and
+    /// the main one, are left alone.
+    ///
+    /// `socket` is a path returned by [`Request::SshAgentEmpty`]; any other
+    /// is refused, so the main agent can't be closed this way. This is how a
+    /// caller that runs repeatedly against an unlocked daemon hands its socket
+    /// back instead of holding it until the next `lock`.
+    SshAgentClose {
+        socket: String,
+    },
+    /// List the private agent sockets this daemon serves, and the keys each
+    /// one holds. Read-only.
+    SshAgentSockets,
     /// Ask which served keys would be offered to a server, without connecting
     /// to it. Read-only.
     ///
@@ -377,6 +391,11 @@ impl std::fmt::Debug for Request {
                 .field("socket", socket)
                 .field("entry", entry)
                 .finish(),
+            Request::SshAgentClose { socket } => f
+                .debug_struct("SshAgentClose")
+                .field("socket", socket)
+                .finish(),
+            Request::SshAgentSockets => f.write_str("SshAgentSockets"),
             Request::SshAgentWhich { host_keys } => f
                 .debug_struct("SshAgentWhich")
                 .field("host_keys", host_keys)
@@ -638,6 +657,13 @@ pub struct SshKeyDto {
     pub comment: String,
 }
 
+/// One private agent socket and the keys it serves, for `ssh-agent sockets`.
+#[derive(Debug, Serialize)]
+pub struct ScopedSocketDto {
+    pub socket: String,
+    pub keys: Vec<SshKeyDto>,
+}
+
 /// One GPG key served by the agent, for `gpg-agent list`.
 #[derive(Debug, Serialize)]
 pub struct GpgKeyDto {
@@ -803,6 +829,17 @@ pub enum OkBody {
         ssh_served: usize,
         ssh_warnings: Vec<String>,
     },
+    /// Response to `SshAgentClose`: the socket that was torn down, and how
+    /// many keys it was serving when it went.
+    SshAgentClosed {
+        ssh_closed: String,
+        ssh_released: usize,
+    },
+    /// Response to `SshAgentSockets`: every private agent socket, in the order
+    /// they were created.
+    SshAgentSockets {
+        ssh_sockets: Vec<ScopedSocketDto>,
+    },
     /// Response to `SshAgentWhich`: what a server would be offered.
     SshAgentWhich {
         /// The host keys the question resolved to, as `SHA256:` fingerprints.
@@ -907,6 +944,15 @@ impl Response {
             ssh_served,
             ssh_warnings,
         })
+    }
+    pub fn ok_ssh_agent_closed(ssh_closed: String, ssh_released: usize) -> Self {
+        Response::Ok(OkBody::SshAgentClosed {
+            ssh_closed,
+            ssh_released,
+        })
+    }
+    pub fn ok_ssh_agent_sockets(ssh_sockets: Vec<ScopedSocketDto>) -> Self {
+        Response::Ok(OkBody::SshAgentSockets { ssh_sockets })
     }
     pub fn ok_ssh_agent_which(
         ssh_host_keys: Vec<String>,

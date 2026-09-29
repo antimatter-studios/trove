@@ -85,6 +85,7 @@ pub async fn handle(
         | Request::MaterializeStatus
         | Request::Describe { .. }
         | Request::SshAgentList
+        | Request::SshAgentSockets
         | Request::SshAgentWhich { .. }
         | Request::GpgAgentList => {}
         _ => idle.bump(),
@@ -561,6 +562,49 @@ pub async fn handle(
                     response: Response::err(e.to_string()),
                     shutdown: false,
                 },
+            }
+        }
+
+        Request::SshAgentClose { socket } => {
+            // Under the vault-state lock, like `SshAgentEmpty`: every change to
+            // the registry is serialised against `Lock`'s teardown of it.
+            let _state_guard = state.lock().await;
+            match scoped::close(scoped_agents, std::path::Path::new(&socket)).await {
+                Ok(released) => Handled {
+                    response: Response::ok_ssh_agent_closed(socket, released),
+                    shutdown: false,
+                },
+                Err(e) => Handled {
+                    response: Response::err(e.to_string()),
+                    shutdown: false,
+                },
+            }
+        }
+
+        Request::SshAgentSockets => {
+            use base64::Engine as _;
+            let registry = scoped_agents.read().await;
+            let mut sockets = Vec::with_capacity(registry.len());
+            for agent in registry.iter() {
+                let keys = agent
+                    .store
+                    .read()
+                    .await
+                    .iter()
+                    .map(|k| crate::protocol::SshKeyDto {
+                        algo: k.algorithm_name().to_string(),
+                        blob_b64: base64::engine::general_purpose::STANDARD.encode(&k.public_blob),
+                        comment: k.comment.clone(),
+                    })
+                    .collect();
+                sockets.push(crate::protocol::ScopedSocketDto {
+                    socket: agent.socket.display().to_string(),
+                    keys,
+                });
+            }
+            Handled {
+                response: Response::ok_ssh_agent_sockets(sockets),
+                shutdown: false,
             }
         }
 

@@ -16,6 +16,8 @@
 //!      isn't there.
 //!   6. Crossing `MaxAuthTries` warns.
 //!   7. `lock` tears the sockets down — the daemon owns the lifetime.
+//!   8. `close` tears down one socket, leaves the rest, and frees its slot
+//!      under the cap; `sockets` lists what is left.
 //!
 //! Listing is driven through the real `ssh-add` where it proves something, so
 //! what's asserted is what an ssh client actually sees.
@@ -175,6 +177,13 @@ impl Harness {
             .to_string();
         wait_until_accepting(Path::new(&socket)).await;
         PathBuf::from(socket)
+    }
+
+    async fn close(&self, socket: &Path) -> Value {
+        self.send(Request::SshAgentClose {
+            socket: socket.to_string_lossy().into_owned(),
+        })
+        .await
     }
 
     async fn add(&self, socket: &Path, entry: &str) -> Value {
@@ -466,7 +475,9 @@ async fn the_number_of_private_sockets_is_capped() {
     );
     let err = resp["error"].as_str().expect("error text");
     assert!(
-        err.contains(&limit.to_string()) && err.contains("trove lock"),
+        err.contains(&limit.to_string())
+            && err.contains("trove ssh-agent close")
+            && err.contains("trove lock"),
         "the refusal should name the limit and the way out, got: {err}"
     );
 }
@@ -495,4 +506,89 @@ async fn lock_tears_down_every_scoped_socket() {
     );
     assert!(!a.exists(), "lock must unlink {}", a.display());
     assert!(!b.exists(), "lock must unlink {}", b.display());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_tears_down_one_socket_and_leaves_the_rest() {
+    if !have("ssh-keygen") || !have("ssh-add") {
+        eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = make_vault(tmp.path(), &["s1"]);
+    let h = Harness::new();
+    h.unlock(&vault).await;
+
+    let a = h.empty().await;
+    let b = h.empty().await;
+    assert_eq!(h.add(&a, "s1").await["status"], "ok");
+    assert_eq!(h.add(&b, "s1").await["status"], "ok");
+
+    let resp = h.close(&a).await;
+    assert_eq!(resp["status"], "ok", "close failed: {resp}");
+    assert_eq!(resp["ssh_released"], 1);
+    assert!(!a.exists(), "close must unlink {}", a.display());
+
+    // The other private socket, and the main agent, are untouched.
+    assert!(
+        ssh_add_list(&b).contains("s1"),
+        "closing one socket must not touch another: {}",
+        ssh_add_list(&b)
+    );
+    assert_eq!(h.key_store.read().await.len(), 1);
+
+    let listed = h.send(Request::SshAgentSockets).await;
+    assert_eq!(listed["status"], "ok", "sockets failed: {listed}");
+    let sockets = listed["ssh_sockets"].as_array().expect("socket list");
+    assert_eq!(sockets.len(), 1, "only b should remain: {listed}");
+    assert_eq!(sockets[0]["socket"], b.to_string_lossy().as_ref());
+    assert_eq!(sockets[0]["keys"][0]["comment"], "s1");
+
+    // Closing it again is an error rather than a silent success, so a caller
+    // with the wrong path finds out.
+    let again = h.close(&a).await;
+    assert_eq!(again["status"], "err", "second close must fail: {again}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_refuses_a_socket_the_daemon_did_not_hand_out() {
+    let tmp = TempDir::new().expect("tempdir");
+    let h = Harness::new();
+    // The main agent socket is the one most likely to be in SSH_AUTH_SOCK.
+    let main = troved::ssh_agent::resolve_ssh_socket_path();
+    for socket in [main, tmp.path().join("elsewhere.sock")] {
+        let resp = h.close(&socket).await;
+        assert_eq!(
+            resp["status"],
+            "err",
+            "must refuse {}: {resp}",
+            socket.display()
+        );
+        let err = resp["error"].as_str().expect("error text");
+        assert!(
+            err.contains("trove ssh-agent sockets"),
+            "the refusal should say how to find a real socket, got: {err}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_a_socket_frees_its_place_under_the_cap() {
+    let h = Harness::new();
+    let limit = troved::ssh_agent::scoped::MAX_SCOPED_AGENTS;
+    let mut first = None;
+    for i in 0..limit {
+        let resp = h.send(Request::SshAgentEmpty).await;
+        assert_eq!(resp["status"], "ok", "socket {i} should be allowed: {resp}");
+        first.get_or_insert_with(|| PathBuf::from(resp["ssh_socket"].as_str().unwrap()));
+    }
+    assert_eq!(h.send(Request::SshAgentEmpty).await["status"], "err");
+
+    let resp = h.close(first.as_ref().unwrap()).await;
+    assert_eq!(resp["status"], "ok", "close failed: {resp}");
+    let resp = h.send(Request::SshAgentEmpty).await;
+    assert_eq!(
+        resp["status"], "ok",
+        "a closed socket must free a slot: {resp}"
+    );
 }

@@ -43,6 +43,11 @@
 //! The daemon owns it. Sockets are torn down on `lock`, on idle-lock and at
 //! shutdown, alongside every other secret-bearing store — the caller exports a
 //! path and never has to clean anything up.
+//!
+//! A caller that is finished with one socket before then can hand it back with
+//! [`close`]. That matters to anything that runs repeatedly against a daemon
+//! that stays unlocked: without it, every run holds a socket until the next
+//! lock, and enough runs reach [`MAX_SCOPED_AGENTS`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,13 +67,13 @@ pub const MAX_AUTH_TRIES_DEFAULT: usize = 6;
 
 /// How many private sockets one daemon will hand out.
 ///
-/// Each one costs a listener task, a socket file and a key store, and nothing
-/// releases an individual socket — they go together at lock. Without a ceiling
-/// a caller that loops on `ssh-agent empty` (a retry around a failing
-/// deployment, say) would consume file descriptors until the daemon could no
-/// longer accept anything at all. 32 is far above the handful a real workflow
-/// needs and far below anything that hurts, and refusing past it turns an
-/// unbounded leak into a message naming the way out.
+/// Each one costs a listener task, a socket file and a key store, and one is
+/// released only when its caller [`close`]s it or at lock. Without a ceiling a
+/// caller that loops on `ssh-agent empty` and never closes (a retry around a
+/// failing deployment, say) would consume file descriptors until the daemon
+/// could no longer accept anything at all. 32 is far above the handful a real
+/// workflow holds at once and far below anything that hurts, and refusing past
+/// it turns an unbounded leak into a message naming the way out.
 pub const MAX_SCOPED_AGENTS: usize = 32;
 
 /// One private agent socket and the keys it serves.
@@ -108,7 +113,8 @@ pub fn new_registry() -> ScopedAgents {
 pub enum CreateError {
     #[error(
         "this daemon already serves {0} private ssh-agent sockets, which is the limit; \
-         `trove lock` releases them all"
+         `trove ssh-agent close <socket>` releases one (`trove ssh-agent sockets` lists them), \
+         and `trove lock` releases them all"
     )]
     Limit(usize),
     #[error("binding the socket: {0}")]
@@ -121,6 +127,16 @@ pub enum AddError {
     #[error(
         "{0} is not an agent socket this daemon created; \
          run `trove ssh-agent empty` and export its path as SSH_AUTH_SOCK"
+    )]
+    UnknownSocket(String),
+}
+
+/// Why a `close` could not be carried out.
+#[derive(Debug, thiserror::Error)]
+pub enum CloseError {
+    #[error(
+        "{0} is not a private agent socket this daemon serves; \
+         `trove ssh-agent sockets` lists the ones it does"
     )]
     UnknownSocket(String),
 }
@@ -196,6 +212,26 @@ pub async fn add(
         served: keys.len(),
         replaced,
     })
+}
+
+/// Tear down the one scoped agent listening at `socket`, leaving the others
+/// alone. Returns how many keys it was serving.
+///
+/// Only sockets in the registry can be closed, so the daemon's main agent
+/// socket — which a caller may well have in `SSH_AUTH_SOCK` — is refused
+/// rather than shut.
+pub async fn close(agents: &ScopedAgents, socket: &Path) -> Result<usize, CloseError> {
+    let agent = {
+        let mut registry = agents.write().await;
+        let i = registry
+            .iter()
+            .position(|a| same_path(&a.socket, socket))
+            .ok_or_else(|| CloseError::UnknownSocket(socket.display().to_string()))?;
+        registry.remove(i)
+    };
+    let served = agent.store.read().await.len();
+    agent.shut_down().await;
+    Ok(served)
 }
 
 /// Drop from every scoped agent any key the daemon no longer holds.
