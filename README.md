@@ -437,6 +437,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.23.0
+`trove ssh-agent close [SOCKET]` closes one private socket from `trove ssh-agent empty` (`$SSH_AUTH_SOCK` by default) and leaves the rest alone, so a script run repeatedly against an unlocked vault no longer reaches the 32-socket limit. `trove ssh-agent sockets` lists the open private sockets and the keys on each.
+
 ### v0.22.0
 The desktop sidebar pencil opens Edit Folder: tags plus Delete folder, which lists every entry in the tree before you confirm (an empty tree goes without asking). The recycle bin is pinned at the bottom of the sidebar and lists everything in it; folder badges count every entry beneath them once, and clicking a folder opens or closes it. GitHub Actions move to their current major versions.
 
@@ -463,6 +466,3 @@ The desktop app can edit an entry's attributes, not just show and copy them — 
 
 ### v0.17.2
 The git credential helper sends an entry's `git.token` attribute when it has one, falling back to `Password`. A self-hosted forge entry is usually the web login too, and forges increasingly want a token rather than a password for git over HTTPS — so both secrets now live on one entry, each used where it belongs. `git.token` is an ordinary KDBX attribute, editable in KeePassXC, matched case-insensitively.
-
-### v0.17.1
-`--env` no longer eats the subcommand: `trove --vault v --env git-credential get` read `git-credential` as the path and ran `trove get` instead, which broke the git credential helper — the one command `--env` exists to serve. Bare `--env` still searches for `.env.trove`; naming a file is now `--env=<PATH>`, and the space-separated form explains itself rather than failing as an unknown subcommand. A `credential.helper` line needs no change.
