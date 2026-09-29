@@ -666,6 +666,7 @@ objects and arrays for scripts:
 | `trove materialize-status --json` | `{materialized: [{title, target_path, vault, ttl_remaining_seconds, exists}, ...]}`; empty state is an empty array. |
 | `trove idle get --json` | `{timeout_seconds, remaining_seconds}`; `remaining_seconds` is null when no idle countdown is active. |
 | `trove ssh-agent list --json` | Array of `{algo, blob_b64, comment}` public identities; `[]` when no daemon is running. |
+| `trove ssh-agent sockets --json` | Array of `{socket, keys: [{algo, blob_b64, comment}]}` private agent sockets; `[]` when no daemon is running. |
 | `trove gpg-agent list --json` | Array of `{keygrip, key_type, comment}`; `[]` when no daemon is running. |
 | `trove keychain status <VAULT> --json` | `{stored, vault}`; does not include the stored password. macOS only. |
 
@@ -732,16 +733,18 @@ gives you the real status.
 
 Every call returns a **separate** socket with its own keys, so callers that run
 in parallel can't disturb each other's offers. The daemon owns the lifetime: the
-sockets go on `trove lock`, on idle-lock and at shutdown, and there is nothing
-to clean up. A key that leaves the vault — because its entry was edited, removed
+sockets go on `trove lock`, on idle-lock and at shutdown. A caller that is
+finished with its socket before then — anything that runs repeatedly while the
+vault stays unlocked — should hand it back with
+[`trove ssh-agent close`](#trove-ssh-agent-close). A key that leaves the vault — because its entry was edited, removed
 or moved — is dropped from these sockets at the same moment it is dropped from
 the main one. Key material never leaves troved: a scoped socket is served by the
 same agent code as the main one.
 
-One daemon hands out at most **32** of these. There is no way to close an
-individual socket, so a caller that loops on `ssh-agent empty` would otherwise
-consume file descriptors until the daemon stopped accepting anything; past the
-limit it is refused with a message naming `trove lock`.
+One daemon holds at most **32** of these at once. A caller that loops on
+`ssh-agent empty` without closing would otherwise consume file descriptors until
+the daemon stopped accepting anything; past the limit `empty` is refused with a
+message naming `trove ssh-agent close` and `trove lock`.
 
 Requires a daemon that is already running — it does not autospawn one. A daemon
 with no vault unlocked holds no keys, so a socket it handed out could never be
@@ -772,6 +775,42 @@ composes in a script.
 
 For the design rationale and alternatives considered, see
 [the scoped SSH-agent socket design note](ssh-agent-empty-add.md).
+
+### trove ssh-agent close
+
+```
+trove ssh-agent close [SOCKET]
+```
+
+Close one private socket that `trove ssh-agent empty` handed out: stop serving
+it, drop its keys and remove the socket file. The other private sockets, and the
+main agent, are left alone. Without `SOCKET` it closes the one named by
+`$SSH_AUTH_SOCK`.
+
+A script that runs often while the vault stays unlocked should release what it
+made, or every run holds a socket until the next lock and the 32-socket limit is
+eventually reached:
+
+```sh
+sock=$(trove ssh-agent empty) || exit 1
+trap 'trove ssh-agent close "$sock"' EXIT
+export SSH_AUTH_SOCK="$sock"
+trove ssh-agent add "Infra/s1"
+```
+
+Only sockets from `empty` can be closed. The main agent socket, a socket from
+another agent, and a socket that is already closed are refused with an error.
+Confirmation goes to stderr; stdout stays empty.
+
+### trove ssh-agent sockets
+
+```
+trove ssh-agent sockets [--json]
+```
+
+List the private sockets the daemon serves, in creation order, with the keys on
+each one as indented `ssh-add -L` lines. Use it to find sockets a caller forgot
+to close. Prints nothing (or `[]` with `--json`) when no daemon is running.
 
 ### Telling the agent which server a key is for
 
