@@ -181,3 +181,63 @@ fn field_edits_keep_attachments_in_history() {
         vec![("key".to_string(), b"key bytes".to_vec())]
     );
 }
+
+/// An entry whose attachment lives on only in its history, as a file saved by
+/// another client can have it: `key` is in the version filed by the username
+/// edit, and the current version no longer has it. trove's own removal drops
+/// the history's reference too, so the file is rewritten with the crate.
+fn entry_with_key_only_in_history(dir: &TempDir) -> (std::path::PathBuf, trove_core::EntryId) {
+    let (path, mut vault, id) = vault_with_entry(dir);
+    vault.attach_binary(&id, "key", b"old private key").unwrap();
+    vault.save().unwrap();
+    vault.set_field(&id, "UserName", "bob").unwrap();
+    vault.save().unwrap();
+    drop(vault);
+
+    let mut db = open_raw(&path);
+    let entry_id = db
+        .iter_all_entries()
+        .find(|e| e.get_title() == Some("e"))
+        .expect("entry exists")
+        .id();
+    let mut without = db.clone();
+    without
+        .entry_mut(entry_id)
+        .unwrap()
+        .remove_attachment_by_name("key");
+    let current = (*without.entry(entry_id).unwrap()).clone();
+    *db.entry_mut(entry_id).unwrap() = current;
+    let mut file = std::fs::File::create(&path).unwrap();
+    db.save(&mut file, keepass::DatabaseKey::new().with_password(PW))
+        .unwrap();
+    drop(file);
+
+    let db = open_raw(&path);
+    assert_eq!(db.num_attachments(), 1, "the history holds the key");
+    (path, id)
+}
+
+#[test]
+fn a_destroyed_entry_takes_its_history_attachments_with_it() {
+    let dir = TempDir::new().unwrap();
+    let (path, id) = entry_with_key_only_in_history(&dir);
+    let mut vault = Vault::open(&path, PW).unwrap();
+    assert!(!vault.recycle_entry(&id, true).unwrap());
+    vault.save().unwrap();
+
+    assert_eq!(open_raw(&path).num_attachments(), 0);
+}
+
+#[test]
+fn a_destroyed_group_takes_its_entries_history_attachments_with_it() {
+    let dir = TempDir::new().unwrap();
+    let (path, id) = entry_with_key_only_in_history(&dir);
+    let mut vault = Vault::open(&path, PW).unwrap();
+    vault.add_group("g").unwrap();
+    vault.move_entry(&id, "g").unwrap();
+    vault.save().unwrap();
+    assert!(!vault.remove_group("g", true, true).unwrap());
+    vault.save().unwrap();
+
+    assert_eq!(open_raw(&path).num_attachments(), 0);
+}

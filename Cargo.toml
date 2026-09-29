@@ -48,7 +48,7 @@ serde_json = "1"
 # read back as the wrong data). crates.io ignores [patch], so the published
 # trove-core still resolves keepass from crates.io.
 [patch.crates-io]
-keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "f140cc01f948d65aacb0ae61f130ce240bb3e1bf" }
+keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "a7e897a8a65680a615d5a83345fb860b2aa528df" }
 
 [profile.release]
 lto = "thin"
