@@ -56,6 +56,52 @@ fn merge_combines_divergent_copies() {
 }
 
 #[test]
+fn merge_takes_an_attachment_rotated_in_the_source() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().join("base.kdbx");
+    let fork = dir.path().join("fork.kdbx");
+
+    let mut v = Vault::create(&base, PW).unwrap();
+    let id = v.add_entry("server").unwrap();
+    v.attach_binary(&id, "id_ed25519", b"old key").unwrap();
+    v.save().unwrap();
+    drop(v);
+    std::fs::copy(&base, &fork).unwrap();
+
+    // Each side adds a different attachment elsewhere, so the two files use
+    // the same attachment IDs for different data.
+    let mut a = Vault::open(&base, PW).unwrap();
+    let mine = a.add_entry("mine").unwrap();
+    a.attach_binary(&mine, "note", b"base data").unwrap();
+    a.save().unwrap();
+
+    let mut b = Vault::open(&fork, PW).unwrap();
+    let theirs = b.add_entry("theirs").unwrap();
+    b.attach_binary(&theirs, "note", b"fork data").unwrap();
+    // Step past KDBX's 1-second time granularity, so the rotation is later.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    b.attach_binary(&id, "id_ed25519", b"new key").unwrap();
+    b.save().unwrap();
+    drop(b);
+
+    let summary = a.merge_from(&fork, PW, None).expect("merge");
+    assert!(summary.updated >= 1, "{summary:?}");
+    drop(a);
+
+    let v = Vault::open(&base, PW).unwrap();
+    let binary = |title: &str, name: &str| {
+        let id = v.find_by_title(title).unwrap();
+        v.read_binary(&id, name).unwrap()
+    };
+    assert_eq!(
+        binary("server", "id_ed25519").as_deref(),
+        Some(&b"new key"[..])
+    );
+    assert_eq!(binary("mine", "note").as_deref(), Some(&b"base data"[..]));
+    assert_eq!(binary("theirs", "note").as_deref(), Some(&b"fork data"[..]));
+}
+
+#[test]
 fn merge_source_credential_failures_are_clean() {
     let dir = TempDir::new().unwrap();
     let base = dir.path().join("base.kdbx");
