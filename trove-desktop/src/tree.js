@@ -42,6 +42,7 @@ function buildTree(entries, groups = []) {
     node.tags = group.tags || [];
     node.inheritedTags = group.inheritedTags || [];
     if (group.recycleBin) node.recycleBin = true;
+    if (group.position != null) node.position = group.position;
   }
   const toArr = (node, inBin = false) => ({
     name: node.name,
@@ -56,10 +57,15 @@ function buildTree(entries, groups = []) {
     // What clicking this folder lists. The badge shows `count` instead, so a
     // folder holding only subfolders does not read as empty.
     own: node.own,
-    // Sort each level's folders alphabetically (natural, case-insensitive);
-    // the recursion through toArr applies it at every depth.
+    // Folders someone has arranged come first, in their order; the rest
+    // follow alphabetically (natural, case-insensitive). The recursion through
+    // toArr applies it at every depth.
     children: Object.values(node.children)
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }))
+      .sort((a, b) => {
+        const pa = a.position ?? Infinity, pb = b.position ?? Infinity;
+        if (pa !== pb) return pa - pb;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      })
       .map((c) => toArr(c, inBin || !!node.recycleBin)),
   });
   return [toArr(root)];

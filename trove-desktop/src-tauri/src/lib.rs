@@ -66,6 +66,8 @@ pub fn run() {
             commands::get_entry_detail,
             commands::save_entry,
             commands::delete_entry,
+            commands::drop_entry,
+            commands::drop_group,
             commands::set_favorite,
             commands::biometric_status,
             commands::biometric_unlock,

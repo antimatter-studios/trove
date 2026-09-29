@@ -5,6 +5,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { Switch } from './overlays.jsx';
 import { splitRecycleBin } from './tree.js';
+import { visibleRows } from './dnd.js';
 // Trove — helpers + three-pane views
 
 function relTime(iso) {
@@ -35,18 +36,32 @@ function strengthInfo(v) {
 }
 
 /* ============ SIDEBAR ============ */
-function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags }) {
+function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags, dnd, onDragStart }) {
   const hasKids = node.children && node.children.length > 0;
   const isOpen = open[node.path];
   const sel = selected === node.path;
   const bin = node.recycleBin;
+  // Root and the bin stay put; every other folder can be carried. Only the
+  // folder tree takes drops — the bin is emptied by deleting, not by filing.
+  const draggable = !bin && node.groupPath.length > 0;
+  const target = dnd && !node.inRecycleBin;
+  const cls = dnd
+    ? (dnd.source === node.path ? " dnd-source" : "")
+      + (dnd.into === node.path ? (dnd.valid ? " dnd-into" : " dnd-into nodrop") : "")
+      + (dnd.shifted.has(node.path) ? " dnd-shift" : "")
+      + (dnd.gapRow === node.path ? " dnd-gap" : "")
+      + (dnd.gapEnd === node.path ? " dnd-gap-end" : "")
+    : "";
   return (
     <React.Fragment>
       <div
-        className={"tree-row" + (sel ? " sel" : "") + (bin ? " bin" : "")}
+        className={"tree-row" + (sel ? " sel" : "") + (bin ? " bin" : "") + cls}
         data-path={node.path}
+        data-drop-path={target ? node.path : undefined}
+        data-open={isOpen ? "1" : undefined}
         title={bin ? "Deleted entries and folders wait here. Deleting from the bin is permanent." : undefined}
-        style={{ paddingLeft: 6 + depth * 14 }}
+        style={{ paddingLeft: 6 + depth * 14, ...(dnd && dnd.gapIndent != null ? { "--gap-indent": dnd.gapIndent + "px" } : null) }}
+        onPointerDown={draggable && onDragStart ? (e) => onDragStart(e, { kind: "group", path: node.path, label: node.name, icon: "folder" }) : undefined}
         // A click both lists the folder and opens/closes it, so the tree can
         // be walked without aiming for the chevron.
         onClick={() => { onSelect(node.path); if (hasKids) setOpen(node.path); }}
@@ -65,19 +80,58 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags }
         <span className="tr-count" title={node.count !== node.own ? `${node.count} including subfolders, ${node.own} directly here` : undefined}>{node.count}</span>
       </div>
       {hasKids && isOpen && node.children.map((c) => (
-        <TreeNode key={c.path} node={c} depth={depth + 1} open={open} setOpen={setOpen} selected={selected} onSelect={onSelect} onEditTags={onEditTags} />
+        <TreeNode key={c.path} node={c} depth={depth + 1} open={open} setOpen={setOpen} selected={selected} onSelect={onSelect} onEditTags={onEditTags} dnd={dnd} onDragStart={onDragStart} />
       ))}
     </React.Fragment>
   );
 }
 
-function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel }) {
+/// How long a carried item has to rest on a closed folder before it opens.
+const HOVER_OPEN_MS = 1000;
+
+function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel, drag, onDragStart }) {
   const [open, setOpenState] = React.useState({ __root: true, inpace: true, personal: true, infra: false });
   const setOpen = (p) => setOpenState((o) => ({ ...o, [p]: !o[p] }));
   // The bin is not a folder you file things in; it is pinned apart below.
   const { tree: folders, bin } = React.useMemo(() => splitRecycleBin(tree), [tree]);
+
+  // Resting on a closed folder opens it, so something can be carried deep
+  // into the tree without letting go.
+  const hoverPath = drag && drag.drop && drag.drop.hover;
+  React.useEffect(() => {
+    if (!hoverPath || open[hoverPath]) return undefined;
+    const t = setTimeout(() => setOpenState((o) => ({ ...o, [hoverPath]: true })), HOVER_OPEN_MS);
+    return () => clearTimeout(t);
+  }, [hoverPath, open]);
+
+  // What the tree looks like mid-drag: the folder being carried, the one it
+  // would drop into, and the rows that slide down to open a gap where it would
+  // land among its new siblings.
+  const dnd = React.useMemo(() => {
+    if (!drag) return null;
+    const d = drag.drop || {};
+    const out = {
+      source: drag.item.kind === "group" ? drag.item.path : null,
+      into: d.into || null, valid: !!d.valid,
+      shifted: new Set(), gapRow: null, gapEnd: null, gapIndent: null,
+    };
+    if (!d.gapBefore) return out;
+    const rows = visibleRows(folders, (p) => !!open[p]);
+    const after = d.gapBefore.startsWith("__after:");
+    const at = after ? rows.indexOf(d.gapBefore.slice(8)) + 1 : rows.indexOf(d.gapBefore);
+    if (at <= 0) return out;
+    const depth = d.parent ? d.parent.split("/").length + 1 : 1;
+    out.gapIndent = 6 + depth * 14;
+    if (at >= rows.length) {
+      out.gapEnd = rows[rows.length - 1];
+    } else {
+      rows.slice(at).forEach((p) => out.shifted.add(p));
+      out.gapRow = rows[at];
+    }
+    return out;
+  }, [drag, folders, open]);
   return (
-    <div className="pane sidebar">
+    <div className={"pane sidebar" + (dnd && !dnd.valid ? " dnd-no" : "")}>
       <div className="sb-scroll">
         {/* The vault chip carries its own lock state: green unlocked, amber
             locked. State belongs on the thing it describes, not in a separate
@@ -118,12 +172,12 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, f
 
         <div className="sb-label">Groups</div>
         {folders.map((n) => (
-          <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} />
+          <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} dnd={dnd} onDragStart={onDragStart} />
         ))}
       </div>
       {bin && (
         <div className="sb-bin">
-          <TreeNode node={bin} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} />
+          <TreeNode node={bin} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} dnd={dnd} onDragStart={onDragStart} />
         </div>
       )}
       {/* Pinned to the bottom of the sidebar: a new entry goes into the vault
@@ -151,7 +205,7 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, f
 }
 
 /* ============ ENTRY LIST ============ */
-function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort, query, onQuery, searchRef, vaultName }) {
+function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort, query, onQuery, searchRef, vaultName, drag, onDragStart }) {
   const listRef = React.useRef(null);
   React.useEffect(() => {
     const el = listRef.current && listRef.current.querySelector(".erow.sel");
@@ -168,7 +222,7 @@ function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCyc
 
   const sortLabel = { title: "Title", modified: "Recently modified", strength: "Weakest first" }[sort];
   return (
-    <div className="pane list">
+    <div className={"pane list" + (drag && drag.drop && drag.drop.overList ? " dnd-no" : "")}>
       {/* Search sits above the list it filters — in the toolbar it was a global
           control that happened to change this pane. */}
       <div className="list-search" onClick={() => searchRef && searchRef.current && searchRef.current.focus()}>
@@ -203,7 +257,12 @@ function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCyc
           <div style={{ padding: "50px 20px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>No entries match.</div>
         )}
         {entries.map((e) => (
-          <div key={e.id} className={"erow" + (e.id === selectedId ? " sel" : "")} onClick={() => onSelect(e.id)}>
+          <div
+            key={e.id}
+            className={"erow" + (e.id === selectedId ? " sel" : "") + (drag && drag.item.kind === "entry" && drag.item.id === e.id ? " dnd-source" : "")}
+            onClick={() => onSelect(e.id)}
+            onPointerDown={onDragStart ? (ev) => onDragStart(ev, { kind: "entry", id: e.id, label: e.title, icon: TYPE_ICON[e.type] || "key" }) : undefined}
+          >
             <div className="cell-title">
               <span className="etype"><Icon name={TYPE_ICON[e.type] || "key"} size={16} /></span>
               <div className="etitle-wrap">

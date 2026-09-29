@@ -4,6 +4,8 @@ import { Icon } from './icons.jsx';
 import { buildTree, resolveEntryPath, isVisibleIn, recycleBinPath } from './tree.js';
 import * as api from './api.js';
 import { Sidebar, EntryList, Detail } from './views.jsx';
+import { useDragController, DragGhost, rowAt, overList } from './drag.jsx';
+import { dropZone, indexTree, resolveGroupDrop, resolveEntryDrop } from './dnd.js';
 import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal, EditFolderModal } from './overlays.jsx';
 // Trove — main app (multi-vault, backed by real .kdbx files via src/api.js)
 
@@ -536,6 +538,53 @@ function App() {
     setGroupEditor(null);
     flashPlain(res.recycled ? "Folder moved to recycle bin" : "Folder deleted");
   };
+  // ---- drag and drop ----
+  // Folders move (or copy) within the tree and slide into order; entries drop
+  // onto a folder. See dnd.js for the rules, drag.jsx for the pointer work.
+  const treeIndex = React.useMemo(() => indexTree(tree), [tree]);
+  const resolveDrop = (item, x, y, copy) => {
+    const row = rowAt(x, y);
+    // The entry list takes nothing, and says so rather than going quiet.
+    if (!row) return overList(x, y) ? { valid: false, overList: true } : null;
+    const isOpen = (p) => document.querySelector(`[data-drop-path="${CSS.escape(p)}"]`)?.dataset.open === "1";
+    const node = treeIndex.get(row.path);
+    const closedWithKids = node && node.node.children.length > 0 && !isOpen(row.path);
+    if (item.kind === "entry") {
+      const entry = entries.find((e) => e.id === item.id);
+      if (!entry) return null;
+      const d = resolveEntryDrop(treeIndex, entry, row.path, entries);
+      return { ...d, hover: closedWithKids ? row.path : null };
+    }
+    const zone = dropZone(row.offsetY, row.height);
+    const d = resolveGroupDrop(treeIndex, item.path, row.path, zone, copy, isOpen);
+    return { ...d, hover: zone === "into" && closedWithKids ? row.path : null };
+  };
+  const folderName = (parent) => (parent ? parent.split("/").pop() : "Root");
+  const dropped = async ({ item, copy, drop }) => {
+    try {
+      if (item.kind === "entry") {
+        const res = await api.dropEntry(vault.id, item.id, drop.parent, copy);
+        patch({ entries: res.entries, groups: res.groups });
+        flashPlain(`${copy ? "Copied" : "Moved"} ${item.label} to ${folderName(drop.parent)}`);
+        return;
+      }
+      const source = item.path;
+      const res = await api.dropGroup(vault.id, source, drop.parent, copy, drop.order);
+      const moved = drop.parent ? drop.parent + "/" + item.label : item.label;
+      // Browsing the folder that moved, or one inside it: follow it.
+      patch((v) => ({
+        entries: res.entries,
+        groups: res.groups,
+        group: !copy && (v.group === source || v.group.startsWith(source + "/")) ? moved + v.group.slice(source.length) : v.group,
+      }));
+      const sameParent = source.split("/").slice(0, -1).join("/") === drop.parent;
+      flashPlain(copy ? `Copied ${item.label} to ${folderName(drop.parent)}` : sameParent ? `Reordered ${folderName(drop.parent)}` : `Moved ${item.label} to ${folderName(drop.parent)}`);
+    } catch (err) {
+      flashPlain(String(err));
+    }
+  };
+  const { drag, start: startDrag } = useDragController({ resolve: resolveDrop, onDrop: dropped });
+
   const doDelete = async (e) => {
     let list;
     try { list = await api.deleteEntry(vault.id, e.id); } catch (err) { setDel(null); flashPlain("Delete failed"); return; }
@@ -696,7 +745,7 @@ function App() {
           <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} onTouchId={touchIdUnlock} onRemember={touchIdRemember} />
         ) : (
           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
-            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} onEditGroupTags={setGroupEditor} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
+            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} onEditGroupTags={setGroupEditor} drag={drag} onDragStart={startDrag} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
             <ResizeHandle
               label="Resize sidebar"
               onDelta={(inc) => setSidebarW((w) => clampW(w + inc, SIDEBAR_MIN, SIDEBAR_MAX))}
@@ -706,6 +755,7 @@ function App() {
               entries={filtered} selectedId={selId} onSelect={setSelId}
               title={groupTitle} subtitle={groupSub} sort={sort} onCycleSort={cycleSort}
               query={query} onQuery={setQuery} searchRef={searchRef} vaultName={vault.name}
+              drag={drag} onDragStart={startDrag}
             />
             <ResizeHandle
               label="Resize entry list"
@@ -735,6 +785,8 @@ function App() {
         {switcher && <VaultSwitcher vaults={vaults} activeId={activeId} onSwitch={switchVault} onOpenNew={() => setOpenVault(true)} onNewVault={newVault} onClose={() => setSwitcher(false)} />}
         {newVaultPath && <NewVaultModal path={newVaultPath} onCreate={createVault} onClose={() => setNewVaultPath(null)} />}
         {openVault && <OpenVaultModal recents={vaults} activeId={activeId} onPick={(v) => { setOpenVault(false); switchVault(v.id); }} onBrowse={browseVault} onClose={() => setOpenVault(false)} />}
+
+        <DragGhost drag={drag} />
 
         {/* toasts */}
         <div className="toast-wrap">
