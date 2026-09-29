@@ -503,31 +503,71 @@ function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
   );
 }
 
-function GroupTagsModal({ group, onClose, onSave }) {
+function EditFolderModal({ group, entries, onClose, onSave, onDelete }) {
   const [tags, setTags] = React.useState(group.tags || []);
   const [busy, setBusy] = React.useState(false);
+  const [confirming, setConfirming] = React.useState(false);
+  const path = group.groupPath.join("/");
+  const label = path || "Root";
+  // Everything the delete takes with it: entries here and in every subfolder.
+  const doomed = path
+    ? entries.filter((e) => e.groupPath === path || e.groupPath.startsWith(path + "/"))
+    : [];
+  const inBin = !!group.inRecycleBin;
   const save = async () => {
     if (busy) return;
     setBusy(true);
     try { await onSave(group, tags); } catch (e) { setBusy(false); }
   };
-  const label = group.groupPath.length ? group.groupPath.join("/") : "Root";
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true);
+    try { await onDelete(group); } catch (e) { setBusy(false); }
+  };
+  // A tree with no entries in it holds nothing worth a second click.
+  const askDelete = () => (doomed.length === 0 ? remove() : setConfirming(true));
   return (
     <div className="scrim center" onMouseDown={onClose}>
       <div className="modal" style={{ width: "min(480px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <div className="mh-badge"><Icon name="folder" size={19} /></div>
-          <div><h2>Group tags</h2><p>{label}</p></div>
+          {confirming
+            ? <div className="mh-badge" style={{ background: "var(--red-dim)", borderColor: "var(--red-dim)", color: "var(--red)" }}><Icon name="trash" size={18} /></div>
+            : <div className="mh-badge"><Icon name="folder" size={19} /></div>}
+          <div><h2>{confirming ? "Delete folder?" : "Edit Folder"}</h2><p>{label}</p></div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
-        <div className="modal-body">
-          <div className="fld">
-            <label>Tags on this group</label>
-            <TagEditor tags={tags} onChange={setTags} placeholder="Add a group tag" />
+        {confirming ? (
+          <div className="modal-body">
+            <div style={{ fontSize: 13.5, color: "var(--text-dim)", lineHeight: 1.6 }}>
+              This deletes <strong style={{ color: "var(--text)" }}>{doomed.length} {doomed.length === 1 ? "entry" : "entries"}</strong> in
+              this folder and its subfolders. {inBin ? "They are already in the recycle bin, so this is permanent." : "They move to the recycle bin."}
+            </div>
+            <div className="folder-doomed">
+              {doomed.map((e) => <div key={e.id} className="folder-doomed-row">{e.path}</div>)}
+            </div>
           </div>
-          {group.inheritedTags?.length > 0 && <div className="tag-inherited"><span>Inherited</span> {group.inheritedTags.join(", ")}</div>}
-        </div>
-        <div className="modal-foot"><div className="grow" /><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary" onClick={save} disabled={busy}>Save tags</button></div>
+        ) : (
+          <div className="modal-body">
+            <div className="fld">
+              <label>Tags on this folder</label>
+              <TagEditor tags={tags} onChange={setTags} placeholder="Add a folder tag" />
+            </div>
+            {group.inheritedTags?.length > 0 && <div className="tag-inherited"><span>Inherited</span> {group.inheritedTags.join(", ")}</div>}
+          </div>
+        )}
+        {confirming ? (
+          <div className="modal-foot"><div className="grow" />
+            <button className="btn-ghost" onClick={() => setConfirming(false)} disabled={busy}>Back</button>
+            <button className="btn-danger" onClick={remove} disabled={busy}>Confirm Delete</button>
+          </div>
+        ) : (
+          <div className="modal-foot">
+            {path && <button className="btn-danger" onClick={askDelete} disabled={busy}><Icon name="trash" size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 5 }} />Delete folder</button>}
+            <div className="grow" />
+            <button className="btn-ghost" onClick={onClose}>Cancel</button>
+            <button className="btn-primary" onClick={save} disabled={busy}>Save tags</button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -905,4 +945,4 @@ function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
   );
 }
 
-export { Unlock, CommandPalette, EntryForm, GroupTagsModal, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };
+export { Unlock, CommandPalette, EntryForm, EditFolderModal, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };

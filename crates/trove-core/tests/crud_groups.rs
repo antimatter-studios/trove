@@ -195,6 +195,19 @@ fn rmdir_recycles_group_with_contents() {
 }
 
 #[test]
+fn recycle_bin_path_appears_once_bin_is_used() {
+    let dir = TempDir::new().unwrap();
+    let mut v = new_vault(&dir);
+    assert_eq!(v.recycle_bin_path(), None);
+    v.add_entry("Old/token").unwrap();
+    v.remove_group("Old", false, false).expect("rmdir Old");
+    assert_eq!(
+        v.recycle_bin_path(),
+        Some(vec![RECYCLE_BIN_GROUP.to_string()])
+    );
+}
+
+#[test]
 fn rmdir_permanent_requires_recursive_for_non_empty() {
     let dir = TempDir::new().unwrap();
     let mut v = new_vault(&dir);

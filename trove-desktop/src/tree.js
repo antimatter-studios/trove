@@ -41,28 +41,55 @@ function buildTree(entries, groups = []) {
     const node = group.path.length ? ensurePath(group.path) : root;
     node.tags = group.tags || [];
     node.inheritedTags = group.inheritedTags || [];
+    if (group.recycleBin) node.recycleBin = true;
   }
-  const toArr = (node) => ({
+  const toArr = (node, inBin = false) => ({
     name: node.name,
     path: node.path,
     groupPath: node.groupPath,
     count: node.count,
     tags: node.tags,
     inheritedTags: node.inheritedTags,
-    // What clicking this folder lists. The badge shows this rather than
-    // `count`, because a folder listing its direct contents while displaying a
-    // recursive total is a badge that lies about what clicking does.
+    recycleBin: !!node.recycleBin,
+    // The bin and everything under it: deleting here is permanent.
+    inRecycleBin: inBin || !!node.recycleBin,
+    // What clicking this folder lists. The badge shows `count` instead, so a
+    // folder holding only subfolders does not read as empty.
     own: node.own,
     // Sort each level's folders alphabetically (natural, case-insensitive);
     // the recursion through toArr applies it at every depth.
     children: Object.values(node.children)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }))
-      .map(toArr),
+      .map((c) => toArr(c, inBin || !!node.recycleBin)),
   });
   return [toArr(root)];
 }
 
-export { buildTree };
+// Lift the recycle bin out of the folder tree so the sidebar can pin it apart.
+// The bin is found by flag, wherever it sits; `bin` is null when there is none.
+// Every folder above the bin stops counting what is in it too, or a collapsed
+// Root would count the bin's entries a second time.
+function splitRecycleBin(tree) {
+  let bin = null;
+  const strip = (node) => {
+    let removed = 0;
+    const children = [];
+    for (const c of node.children) {
+      if (c.recycleBin) {
+        bin = c;
+        removed += c.count;
+      } else {
+        const kept = strip(c);
+        removed += c.count - kept.count;
+        children.push(kept);
+      }
+    }
+    return { ...node, children, count: node.count - removed };
+  };
+  return { tree: tree.map(strip), bin };
+}
+
+export { buildTree, splitRecycleBin };
 
 /* ============ ENTRY PATHS, RELATIVE TO WHERE YOU ARE ============ */
 
@@ -119,14 +146,25 @@ export function displayEntryPath(fullPath, group) {
 /// `__all` shows everything and `__fav` shows favourites wherever they live;
 /// neither is a folder.
 ///
+/// The recycle bin (`binPath`) is the exception: it lists everything in it,
+/// subfolders included. Deleted folders land there whole, and an entry buried
+/// in one was easy to overlook when the bin listed only its top level.
+///
 /// The list filter and the post-save navigation MUST agree on this, which is
 /// why it is one function. If they drifted, saving an entry that is plainly on
 /// screen could navigate away from it, or one that has left the view could
 /// leave you staring at a list it is not in.
-export function isVisibleIn(entry, group) {
+export function isVisibleIn(entry, group, binPath = null) {
   if (!entry) return false;
   if (!group || group === "__all") return true;
   if (group === "__fav") return !!entry.fav;
   if (group === "__root") return entry.groupPath === "";
+  if (binPath && group === binPath) return entry.groupPath === group || entry.groupPath.startsWith(group + "/");
   return entry.groupPath === group;
+}
+
+/// Path of the recycle bin among the vault's groups, or null if it has none.
+export function recycleBinPath(groups = []) {
+  const bin = groups.find((g) => g.recycleBin);
+  return bin ? bin.path.join("/") : null;
 }

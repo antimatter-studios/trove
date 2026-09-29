@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { Switch } from './overlays.jsx';
-import { buildTree } from './tree.js';
+import { splitRecycleBin } from './tree.js';
 // Trove — helpers + three-pane views
 
 function relTime(iso) {
@@ -39,12 +39,17 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags }
   const hasKids = node.children && node.children.length > 0;
   const isOpen = open[node.path];
   const sel = selected === node.path;
+  const bin = node.recycleBin;
   return (
     <React.Fragment>
       <div
-        className={"tree-row" + (sel ? " sel" : "")}
+        className={"tree-row" + (sel ? " sel" : "") + (bin ? " bin" : "")}
+        data-path={node.path}
+        title={bin ? "Deleted entries and folders wait here. Deleting from the bin is permanent." : undefined}
         style={{ paddingLeft: 6 + depth * 14 }}
-        onClick={() => onSelect(node.path)}
+        // A click both lists the folder and opens/closes it, so the tree can
+        // be walked without aiming for the chevron.
+        onClick={() => { onSelect(node.path); if (hasKids) setOpen(node.path); }}
       >
         <span
           className={"tw" + (isOpen ? " open" : "")}
@@ -53,11 +58,11 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags }
         >
           <Icon name="chevron" size={13} />
         </span>
-        <Icon name="folder" size={15} className="tfic" />
+        <Icon name={bin ? "trash" : "folder"} size={15} className="tfic" />
         <span className="tr-name">{node.name}</span>
         {node.tags.length > 0 && <span className="tr-tag-count" title={`Tags: ${node.tags.join(", ")}`}>⌑{node.tags.length}</span>}
-        <button className="tr-edit-tags" title={`Edit ${node.name} tags`} aria-label={`Edit ${node.name} tags`} onClick={(e) => { e.stopPropagation(); onEditTags(node); }}><Icon name="edit" size={12} /></button>
-        <span className="tr-count" title={node.count !== node.own ? `${node.own} here, ${node.count} including subfolders` : undefined}>{node.own}</span>
+        {!bin && <button className="tr-edit-tags" title={`Edit ${node.name} folder`} aria-label={`Edit ${node.name} folder`} onClick={(e) => { e.stopPropagation(); onEditTags(node); }}><Icon name="edit" size={12} /></button>}
+        <span className="tr-count" title={node.count !== node.own ? `${node.count} including subfolders, ${node.own} directly here` : undefined}>{node.count}</span>
       </div>
       {hasKids && isOpen && node.children.map((c) => (
         <TreeNode key={c.path} node={c} depth={depth + 1} open={open} setOpen={setOpen} selected={selected} onSelect={onSelect} onEditTags={onEditTags} />
@@ -69,6 +74,8 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags }
 function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel }) {
   const [open, setOpenState] = React.useState({ __root: true, inpace: true, personal: true, infra: false });
   const setOpen = (p) => setOpenState((o) => ({ ...o, [p]: !o[p] }));
+  // The bin is not a folder you file things in; it is pinned apart below.
+  const { tree: folders, bin } = React.useMemo(() => splitRecycleBin(tree), [tree]);
   return (
     <div className="pane sidebar">
       <div className="sb-scroll">
@@ -110,10 +117,15 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, f
         </div>
 
         <div className="sb-label">Groups</div>
-        {tree.map((n) => (
+        {folders.map((n) => (
           <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} />
         ))}
       </div>
+      {bin && (
+        <div className="sb-bin">
+          <TreeNode node={bin} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} />
+        </div>
+      )}
       {/* Pinned to the bottom of the sidebar: a new entry goes into the vault
           this pane belongs to, so the action lives with its target rather than
           floating in a global toolbar. */}
