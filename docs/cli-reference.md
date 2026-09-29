@@ -1016,6 +1016,17 @@ shadowed: `trove` completes via `_openstack`.
 fix it with: trove completions zsh --install
 ```
 
+## CLI and daemon versions
+
+The CLI and `troved` are released together and only promise to understand
+each other at the same version. After an upgrade, a daemon started by the old
+version keeps running until it is stopped. Commands still work while the old
+daemon understands them, with a warning that the versions differ
+(`TROVE_NO_VERSION_WARN=1` silences it). A command the old daemon can't decode
+fails with an error that names both versions and says to restart it: stop it
+with `trove daemons kill --all` (on Windows, end `troved.exe`), then re-run.
+The next command starts the current daemon, and vaults need unlocking again.
+
 ## trove daemons *(Unix only)*
 
 ```

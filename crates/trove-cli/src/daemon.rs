@@ -49,7 +49,65 @@ pub fn control_socket_path() -> PathBuf {
 /// (`is_daemon_not_running` lets the caller distinguish that case for exit
 /// code mapping). On any other error the original `io::Error` chain is
 /// preserved via `Context`.
+///
+/// A daemon that cannot decode the request replies `invalid request: …`. That
+/// is almost always a daemon from another build, left running across an
+/// upgrade, so the reply's error is rewritten to say so and how to restart it
+/// — for every command, whichever way it reached the daemon.
 pub fn send(req: &Request) -> Result<Value> {
+    let mut v = send_raw(req)?;
+    if let Some(message) = undecodable_request_message(&v) {
+        v["error"] = Value::String(message);
+    }
+    Ok(v)
+}
+
+/// The prefix `troved` puts on the error for a request it could not decode.
+const UNDECODABLE_REQUEST: &str = "invalid request: ";
+
+/// The error for a request the daemon could not decode, explained, or `None`
+/// when the reply is anything else or the daemon is this very build (then the
+/// raw message is a real bug report and is left alone).
+fn undecodable_request_message(reply: &Value) -> Option<String> {
+    let raw = response_error(reply)?;
+    if !raw.starts_with(UNDECODABLE_REQUEST) {
+        return None;
+    }
+    let daemon_version = send_raw(&Request::GetVersion).ok().and_then(|v| {
+        v.get("daemon_version")
+            .and_then(Value::as_str)
+            .map(String::from)
+    });
+    version_mismatch_error(daemon_version.as_deref(), &raw)
+}
+
+/// The message for a request a daemon of `daemon_version` could not decode
+/// (`None`: a daemon too old to report its version). `None` when the daemon is
+/// this CLI's own build.
+fn version_mismatch_error(daemon_version: Option<&str>, raw: &str) -> Option<String> {
+    let cli = cli_version();
+    // serde lists every request the daemon knows after this; that is noise here.
+    let raw = raw.split(", expected").next().unwrap_or(raw);
+    let daemon = match daemon_version {
+        Some(v) if v == cli => return None,
+        Some(v) => format!("troved {v}"),
+        None => "an older troved, from before version reporting".to_string(),
+    };
+    Some(format!(
+        "the running daemon is {daemon}, which does not understand this request from \
+         trove {cli}. Restart it to load the current version: {RESTART_DAEMON}, then re-run \
+         the command (vaults it had unlocked need unlocking again). Daemon said: {raw}"
+    ))
+}
+
+/// How to stop a running daemon so the next command starts the current one.
+#[cfg(unix)]
+const RESTART_DAEMON: &str = "`trove daemons kill --all`";
+#[cfg(windows)]
+const RESTART_DAEMON: &str = "end troved.exe (`taskkill /IM troved.exe`)";
+
+/// [`send`] without the version-mismatch explanation.
+fn send_raw(req: &Request) -> Result<Value> {
     let path = control_socket_path();
     let stream = ipc::connect(&path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
@@ -393,6 +451,29 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn version_mismatch_error_names_both_versions_and_the_fix() {
+        let raw = "invalid request: unknown variant `ssh-agent-sockets`";
+        let full = format!("{raw}, expected one of `ping`, `unlock` at line 1 column 26");
+        let msg = version_mismatch_error(Some("0.1.0"), &full).expect("older daemon");
+        assert!(msg.contains("troved 0.1.0"), "{msg}");
+        assert!(msg.contains(cli_version()), "{msg}");
+        assert!(msg.contains(RESTART_DAEMON), "{msg}");
+        assert!(
+            msg.ends_with(raw),
+            "keeps the daemon's words, not the list: {msg}"
+        );
+
+        let msg = version_mismatch_error(None, raw).expect("pre-version daemon");
+        assert!(msg.contains("before version reporting"), "{msg}");
+
+        assert_eq!(
+            version_mismatch_error(Some(cli_version()), raw),
+            None,
+            "same build: the raw error is a real bug, left alone"
+        );
+    }
+
+    #[test]
     fn response_error_extracts_message() {
         let v: Value = serde_json::json!({"status": "err", "error": "boom"});
         assert_eq!(response_error(&v).as_deref(), Some("boom"));
@@ -478,6 +559,45 @@ mod tests {
         assert_eq!(req_json["cmd"], "status");
 
         std::env::remove_var("TROVE_SOCK");
+    }
+
+    /// An older daemon that cannot decode a request: every command gets the
+    /// explained error, naming both versions, instead of the raw serde text.
+    #[test]
+    fn send_explains_a_request_an_older_daemon_cannot_decode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("daemon.sock");
+        std::env::set_var("TROVE_SOCK", &sock);
+
+        let listener = UnixListener::bind(&sock).expect("bind");
+        let server = std::thread::spawn(move || {
+            // The command, which it cannot decode, then the version probe.
+            for reply in [
+                serde_json::json!({
+                    "status": "err",
+                    "error": "invalid request: unknown variant `ssh_agent_sockets`"
+                }),
+                serde_json::json!({"status": "ok", "daemon_version": "0.0.1-old"}),
+            ] {
+                let (stream, _) = listener.accept().expect("accept");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read req");
+                let mut writer = stream;
+                writer
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .expect("write reply");
+            }
+        });
+
+        let resp = send(&Request::Status).expect("send");
+        server.join().expect("server thread");
+        std::env::remove_var("TROVE_SOCK");
+        let error = response_error(&resp).expect("still an error");
+        assert!(error.contains("troved 0.0.1-old"), "{error}");
+        assert!(error.contains(RESTART_DAEMON), "{error}");
+        assert!(error.contains("unknown variant"), "{error}");
     }
 
     /// `TROVE_NO_AUTOSPAWN=1` is the documented opt-out switch. Anything else
