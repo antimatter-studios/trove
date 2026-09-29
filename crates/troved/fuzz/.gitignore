@@ -1,8 +1,7 @@
-# The fuzz subcrate is a standalone workspace. Its lockfile and build
-# artefacts are developer-local — only the source files (Cargo.toml,
-# fuzz_targets/, README.md) belong in version control.
+# The fuzz subcrate is a standalone workspace. Its build artefacts are
+# developer-local. Cargo.lock is committed so the scheduled fuzz workflow
+# builds a known dependency graph (`cargo fetch --locked`).
 /target
-/Cargo.lock
 /corpus
 /artifacts
 /coverage
