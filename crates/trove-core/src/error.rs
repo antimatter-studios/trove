@@ -21,8 +21,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error(
-        "the vault file changed on disk since it was opened: {0}. \
-         Saving would discard whatever changed it — reopen the vault, or save elsewhere."
+        "the vault file changed on disk since it was opened, and the change could not be \
+         merged (it opens with other credentials, is not a copy of this vault, cannot be read, \
+         or kept changing while saving): {0}. Saving would discard it — reopen the vault, \
+         or save elsewhere."
     )]
     StaleWrite(PathBuf),
 

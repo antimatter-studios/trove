@@ -43,12 +43,12 @@ serde_json = "1"
 # keepass-rs comes from antimatter-studios/keepass-rs, branch `trove`: upstream
 # plus fixes trove needs, pinned to one commit so fork changes only reach trove
 # when this line is bumped. Sync the fork from upstream releases periodically
-# and send fixes upstream. Currently: upstream v0.15.0 plus the attachment-id
-# fix from sseemayer/keepass-rs#374 (removing an attachment made later ones
-# read back as the wrong data). crates.io ignores [patch], so the published
-# trove-core still resolves keepass from crates.io.
+# and send fixes upstream. Currently: upstream v0.15.0 plus the attachment and
+# merge fixes sent upstream as sseemayer/keepass-rs#374, #375 and #377-#381.
+# crates.io ignores [patch], so the published trove-core still resolves keepass
+# from crates.io.
 [patch.crates-io]
-keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "43fc15c6e61654a043daacb3cc6fbc74b1f8d4ae" }
+keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "4a82866302ae2ff046f6c9797d2d3bb00aa0b467" }
 
 [profile.release]
 lto = "thin"

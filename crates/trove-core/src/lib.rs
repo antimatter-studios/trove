@@ -214,6 +214,27 @@ pub struct MergeSummary {
     pub deleted: usize,
 }
 
+impl MergeSummary {
+    fn count(&mut self, log: &keepass::db::merge::MergeLog) {
+        for event in &log.events {
+            use keepass::db::merge::MergeEventType;
+            match event.event_type {
+                MergeEventType::Created => self.created += 1,
+                MergeEventType::Updated => self.updated += 1,
+                MergeEventType::LocationUpdated => self.relocated += 1,
+                MergeEventType::Deleted => self.deleted += 1,
+                // MergeEventType is #[non_exhaustive]; count anything the
+                // crate adds later as an update rather than dropping it.
+                _ => self.updated += 1,
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Non-secret database facts for `db-info`.
 #[derive(Debug, Clone)]
 pub struct DbInfo {
@@ -284,6 +305,10 @@ pub(crate) struct VaultInner {
     /// disk, and the other side's changes are gone with nothing said. `None`
     /// only for a vault created in memory that has never touched disk.
     pub(crate) stamp: Option<FileStamp>,
+    /// What `save()` merged in from other writers since the caller last asked.
+    pub(crate) merged_on_save: MergeSummary,
+    /// The vault settings as the file held them at `stamp`.
+    pub(crate) base: DiskBase,
     /// Entries as they were before trove's first change to each since the last
     /// save. `save()` files each one as a history version.
     pub(crate) history: HistoryTracker,
@@ -312,16 +337,20 @@ struct EntryBefore {
 /// A cheap identity for the vault file, used to notice that something else
 /// wrote it.
 ///
-/// Length plus modification time rather than a hash: it costs one `stat` on a
-/// path already being opened, and the failure mode is the safe one. A content
-/// change that preserved both would be missed, which needs a writer to produce
-/// an identical-length file within the filesystem's timestamp resolution; a
-/// touched-but-unchanged file is reported as changed, which costs a reopen
-/// rather than data.
+/// Length, modification time and (on Unix) inode rather than a hash: it costs
+/// one `stat` on a path already being opened, and the failure mode is the safe
+/// one. Writers that replace the file by renaming a new one over it (trove,
+/// KeePassXC) always change the inode. A content change that preserved all
+/// three would be missed, which needs an in-place writer to produce an
+/// identical-length file within the filesystem's timestamp resolution; a
+/// touched-but-unchanged file is reported as changed, which costs a merge that
+/// finds nothing rather than data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileStamp {
     len: u64,
     modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: u64,
 }
 
 impl FileStamp {
@@ -329,13 +358,24 @@ impl FileStamp {
     /// is not a conflict, it is a vault that no longer exists, and `save()`
     /// recreating it is the reasonable outcome.
     fn read(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
-        Some(Self {
+        std::fs::metadata(path).ok().map(|meta| Self::of(&meta))
+    }
+
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
             len: meta.len(),
             modified: meta.modified().ok(),
-        })
+            #[cfg(unix)]
+            inode: meta.ino(),
+        }
     }
 }
+
+/// How many times `save()` merges and writes again when other writers keep
+/// replacing the file under it, before giving up with [`Error::StaleWrite`].
+const SAVE_ATTEMPTS: usize = 5;
 
 impl Drop for VaultInner {
     fn drop(&mut self) {
@@ -362,17 +402,139 @@ fn touch_location(entry: &mut keepass::db::EntryMut<'_>) {
     entry.times.location_changed = Some(keepass::db::Times::now());
 }
 
-/// Rough size of one history version, for the vault's `HistoryMaxSize`:
-/// field names and values, tags, and attachment bytes.
-fn history_version_size(version: &keepass::db::EntryRef<'_>) -> usize {
-    let fields: usize = version
-        .fields
-        .iter()
-        .map(|(k, v)| k.len() + v.get().len())
-        .sum();
-    let tags: usize = version.tags.iter().map(String::len).sum();
-    let attachments: usize = version.attachments().map(|a| a.data.get().len()).sum();
-    fields + tags + attachments
+/// What one version of an entry weighs against the vault's `HistoryMaxSize`:
+/// field names and values and tags, plus its attachments, each identified by a
+/// hash of its data. KeePassXC counts an attachment's data once per history,
+/// and not at all when the entry itself still holds it, so an unchanged key
+/// file does not use up the history on every edit.
+struct Footprint {
+    text: usize,
+    attachments: Vec<(u64, usize)>,
+}
+
+impl Footprint {
+    fn of(version: &keepass::db::EntryRef<'_>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let fields: usize = version
+            .fields
+            .iter()
+            .map(|(k, v)| k.len() + v.get().len())
+            .sum();
+        let tags: usize = version.tags.iter().map(String::len).sum();
+        let attachments = version
+            .attachments()
+            .map(|a| {
+                let data = a.data.get();
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                data.hash(&mut hasher);
+                (hasher.finish(), data.len())
+            })
+            .collect();
+        Self {
+            text: fields + tags,
+            attachments,
+        }
+    }
+}
+
+/// An entry's history versions, in file order, each with its footprint.
+fn history_versions(entry: &keepass::db::EntryRef<'_>) -> Vec<(keepass::db::Entry, Footprint)> {
+    let count = entry.history.as_ref().map_or(0, |h| h.get_entries().len());
+    (0..count)
+        .filter_map(|i| entry.historical(i))
+        .map(|v| ((*v).clone(), Footprint::of(&v)))
+        .collect()
+}
+
+/// The vault settings a merge of entries and groups leaves alone, as they were
+/// in the file this handle last read or wrote: the base for merging another
+/// writer's changes to them.
+#[derive(Clone)]
+pub(crate) struct DiskBase {
+    meta: keepass::db::Meta,
+    config: keepass::config::DatabaseConfig,
+}
+
+impl DiskBase {
+    fn of(db: &keepass::Database) -> Self {
+        Self {
+            meta: db.meta.clone(),
+            config: db.config.clone(),
+        }
+    }
+}
+
+/// Three-way merge of vault settings: whatever this handle left as it was in
+/// `base` takes the other writer's value; whatever it changed keeps its own.
+fn merge_settings(base: &DiskBase, ours: &mut keepass::Database, theirs: &keepass::Database) {
+    macro_rules! take_if_unchanged {
+        ($($($field:ident).+),+ $(,)?) => {$(
+            if ours.$($field).+ == base.$($field).+ {
+                ours.$($field).+ = theirs.$($field).+.clone();
+            }
+        )+};
+    }
+    macro_rules! take_together_if_unchanged {
+        ($($field:ident),+) => {
+            if ($(&ours.meta.$field),+) == ($(&base.meta.$field),+) {
+                $(ours.meta.$field = theirs.meta.$field.clone();)+
+            }
+        };
+    }
+    // Field by field, leaving out the format version: trove always writes 4.1,
+    // so its own copy differs there from a KeePassXC-written base without any
+    // change being made.
+    take_if_unchanged!(config.outer_cipher_config, config.compression_config);
+    take_if_unchanged!(config.inner_cipher_config, config.kdf_config);
+    take_if_unchanged!(config.public_custom_data);
+    take_if_unchanged!(meta.generator, meta.maintenance_history_days, meta.color);
+    take_if_unchanged!(meta.memory_protection, meta.last_selected_group);
+    take_if_unchanged!(meta.last_top_visible_group, meta.history_max_items);
+    take_if_unchanged!(meta.history_max_size, meta.settings_changed);
+    take_if_unchanged!(meta.master_key_change_rec, meta.master_key_change_force);
+    take_together_if_unchanged!(database_name, database_name_changed);
+    take_together_if_unchanged!(database_description, database_description_changed);
+    take_together_if_unchanged!(default_username, default_username_changed);
+    take_together_if_unchanged!(recyclebin_enabled, recyclebin_uuid, recyclebin_changed);
+    take_together_if_unchanged!(entry_templates_group, entry_templates_group_changed);
+    take_if_unchanged!(meta.master_key_changed);
+
+    // Custom data (KeePassXC-Browser keys, plugin settings) key by key, so a
+    // key either side added or removed survives the other side's save.
+    let keys: HashSet<String> = base
+        .meta
+        .custom_data
+        .keys()
+        .chain(ours.meta.custom_data.keys())
+        .chain(theirs.meta.custom_data.keys())
+        .cloned()
+        .collect();
+    for key in keys {
+        if ours.meta.custom_data.get(&key) != base.meta.custom_data.get(&key) {
+            continue;
+        }
+        match theirs.meta.custom_data.get(&key) {
+            Some(item) => {
+                ours.meta.custom_data.insert(key, item.clone());
+            }
+            None => {
+                ours.meta.custom_data.remove(&key);
+            }
+        }
+    }
+
+    // Deletions the other writer recorded for things this copy never had: kept,
+    // so a third copy that still has them loses them on its next merge too.
+    for (uuid, deleted) in &theirs.deleted_objects {
+        let present = ours.entry(keepass::db::EntryId::from_uuid(*uuid)).is_some()
+            || ours.group(keepass::db::GroupId::from_uuid(*uuid)).is_some();
+        if !present {
+            let known = ours.deleted_objects.entry(*uuid).or_insert(*deleted);
+            if *deleted > *known {
+                *known = *deleted;
+            }
+        }
+    }
 }
 
 /// Build the composite `DatabaseKey` from a password and optional keyfile
@@ -410,6 +572,8 @@ impl Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
                 stamp: FileStamp::read(path),
+                merged_on_save: MergeSummary::default(),
+                base: DiskBase::of(&db),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 #[cfg(feature = "yubikey")]
@@ -436,15 +600,18 @@ impl Vault {
         if path.exists() {
             return Err(Error::AlreadyExists(path.to_path_buf()));
         }
+        let db = keepass::Database::new();
         let mut vault = Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
                 stamp: FileStamp::read(path),
+                merged_on_save: MergeSummary::default(),
+                base: DiskBase::of(&db),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 challenge_response: Some(challenge_response),
                 history: HistoryTracker::default(),
-                db: keepass::Database::new(),
+                db,
             },
         };
         vault.save()?;
@@ -466,13 +633,18 @@ impl Vault {
             return Err(Error::NotFound(path.to_path_buf()));
         }
         let mut file = std::fs::File::open(path)?;
+        // Stamp the handle before reading: another writer replacing the file
+        // during the KDF must not lend its stamp to the contents read here.
+        let stamp = Some(FileStamp::of(&file.metadata()?));
         let key = database_key(password, keyfile)?
             .with_challenge_response_key(challenge_response.clone());
         let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
         Ok(Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
-                stamp: FileStamp::read(path),
+                stamp,
+                merged_on_save: MergeSummary::default(),
+                base: DiskBase::of(&db),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 challenge_response: Some(challenge_response),
@@ -496,12 +668,19 @@ impl Vault {
             return Err(Error::NotFound(path.to_path_buf()));
         }
         let mut file = std::fs::File::open(path)?;
+        // Stamp the handle before reading: another writer replacing the file
+        // during the KDF must not lend its stamp to the contents read here.
+        let stamp = Some(FileStamp::of(&file.metadata()?));
+        #[cfg(test)]
+        save_race_tests::run_hook(&save_race_tests::OPENED, path);
         let key = database_key(password, keyfile)?;
         let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
         Ok(Vault {
             inner: VaultInner {
                 path: path.to_path_buf(),
-                stamp: FileStamp::read(path),
+                stamp,
+                merged_on_save: MergeSummary::default(),
+                base: DiskBase::of(&db),
                 password: password.to_string(),
                 keyfile: keyfile.map(<[u8]>::to_vec),
                 #[cfg(feature = "yubikey")]
@@ -545,15 +724,19 @@ impl Vault {
         // old database away and zeroizes on the way.
         std::mem::swap(&mut self.inner.db, &mut fresh.inner.db);
         self.inner.stamp = fresh.inner.stamp.clone();
+        self.inner.base = fresh.inner.base.clone();
         // Unsaved edits are gone, so there is nothing to file history for.
         self.inner.history = HistoryTracker::default();
+        // What the file holds now is exactly what this handle shows.
+        self.inner.merged_on_save = MergeSummary::default();
         Ok(())
     }
 
     /// Has the vault file changed since this handle read it?
     ///
-    /// For a caller that would rather ask than have `save()` fail — a GUI
-    /// reloading quietly when nothing local is dirty, say.
+    /// For a caller showing the vault — a GUI reloading quietly when nothing
+    /// local is dirty, say. `save()` does not need it: it merges whatever
+    /// changed.
     pub fn changed_on_disk(&self) -> bool {
         match &self.inner.stamp {
             // A vault we have never seen on disk cannot have been changed by
@@ -565,11 +748,12 @@ impl Vault {
         }
     }
 
-    fn check_not_stale(&self) -> Result<()> {
-        if self.changed_on_disk() {
-            return Err(Error::StaleWrite(self.inner.path.clone()));
-        }
-        Ok(())
+    /// What `save()` merged in from other writers since the last call, or
+    /// `None` when it merged nothing. For a caller showing the vault: entries
+    /// it did not create may now be in memory, so its lists need refreshing.
+    pub fn take_merged_on_save(&mut self) -> Option<MergeSummary> {
+        let merged = std::mem::take(&mut self.inner.merged_on_save);
+        (!merged.is_empty()).then_some(merged)
     }
 
     /// Remember an entry as it is now, before trove's first change to it since
@@ -597,8 +781,6 @@ impl Vault {
     /// gets no version.
     fn record_history(&mut self) {
         let tracker = std::mem::take(&mut self.inner.history);
-        let max_items = self.inner.db.meta.history_max_items;
-        let max_size = self.inner.db.meta.history_max_size;
         for (id, before) in tracker.before {
             let Some(current) = self.inner.db.entry(id) else {
                 continue; // deleted since
@@ -608,14 +790,7 @@ impl Vault {
             now.times = before.entry.times.clone();
             let changed = now != before.entry;
 
-            let count = current
-                .history
-                .as_ref()
-                .map_or(0, |h| h.get_entries().len());
-            let mut versions: Vec<(keepass::db::Entry, usize)> = (0..count)
-                .filter_map(|i| current.historical(i))
-                .map(|v| ((*v).clone(), history_version_size(&v)))
-                .collect();
+            let mut versions = history_versions(&current);
             // keepass-rs filed the version at the front of the history.
             let filed = match versions.first() {
                 Some((version, _)) if *version == before.entry => Some(versions.remove(0)),
@@ -637,45 +812,208 @@ impl Vault {
                 continue;
             }
 
-            // KeePassXC keeps history oldest-first and trims from the front;
-            // keepass-rs inserts new versions at the front. Order the existing
-            // versions by modification time (ties keep file order), put the
-            // version being filed last — it is the newest by definition — keep
-            // the newest the vault's limits allow, and write them oldest-first
-            // so both tools read the same history.
-            versions.sort_by_key(|(v, _)| v.times.last_modification);
-            versions.extend(filed);
-            let item_cap = max_items
-                .filter(|m| *m >= 0)
-                .map_or(usize::MAX, |m| m as usize);
-            let size_cap = max_size
-                .filter(|m| *m >= 0)
-                .map_or(usize::MAX, |m| m as usize);
-            let mut kept = Vec::new();
-            let mut total = 0usize;
-            for (version, size) in versions.into_iter().rev() {
-                if kept.len() >= item_cap
-                    || (!kept.is_empty() && total.saturating_add(size) > size_cap)
-                {
-                    break;
-                }
-                total = total.saturating_add(size);
-                kept.push(version);
-            }
-            // `kept` is newest-first; `add_entry` inserts at the front, so
-            // adding in this order leaves the history oldest-first. A file only
-            // a trimmed version used leaves the vault with it.
-            let mut ordered = keepass::db::History::default();
-            for version in kept {
-                ordered.add_entry(version);
-            }
-            let mut entry = self.inner.db.entry_mut(id).expect("entry exists");
-            entry.edit_history(|history| *history = ordered);
+            self.write_history(id, versions, filed, true);
         }
     }
 
-    /// Persist in-memory state back to the original path (atomic replace).
-    pub fn save(&mut self) -> Result<()> {
+    /// Write an entry's history the way KeePassXC keeps it: oldest-first,
+    /// and with `trim`, trimmed from the front to the vault's
+    /// `HistoryMaxItems` / `HistoryMaxSize`. keepass-rs inserts new versions
+    /// at the front and its merge leaves histories newest-first, so the
+    /// versions are ordered by modification time (ties keep file order), with
+    /// `newest`, when given, placed last: it is the newest by definition.
+    fn write_history(
+        &mut self,
+        id: keepass::db::EntryId,
+        mut versions: Vec<(keepass::db::Entry, Footprint)>,
+        newest: Option<(keepass::db::Entry, Footprint)>,
+        trim: bool,
+    ) {
+        let cap = |limit: Option<isize>| {
+            limit
+                .filter(|m| trim && *m >= 0)
+                .map_or(usize::MAX, |m| m as usize)
+        };
+        let item_cap = cap(self.inner.db.meta.history_max_items);
+        let size_cap = cap(self.inner.db.meta.history_max_size);
+        let current = self.inner.db.entry(id).expect("entry exists");
+        let mut counted: HashSet<u64> = Footprint::of(&current)
+            .attachments
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect();
+        versions.sort_by_key(|(v, _)| v.times.last_modification);
+        versions.extend(newest);
+        let mut kept = Vec::new();
+        let mut total = 0usize;
+        for (version, footprint) in versions.into_iter().rev() {
+            let mut size = footprint.text;
+            let mut new_data = Vec::new();
+            for (hash, len) in footprint.attachments {
+                if !counted.contains(&hash) && !new_data.contains(&hash) {
+                    size = size.saturating_add(len);
+                    new_data.push(hash);
+                }
+            }
+            if kept.len() >= item_cap || (!kept.is_empty() && total.saturating_add(size) > size_cap)
+            {
+                break;
+            }
+            counted.extend(new_data);
+            total = total.saturating_add(size);
+            kept.push(version);
+        }
+        // `kept` is newest-first; `add_entry` inserts at the front, so adding
+        // in this order leaves the history oldest-first. A file only a trimmed
+        // version used leaves the vault with it.
+        let mut ordered = keepass::db::History::default();
+        for version in kept {
+            ordered.add_entry(version);
+        }
+        let mut entry = self.inner.db.entry_mut(id).expect("entry exists");
+        entry.edit_history(|history| *history = ordered);
+    }
+
+    /// Put the histories a merge rewrote back in KeePassXC's order: the merge
+    /// leaves them newest-first, which KeePassXC would trim from the wrong end.
+    /// Entries the merge changed are also trimmed to the vault's limits, as
+    /// KeePassXC does when it merges; the others are only reordered.
+    fn settle_merged_histories(&mut self, log: &keepass::db::merge::MergeLog) {
+        use keepass::db::merge::MergeEventTarget;
+        let changed: HashSet<keepass::db::EntryId> = log
+            .events
+            .iter()
+            .filter_map(|event| match event.target {
+                MergeEventTarget::Entry(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        let unsettled: Vec<keepass::db::EntryId> = self
+            .inner
+            .db
+            .iter_all_entries()
+            .filter(|entry| {
+                let count = entry.history.as_ref().map_or(0, |h| h.get_entries().len());
+                let times: Vec<_> = (0..count)
+                    .filter_map(|i| entry.historical(i))
+                    .map(|v| v.times.last_modification)
+                    .collect();
+                changed.contains(&entry.id()) || !times.is_sorted()
+            })
+            .map(|entry| entry.id())
+            .collect();
+        for id in unsettled {
+            let current = self.inner.db.entry(id).expect("entry exists");
+            let versions = history_versions(&current);
+            self.write_history(id, versions, None, changed.contains(&id));
+        }
+    }
+
+    /// Does the vault file open with this handle's key?
+    fn file_opens_with_current_key(&self) -> bool {
+        let Ok(key) = self.current_key() else {
+            return false;
+        };
+        std::fs::File::open(&self.inner.path)
+            .ok()
+            .is_some_and(|mut file| keepass::Database::open(&mut file, key).is_ok())
+    }
+
+    /// The key the vault file is written with: password, keyfile, and the
+    /// challenge-response provider when there is one.
+    fn current_key(&self) -> Result<keepass::DatabaseKey> {
+        #[allow(unused_mut)]
+        let mut key = database_key(&self.inner.password, self.inner.keyfile.as_deref())?;
+        #[cfg(feature = "yubikey")]
+        if let Some(cr) = &self.inner.challenge_response {
+            key = key.with_challenge_response_key(cr.clone());
+        }
+        Ok(key)
+    }
+
+    /// The vault file as another writer left it, when it changed since this
+    /// handle last read or wrote it. `None` when it did not change, or is gone
+    /// (`save()` recreating it is the reasonable outcome).
+    ///
+    /// Fails with [`Error::StaleWrite`] when the file cannot be merged: it
+    /// opens with other credentials, is not a copy of this vault, or cannot
+    /// be read.
+    fn read_disk_copy(&self) -> Result<Option<(keepass::Database, FileStamp)>> {
+        let Some(known) = &self.inner.stamp else {
+            // Never on disk: the first save creates it.
+            return Ok(None);
+        };
+        let mut file = match std::fs::File::open(&self.inner.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        // Stamp the open handle rather than the path, so the stamp describes
+        // the bytes read even if the file is replaced again meanwhile.
+        let stamp = FileStamp::of(&file.metadata()?);
+        if &stamp == known {
+            return Ok(None);
+        }
+        let stale = || Error::StaleWrite(self.inner.path.clone());
+        let other = keepass::Database::open(&mut file, self.current_key()?).map_err(|e| {
+            match open_err_to_error(e) {
+                // Not about the file: a disk error, or a hardware key that did
+                // not answer. Say that rather than blame the file.
+                Error::Io(e) => Error::Io(e),
+                Error::Kdbx(msg) if msg.starts_with("challenge-response") => Error::Kdbx(msg),
+                _ => stale(),
+            }
+        })?;
+        // The KDBX merge reconciles diverged copies of one vault; a different
+        // vault written to the same path is not one.
+        if other.root().id() != self.inner.db.root().id() {
+            return Err(stale());
+        }
+        Ok(Some((other, stamp)))
+    }
+
+    /// Merge another writer's copy of the vault into this one: the newer
+    /// change to each entry wins, and the other goes into its history.
+    ///
+    /// Vault settings, which the KDBX merge leaves alone, are merged against
+    /// the file as this handle last saw it: the other writer's changes are
+    /// taken wherever this handle made none. `other` becomes that base.
+    fn merge_disk_copy(&mut self, other: &keepass::Database) -> Result<()> {
+        // Into a copy, so a merge that fails leaves this handle as it was.
+        let mut merged = self.inner.db.clone();
+        let log = merged
+            .merge(other)
+            .map_err(|_| Error::StaleWrite(self.inner.path.clone()))?;
+        merge_settings(&self.inner.base, &mut merged, other);
+        self.inner.db = merged;
+        self.inner.base = DiskBase::of(other);
+        self.settle_merged_histories(&log);
+        self.inner.merged_on_save.count(&log);
+        Ok(())
+    }
+
+    /// Does `other` already hold everything this handle has? True for our own
+    /// write read back, and for a writer that merged it before writing.
+    fn holds_all_of_ours(&self, other: &keepass::Database) -> bool {
+        let mut probe = other.clone();
+        let entries_held = probe
+            .merge(&self.inner.db)
+            .is_ok_and(|log| log.events.is_empty());
+        let deletions_held = self
+            .inner
+            .db
+            .deleted_objects
+            .keys()
+            .all(|uuid| other.deleted_objects.contains_key(uuid));
+        entries_held
+            && deletions_held
+            && other.meta == self.inner.db.meta
+            && other.config == self.inner.db.config
+    }
+
+    /// Settle what trove writes regardless of what changed. Runs after any
+    /// merge, since the other writer's file may lack it.
+    fn prepare_for_write(&mut self) {
         // trove only ever writes KDBX 4.1. Force the version before serializing
         // so re-saving a legacy 4.0 vault (written by keepass 0.12.5) succeeds:
         // the 0.13.10 writer emits only 4.1 and would otherwise reject KDB4(0)
@@ -699,16 +1037,12 @@ impl Vault {
                 .root_mut()
                 .edit(|g| g.name = DEFAULT_GROUP.to_string());
         }
+    }
 
-        // Refuse to overwrite a file something else has written since we read
-        // it. A vault is one file with several writers — the CLI, the desktop
-        // app, KeePassXC, and the same file synced onto another machine — and
-        // without this the last writer wins silently, taking the other's
-        // changes with it.
-        self.check_not_stale()?;
-
-        self.record_history();
-
+    /// Serialize the vault into a temporary file next to it, returning the
+    /// temporary path and its stamp — which the rename carries over to the
+    /// vault path.
+    fn write_temp(&self) -> Result<(PathBuf, FileStamp)> {
         let dir = self
             .inner
             .path
@@ -729,38 +1063,109 @@ impl Vault {
             })?
             .to_owned();
 
+        // Unique per save, not just per process: two handles on one vault in
+        // one process (the desktop hosting the daemon, say) must not share it.
+        static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut tmp_name = std::ffi::OsString::from(&file_name);
-        tmp_name.push(format!(".tmp.{}", std::process::id()));
+        tmp_name.push(format!(".tmp.{}.{n}", std::process::id()));
         let tmp_path = dir.join(&tmp_name);
 
         // Scope the file handle so it is closed (and thus fully flushed by the
-        // OS) before we attempt the rename. We also fsync explicitly for
-        // crash-safety on POSIX.
-        {
+        // OS) before the rename. We also fsync explicitly for crash-safety on
+        // POSIX.
+        let written = (|| {
             let mut tmp = std::fs::File::create(&tmp_path)?;
-            #[allow(unused_mut)]
-            let mut key = database_key(&self.inner.password, self.inner.keyfile.as_deref())?;
-            #[cfg(feature = "yubikey")]
-            if let Some(cr) = &self.inner.challenge_response {
-                key = key.with_challenge_response_key(cr.clone());
-            }
             self.inner
                 .db
-                .save(&mut tmp, key)
+                .save(&mut tmp, self.current_key()?)
                 .map_err(save_err_to_error)?;
             tmp.sync_all()?;
+            Ok(FileStamp::of(&tmp.metadata()?))
+        })();
+        match written {
+            Ok(stamp) => Ok((tmp_path, stamp)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                Err(e)
+            }
         }
+    }
 
-        // Atomic replace. `rename` over an existing target is atomic on POSIX.
-        if let Err(e) = std::fs::rename(&tmp_path, &self.inner.path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(Error::Io(e));
+    /// Persist in-memory state back to the original path (atomic replace).
+    ///
+    /// A vault is one file with several writers: the CLI, the desktop app,
+    /// KeePassXC, and the same file synced onto another machine. When the file
+    /// changed since this handle read it, the other writer's changes are
+    /// merged in first (the KDBX merge: the newer change to an entry wins, the
+    /// other goes into its history), so neither side's work is lost. The file
+    /// is checked again after the rename, and a write that landed in between is
+    /// merged and written over too. No lock file: they do not reach other
+    /// machines through Dropbox or Google Drive anyway.
+    ///
+    /// Fails with [`Error::StaleWrite`] when the file on disk cannot be
+    /// merged: it opens with other credentials, is not a copy of this vault,
+    /// cannot be read, or keeps changing through every round.
+    pub fn save(&mut self) -> Result<()> {
+        // Read what another writer saved before touching our own state, so a
+        // file that cannot be merged at the first look leaves this handle as
+        // it was.
+        let mut disk = self.read_disk_copy()?;
+
+        self.record_history();
+
+        for _ in 0..SAVE_ATTEMPTS {
+            if let Some((other, stamp)) = disk.take() {
+                self.merge_disk_copy(&other)?;
+                self.inner.stamp = Some(stamp);
+            }
+
+            self.prepare_for_write();
+            let (tmp_path, written) = self.write_temp()?;
+
+            #[cfg(test)]
+            save_race_tests::run_hook(&save_race_tests::BEFORE_RENAME, &self.inner.path);
+
+            // Serializing takes a while (the KDF): if another writer landed
+            // meanwhile, merge that too rather than rename over it.
+            match self.read_disk_copy() {
+                Ok(None) => {}
+                changed => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    disk = changed?;
+                    continue;
+                }
+            }
+
+            // Atomic replace. `rename` over an existing target is atomic on POSIX.
+            if let Err(e) = std::fs::rename(&tmp_path, &self.inner.path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(Error::Io(e));
+            }
+            // Our own write is the new baseline; without this a second save in
+            // the same session would see the file as changed by someone else.
+            self.inner.stamp = Some(written);
+            self.inner.base = DiskBase::of(&self.inner.db);
+
+            #[cfg(test)]
+            save_race_tests::run_hook(&save_race_tests::AFTER_RENAME, &self.inner.path);
+
+            // And check afterwards: a writer that renamed its file over ours in
+            // the same instant never saw our changes. If the file holds them
+            // anyway (it merged them, or a filesystem that restamps on rename
+            // handed our own write back), adopt it; otherwise merge and write
+            // again. Every round loses nothing, so the copies converge.
+            match self.read_disk_copy()? {
+                None => return Ok(()),
+                Some((other, stamp)) if self.holds_all_of_ours(&other) => {
+                    self.merge_disk_copy(&other)?;
+                    self.inner.stamp = Some(stamp);
+                    return Ok(());
+                }
+                changed => disk = changed,
+            }
         }
-
-        // Our own write is the new baseline; without this a second save in the
-        // same session would see the file as changed by someone else.
-        self.inner.stamp = FileStamp::read(&self.inner.path);
-        Ok(())
+        Err(Error::StaleWrite(self.inner.path.clone()))
     }
 
     pub fn path(&self) -> &Path {
@@ -1276,12 +1681,14 @@ impl Vault {
     /// Delete an entry by ID.
     pub fn delete_entry(&mut self, id: &EntryId) -> Result<()> {
         let entry_id = self.lookup_entry_id(id)?;
-        let entry = self
+        let mut entry = self
             .inner
             .db
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        entry.remove();
+        // Tracked, so the file records the deletion: a merge with a copy that
+        // still has the entry deletes it there instead of bringing it back.
+        entry.track_changes().remove();
         Ok(())
     }
 
@@ -1563,10 +1970,17 @@ impl Vault {
             .db
             .group_mut(group_id)
             .ok_or_else(|| Error::GroupNotFound(source.into()))?;
+        // Tracked, so the move and the rename carry their times: a merge
+        // decides by them, and would otherwise keep the other copy's. A move
+        // alone leaves the modification time be, so it does not outrank an
+        // edit made elsewhere.
         group
+            .track_changes()
             .move_to(parent_id)
             .map_err(|e| Error::Kdbx(format!("moving group: {e:?}")))?;
-        group.edit(|g| g.name = leaf);
+        if group.name != leaf {
+            group.edit_tracking(|g| g.name = leaf);
+        }
         Ok(plan)
     }
 
@@ -1803,6 +2217,26 @@ impl Vault {
         Ok(true)
     }
 
+    /// Record a group and everything under it as deleted, so a merge with a
+    /// copy that still has them deletes them there instead of bringing them
+    /// back.
+    fn record_deleted_subtree(&mut self, gid: keepass::db::GroupId) {
+        let now = Some(keepass::db::Times::now());
+        let mut pending = vec![gid];
+        let mut gone = Vec::new();
+        while let Some(id) = pending.pop() {
+            let Some(group) = self.inner.db.group(id) else {
+                continue;
+            };
+            gone.push(id.uuid());
+            gone.extend(group.entries().map(|e| e.id().uuid()));
+            pending.extend(group.groups().map(|g| g.id()));
+        }
+        for uuid in gone {
+            self.inner.db.deleted_objects.insert(uuid, now);
+        }
+    }
+
     /// Remove a group. Default: move it (contents and all) to the recycle
     /// bin, mirroring KeePassXC. With `permanent` (or the bin disabled, or
     /// the group already inside the bin) it is destroyed instead — and a
@@ -1824,6 +2258,7 @@ impl Vault {
             if !empty && !recursive {
                 return Err(Error::GroupNotEmpty(path.to_string()));
             }
+            self.record_deleted_subtree(gid);
             self.inner.db.group_mut(gid).expect("resolved id").remove();
             return Ok(false);
         }
@@ -1832,6 +2267,7 @@ impl Vault {
             .db
             .group_mut(gid)
             .expect("resolved id")
+            .track_changes()
             .move_to(bin)
             .map_err(|e| Error::Kdbx(format!("moving group to recycle bin: {e:?}")))?;
         Ok(true)
@@ -2124,19 +2560,9 @@ impl Vault {
             .db
             .merge(&other)
             .map_err(|e| Error::Kdbx(format!("merge: {e}")))?;
+        self.settle_merged_histories(&log);
         let mut summary = MergeSummary::default();
-        for event in &log.events {
-            use keepass::db::merge::MergeEventType;
-            match event.event_type {
-                MergeEventType::Created => summary.created += 1,
-                MergeEventType::Updated => summary.updated += 1,
-                MergeEventType::LocationUpdated => summary.relocated += 1,
-                MergeEventType::Deleted => summary.deleted += 1,
-                // MergeEventType is #[non_exhaustive]; count anything the
-                // crate adds later as an update rather than dropping it.
-                _ => summary.updated += 1,
-            }
-        }
+        summary.count(&log);
         self.save()?;
         Ok(summary)
     }
@@ -2156,13 +2582,23 @@ impl Vault {
     /// Change the vault's credentials: a new password and/or keyfile. Takes
     /// effect immediately (the vault is re-saved under the new composite key).
     pub fn rekey(&mut self, new_password: &str, new_keyfile: Option<&[u8]>) -> Result<()> {
+        // Another writer's changes can only be read with the key the file has
+        // now, so take them in before switching.
+        if self.changed_on_disk() {
+            self.save()?;
+        }
         let old_password = std::mem::replace(&mut self.inner.password, new_password.to_string());
         let old_keyfile =
             std::mem::replace(&mut self.inner.keyfile, new_keyfile.map(<[u8]>::to_vec));
         if let Err(e) = self.save() {
-            // Roll back so a failed save leaves a consistent in-memory state.
-            self.inner.password = old_password;
-            self.inner.keyfile = old_keyfile;
+            // Roll back so a failed save leaves a consistent in-memory state:
+            // the handle keeps whichever key the file now opens with. The save
+            // can fail after its write landed, and another writer on the old
+            // key can have replaced that write since.
+            if !self.file_opens_with_current_key() {
+                self.inner.password = old_password;
+                self.inner.keyfile = old_keyfile;
+            }
             return Err(e);
         }
         let mut old_password = old_password;
@@ -2560,6 +2996,179 @@ fn apply_default_meta_policy(meta: &mut keepass::db::Meta) {
     meta.history_max_items.get_or_insert(10);
     meta.history_max_size.get_or_insert(6 * 1024 * 1024);
     meta.recyclebin_enabled.get_or_insert(true);
+}
+
+/// Writers landing inside `save()`'s own windows: while it serializes, and
+/// right after its rename. Hooks run once, on the thread that set them.
+#[cfg(test)]
+mod save_race_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::thread::LocalKey;
+
+    type Hook = RefCell<Option<Box<dyn FnOnce(&Path)>>>;
+
+    thread_local! {
+        pub(super) static BEFORE_RENAME: Hook = RefCell::new(None);
+        pub(super) static AFTER_RENAME: Hook = RefCell::new(None);
+        pub(super) static OPENED: Hook = RefCell::new(None);
+    }
+
+    pub(super) fn run_hook(hook: &'static LocalKey<Hook>, path: &Path) {
+        if let Some(f) = hook.with(|h| h.borrow_mut().take()) {
+            f(path);
+        }
+    }
+
+    fn set_hook(hook: &'static LocalKey<Hook>, f: impl FnOnce(&Path) + 'static) {
+        hook.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    const PW: &str = "pw";
+
+    fn titles(path: &Path) -> Vec<String> {
+        let mut titles: Vec<String> = Vault::open(path, PW)
+            .expect("reopen")
+            .list_entries()
+            .into_iter()
+            .map(|e| e.title)
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    /// Another writer saves while this save is serializing. Renaming over it
+    /// would lose its entry; the save merges it and writes again.
+    #[test]
+    fn a_write_landing_during_serialization_is_merged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.kdbx");
+        Vault::create(&path, PW).expect("create");
+        let mut app = Vault::open(&path, PW).expect("open");
+        let mut cli = Vault::open(&path, PW).expect("open");
+        cli.add_entry("from-the-cli").expect("add");
+        set_hook(&BEFORE_RENAME, move |_| cli.save().expect("cli saves"));
+
+        app.add_entry("from-the-app").expect("add");
+        app.save().expect("save");
+        assert_eq!(titles(&path), ["from-the-app", "from-the-cli"]);
+        assert_eq!(app.take_merged_on_save().map(|m| m.created), Some(1));
+    }
+
+    /// Another writer replaces the file while this handle is still reading it
+    /// (the KDF takes a while). The handle holds the old contents, so it must
+    /// not take the new file's stamp: its save then merges the other write.
+    #[test]
+    fn a_write_landing_while_opening_is_merged_on_save() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.kdbx");
+        Vault::create(&path, PW).expect("create");
+        let theirs = dir.path().join("theirs.kdbx");
+        std::fs::copy(&path, &theirs).expect("copy");
+        let mut cli = Vault::open(&theirs, PW).expect("open");
+        cli.add_entry("from-the-cli").expect("add");
+        cli.save().expect("save");
+        drop(cli);
+        set_hook(&OPENED, move |path| {
+            std::fs::rename(&theirs, path).expect("replace");
+        });
+
+        let mut app = Vault::open(&path, PW).expect("open");
+        assert!(
+            app.find_by_title("from-the-cli").is_none(),
+            "read the old file"
+        );
+        assert!(app.changed_on_disk());
+        app.add_entry("from-the-app").expect("add");
+        app.save().expect("save");
+        assert_eq!(titles(&path), ["from-the-app", "from-the-cli"]);
+    }
+
+    /// A writer still on the old key replaces the file right after rekey's
+    /// write. The file opens with the old key again, so the handle must keep
+    /// the old key: with the new one it could never read or save the vault.
+    #[test]
+    fn rekey_keeps_the_key_the_file_opens_with() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.kdbx");
+        Vault::create(&path, PW).expect("create");
+        let mut app = Vault::open(&path, PW).expect("open");
+        let theirs = dir.path().join("theirs.kdbx");
+        std::fs::copy(&path, &theirs).expect("copy");
+        let mut cli = Vault::open(&theirs, PW).expect("open");
+        cli.add_entry("from-the-cli").expect("add");
+        cli.save().expect("save");
+        drop(cli);
+        set_hook(&AFTER_RENAME, move |path| {
+            std::fs::rename(&theirs, path).expect("replace");
+        });
+
+        app.rekey("new password", None)
+            .expect_err("the file changed under the rekey");
+        assert_eq!(app.current_password(), PW);
+        app.add_entry("from-the-app").expect("add");
+        app.save().expect("the handle can still save");
+        assert_eq!(titles(&path), ["from-the-app", "from-the-cli"]);
+    }
+
+    /// Another writer renames a file that never saw this save's changes over
+    /// it, right after its rename. The check afterwards catches it, merges,
+    /// and writes again.
+    #[test]
+    fn a_write_replacing_ours_right_after_the_rename_is_merged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.kdbx");
+        Vault::create(&path, PW).expect("create");
+        let mut app = Vault::open(&path, PW).expect("open");
+
+        // The other writer's file, made from the state before the app's save.
+        let theirs = dir.path().join("theirs.kdbx");
+        std::fs::copy(&path, &theirs).expect("copy");
+        let mut cli = Vault::open(&theirs, PW).expect("open");
+        cli.add_entry("from-the-cli").expect("add");
+        cli.save().expect("save");
+        drop(cli);
+        set_hook(&AFTER_RENAME, move |path| {
+            std::fs::rename(&theirs, path).expect("replace");
+        });
+
+        app.add_entry("from-the-app").expect("add");
+        app.save().expect("save");
+        assert_eq!(titles(&path), ["from-the-app", "from-the-cli"]);
+        assert_eq!(app.take_merged_on_save().map(|m| m.created), Some(1));
+        assert!(!app.changed_on_disk());
+    }
+
+    /// Another writer that merged this save's changes before writing leaves a
+    /// file holding everything: adopted as it is, without writing again.
+    #[test]
+    fn a_write_that_already_holds_ours_is_adopted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.kdbx");
+        Vault::create(&path, PW).expect("create");
+        let mut app = Vault::open(&path, PW).expect("open");
+        let mut cli = Vault::open(&path, PW).expect("open");
+        cli.add_entry("from-the-cli").expect("add");
+        // The cli's own save sees the app's write and merges it.
+        let cli_write = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let seen = cli_write.clone();
+        set_hook(&AFTER_RENAME, move |path| {
+            cli.save().expect("cli saves");
+            *seen.borrow_mut() = std::fs::read(path).expect("read");
+        });
+
+        app.add_entry("from-the-app").expect("add");
+        app.save().expect("save");
+        assert_eq!(titles(&path), ["from-the-app", "from-the-cli"]);
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            *cli_write.borrow(),
+            "the app did not write again"
+        );
+        assert!(app.find_by_title("from-the-cli").is_some());
+        assert!(!app.changed_on_disk(), "the cli's file is the baseline");
+        assert_eq!(app.take_merged_on_save().map(|m| m.created), Some(1));
+    }
 }
 
 #[cfg(test)]

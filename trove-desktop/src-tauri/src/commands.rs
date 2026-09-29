@@ -1645,12 +1645,18 @@ pub async fn set_settings(app: AppHandle, settings: Settings) -> Result<(), Stri
 
 /// Has this vault's file been written by something else since we read it?
 ///
+/// Also true once after a save of ours merged in another writer's changes: the
+/// file then holds entries the window's list does not.
+///
 /// Polled by the window rather than pushed from a file watcher: it is one
 /// `stat` on a path we already know, it only matters while somebody is looking
 /// at the list, and there is no watcher to leak when a vault closes.
 #[tauri::command]
 pub async fn vault_changed_on_disk(app: AppHandle, id: String) -> Result<bool, String> {
-    on_vault(app, id, |v| Ok(v.changed_on_disk())).await
+    on_vault_mut(app, id, |v| {
+        Ok(v.take_merged_on_save().is_some() || v.changed_on_disk())
+    })
+    .await
 }
 
 /// Re-read a vault whose file was changed by something else, returning the
