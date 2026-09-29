@@ -4,6 +4,16 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.23.0 — 2026-09-29
+
+**Close one private SSH agent socket.** `trove ssh-agent close [SOCKET]` tears
+down a socket that `trove ssh-agent empty` handed out, and leaves the others and
+the main agent alone. It closes `$SSH_AUTH_SOCK` when no socket is named. Before
+this, `trove lock` was the only way to release a private socket, so a script that
+ran repeatedly against an unlocked vault reached the 32-socket limit.
+`trove ssh-agent sockets [--json]` lists the open private sockets and the keys on
+each. The limit error now names both commands. (#221)
+
 ## v0.22.0 — 2026-09-29
 
 **Edit and delete folders in the desktop app.** The sidebar pencil opens Edit
