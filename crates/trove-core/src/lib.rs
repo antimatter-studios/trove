@@ -305,14 +305,8 @@ pub(crate) struct HistoryTracker {
 }
 
 struct EntryBefore {
+    /// The entry as it was, filed into its history at the first change.
     entry: keepass::db::Entry,
-    /// The attachments the earlier version points at, with the bytes each held
-    /// at the time. keepass-rs frees an attachment's data once no *current*
-    /// entry uses it, even if a history version still points at it
-    /// (keepass-rs#360), and then hands the freed id to the next attachment
-    /// added. `save()` checks each id still holds these bytes before filing
-    /// the version.
-    attachments: Vec<(keepass::db::AttachmentId, zeroize::Zeroizing<Vec<u8>>)>,
 }
 
 /// A cheap identity for the vault file, used to notice that something else
@@ -579,55 +573,67 @@ impl Vault {
     }
 
     /// Remember an entry as it is now, before trove's first change to it since
-    /// the last save. Later calls for the same entry keep the first state.
+    /// the last save, and file it into the entry's history right away: the
+    /// attachments it points at then stay in the vault while the entry
+    /// changes. Later calls for the same entry keep the first state.
     fn remember_before_edit(&mut self, id: keepass::db::EntryId) {
         let inner = &mut self.inner;
         if inner.history.created.contains(&id) || inner.history.before.contains_key(&id) {
             return;
         }
-        let Some(current) = inner.db.entry(id) else {
+        let Some(mut current) = inner.db.entry_mut(id) else {
             return;
         };
-        let attachments = current
-            .attachments()
-            .map(|a| (a.id(), zeroize::Zeroizing::new(a.data.get().clone())))
-            .collect();
         let mut entry: keepass::db::Entry = (*current).clone();
         entry.history = None;
-        inner
-            .history
-            .before
-            .insert(id, EntryBefore { entry, attachments });
+        current.track_changes();
+        inner.history.before.insert(id, EntryBefore { entry });
     }
 
-    /// File one history version for every entry trove changed since the last
-    /// save, then trim each to the vault's `HistoryMaxItems` / `HistoryMaxSize`
-    /// — what KeePassXC does on each edit. An entry that ends up unchanged gets
-    /// no version.
+    /// Settle the history of every entry trove changed since the last save:
+    /// the version filed at the first change becomes the newest, and the
+    /// history is trimmed to the vault's `HistoryMaxItems` / `HistoryMaxSize`
+    /// — what KeePassXC does on each edit. An entry that ends up unchanged
+    /// gets no version.
     fn record_history(&mut self) {
         let tracker = std::mem::take(&mut self.inner.history);
         let max_items = self.inner.db.meta.history_max_items;
         let max_size = self.inner.db.meta.history_max_size;
         for (id, before) in tracker.before {
-            // The earlier version would point at attachment data that is gone
-            // or has been reused for other bytes (keepass-rs#360). Skip it
-            // rather than write a version that reads the wrong attachment.
-            let attachments_intact = before.attachments.iter().all(|(att, bytes)| {
-                self.inner
-                    .db
-                    .attachment(*att)
-                    .is_some_and(|a| a.data.get() == &**bytes)
-            });
-            if !attachments_intact {
-                continue;
-            }
             let Some(current) = self.inner.db.entry(id) else {
                 continue; // deleted since
             };
             let mut now: keepass::db::Entry = (*current).clone();
             now.history = None;
             now.times = before.entry.times.clone();
-            if now == before.entry {
+            let changed = now != before.entry;
+
+            let count = current
+                .history
+                .as_ref()
+                .map_or(0, |h| h.get_entries().len());
+            let mut versions: Vec<(keepass::db::Entry, usize)> = (0..count)
+                .filter_map(|i| current.historical(i))
+                .map(|v| ((*v).clone(), history_version_size(&v)))
+                .collect();
+            // keepass-rs filed the version at the front of the history.
+            let filed = match versions.first() {
+                Some((version, _)) if *version == before.entry => Some(versions.remove(0)),
+                _ => None,
+            };
+
+            if !changed {
+                // Nothing to file: take the version back out, and leave the
+                // rest as it was. `add_entry` inserts at the front, so adding
+                // the rest last-first keeps their order.
+                if filed.is_some() {
+                    let mut kept = keepass::db::History::default();
+                    for (version, _) in versions.into_iter().rev() {
+                        kept.add_entry(version);
+                    }
+                    let mut entry = self.inner.db.entry_mut(id).expect("entry exists");
+                    entry.edit_history(|history| *history = kept);
+                }
                 continue;
             }
 
@@ -637,28 +643,8 @@ impl Vault {
             // version being filed last — it is the newest by definition — keep
             // the newest the vault's limits allow, and write them oldest-first
             // so both tools read the same history.
-            let count = current
-                .history
-                .as_ref()
-                .map_or(0, |h| h.get_entries().len());
-            let mut versions: Vec<(keepass::db::Entry, usize)> = (0..count)
-                .filter_map(|i| current.historical(i))
-                .map(|v| ((*v).clone(), history_version_size(&v)))
-                .collect();
             versions.sort_by_key(|(v, _)| v.times.last_modification);
-            let new_size = before
-                .entry
-                .fields
-                .iter()
-                .map(|(k, v)| k.len() + v.get().len())
-                .sum::<usize>()
-                + before.entry.tags.iter().map(String::len).sum::<usize>()
-                + before
-                    .attachments
-                    .iter()
-                    .map(|(_, b)| b.len())
-                    .sum::<usize>();
-            versions.push((before.entry, new_size));
+            versions.extend(filed);
             let item_cap = max_items
                 .filter(|m| *m >= 0)
                 .map_or(usize::MAX, |m| m as usize);
@@ -677,13 +663,14 @@ impl Vault {
                 kept.push(version);
             }
             // `kept` is newest-first; `add_entry` inserts at the front, so
-            // adding in this order leaves the history oldest-first.
+            // adding in this order leaves the history oldest-first. A file only
+            // a trimmed version used leaves the vault with it.
             let mut ordered = keepass::db::History::default();
             for version in kept {
                 ordered.add_entry(version);
             }
             let mut entry = self.inner.db.entry_mut(id).expect("entry exists");
-            entry.history = Some(ordered);
+            entry.edit_history(|history| *history = ordered);
         }
     }
 
