@@ -166,6 +166,99 @@ fn merge_flows_and_errors() {
 }
 
 #[test]
+fn sync_flows_and_errors() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.kdbx");
+    let a = a.to_str().unwrap();
+    let b = dir.path().join("b.kdbx");
+    let b = b.to_str().unwrap();
+    let list = |vault: &str| {
+        ok(
+            &run_trove(
+                &trove,
+                &["--vault", vault, "--password-stdin", "list"],
+                &format!("{PW}\n"),
+            ),
+            "list",
+        )
+    };
+
+    // A missing copy is created.
+    seed(&trove, a, "shared", "orig");
+    let out = ok(
+        &run_trove(
+            &trove,
+            &["--vault", a, "--password-stdin", "sync", b],
+            &format!("{PW}\n"),
+        ),
+        "sync creates",
+    );
+    assert!(out.contains("created"), "{out}");
+    assert!(list(b).contains("shared"));
+
+    // Each side's change reaches the other.
+    for (vault, entry) in [(a, "in-a"), (b, "in-b")] {
+        ok(
+            &run_trove(
+                &trove,
+                &[
+                    "--vault",
+                    vault,
+                    "--password-stdin",
+                    "add",
+                    "password",
+                    entry,
+                    "--secret-stdin",
+                ],
+                &format!("{PW}\nsecret\n"),
+            ),
+            "diverge",
+        );
+    }
+    let out = ok(
+        &run_trove(
+            &trove,
+            &["--vault", a, "--password-stdin", "sync", b],
+            &format!("{PW}\n{PW}\n"),
+        ),
+        "sync",
+    );
+    assert!(out.contains("pulled 1 created"), "{out}");
+    assert!(out.contains("pushed 1 created"), "{out}");
+    for vault in [a, b] {
+        let out = list(vault);
+        assert!(out.contains("in-a") && out.contains("in-b"), "{out}");
+    }
+
+    // Wrong password for the other copy → vault-error exit (2).
+    let out = run_trove(
+        &trove,
+        &["--vault", a, "--password-stdin", "sync", b],
+        &format!("{PW}\nwrong\n"),
+    );
+    assert_eq!(out.status.code(), Some(2), "bad other creds");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("b.kdbx"), "names the other copy: {stderr}");
+
+    // Nothing new on either side: the other copy is left alone.
+    let before = std::fs::read(b).unwrap();
+    let out = ok(
+        &run_trove(
+            &trove,
+            &["--vault", a, "--password-stdin", "sync", b],
+            &format!("{PW}\n{PW}\n"),
+        ),
+        "sync again",
+    );
+    assert!(out.contains("already had everything"), "{out}");
+    assert_eq!(std::fs::read(b).unwrap(), before);
+}
+
+#[test]
 fn export_xml_and_csv_shapes() {
     let Some(trove) = find_trove() else {
         eprintln!("skipping: trove binary not built");
