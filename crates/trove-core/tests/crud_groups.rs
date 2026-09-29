@@ -275,3 +275,62 @@ fn search_matches_all_unprotected_surfaces_only() {
     assert!(hit("hunter2").is_empty(), "protected values must not match");
     assert!(hit("zzz-no-hit").is_empty());
 }
+
+#[test]
+fn group_order_persists_and_rejects_strangers() {
+    let dir = TempDir::new().unwrap();
+    let vault_path = dir.path().join("t.kdbx");
+    let mut v = Vault::create(&vault_path, PW).unwrap();
+    for g in ["Work/A", "Work/B", "Work/C", "Home"] {
+        v.add_group(g).unwrap();
+    }
+    let order = |v: &Vault, parent: &[&str]| -> Vec<(String, Option<u32>)> {
+        let mut kids: Vec<_> = v
+            .list_groups()
+            .into_iter()
+            .filter(|g| {
+                g.path.len() == parent.len() + 1
+                    && g.path
+                        .starts_with(&parent.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            })
+            .map(|g| (g.path.last().unwrap().clone(), g.position))
+            .collect();
+        kids.sort();
+        kids
+    };
+    assert!(order(&v, &["Work"]).iter().all(|(_, p)| p.is_none()));
+
+    let names = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    v.set_group_order("Work", &names(&["C", "A", "B"])).unwrap();
+    v.set_group_order("", &names(&["Work", "Home"])).unwrap();
+    v.save().unwrap();
+    drop(v);
+
+    let mut v = reopen(&vault_path);
+    assert_eq!(
+        order(&v, &["Work"]),
+        vec![
+            ("A".into(), Some(1)),
+            ("B".into(), Some(2)),
+            ("C".into(), Some(0))
+        ]
+    );
+    assert_eq!(
+        order(&v, &[])
+            .into_iter()
+            .filter(|(n, _)| n != "Recycle Bin")
+            .collect::<Vec<_>>(),
+        vec![("Home".into(), Some(1)), ("Work".into(), Some(0))]
+    );
+
+    // Not a child of Work, and listed twice: both refused, nothing written.
+    assert!(matches!(
+        v.set_group_order("Work", &names(&["A", "Home"])),
+        Err(Error::GroupNotFound(_))
+    ));
+    assert!(matches!(
+        v.set_group_order("Work", &names(&["A", "A"])),
+        Err(Error::InvalidPath(_))
+    ));
+    assert_eq!(order(&v, &["Work"])[0], ("A".into(), Some(1)));
+}

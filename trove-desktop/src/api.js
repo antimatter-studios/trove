@@ -67,6 +67,27 @@ export function deleteGroup(id, path) {
   }));
 }
 
+// drop_entry(id, entryId, group, copy) -> { entries, groups, id }
+// Move an entry into `group` ("" is the root), or copy it; `id` is where it
+// landed — the copy's id when copying.
+export function dropEntry(id, entryId, group, copy) {
+  return invoke('drop_entry', { id, entryId, group, copy }).then((res) => ({
+    id: res.id,
+    entries: normEntries(res.entries),
+    groups: res.groups || [],
+  }));
+}
+
+// drop_group(id, source, parent, copy, order) -> { entries, groups }
+// Move (or copy) folder `source` into `parent`, then store `order` — the
+// parent's child names, first to last — as the order they are shown in.
+export function dropGroup(id, source, parent, copy, order) {
+  return invoke('drop_group', { id, source, parent, copy, order }).then((res) => ({
+    entries: normEntries(res.entries),
+    groups: res.groups || [],
+  }));
+}
+
 /* ---- Reading one entry (secrets, on demand) ---- */
 
 // get_field(id, entryId, field) -> Option<String>

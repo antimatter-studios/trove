@@ -16,6 +16,11 @@
   --amber: oklch(0.80 0.13 78);
   --red: oklch(0.70 0.17 24);
   --red-dim: oklch(0.70 0.17 24 / 0.16);
+  /* Drag and drop: "lands here" and "cannot land here". Themes override. */
+  --drop-ok: var(--green);
+  --drop-ok-dim: oklch(0.78 0.14 150 / 0.16);
+  --drop-no: var(--red);
+  --drop-no-dim: var(--red-dim);
 }
 
 [data-theme="dark"] {
@@ -63,6 +68,10 @@
   --shadow-window: 0 40px 90px -24px oklch(0.3 0.02 264 / 0.35), 0 10px 24px -12px oklch(0.3 0.02 264 / 0.25);
   --shadow-pop: 0 30px 70px -20px oklch(0.3 0.02 264 / 0.4);
   color-scheme: light;
+  --drop-ok: oklch(0.58 0.15 150);
+  --drop-ok-dim: oklch(0.58 0.15 150 / 0.14);
+  --drop-no: oklch(0.56 0.19 24);
+  --drop-no-dim: oklch(0.56 0.19 24 / 0.12);
 }
 
 [data-accent="brass"]    { --ah: 85; }
@@ -80,7 +89,18 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
+  /* An app, not a page: dragging across the window must not paint a
+     selection over labels, rows and buttons. Text worth copying opts back in
+     below; form fields are always editable and selectable. */
+  -webkit-user-select: none; user-select: none;
+  cursor: default;
 }
+input, textarea, [contenteditable="true"],
+.dt-title, .dt-crumb, .fv:not(.secret), .notes, .meta-item .mv,
+.ul-err, .att-err, code {
+  -webkit-user-select: text; user-select: text;
+}
+.dt-title, .dt-crumb, .fv:not(.secret), .notes, .meta-item .mv, .ul-err, .att-err { cursor: text; }
 .ic { display: block; flex: none; }
 button { font-family: inherit; color: inherit; cursor: pointer; white-space: nowrap; }
 input { font-family: inherit; }
@@ -259,6 +279,54 @@ input { font-family: inherit; }
 .tr-edit-tags { display: none; border: 0; background: transparent; color: var(--text-faint); padding: 2px; border-radius: 4px; cursor: pointer; }
 .tree-row:hover .tr-edit-tags, .tr-edit-tags:focus-visible { display: grid; place-items: center; }
 .tr-edit-tags:hover { color: var(--accent); background: var(--bg-2); }
+/* ---- drag and drop ---- */
+/* Rows below the landing spot slide down one row to open a gap; the gap shows
+   a line at the depth the folder would land at. */
+.tree-row { position: relative; }
+body.dnd-active, body.dnd-active * { cursor: grabbing !important; -webkit-user-select: none !important; user-select: none !important; }
+body.dnd-active .tree-row:hover { background: transparent; }
+.tree-row.dnd-shift { transform: translateY(30px); }
+.tree-row, .erow { transition: background .1s, color .1s, transform .16s ease, opacity .12s; }
+.tree-row.dnd-gap::before, .tree-row.dnd-gap-end::after {
+  content: ""; position: absolute; left: var(--gap-indent, 20px); right: 8px; height: 2px;
+  border-radius: 2px; background: var(--drop-ok); box-shadow: 0 0 0 3px var(--drop-ok-dim);
+}
+.sidebar.dnd-no .tree-row.dnd-gap::before, .sidebar.dnd-no .tree-row.dnd-gap-end::after { background: var(--drop-no); box-shadow: 0 0 0 3px var(--drop-no-dim); }
+.tree-row.dnd-gap::before { top: -16px; }
+.tree-row.dnd-gap-end::after { bottom: -16px; }
+.tree-row.dnd-source, .erow.dnd-source { opacity: .4; }
+/* The folder it would drop into: green when it can, red when it cannot. */
+.tree-row.dnd-into { background: var(--drop-ok-dim); box-shadow: inset 0 0 0 1.5px var(--drop-ok); color: var(--text); }
+.tree-row.dnd-into.nodrop { background: var(--drop-no-dim); box-shadow: inset 0 0 0 1.5px var(--drop-no); }
+/* The entry list while something is carried over it: nowhere to drop. */
+.pane.list { transition: box-shadow .12s, background .12s; }
+.pane.list.dnd-no { box-shadow: inset 0 0 0 1.5px var(--drop-no); background-image: linear-gradient(var(--drop-no-dim), var(--drop-no-dim)); }
+/* What follows the pointer: the item, with move/copy in its corner. Neutral
+   while over nothing, then green or red once there is somewhere to drop. */
+.dnd-ghost {
+  position: fixed; left: 0; top: 0; z-index: 1000; pointer-events: none;
+  display: flex; align-items: center; gap: 7px; max-width: 260px;
+  padding: 6px 12px 6px 9px; border-radius: 9px;
+  background: var(--bg-2); color: var(--text); border: 1px solid var(--border);
+  box-shadow: 0 10px 28px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.2);
+  font-family: var(--font-mono); font-size: 12.5px;
+  transition: opacity .12s, border-color .12s;
+}
+.dnd-ghost.ok { border-color: var(--drop-ok); }
+.dnd-ghost.no { border-color: var(--drop-no); }
+.dnd-ghost-ic { color: var(--text-faint); display: grid; place-items: center; }
+.dnd-ghost.ok .dnd-ghost-ic { color: var(--drop-ok); }
+.dnd-ghost.no .dnd-ghost-ic { color: var(--drop-no); }
+.dnd-ghost-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dnd-badge {
+  position: absolute; right: -8px; bottom: -9px;
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 1px 6px; border-radius: 6px;
+  font-family: var(--font-sans); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--bg-0); background: var(--text-faint);
+}
+.dnd-ghost.ok .dnd-badge { background: var(--drop-ok); }
+.dnd-ghost.no .dnd-badge { background: var(--drop-no); }
 .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag-chip { border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; color: var(--text-dim); font-size: 11px; }
 .tag-editor-list { margin-bottom: 8px; }
@@ -324,6 +392,8 @@ input { font-family: inherit; }
   display: grid; grid-template-columns: minmax(0,1fr) 80px; gap: 12px; align-items: center;
   padding: 0 16px; height: 54px; cursor: pointer; position: relative;
   border-bottom: 1px solid var(--border-soft);
+  /* Rows are picked up and dragged; a press must not start a text selection. */
+  user-select: none;
 }
 .erow:hover { background: var(--bg-1); }
 .erow.sel { background: var(--bg-2); }

@@ -120,6 +120,18 @@ describe('app chrome + theme', () => {
 // still catches a genuine hang.
 const UNLOCK_WAIT = { timeout: 10000 };
 
+// The unlock card for the vault under test. Before `listVaults` resolves the
+// card shows the "No vault" placeholder, and the real vault arriving resets the
+// field — so typing into the placeholder loses the password and the submit is
+// dropped. Wait for the vault itself, not just for an input.
+async function unlockInput(c) {
+  return waitFor(() => {
+    const el = c.querySelector('.unlock-card .ul-field input');
+    if (!el || c.querySelector('.unlock-card .vc-name')?.textContent !== LOCKED_VAULT.name) throw new Error('no unlock input for the vault yet');
+    return el;
+  }, UNLOCK_WAIT);
+}
+
 describe('real unlock flow', () => {
   it('renders unlock progress events and drains queued steps before opening the vault', async () => {
     let emitProgress;
@@ -129,11 +141,7 @@ describe('real unlock flow', () => {
     });
     api.listVaults.mockResolvedValue([LOCKED_VAULT]);
     const { container: c } = render(<App />);
-    const input = await waitFor(() => {
-      const el = c.querySelector('.unlock-card .ul-field input');
-      if (!el) throw new Error('no unlock input yet');
-      return el;
-    });
+    const input = await unlockInput(c);
     await waitFor(() => expect(emitProgress).toBeTypeOf('function'));
     fireEvent.change(input, { target: { value: 'correct horse' } });
     fireEvent.submit(c.querySelector('.unlock-card'));
@@ -151,11 +159,7 @@ describe('real unlock flow', () => {
     api.listVaults.mockResolvedValue([LOCKED_VAULT]);
     const { container: c } = render(<App />);
     // Locked → the Unlock card is shown.
-    const input = await waitFor(() => {
-      const el = c.querySelector('.unlock-card .ul-field input');
-      if (!el) throw new Error('no unlock input yet');
-      return el;
-    });
+    const input = await unlockInput(c);
     fireEvent.change(input, { target: { value: 'correct horse' } });
     fireEvent.submit(c.querySelector('.unlock-card'));
 
@@ -215,11 +219,7 @@ describe('real unlock flow', () => {
     api.listVaults.mockResolvedValue([LOCKED_VAULT]);
     api.unlockVault.mockRejectedValue('Incorrect master password');
     const { container: c } = render(<App />);
-    const input = await waitFor(() => {
-      const el = c.querySelector('.unlock-card .ul-field input');
-      if (!el) throw new Error('no unlock input yet');
-      return el;
-    });
+    const input = await unlockInput(c);
     fireEvent.change(input, { target: { value: 'nope' } });
     // Submitted in the same tick as the change on purpose: that used to race
     // the re-render and be dropped silently, and `submit` reads the field
@@ -267,11 +267,7 @@ describe('selected-entry detail stays fresh after an edit', () => {
     api.listVaults.mockResolvedValue([LOCKED_VAULT]);
     const { container: c } = render(<App />);
 
-    const input = await waitFor(() => {
-      const el = c.querySelector('.unlock-card .ul-field input');
-      if (!el) throw new Error('no unlock input yet');
-      return el;
-    });
+    const input = await unlockInput(c);
     fireEvent.change(input, { target: { value: 'correct horse' } });
     fireEvent.submit(c.querySelector('.unlock-card'));
     await waitFor(() => expect(c.querySelector('.body .pane.detail')).toBeTruthy());

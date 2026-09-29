@@ -272,6 +272,9 @@ pub struct GroupDto {
     pub inherited_tags: Vec<String>,
     /// This group is the vault's recycle bin (the UI pins it apart).
     pub recycle_bin: bool,
+    /// Place among its siblings once someone has arranged them; `None` sorts
+    /// alphabetically after the arranged ones.
+    pub position: Option<u32>,
 }
 
 /// Result of [`save_entry`]: the fresh list plus the saved entry's id (for
@@ -871,6 +874,7 @@ fn build_group_dtos(vault: &Vault) -> Vec<GroupDto> {
             path: group.path,
             tags: group.tags,
             inherited_tags: group.inherited_tags,
+            position: group.position,
         })
         .collect()
 }
@@ -2233,6 +2237,70 @@ pub async fn delete_group(
             entries: build_entry_dtos(vault),
             groups: build_group_dtos(vault),
             recycled,
+        })
+    })
+    .await
+}
+
+/// Drop an entry onto a folder in the sidebar: move it there, or copy it when
+/// `copy` is set. The returned id is the copy's, so the UI can select it.
+#[tauri::command]
+pub async fn drop_entry(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    group: String,
+    copy: bool,
+) -> Result<SaveResult, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault_write(app, id, move |vault| {
+        let landed = if copy {
+            vault.copy_entry(&eid, &group).map_err(|e| e.to_string())?
+        } else {
+            vault
+                .move_entry_to_path(&eid, &group)
+                .map_err(|e| e.to_string())?;
+            eid
+        };
+        Ok(SaveResult {
+            entries: build_entry_dtos(vault),
+            groups: build_group_dtos(vault),
+            id: landed.as_str().to_string(),
+        })
+    })
+    .await
+}
+
+/// Drop a folder into `parent`, moving it (or copying it when `copy` is set),
+/// then record `order` as the new order of `parent`'s children. A drop within
+/// the same parent is a plain reorder. One command so the whole gesture costs
+/// one vault write.
+#[tauri::command]
+pub async fn drop_group(
+    app: AppHandle,
+    id: String,
+    source: String,
+    parent: String,
+    copy: bool,
+    order: Vec<String>,
+) -> Result<SaveResult, String> {
+    on_vault_write(app, id, move |vault| {
+        if copy {
+            vault
+                .copy_group(&source, &parent, false)
+                .map_err(|e| e.to_string())?;
+        } else {
+            vault
+                .move_group_to_path(&source, &parent)
+                .map_err(|e| e.to_string())?;
+        }
+        vault
+            .set_group_order(&parent, &order)
+            .map_err(|e| e.to_string())?;
+        Ok(SaveResult {
+            entries: build_entry_dtos(vault),
+            groups: build_group_dtos(vault),
+            id: String::new(),
         })
     })
     .await

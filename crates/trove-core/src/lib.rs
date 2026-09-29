@@ -41,6 +41,13 @@ const DEFAULT_GROUP: &str = "Root";
 /// `Meta/RecycleBinUUID`; the name is only cosmetic.
 pub const RECYCLE_BIN_GROUP: &str = "Recycle Bin";
 
+/// Group `CustomData` key holding a folder's place among its siblings.
+///
+/// keepass-rs keeps child groups in a set, so a KDBX written by it carries no
+/// folder order of its own. Anything that lets people arrange folders records
+/// the position here instead; KeePassXC preserves unknown custom data.
+pub const GROUP_POSITION_KEY: &str = "Trove.Position";
+
 /// Stable identifier for an entry within a vault.
 ///
 /// Backed by the kdbx UUID, serialised as a string for wire/disk transport.
@@ -129,6 +136,9 @@ pub struct GroupSummary {
     pub tags: Vec<String>,
     /// Tags inherited from ancestor groups, root → nearest parent.
     pub inherited_tags: Vec<String>,
+    /// Place among its siblings, as set by [`Vault::set_group_order`]. `None`
+    /// for a group nobody has arranged.
+    pub position: Option<u32>,
 }
 
 /// Safe metadata for agent discovery. Values are limited to unprotected
@@ -930,6 +940,66 @@ impl Vault {
             .group_mut(id)
             .ok_or_else(|| Error::GroupNotFound(path.to_string()))?
             .edit_tracking(|group| group.tags = tags.to_vec());
+        Ok(())
+    }
+
+    /// Record the order of `parent`'s child groups: `names[i]` gets position `i`.
+    ///
+    /// Every name must be a direct child of `parent`, once. Children left out
+    /// keep whatever position they had, so a caller that only knows part of the
+    /// list cannot scramble the rest. Groups whose position is already right
+    /// are not touched, so their modification time stays put.
+    pub fn set_group_order(&mut self, parent: &str, names: &[String]) -> Result<()> {
+        let parent_id = self.resolve_group(parent)?;
+        let mut ids = Vec::with_capacity(names.len());
+        {
+            let group = self
+                .inner
+                .db
+                .group(parent_id)
+                .ok_or_else(|| Error::GroupNotFound(parent.to_string()))?;
+            for (i, name) in names.iter().enumerate() {
+                if names[..i].contains(name) {
+                    return Err(Error::InvalidPath(format!("{name} is listed twice")));
+                }
+                let child = group.group_by_name(name).ok_or_else(|| {
+                    Error::GroupNotFound(if parent.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{parent}/{name}")
+                    })
+                })?;
+                ids.push(child.id());
+            }
+        }
+        for (position, id) in ids.into_iter().enumerate() {
+            let value = position.to_string();
+            let mut group = self
+                .inner
+                .db
+                .group_mut(id)
+                .expect("child id was just resolved");
+            let current =
+                group
+                    .custom_data
+                    .get(GROUP_POSITION_KEY)
+                    .and_then(|item| match &item.value {
+                        Some(keepass::db::CustomDataValue::String(s)) => Some(s.clone()),
+                        _ => None,
+                    });
+            if current.as_deref() == Some(value.as_str()) {
+                continue;
+            }
+            group.edit_tracking(|g| {
+                g.custom_data.insert(
+                    GROUP_POSITION_KEY.to_string(),
+                    keepass::db::CustomDataItem {
+                        value: Some(keepass::db::CustomDataValue::String(value)),
+                        last_modification_time: Some(keepass::db::Times::now()),
+                    },
+                );
+            });
+        }
         Ok(())
     }
 
@@ -2292,6 +2362,13 @@ fn summarise_group(group: &keepass::db::GroupRef<'_>) -> GroupSummary {
         path: build_group_path_from_group(group),
         tags: group.tags.clone(),
         inherited_tags: build_inherited_tags(group.parent()),
+        position: group
+            .custom_data
+            .get(GROUP_POSITION_KEY)
+            .and_then(|item| match &item.value {
+                Some(keepass::db::CustomDataValue::String(s)) => s.parse().ok(),
+                _ => None,
+            }),
     }
 }
 
