@@ -38,10 +38,23 @@ mod windows_imp {
     /// supports `try_clone` like `UnixStream`.
     pub type Stream = std::fs::File;
 
+    /// `ERROR_PIPE_BUSY`: every instance is connected. troved stands up the
+    /// next one right after each accept, so this clears within milliseconds.
+    const ERROR_PIPE_BUSY: i32 = 231;
+
     pub fn connect(path: &Path) -> io::Result<Stream> {
         // Same derivation troved uses to bind the pipe, so we open the exact
         // name it created.
         let name = troved::ipc::pipe_name(path);
-        OpenOptions::new().read(true).write(true).open(name)
+        let mut attempts = 0;
+        loop {
+            match OpenOptions::new().read(true).write(true).open(&name) {
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 100 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
     }
 }

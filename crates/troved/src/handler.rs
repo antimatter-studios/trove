@@ -496,7 +496,7 @@ pub async fn handle(
             let _state_guard = state.lock().await;
             match scoped::create(scoped_agents, idle.clone()).await {
                 Ok(path) => Handled {
-                    response: Response::ok_ssh_agent_socket(path.display().to_string()),
+                    response: Response::ok_ssh_agent_socket(crate::ipc::client_address(&path)),
                     shutdown: false,
                 },
                 Err(e) => Handled {
@@ -598,7 +598,7 @@ pub async fn handle(
                     })
                     .collect();
                 sockets.push(crate::protocol::ScopedSocketDto {
-                    socket: agent.socket.display().to_string(),
+                    socket: crate::ipc::client_address(&agent.socket),
                     keys,
                 });
             }

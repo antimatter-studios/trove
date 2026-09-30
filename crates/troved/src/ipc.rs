@@ -23,6 +23,20 @@ pub use unix_imp::{bind, connect, ClientStream, Listener, Stream};
 #[cfg(windows)]
 pub use windows_imp::{bind, connect, pipe_name, ClientStream, Listener, Stream};
 
+/// What a client outside trove has to be given to reach the endpoint at
+/// `path`: the socket path on Unix, the pipe name on Windows. This is the value
+/// for `SSH_AUTH_SOCK`; Windows OpenSSH wants `\\.\pipe\...`, not a path.
+pub fn client_address(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        pipe_name(path).to_string_lossy().into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        path.display().to_string()
+    }
+}
+
 #[cfg(unix)]
 mod unix_imp {
     use super::*;
@@ -269,8 +283,23 @@ mod windows_imp {
         }
     }
 
+    /// `ERROR_PIPE_BUSY`: every instance is connected. The listener stands up
+    /// the next one right after each accept, so this clears within
+    /// milliseconds; tokio's named-pipe client example retries the same way.
+    const ERROR_PIPE_BUSY: i32 = 231;
+
     pub async fn connect(path: &Path) -> io::Result<ClientStream> {
-        ClientOptions::new().open(pipe_name(path))
+        let name = pipe_name(path);
+        let mut attempts = 0;
+        loop {
+            match ClientOptions::new().open(&name) {
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 100 => {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                other => return other,
+            }
+        }
     }
 }
 
