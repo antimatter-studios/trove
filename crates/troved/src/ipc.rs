@@ -21,7 +21,7 @@ use std::path::Path;
 #[cfg(unix)]
 pub use unix_imp::{bind, connect, ClientStream, Listener, Stream};
 #[cfg(windows)]
-pub use windows_imp::{bind, connect, pipe_name, ClientStream, Listener, Stream};
+pub use windows_imp::{bind, bind_pipe, connect, pipe_name, ClientStream, Listener, Stream};
 
 /// What a client outside trove has to be given to reach the endpoint at
 /// `path`: the socket path on Unix, the pipe name on Windows. This is the value
@@ -144,12 +144,17 @@ mod windows_imp {
     }
 
     pub async fn bind(path: &Path) -> io::Result<Listener> {
-        let name = pipe_name(path);
-        // `first_pipe_instance` makes this fail if another daemon already owns
-        // the name — the named-pipe analogue of EADDRINUSE.
-        let pending = security::create_server(&name, true)?;
+        bind_pipe(&pipe_name(path))
+    }
+
+    /// Bind a pipe by its full name rather than a path, for names other
+    /// programs look for.
+    pub fn bind_pipe(name: &std::ffi::OsStr) -> io::Result<Listener> {
+        // `first_pipe_instance` makes this fail if another process already
+        // owns the name — the named-pipe analogue of EADDRINUSE.
+        let pending = security::create_server(name, true)?;
         Ok(Listener {
-            name,
+            name: name.to_os_string(),
             pending: Some(pending),
         })
     }

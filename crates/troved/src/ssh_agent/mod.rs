@@ -208,12 +208,51 @@ pub async fn run(
 ) -> std::io::Result<()> {
     let listener = bind_listener(&socket_path).await?;
     eprintln!("ssh-agent listening on {}", socket_path.display());
-    serve(listener, store, idle).await
+    let agent_lock: AgentLock = Arc::new(tokio::sync::RwLock::new(None));
+    // Windows OpenSSH looks for its agent at a fixed pipe when SSH_AUTH_SOCK
+    // is unset. Serving it too (same keys, same `ssh-add -x` lock) means no
+    // configuration at all, and no key leaves troved.
+    #[cfg(windows)]
+    if let Some(pipe) = bind_openssh_pipe().await {
+        let (store, idle, agent_lock) = (store.clone(), idle.clone(), agent_lock.clone());
+        tokio::spawn(async move {
+            let _ = serve_with_lock(pipe, store, idle, agent_lock).await;
+        });
+    }
+    serve_with_lock(listener, store, idle, agent_lock).await
+}
+
+/// The pipe Windows OpenSSH uses when `SSH_AUTH_SOCK` is unset, normally
+/// served by the OpenSSH Authentication Agent service (disabled by default).
+#[cfg(windows)]
+pub const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// Bind [`OPENSSH_PIPE`] unless `TROVE_SSH_OPENSSH_PIPE=0` or something else
+/// already serves it, in which case trove keeps only its own pipe.
+#[cfg(windows)]
+async fn bind_openssh_pipe() -> Option<ipc::Listener> {
+    if std::env::var("TROVE_SSH_OPENSSH_PIPE").as_deref() == Ok("0") {
+        return None;
+    }
+    match ipc::bind_pipe(std::ffi::OsStr::new(OPENSSH_PIPE)) {
+        Ok(listener) => {
+            eprintln!("ssh-agent listening on {OPENSSH_PIPE}");
+            Some(listener)
+        }
+        Err(e) => {
+            eprintln!(
+                "ssh-agent: not serving {OPENSSH_PIPE} ({e}); another agent, such as the \
+                 OpenSSH Authentication Agent service, has it. Point SSH_AUTH_SOCK at \
+                 `trove ssh-agent socket` instead"
+            );
+            None
+        }
+    }
 }
 
 /// Accept connections on an already-bound listener and serve them from `store`.
 pub async fn serve(
-    mut listener: ipc::Listener,
+    listener: ipc::Listener,
     store: KeyStore,
     idle: Arc<IdleTracker>,
 ) -> std::io::Result<()> {
@@ -221,7 +260,16 @@ pub async fn serve(
     // connection it serves — `ssh-add -x` in one shell must lock the agent for
     // all of them.
     let agent_lock: AgentLock = Arc::new(tokio::sync::RwLock::new(None));
+    serve_with_lock(listener, store, idle, agent_lock).await
+}
 
+/// [`serve`], sharing `agent_lock` with other listeners for the same agent.
+async fn serve_with_lock(
+    mut listener: ipc::Listener,
+    store: KeyStore,
+    idle: Arc<IdleTracker>,
+    agent_lock: AgentLock,
+) -> std::io::Result<()> {
     // Read once, at bind time: whether an unclaimed host gets an empty answer
     // rather than the whole keyring. A per-connection read would let the answer
     // change under a running deployment.
