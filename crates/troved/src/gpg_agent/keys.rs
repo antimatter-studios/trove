@@ -1155,6 +1155,124 @@ fn push_sexp_param(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
     out.push(b')');
 }
 
+/// Turn a `gpg --export-secret-keys` blob into the matching public-key export,
+/// the bytes `gpg --export` would give for the same key: each secret key and
+/// subkey packet cut down to its public part, with the user IDs and
+/// signatures kept as they are. gpg needs this in its keyring before it will
+/// ask any agent to sign with the key.
+///
+/// Works for every algorithm and whether or not the secret part is
+/// passphrase-protected, since only the public fields are read. Trust packets
+/// are dropped, as `gpg --export` drops them.
+pub fn public_key_export(secret_export: &[u8]) -> Result<Vec<u8>, ParseError> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    let mut saw_key = false;
+    while cursor < secret_export.len() {
+        let (tag, body, next) = read_packet(secret_export, cursor)
+            .map_err(|e| ParseError::Malformed(format!("packet at {cursor}: {e}")))?;
+        match tag {
+            // Secret-Key -> Public-Key, Secret-Subkey -> Public-Subkey.
+            5 | 7 => {
+                let public_tag = if tag == 5 { 6 } else { 14 };
+                let len = public_part_len(body)?;
+                write_packet(&mut out, public_tag, &body[..len]);
+                saw_key = true;
+            }
+            // Public keys and subkeys, signatures, user IDs and attributes.
+            2 | 6 | 13 | 14 | 17 => write_packet(&mut out, tag, body),
+            _ => {}
+        }
+        cursor = next;
+    }
+    if !saw_key {
+        return Err(ParseError::Malformed(
+            "no secret-key packet in export".into(),
+        ));
+    }
+    Ok(out)
+}
+
+/// How many leading bytes of a secret-key packet body are its public-key
+/// packet body.
+fn public_part_len(body: &[u8]) -> Result<usize, ParseError> {
+    let short = || ParseError::Malformed("secret-key packet truncated".into());
+    let version = *body.first().ok_or_else(short)?;
+    match version {
+        // v5 and v6 state the size of the public key material after the
+        // algorithm: version, created (4), algorithm, count (4), material.
+        5 | 6 => {
+            let count = body.get(6..10).ok_or_else(short)?;
+            let count = u32::from_be_bytes(count.try_into().expect("4 bytes")) as usize;
+            let end = 10usize.checked_add(count).ok_or_else(short)?;
+            (end <= body.len()).then_some(end).ok_or_else(short)
+        }
+        // v3 has the v4 layout plus a 2-byte validity period before the
+        // algorithm.
+        3 | 4 => {
+            let algo_at = if version == 3 { 7 } else { 5 };
+            let algo = *body.get(algo_at).ok_or_else(short)?;
+            let mut p = algo_at + 1;
+            let mpi = |p: &mut usize| -> Result<(), ParseError> {
+                let bits = body.get(*p..*p + 2).ok_or_else(short)?;
+                let bytes = (u16::from_be_bytes([bits[0], bits[1]]) as usize).div_ceil(8);
+                *p += 2 + bytes;
+                (*p <= body.len()).then_some(()).ok_or_else(short)
+            };
+            let oid = |p: &mut usize| -> Result<(), ParseError> {
+                let len = *body.get(*p).ok_or_else(short)? as usize;
+                *p += 1 + len;
+                (*p <= body.len()).then_some(()).ok_or_else(short)
+            };
+            match algo {
+                // RSA: n, e.
+                1..=3 => (0..2).try_for_each(|_| mpi(&mut p))?,
+                // Elgamal: p, g, y.
+                16 => (0..3).try_for_each(|_| mpi(&mut p))?,
+                // DSA: p, q, g, y.
+                17 => (0..4).try_for_each(|_| mpi(&mut p))?,
+                // ECDSA, EdDSA: curve OID, point.
+                19 | 22 => {
+                    oid(&mut p)?;
+                    mpi(&mut p)?;
+                }
+                // ECDH: curve OID, point, KDF parameters (length-prefixed).
+                18 => {
+                    oid(&mut p)?;
+                    mpi(&mut p)?;
+                    oid(&mut p)?;
+                }
+                other => {
+                    return Err(ParseError::Malformed(format!(
+                        "can't find the public part of a key with algorithm {other}"
+                    )))
+                }
+            }
+            Ok(p)
+        }
+        other => Err(ParseError::Malformed(format!(
+            "unknown key packet version {other}"
+        ))),
+    }
+}
+
+/// Append one packet with a new-format header (RFC 4880 §4.2.2).
+fn write_packet(out: &mut Vec<u8>, tag: u8, body: &[u8]) {
+    out.push(0xC0 | tag);
+    let len = body.len();
+    if len < 192 {
+        out.push(len as u8);
+    } else if len < 8384 {
+        let l = len - 192;
+        out.push(((l >> 8) + 192) as u8);
+        out.push((l & 0xFF) as u8);
+    } else {
+        out.push(0xFF);
+        out.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+    out.extend_from_slice(body);
+}
+
 #[cfg(test)]
 mod rsa_tests {
     use super::*;
@@ -1169,6 +1287,28 @@ mod rsa_tests {
     /// This is the whole point of the fixture: the keygrip is how gpg-agent
     /// addresses a key, so if ours disagrees, gpg never asks us to sign.
     const GPG_REPORTED_KEYGRIP: &str = "237e7f46842208d3fbe82251a64a3b8bab609a27";
+
+    #[test]
+    fn public_key_export_keeps_no_secret_packets() {
+        let public = public_key_export(RSA_EXPORT).expect("derive public export");
+        let mut cursor = 0;
+        let mut tags = Vec::new();
+        while cursor < public.len() {
+            let (tag, _, next) = read_packet(&public, cursor).expect("well-formed output");
+            tags.push(tag);
+            cursor = next;
+        }
+        assert_eq!(
+            tags.first(),
+            Some(&6),
+            "starts with the public key: {tags:?}"
+        );
+        assert!(tags.contains(&13), "keeps the user ID: {tags:?}");
+        assert!(tags.contains(&2), "keeps the signatures: {tags:?}");
+        assert!(!tags.contains(&5) && !tags.contains(&7), "{tags:?}");
+        assert!(public.len() < RSA_EXPORT.len());
+        assert!(public_key_export(b"").is_err());
+    }
 
     #[test]
     fn parses_a_real_gpg_rsa_export() {

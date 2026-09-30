@@ -1474,6 +1474,32 @@ gpg(1) wants a fixed path under `$GNUPGHOME`. Typical use:
 ln -sf "$(trove gpg-agent socket)" "$(gpgconf --list-dirs agent-socket)"
 ```
 
+### trove gpg-agent import
+
+```
+trove [--vault <PATH>] gpg-agent import [--print]
+```
+
+Import the public half of every vault GPG key into gpg's keyring. gpg only asks
+an agent to sign with a key it already knows, so a key that lives only in the
+vault is invisible to `gpg` and `git commit -S` until its public key is in the
+keyring.
+
+Each entry's `gpg-priv` secret-key export is cut down to its public packets
+(public key and subkeys, user IDs, signatures), the bytes `gpg --export` would
+give, and fed to `gpg --batch --import`. No secret key material reaches gpg.
+Entries the agent wouldn't serve are left out. Importing again changes nothing.
+The keyring keeps the keys after `trove lock`; `gpg --delete-keys <ID>` removes
+one.
+
+It never runs on its own at unlock: the keyring outlives the lock, so changing
+it is a deliberate step.
+
+| Flag | Description |
+| --- | --- |
+| `--print` | Write the public keys (binary OpenPGP) to stdout instead of importing them. Refuses a terminal. |
+| `--vault <PATH>` | Global. Present → read that vault file; absent → the vaults unlocked in the daemon. |
+
 ## trove materialize
 
 ```

@@ -67,10 +67,9 @@ desktop the natural pinentry for item 4's confirm constraint.
 Needs a fallback: if a standalone `troved` already holds the singleton lock, the
 desktop should degrade to being a *client* rather than refusing to start.
 
-### 7. Export public keys into the user's gpg keyring on unlock
-gpg won't ask any agent for a key it doesn't know about, so a vault-held key is
-invisible until its public half is in the keyring. Our e2e tests hide this by
-generating keys with gpg itself.
+### 7. ~~Export public keys into the user's gpg keyring on unlock~~
+Done as an explicit `trove gpg-agent import` rather than on unlock, because the
+keyring outlives the lock (#301).
 
 ### 8. Windows: bind the well-known agent pipe
 `\\.\pipe\openssh-ssh-agent` is usually free (the OpenSSH Authentication Agent

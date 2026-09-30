@@ -89,7 +89,8 @@ pub async fn handle(
         | Request::SshAgentList
         | Request::SshAgentSockets
         | Request::SshAgentWhich { .. }
-        | Request::GpgAgentList => {}
+        | Request::GpgAgentList
+        | Request::GpgPublicKeys => {}
         _ => idle.bump(),
     }
     match req {
@@ -683,6 +684,23 @@ pub async fn handle(
                 .collect();
             Handled {
                 response: Response::ok_gpg_agent_list(dtos),
+                shutdown: false,
+            }
+        }
+
+        Request::GpgPublicKeys => {
+            use base64::Engine as _;
+            let guard = state.lock().await;
+            let dtos = guard
+                .iter_with_filters()
+                .flat_map(|(vault, filter)| gpg_public_keys_from_vault(vault, filter))
+                .map(|(entry, export)| crate::protocol::GpgPublicKeyDto {
+                    entry,
+                    export_b64: base64::engine::general_purpose::STANDARD.encode(export),
+                })
+                .collect();
+            Handled {
+                response: Response::ok_gpg_public_keys(dtos),
                 shutdown: false,
             }
         }
@@ -2224,6 +2242,31 @@ async fn add_totp(
         return err_handled(format!("saving vault: {e}"));
     }
     ok_handled(Response::ok_empty())
+}
+
+/// The public-key export for every entry whose `gpg-priv` attachment the
+/// agent would serve, keyed by entry path. Entries it would skip are skipped
+/// here too, so `gpg-agent import` never hands gpg a key trove can't sign
+/// with.
+pub fn gpg_public_keys_from_vault(vault: &Vault, filter: Option<&str>) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    for entry in vault.list_entries() {
+        if !entry_matches_filter(&entry, filter)
+            || !entry.attachment_names.iter().any(|a| a == "gpg-priv")
+        {
+            continue;
+        }
+        let Ok(Some(bytes)) = vault.read_binary(&entry.id, "gpg-priv") else {
+            continue;
+        };
+        if gpg_keys::parse_gpg_export(&bytes, &entry.title).is_err() {
+            continue;
+        }
+        if let Ok(export) = gpg_keys::public_key_export(&bytes) {
+            out.push((entry.display_path(), export));
+        }
+    }
+    out
 }
 
 /// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to

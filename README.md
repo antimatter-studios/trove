@@ -193,7 +193,11 @@ For scripted use, `trove --password-stdin unlock my-vault.kdbx` reads the passwo
 # Point gpg(1) at our socket. gpg insists on a fixed path under $GNUPGHOME.
 ln -sf "$(trove gpg-agent socket)" "$(gpgconf --list-dirs agent-socket)"
 
-# After `unlock` (above), git commit -S works against an ed25519 OpenPGP key.
+# gpg only signs with keys it knows. After `unlock` (above), put the public
+# half of each vault GPG key into your keyring (once per key):
+trove gpg-agent import
+
+# git commit -S now works against an ed25519 or RSA OpenPGP key.
 git commit -S -m "signed with troved"
 ```
 
