@@ -1763,7 +1763,10 @@ dependencies = [
 name = "trove-core"
 version = "0.25.0"
 dependencies = [
+ "base32",
+ "hmac 0.12.1",
  "keepass",
+ "sha1",
  "thiserror 1.0.69",
  "zeroize",
 ]

@@ -87,3 +87,33 @@ fn totp_failure_modes() {
     ));
     assert_eq!(v.get_field(&id, "otp").unwrap(), None);
 }
+
+/// Steam Guard codes, as KeePassXC stores them (`encoder=steam`). The secret
+/// and time/code pairs are KeePassXC's own test vectors, taken from the Steam
+/// mobile app with a throwaway account.
+#[test]
+fn steam_codes_match_keepassxc() {
+    let dir = TempDir::new().unwrap();
+    let uri = "otpauth://totp/Steam:test?secret=63BEDWCQZKTQWPESARIERL5DTTQFCJTK\
+               &period=30&digits=5&issuer=Steam&encoder=steam";
+    let (v, id) = vault_with_totp(&dir, uri);
+    assert_eq!(v.totp_at(&id, 1_511_200_518).unwrap().code, "FR8RV");
+    assert_eq!(v.totp_at(&id, 1_511_200_714).unwrap().code, "9P3VP");
+    assert_eq!(v.totp_at(&id, 1_511_200_518).unwrap().period_secs, 30);
+}
+
+/// An HOTP URI must not be read as TOTP: that would print a plausible but
+/// wrong code. It is refused until HOTP is supported.
+#[test]
+fn hotp_is_refused_not_misread() {
+    let dir = TempDir::new().unwrap();
+    let mut v = Vault::create(&dir.path().join("h.kdbx"), PW).unwrap();
+    let id = v.add_entry("hotp").unwrap();
+    let uri = format!("otpauth://hotp/x?secret={RFC_SECRET_B32}&counter=0");
+    let err = v.set_totp_uri(&id, &uri).unwrap_err();
+    assert!(err.to_string().contains("HOTP"), "{err}");
+    // One written by another tool is refused at read time too.
+    v.set_field(&id, "otp", &uri).unwrap();
+    let err = v.totp_at(&id, 59).unwrap_err();
+    assert!(err.to_string().contains("HOTP"), "{err}");
+}

@@ -2669,8 +2669,11 @@ dependencies = [
 name = "trove-core"
 version = "0.25.0"
 dependencies = [
+ "base32",
+ "hmac 0.12.1",
  "keepass",
  "rand 0.8.7",
+ "sha1 0.10.7",
  "tempfile",
  "thiserror 1.0.69",
  "zeroize",

@@ -323,7 +323,7 @@ confirmed). Adding to an existing entry path is refused — use `trove edit`.
 ### trove add totp
 
 ```
-trove [--vault <PATH>] add totp <ENTRY_PATH> (--uri <URI> | --secret <BASE32> [--digits N] [--period N] [--algorithm A])
+trove [--vault <PATH>] add totp <ENTRY_PATH> (--uri <URI> | --secret <BASE32> [--digits N] [--period N] [--algorithm A] | --secret <BASE32> --steam)
 ```
 
 Attach a TOTP (2FA) generator: stored as the `otp` string field carrying an
@@ -333,8 +333,11 @@ both tools. The field is Protected (never searchable, `--attr otp` needs
 replaced. `--secret` takes the base32 "manual entry" code sites display
 (whitespace tolerated), with `--digits` (default 6), `--period` (default 30s)
 and `--algorithm` (SHA1 default, SHA256, SHA512). The URI is validated before
-anything lands in the vault. Steam's 5-character variant is not supported.
-Read codes with `trove show <entry> --totp`.
+anything lands in the vault. `--steam` stores a Steam Guard generator the way
+KeePassXC does (`encoder=steam`: five characters from Steam's alphabet, 30s),
+and a Steam URI from KeePassXC reads the same. HOTP (`otpauth://hotp`,
+counter-based) is refused rather than misread as TOTP. Read codes with
+`trove show <entry> --totp`.
 
 ### trove add ssh
 
