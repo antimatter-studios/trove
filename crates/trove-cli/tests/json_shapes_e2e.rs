@@ -575,6 +575,7 @@ mod daemon {
             "vault": "string",
             "ttl_remaining_seconds": "integer|null",
             "exists": "bool",
+            "memory_backed": "bool",
         }]});
         assert_shape("materialize-status", &mat, &spec);
 

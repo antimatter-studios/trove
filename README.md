@@ -215,8 +215,11 @@ Inspect what the daemon currently has on disk:
 
 ```sh
 trove materialize-status
-# kubeconfig-prod  /tmp/kubeconfig  ttl=- exists=true
+# kubeconfig-prod  /tmp/kubeconfig  ttl=none  exists=true  backing=disk
 ```
+
+`backing=memory` only on a Linux tmpfs. macOS has none, so a materialized file
+there is on disk even under `/tmp`, and the wipe on lock is best effort.
 
 `trove status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `trove --vault my-vault.kdbx materialize` runs the same plan in-process and wipes everything on Ctrl-C.
 
