@@ -170,6 +170,44 @@ macro_rules! crate_impl {
                 Ok(out)
             }
 
+            /// Open `bytes` and report the crypto/format settings its header
+            /// declares, in the matrix's own terms. `kdbx4_minor` is always
+            /// `Some`, since a file on disk has a concrete version. KDF
+            /// parameters are not compared: only which KDF it is.
+            pub fn read_config(bytes: &[u8], spec: &VaultSpec) -> Result<Config, String> {
+                let key = db_key(spec)?;
+                let mut cursor = std::io::Cursor::new(bytes);
+                let db = Database::open(&mut cursor, key).map_err(|e| e.to_string())?;
+                let cfg = &db.config;
+                let kdbx4_minor = match cfg.version {
+                    DatabaseVersion::KDB4(minor) => Some(u32::from(minor)),
+                    ref other => return Err(format!("not a KDBX 4 file: {other:?}")),
+                };
+                let kdf = match cfg.kdf_config {
+                    KdfConfig::Aes { .. } => Kdf::Aes,
+                    KdfConfig::Argon2 { .. } => Kdf::Argon2d,
+                    KdfConfig::Argon2id { .. } => Kdf::Argon2id,
+                    ref other => return Err(format!("unknown KDF: {other:?}")),
+                };
+                let outer = match cfg.outer_cipher_config {
+                    OuterCipherConfig::AES256 => OuterCipher::Aes256,
+                    OuterCipherConfig::ChaCha20 => OuterCipher::ChaCha20,
+                    OuterCipherConfig::Twofish => OuterCipher::Twofish,
+                    ref other => return Err(format!("unknown outer cipher: {other:?}")),
+                };
+                let compression = match cfg.compression_config {
+                    CompressionConfig::GZip => Compression::GZip,
+                    CompressionConfig::None => Compression::None,
+                    ref other => return Err(format!("unknown compression: {other:?}")),
+                };
+                Ok(Config {
+                    kdbx4_minor,
+                    kdf,
+                    outer,
+                    compression,
+                })
+            }
+
             /// Recursively collect entries. `prefix` holds the ancestor group
             /// names EXCLUDING root; an entry's path is
             /// `prefix.join("/") + "/" + title` (no leading slash; a root entry

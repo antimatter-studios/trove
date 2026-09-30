@@ -24,7 +24,10 @@ and are released together.
   Structs and enums that may grow are marked `#[non_exhaustive]`.
 - **Vault safety.** trove never damages a KeePassXC-compatible vault: what it
   writes stays readable by KeePassXC, and it keeps the data other clients put
-  there, even when it doesn't use that data itself.
+  there, even when it doesn't use that data itself. Saving keeps the vault's
+  KDF, outer cipher and compression; only the KDBX 4 minor version moves to
+  4.1. New vaults use Argon2d, and trove doesn't retune an AES-KDF vault
+  (KeePassXC does that).
 
 ## Not covered
 

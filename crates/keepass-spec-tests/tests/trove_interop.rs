@@ -327,3 +327,122 @@ fn trove_resave_heals_legacy_kdbx4_0_for_keepassxc() {
         });
     }
 }
+
+/// 5. trove keeps a vault's crypto settings through its own write path, for
+///    every KDF (Argon2d, Argon2id, AES-KDF) x outer cipher (AES-256, ChaCha20,
+///    Twofish) x compression x KDBX 4 minor in the config fixtures. Each vault
+///    is minted by the keepass crate (0.12.5 for forced 4.0, which 0.13.13
+///    can't write), re-saved by `trove add ssh`, then checked two ways: the
+///    header still declares the same KDF, cipher and compression (save only
+///    forces the version to 4.1), and keepassxc opens it and finds both the
+///    original entry and trove's.
+///
+///    trove doesn't write AES-KDF vaults of its own or retune them (`db-edit`
+///    refuses), but it must not silently convert one to Argon2 on save either.
+#[test]
+fn trove_resave_preserves_every_cipher_and_kdf() {
+    let trove = require_trove();
+
+    let oracles = keepassxc_party::discover();
+    assert!(
+        !oracles.is_empty(),
+        "no keepassxc-cli found — this oracle test must not be skipped. Install \
+         KeePassXC (macOS: `brew install --cask keepassxc`) or set \
+         TROVE_KEEPASSXC_CLI / TROVE_KEEPASSXC_CLIS (colon-separated paths)."
+    );
+
+    let specs: Vec<VaultSpec> = fixtures::all()
+        .into_iter()
+        .filter(|s| s.name.starts_with("cfg-"))
+        .collect();
+    assert_eq!(
+        specs.len(),
+        54,
+        "the config cartesian should have 54 fixtures"
+    );
+
+    let mut failures = Vec::new();
+    for spec in &specs {
+        let minted = if spec.config.kdbx4_minor == Some(0) {
+            crate_party::kp012::produce(spec)
+        } else {
+            crate_party::kp013::produce(spec)
+        };
+        let minted = match minted {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                failures.push(format!(
+                    "{}: keepass crate couldn't mint it: {e}",
+                    spec.name
+                ));
+                continue;
+            }
+        };
+
+        let resaved = match trove_party::resave_with_added_ssh(
+            &trove,
+            &minted,
+            spec.password,
+            "github.com",
+            TEST_ED25519_KEY.as_bytes(),
+        ) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                failures.push(format!(
+                    "{}: trove couldn't open and re-save it: {e}",
+                    spec.name
+                ));
+                continue;
+            }
+        };
+
+        let expected = matrix::Config {
+            kdbx4_minor: Some(1),
+            ..spec.config
+        };
+        match crate_party::kp013::read_config(&resaved, spec) {
+            Ok(got) if got == expected => {}
+            Ok(got) => failures.push(format!(
+                "{}: trove's save changed the settings: expected {expected:?}, got {got:?}",
+                spec.name
+            )),
+            Err(e) => failures.push(format!(
+                "{}: keepass crate couldn't reopen it: {e}",
+                spec.name
+            )),
+        }
+
+        for oracle in &oracles {
+            match keepassxc_party::consume(oracle, &resaved, spec) {
+                Ok(repr) => {
+                    // keepassxc's CSV names the root group, so match on the
+                    // title: both entries sit in the root.
+                    let titles: Vec<&str> = repr
+                        .keys()
+                        .map(|path| path.rsplit('/').next().unwrap_or(path))
+                        .collect();
+                    for title in ["cfg", "github.com"] {
+                        if !titles.contains(&title) {
+                            failures.push(format!(
+                                "{}: keepassxc@{} opened it but `{title}` is missing (found {titles:?})",
+                                spec.name, oracle.version
+                            ));
+                        }
+                    }
+                }
+                Err(e) => failures.push(format!(
+                    "{}: keepassxc@{} couldn't open trove's re-save: {e}",
+                    spec.name, oracle.version
+                )),
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} config fixtures failed:\n{}",
+        failures.len(),
+        specs.len(),
+        failures.join("\n")
+    );
+}
