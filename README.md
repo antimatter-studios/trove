@@ -227,101 +227,65 @@ wedged one, and clearing stale files.
 
 See [docs/stability.md](docs/stability.md) for what the 1.0 stability promise covers and how things are deprecated, [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, [docs/threat-model.md](docs/threat-model.md) for what this defends against, and [docs/macos.md](docs/macos.md) / [docs/windows.md](docs/windows.md) for how agent integration differs per platform. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is deliberately **excluded** from the workspace (it pins EOL `keepass` producers to test cross-version compatibility, and those drag in advisories the app's graph shouldn't carry), so `cargo test --workspace` does **not** run it — use `cargo test --manifest-path crates/keepass-spec-tests/Cargo.toml`. The `interop_*` tests there are oracle-mandatory: they fail rather than skip when `keepassxc-cli` is missing.
 
-## Shipped (v0.5.0)
+## Shipped
 
-Full `keepassxc-cli` command parity landed in v0.5.0 — every gap in the
-comparison that started this project is closed, and each is proven against the
-real `keepassxc-cli` binary in CI. See [docs/parity-plan.md](docs/parity-plan.md)
-for the gap-by-gap plan and [docs/cli-reference.md](docs/cli-reference.md) for
-the commands.
+The [CHANGELOG](CHANGELOG.md) has the detail; in short:
 
-- **Generic entry CRUD** — `add password`, `get password`, `show`, `edit`,
-  `search`, `mkdir`, `mv`, `rm`, `rmdir` (recycle-bin aware).
-- **Composite keys** — `--key-file` (all KeePassXC formats) and
-  `--yubikey` HMAC-SHA1 challenge-response (`--features yubikey`).
-- **TOTP** — `add totp` / `show --totp`, KeePassXC's `otpauth://` field.
-- **Generation + audit** — `generate password`/`diceware`, `estimate`
-  (zxcvbn), `analyze --hibp` (offline breach check).
-- **Clipboard** — `clip` with a hash-guarded detached auto-clear.
-- **Vault ops** — `merge`, `sync`, `export xml|csv`, `db-edit`, `db-info`.
+- **KeePassXC compatibility.** Full `keepassxc-cli` command parity since
+  v0.5.0, each command proven against the real `keepassxc-cli` in CI (see
+  [docs/parity-plan.md](docs/parity-plan.md)): entry CRUD, key files and
+  YubiKey challenge-response, TOTP, password generation and audit, clipboard
+  with auto-clear, `merge`, `export`, `db-edit`, `db-info`. Native KDBX tags,
+  favorites and entry history are kept the way KeePassXC keeps them.
+- **SSH agent.** Keys never touch disk. Per-entry agent policy, private agent
+  sockets holding only the keys you choose (`ssh-agent empty`/`add`/`close`),
+  key choice by the server's host key, `ssh-add -d/-D/-x/-X`, and forwarding
+  into an agent that is already running.
+- **GPG agent.** `git commit -S` and `gpg --decrypt` with ed25519/cv25519 and
+  RSA OpenPGP keys from the vault.
+- **File materialization.** Attachments written to a target path on unlock and
+  wiped on lock, and `trove exec <scope> -- cmd` for secrets that live only as
+  long as one process tree (the `op run` of kdbx).
+- **Headless daemon.** `troved` auto-spawns and serves the CLI, the agents and
+  the desktop app. Several vaults can be unlocked at once, filtered by tag, with
+  passwords from `.env.trove` or the macOS keychain.
+- **Sync.** `trove sync` does a two-way sync with another copy of the vault,
+  and saves merge other writers' changes instead of overwriting them.
+- **Scripting.** `--json` on read and status commands, `describe` for agents,
+  a `git-credential` helper, and `resolve trove://…` secret references.
+- **Desktop app.** One Tauri app for macOS, Linux and Windows, with Touch ID
+  unlock, attachments and drag and drop.
+- **Platforms.** macOS and Linux; native Windows builds with named-pipe IPC
+  are experimental ([docs/windows.md](docs/windows.md)).
 
-Beyond what `keepassxc-cli` offers:
+## Roadmap
 
-- **`exec <scope> -- cmd`** — secrets scoped to one process tree, wiped on
-  exit (the `op run` of kdbx). `trove exec kube-prod -- bash` gives that shell
-  a kubeconfig that vanishes when it closes.
-- **`--json`** on read commands, **`git-credential`** helper, and
-  **`resolve trove://…`** secret references.
+What's next is tracked in the
+[issue tracker](https://github.com/antimatter-studios/trove/issues). The
+bigger ideas, grouped:
 
-## Feature exploration
-
-The menu below is the original design space; the shipped list above marks
-what's done. The rest — sync, sharing, plugins, mobile — remains a menu, not a
-roadmap.
-
-Annotations:
-- *(upstream refused)* — explicit upstream rejection on record (quoted below).
-- *(upstream silent)* — request exists or is implied; no maintainer answer either way.
-- *(no rejection — extension territory)* — fits naturally as a kdbx-compatible extension; not in scope upstream.
-
-### File materialization (the headline feature)
-
-- **Decrypt-to-disk entries** — entry has a target path, perms, owner; written on unlock, securely wiped on lock. *(no rejection — extension territory)*
-- **`spm exec -- cmd`** — run a process with secrets injected as env vars or temp files (à la `op run`), no on-disk residue. *(upstream silent — see [#11206](https://github.com/keepassxreboot/keepassxc/issues/11206); third-party [`keepassxc-run`](https://github.com/kai2nenobu/keepassxc-run) fills the gap)*
-- **FUSE / virtual filesystem mount** — mount the vault as a read-only filesystem; secrets exist only while the FS is mounted. *(upstream silent — closest is [#4847](https://github.com/keepassxreboot/keepassxc/issues/4847); third-party [`keepass-fuse`](https://github.com/JulianJacobi/keepass-fuse) exists)*
-- **SSH agent + GPG agent bridge** — keys never touch disk; agent serves them while unlocked. (KeePassXC has narrow SSH support; extend it.)
-- **Templated config rendering** — entry holds a template + variable refs to other entries; renders a fully-populated config file on unlock.
-- **Per-shell env injection** — `eval "$(spm env myproject)"` exports a scoped set of secrets to the current shell.
-
-### Sync & multi-device
-
-- **First-class cloud sync adapters** — Dropbox / GDrive / iCloud / WebDAV / S3 / Git, built in, not "bring your own". *(upstream refused — [FAQ](https://keepassxc.org/docs/): "We prefer this approach, because it is simple, not tied to a specific cloud provider and keeps the complexity of our code low.")*
-- **Self-hosted sync server** — Vaultwarden-style, speaks a kdbx-aware protocol, end-to-end encrypted. *(upstream silent on a server specifically; same FAQ stance applies by analogy)*
-- **Visual 3-way merge** — interactive conflict resolution when two devices diverge.
-- **Delta sync** — don't re-upload a 50 MB vault on every change.
-- **Multi-client lock coordination** — know when another device has the vault open.
-
-### Sharing & teams
-
-- **Shared vaults with per-user keys** — multiple identities, each with their own key, decrypting shared entries. *(upstream refused — droidmonkey, [#3597](https://github.com/keepassxreboot/keepassxc/discussions/3597), 2025-04-27: "Honestly I have near zero appetite for this scheme and would likely never incorporate such a complex (and non-standard) change into our application." Also 2019: "This is not how encryption works.")*
-- **Per-entry / per-group sharing** — beyond KeeShare's read-only awkwardness.
-- **Org RBAC + audit log** — admin console, role-based access, who-accessed-what. *(upstream refused — droidmonkey, [#9526](https://github.com/keepassxreboot/keepassxc/discussions/9526), 2023-06-04: "We are an individual password manager. It just so happens you can share the database file between users and we try to accommodate that behavior.")*
-- **SSO / OIDC unlock** for team contexts. *(upstream silent — open as [#6055](https://github.com/keepassxreboot/keepassxc/issues/6055) since Feb 2021)*
-
-### Browser, CLI, automation
-
-- **Headless daemon mode** — browser extension and CLI work without a GUI running. *(upstream refused — droidmonkey, [#12764](https://github.com/keepassxreboot/keepassxc/discussions/12764), 2025-11-30: "Likely not possible unless you modify the code.")*
-- **Stable RPC / scripting API** — proper IPC for scripts and CI, not just `keepassxc-cli` flags.
-- **Native messaging without GUI** — browser proxy that doesn't require the full app.
-
-### Passkeys, TOTP, hardware
-
-- **Passkey / WebAuthn storage and autofill** — at parity with Bitwarden/1Password.
-- **HOTP / Steam / Yandex TOTP variants** out of the box.
-- **FIDO2 hardware key as primary factor**, not just challenge-response. *(upstream silent — open as [#6801](https://github.com/keepassxreboot/keepassxc/issues/6801) since 2021; groundwork PR [#10311](https://github.com/keepassxreboot/keepassxc/pull/10311) exists)*
-
-### Plugins & extensibility
-
-- **Sandboxed plugin system** — WASM or subprocess-isolated, signed plugins, capability-scoped. The thing KeePass2 users won't give up. *(upstream refused — [FAQ](https://keepassxc.org/docs/): "KeePassXC does not support plugins at the moment and probably never will. … Plugins are inherently dangerous. Many KeePass2 plugins are barely maintained (if at all), some have known vulnerabilities that have never been (and probably never will be) fixed.")*
-- **Custom entry types** — schemas beyond username/password (API tokens, certs, recovery codes, crypto keys).
-
-### Audit, breach, health
-
-- **Continuous HIBP monitoring** — scheduled background checks, not one-shot.
-- **Breach notifications** — email / push when a watched entry leaks.
-- **Cross-entry analytics** — reused-password graph, weak-password clusters, age-of-secret reports.
-
-### Mobile
-
-- **Companion mobile app** — at minimum, deep integration with KeePassDX/Strongbox so file-materialization features degrade gracefully on phones. *(upstream refused — [FAQ](https://keepassxc.org/docs/): "We don't have our own mobile app … porting it properly to mobile platforms would require a full rewrite.")*
-- **Mobile autofill parity** with the desktop browser extension.
-
-### Quality-of-life
-
-- **History / versioning UI + global undo.**
-- **Large attachment handling** — store attachments out-of-band, referenced from kdbx, so the vault stays small.
-- **Lossless import/export** with 1Password and Bitwarden.
-- **Better Linux keyring integration** (Secret Service, kwallet, gnome-keyring).
+- **Secrets on disk and in processes:** read-only FUSE mount (#276), config
+  templates that reference other entries (#275), per-shell env injection with
+  `trove env` (#282), exec through the unlocked daemon (#281), memory-backed
+  targets on macOS (#273).
+- **Sync and multi-device:** delta sync (#230), an opt-in self-hosted sync
+  server (#236).
+- **Sharing and teams:** member identity keys (#231), sealed fields with group
+  keys (#232), per-entry permissions for company vaults (#233), sending one
+  entry to a person (#235), admin audit review (#327), SSO/OIDC unlock (#286).
+- **Automation:** a documented, versioned RPC API for scripts (#309), a browser
+  native-messaging host without the GUI (#289).
+- **Passkeys, one-time codes, hardware:** passkeys in KeePassXC's format
+  (#310), HOTP, Steam and Yandex codes (#311), FIDO2 as a primary unlock factor
+  (#312).
+- **Extensibility:** a sandboxed plugin host (#288), custom entry types (#292).
+- **Audit and health:** scheduled breach checks and a health report (#284),
+  cross-entry analytics (#285).
+- **Mobile:** materialization metadata that KeePassDX and Strongbox can adopt
+  (#290). There will be no first-party mobile app ([docs/scope.md](docs/scope.md)).
+- **Quality of life:** history UI with global undo (#287), large attachments
+  stored out of band (#247), lossless 1Password and Bitwarden import/export
+  (#291), Secret Service on Linux (#293).
 
 ## Upstream's reasoning, evaluated
 
@@ -335,7 +299,7 @@ For each upstream rejection, is the justification valid? Are we right to ignore 
 
 **But the conclusion ("never") is lazy.** "Plugins are dangerous *the way KeePass2 does them*" is not the same as "plugins are dangerous." A WASM sandbox with capability-scoped APIs (read this entry, write to this path, talk to this host) is a fundamentally different threat model. Browsers, Figma, Zellij, Envoy, and 1Password's own integrations all show sandboxed extensibility working in practice. Refusing to engage with the sandboxed-plugin design is a maintenance-cost decision dressed up as a security decision.
 
-**Our stance:** ship plugins, but only sandboxed and capability-scoped. Treat upstream's warning as a spec for what to avoid, not a reason to avoid the feature.
+**Our stance:** ship plugins, but only sandboxed and capability-scoped (#288). Treat upstream's warning as a spec for what to avoid, not a reason to avoid the feature.
 
 ### Built-in cloud sync — *upstream mostly right*
 
@@ -381,13 +345,13 @@ For each upstream rejection, is the justification valid? Are we right to ignore 
 
 **Not a real technical reason.** The browser-extension proxy talks to the GUI app over native messaging because that's how it was built — not because cryptographically or architecturally it must. A headless daemon serving the same native-messaging protocol is straightforward. droidmonkey's answer is a maintenance-scope reply, not an architectural objection.
 
-**Our stance:** headless mode from day one. The CLI/daemon is the primary surface; the GUI is one of several clients of it.
+**Our stance:** headless mode from day one. The CLI/daemon is the primary surface; the GUI is one of several clients of it. Shipped; the browser host without the GUI is #289.
 
 ### Cloud sync server (Vaultwarden-shape) — *no upstream argument; defaults to scope*
 
 No explicit upstream rejection, but the "keep complexity low / not tied to a provider" line from the cloud-sync FAQ implicitly applies.
 
-**Our stance:** optional, opt-in self-hosted server. Never required. The vault file always works without it. Server adds: presence/lock coordination, delta sync, per-user-key bundle distribution, audit log storage. Not OAuth, not a "cloud."
+**Our stance:** optional, opt-in self-hosted server (#236). Never required. The vault file always works without it. Server adds: presence/lock coordination, delta sync, per-user-key bundle distribution, audit log storage. Not OAuth, not a "cloud."
 
 ### `op run` / FUSE / SSO-OIDC / FIDO2-primary — *no upstream rejection; just nobody's done it*
 
