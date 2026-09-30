@@ -95,8 +95,15 @@ jobs:
       - name: Fuzz ${{ matrix.target }}
         # -timeout: any single input taking longer than this counts as a hang
         # (libfuzzer's default of 1200s is longer than the whole run).
+        # The committed seeds (fuzz/seeds/<target>) are read as a second corpus
+        # directory; new finds go to the cached corpus, the first directory.
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
+          mkdir -p "corpus/$TARGET"
+          dirs=("corpus/$TARGET")
+          if [ -d "seeds/$TARGET" ]; then dirs+=("seeds/$TARGET"); fi
+          cargo +nightly fuzz run "$TARGET" "${dirs[@]}" -- \
             -max_total_time="$FUZZ_SECONDS" -timeout=30
 
       - name: Save corpus

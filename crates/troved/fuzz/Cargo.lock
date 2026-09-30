@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "trove-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "keepass",
  "thiserror 1.0.69",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "troved"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "aes 0.8.4",
  "aes-kw",
@@ -1647,6 +1647,7 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "ssh-key",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "trove-core",
