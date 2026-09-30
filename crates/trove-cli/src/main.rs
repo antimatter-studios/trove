@@ -2324,7 +2324,7 @@ fn cmd_ssh_agent_socket() -> Result<()> {
     } else {
         ssh_socket_tmp_fallback()
     };
-    println!("{}", path.display());
+    println!("{}", troved::ipc::client_address(&path));
     Ok(())
 }
 

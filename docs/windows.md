@@ -4,8 +4,9 @@ Native Windows is experimental: see [stability.md](stability.md#platforms).
 
 Status: **notes, not implemented.** Native Windows builds work (named-pipe IPC,
 control/ssh/gpg channels), but trove serves its agents on its *own* pipe names,
-so no Windows client finds them without `SSH_AUTH_SOCK` pointing at a hashed
-pipe name. This captures what makes Windows different and what to do about it.
+so no Windows client finds them without `SSH_AUTH_SOCK` pointing at the hashed
+pipe name (`trove ssh-agent socket` prints it). This captures what makes Windows
+different and what to do about it.
 
 ## The core difference: Windows has a well-known agent pipe
 
@@ -56,18 +57,27 @@ well-known agent pipe.
 A Windows box can have three ssh clients that do not agree on transport:
 
 1. **Windows OpenSSH** (`C:\Windows\System32\OpenSSH\ssh.exe`) — native named
-   pipes. Served by binding the well-known pipe.
+   pipes. Works today with `SSH_AUTH_SOCK` set to the pipe name
+   `trove ssh-agent socket` prints; binding the well-known pipe would drop that
+   step.
 2. **Git for Windows** — bundles an MSYS2/MinGW ssh using Cygwin-style
-   Unix-socket *emulation*, not native pipes. Owning the OpenSSH pipe probably
-   does **not** serve it unless git is pointed at the system ssh
-   (`core.sshCommand`, or the installer's "use external OpenSSH" option).
+   Unix-socket *emulation*, not native pipes, so it can't use trove's agent.
+   Point git at the system ssh instead: `core.sshCommand` set to
+   `C:/Windows/System32/OpenSSH/ssh.exe`, or the installer's "use external
+   OpenSSH" option.
 3. **WSL2** — real Linux, real Unix sockets. Needs a relay such as
    [npiperelay](https://github.com/jstarks/npiperelay).
 
-> **Verify before trusting:** [README.md](../README.md) currently says the
-> native build "brokers for native-Windows clients (Git for Windows, Windows
-> OpenSSH)". The Git for Windows half of that claim is doubtful for the reason
-> above and has not been tested on a real machine. Either prove it or reword it.
+Tested on Windows 11 (ARM64), with the 0.25.0 x86_64 release build and a
+native build, Windows OpenSSH and Git for Windows 2.54. `trove ssh-agent empty`
+sockets behave the same way, addressed by the pipe name it prints:
+
+| Client | `SSH_AUTH_SOCK` | Result |
+|---|---|---|
+| Windows OpenSSH `ssh-add -l` / `-T` | `\\.\pipe\trove-<hash>` | lists the key, signs |
+| Git for Windows `ssh-add -l` | `\\.\pipe\trove-<hash>` | `Error connecting to agent: Device or resource busy` |
+| Git for Windows `ssh-add -l` | `//./pipe/trove-<hash>` | hangs |
+| Git for Windows `ssh-add -l` | the Unix-style path | `No such file or directory` |
 
 ## Security deltas on Windows
 

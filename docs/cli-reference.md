@@ -1153,6 +1153,11 @@ Print the path to the troved SSH agent socket, then exit. Resolution order:
 
 Typical use: `export SSH_AUTH_SOCK="$(trove ssh-agent socket)"`.
 
+On Windows it prints the named pipe the agent listens on
+(`\\.\pipe\trove-<hash>`, derived from that path), which is what Windows
+OpenSSH needs in `SSH_AUTH_SOCK`: `$env:SSH_AUTH_SOCK = trove ssh-agent socket`.
+`ssh-agent empty` prints pipe names there too.
+
 ### trove ssh-agent empty
 
 ```

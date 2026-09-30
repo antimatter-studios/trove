@@ -277,7 +277,9 @@ fn fresh_socket_path() -> PathBuf {
 /// `TMPDIR` hands out (`/tmp` → `/private/tmp` on macOS). A caller that echoed
 /// back exactly what we printed hits the cheap comparison first.
 fn same_path(a: &Path, b: &Path) -> bool {
-    if a == b {
+    // Clients name a socket by what `ssh-agent empty` printed, which on
+    // Windows is the pipe name rather than the path.
+    if a == b || crate::ipc::client_address(a) == b.to_string_lossy() {
         return true;
     }
     match (a.canonicalize(), b.canonicalize()) {
