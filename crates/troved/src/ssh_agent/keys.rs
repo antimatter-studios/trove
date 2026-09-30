@@ -28,6 +28,7 @@ use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use ssh_key::private::{KeypairData, RsaKeypair};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, PrivateKey};
+use zeroize::Zeroizing;
 
 use super::keeagent::ForwardPolicy;
 use super::wire;
@@ -358,9 +359,11 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
     // the bytes aren't valid UTF-8.
     let pk = match std::str::from_utf8(bytes) {
         Ok(s) => parse_pem_private_key(s)?,
-        Err(_) => {
-            PrivateKey::from_bytes(bytes).map_err(|e| ParseError::NotOpenssh(e.to_string()))?
-        }
+        Err(_) => PrivateKey::from_bytes(bytes).or_else(|e| {
+            pad_short_ecdsa_scalar(bytes)
+                .and_then(|blob| PrivateKey::from_bytes(&blob).ok())
+                .ok_or_else(|| ParseError::NotOpenssh(e.to_string()))
+        })?,
     };
 
     if pk.is_encrypted() {
@@ -497,6 +500,12 @@ fn parse_pem_private_key(s: &str) -> Result<PrivateKey, ParseError> {
         Ok(pk) => return Ok(pk),
         Err(e) => e,
     };
+    if let Some(pk) = openssh_pem_body(s)
+        .and_then(|blob| pad_short_ecdsa_scalar(&blob))
+        .and_then(|blob| PrivateKey::from_bytes(&blob).ok())
+    {
+        return Ok(pk);
+    }
     if let Ok(rsa) = rsa::RsaPrivateKey::from_pkcs1_pem(s) {
         let kp = RsaKeypair::try_from(rsa)
             .map_err(|e| ParseError::NotOpenssh(format!("rsa pkcs1: {e}")))?;
@@ -508,6 +517,106 @@ fn parse_pem_private_key(s: &str) -> Result<PrivateKey, ParseError> {
         return Ok(PrivateKey::from(kp));
     }
     Err(ParseError::NotOpenssh(openssh_err.to_string()))
+}
+
+/// The binary body of an `-----BEGIN OPENSSH PRIVATE KEY-----` armor.
+fn openssh_pem_body(s: &str) -> Option<Zeroizing<Vec<u8>>> {
+    use base64::Engine;
+    let body = s
+        .trim()
+        .strip_prefix("-----BEGIN OPENSSH PRIVATE KEY-----")?
+        .strip_suffix("-----END OPENSSH PRIVATE KEY-----")?;
+    let b64: String = body.split_whitespace().collect();
+    let b64 = Zeroizing::new(b64);
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .ok()
+        .map(Zeroizing::new)
+}
+
+/// Re-encode an unencrypted OpenSSH ECDSA key so its private scalar is full
+/// width, or `None` if there is nothing to fix.
+///
+/// The scalar is an `mpint`, which drops leading zero bytes, so ssh-keygen
+/// writes a P-256 key with a 31-byte scalar about once in 256. ssh-key 0.6.7
+/// only accepts exactly the curve size (or one more, for a sign byte) and
+/// fails such a key with "length invalid". Zero-padding the scalar to the curve
+/// size is the same number, in a form ssh-key reads.
+fn pad_short_ecdsa_scalar(blob: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    const MAGIC: &[u8] = b"openssh-key-v1\0";
+    let mut r = Cursor(blob.strip_prefix(MAGIC)?);
+    let cipher = r.string()?;
+    let kdf = r.string()?;
+    let kdf_options = r.string()?;
+    if cipher != b"none" || r.u32()? != 1 {
+        return None;
+    }
+    let public = r.string()?;
+    let mut private = Cursor(r.string()?);
+    if !r.0.is_empty() {
+        return None;
+    }
+
+    let check1 = private.u32()?;
+    let check2 = private.u32()?;
+    let key_type = private.string()?;
+    let size = match key_type {
+        b"ecdsa-sha2-nistp256" => 32,
+        b"ecdsa-sha2-nistp384" => 48,
+        _ => return None,
+    };
+    let curve = private.string()?;
+    let point = private.string()?;
+    let scalar = private.string()?;
+    let comment = private.string()?;
+    if scalar.is_empty() || scalar.len() >= size {
+        return None;
+    }
+
+    let mut padded = Zeroizing::new(vec![0u8; size - scalar.len()]);
+    padded.extend_from_slice(scalar);
+    let mut section = Zeroizing::new(Vec::new());
+    section.extend_from_slice(&check1.to_be_bytes());
+    section.extend_from_slice(&check2.to_be_bytes());
+    for field in [key_type, curve, point, padded.as_slice(), comment] {
+        wire::put_string(&mut section, field);
+    }
+    // Unencrypted keys pad the private section to 8 bytes with 1, 2, 3, ...
+    let mut pad = 1u8;
+    while section.len() % 8 != 0 {
+        section.push(pad);
+        pad += 1;
+    }
+
+    let mut out = Zeroizing::new(MAGIC.to_vec());
+    for field in [cipher, kdf, kdf_options] {
+        wire::put_string(&mut out, field);
+    }
+    out.extend_from_slice(&1u32.to_be_bytes());
+    wire::put_string(&mut out, public);
+    wire::put_string(&mut out, &section);
+    Some(out)
+}
+
+/// Reads the SSH wire primitives `pad_short_ecdsa_scalar` needs.
+struct Cursor<'a>(&'a [u8]);
+
+impl<'a> Cursor<'a> {
+    fn u32(&mut self) -> Option<u32> {
+        let (head, rest) = self.0.split_first_chunk::<4>()?;
+        self.0 = rest;
+        Some(u32::from_be_bytes(*head))
+    }
+
+    fn string(&mut self) -> Option<&'a [u8]> {
+        let len = usize::try_from(self.u32()?).ok()?;
+        if len > self.0.len() {
+            return None;
+        }
+        let (head, rest) = self.0.split_at(len);
+        self.0 = rest;
+        Some(head)
+    }
 }
 
 /// Backwards-compat alias kept so any external test still compiles. New code
@@ -627,6 +736,49 @@ mod tests {
         let sig = loaded.sign(b"hello", 0).expect("sign p256");
         assert_eq!(&sig[0..4], &19u32.to_be_bytes());
         assert_eq!(&sig[4..23], b"ecdsa-sha2-nistp256");
+    }
+
+    /// An ssh-keygen P-256 key whose private scalar is 31 bytes, which
+    /// ssh-key 0.6.7 alone rejects with "length invalid".
+    const SHORT_SCALAR_P256: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
+1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQScrZ4WuY9tOUEgBU7ifSsU26beh4/o
+1ro1n2J6DHL4j3fDxo/zN2kwOGp1/IhUa4NUmjdnjENgvVaHaio6ltIGAAAAsOcMSJrnDE
+iaAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBJytnha5j205QSAF
+TuJ9KxTbpt6Hj+jWujWfYnoMcviPd8PGj/M3aTA4anX8iFRrg1SaN2eMQ2C9VodqKjqW0g
+YAAAAfdquhYNtIICkhYYalxIv4WTAlxlLvgxVKScSVgGQ4zAAAABdzaG9ydC1zY2FsYXJA
+dHJvdmUudGVzdAEC
+-----END OPENSSH PRIVATE KEY-----
+";
+
+    #[test]
+    fn parses_an_ecdsa_key_with_a_short_private_scalar() {
+        assert!(
+            PrivateKey::from_openssh(SHORT_SCALAR_P256).is_err(),
+            "fixture no longer exercises the ssh-key bug"
+        );
+        let loaded =
+            parse_private_key(SHORT_SCALAR_P256.as_bytes(), "short").expect("parse short scalar");
+        assert_eq!(&loaded.public_blob[4..23], b"ecdsa-sha2-nistp256");
+        let KeypairData::Ecdsa(kp) = loaded.private_key.key_data() else {
+            panic!("not ecdsa");
+        };
+        assert_eq!(kp.private_key_bytes()[0], 0, "scalar should be zero-padded");
+        loaded.sign(b"hello", 0).expect("sign");
+        loaded.agent_add_body("short").expect("forward body");
+
+        // The binary form (no PEM armor) takes the same path.
+        let blob = openssh_pem_body(SHORT_SCALAR_P256).expect("armor");
+        parse_private_key(&blob, "short").expect("parse binary short scalar");
+    }
+
+    #[test]
+    fn full_width_ecdsa_scalars_are_left_alone() {
+        let pk = random_key(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        });
+        let blob = openssh_pem_body(&pem_of(&pk)).expect("armor");
+        assert!(pad_short_ecdsa_scalar(&blob).is_none());
     }
 
     #[test]
