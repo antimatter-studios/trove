@@ -659,7 +659,9 @@ enum Command {
     /// `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`. For several
     /// variables from one entry, map each with `Exec.<VAR>` naming a field
     /// or `@attachment` (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`).
-    /// The child's exit code becomes trove's. Offline-only: requires `--vault`.
+    /// The child's exit code becomes trove's. With the global `--vault` it
+    /// opens that file; without it, it reads the vaults unlocked in the
+    /// daemon, gated by `TROVE_SESSION`.
     ///
     /// If an entry and group share a name, use `--entry PATH` or `--group PATH`.
     /// Example: `trove --vault v.kdbx exec Infra/kubeconfig-prod -- bash`
@@ -1476,7 +1478,6 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
         Command::Init
         | Command::Materialize
         | Command::Group { .. }
-        | Command::Exec { .. }
         | Command::Analyze { .. }
         | Command::GitCredential { .. }
         | Command::Resolve { .. }
@@ -1498,7 +1499,8 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
         | Command::Cp { .. }
         | Command::Mkdir { .. }
         | Command::Rmdir { .. }
-        | Command::RenameAttachment { .. } => vault.is_some(),
+        | Command::RenameAttachment { .. }
+        | Command::Exec { .. } => vault.is_some(),
         Command::Generate {
             resource: GenerateResource::Ssh { .. },
         } => vault.is_some(),
@@ -1873,14 +1875,7 @@ fn run(cli: Cli) -> Result<()> {
             entry,
             group,
             command,
-        } => cmd_exec(
-            require_vault(vault)?,
-            scope,
-            entry,
-            group,
-            &command,
-            pw_stdin,
-        ),
+        } => cmd_exec(vault, scope, entry, group, &command, pw_stdin),
         Command::GitCredential { operation } => cmd_git_credential(vault, &operation, pw_stdin),
         Command::Resolve { reference, base64 } => {
             cmd_resolve(require_vault(vault)?, &reference, base64, pw_stdin)
@@ -6211,14 +6206,22 @@ fn cmd_resolve(vault_path: &Path, reference: &str, base64: bool, pw_stdin: bool)
 /// `trove exec <SCOPE> -- cmd…` — inject, run, wipe. The child's exit code
 /// becomes ours (after cleanup), so pipelines and CI see the real result.
 fn cmd_exec(
-    vault_path: &Path,
+    vault_path: Option<&Path>,
     scope: Option<String>,
     entry: Option<String>,
     group: Option<String>,
     command: &[std::ffi::OsString],
     pw_stdin: bool,
 ) -> Result<()> {
-    let v = open_vault(vault_path, pw_stdin)?;
+    // Offline with --vault; otherwise the vaults unlocked in the daemon.
+    let opened = match vault_path {
+        Some(path) => Some(open_vault(path, pw_stdin)?),
+        None => None,
+    };
+    let source: Box<dyn exec::Source + '_> = match &opened {
+        Some(v) => Box::new(exec::VaultSource::new(v)),
+        None => Box::new(exec::DaemonSource::connect()?),
+    };
     let scope = match (scope, entry, group) {
         (Some(scope), None, None) => exec::Scope::Auto(scope),
         (None, Some(entry), None) => exec::Scope::Entry(entry),
@@ -6226,12 +6229,16 @@ fn cmd_exec(
         _ => unreachable!("clap validates exec scope arguments"),
     };
     let tmp = exec::private_tmp_dir()?;
-    // Resolve + run inside a closure so EVERY exit path below funnels
-    // through the wipe. (SIGKILL can't be caught; SIGINT is handled by the
-    // tokio ctrl_c guard which keeps us alive until the child dies.)
+    let injections = exec::resolve(source.as_ref(), scope, &tmp);
+    // The decrypted vault isn't needed while the child runs.
+    drop(source);
+    drop(opened);
+    // Run inside a closure so EVERY exit path below, a failed resolve
+    // included, funnels through the wipe. (SIGKILL can't be caught; SIGINT is
+    // handled by the tokio ctrl_c guard which keeps us alive until the child
+    // dies.)
     let result = (|| -> Result<i32> {
-        let injections = exec::resolve(&v, scope, &tmp)?;
-        drop(v); // decrypted vault not needed while the child runs
+        let injections = injections?;
         let wrote_files = std::fs::read_dir(&tmp).is_ok_and(|mut d| d.next().is_some());
         if cfg!(target_os = "linux") && wrote_files && exec::is_disk_backed(&tmp) {
             eprintln!(

@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use trove_core::{EntrySummary, Vault};
+use trove_core::{EntryId, Vault};
 
 /// One resolved injection: an env var carrying either a secret value or the
 /// path of a materialized attachment.
@@ -37,6 +37,235 @@ pub enum Scope {
     Auto(String),
     Entry(String),
     Group(String),
+}
+
+/// One entry as `exec` sees it, from either source.
+pub struct Entry {
+    /// Stable id: names the entry's files in the run directory.
+    pub id: String,
+    pub title: String,
+    pub group_path: Vec<String>,
+    pub attachment_names: Vec<String>,
+}
+
+impl Entry {
+    fn display_path(&self) -> String {
+        if self.group_path.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{}/{}", self.group_path.join("/"), self.title)
+        }
+    }
+}
+
+/// Where `exec` reads entries from: a vault file opened here, or the vaults
+/// unlocked in the daemon.
+pub trait Source {
+    fn entries(&self) -> Result<Vec<Entry>>;
+    /// The id of the entry at `path` (a title alone finds the first match).
+    fn find(&self, path: &str) -> Result<Option<String>>;
+    fn field(&self, e: &Entry, name: &str) -> Result<Option<String>>;
+    /// The names of the entry's fields starting with `prefix`.
+    fn field_names(&self, e: &Entry, prefix: &str) -> Result<Vec<String>>;
+    fn attachment(&self, e: &Entry, name: &str) -> Result<Option<Vec<u8>>>;
+}
+
+/// A vault file opened by `exec` itself.
+pub struct VaultSource<'a> {
+    vault: &'a Vault,
+    ids: std::collections::HashMap<String, EntryId>,
+}
+
+impl<'a> VaultSource<'a> {
+    pub fn new(vault: &'a Vault) -> Self {
+        let ids = vault
+            .list_entries()
+            .into_iter()
+            .map(|e| (e.id.to_string(), e.id))
+            .collect();
+        Self { vault, ids }
+    }
+
+    fn id(&self, e: &Entry) -> Result<&EntryId> {
+        self.ids
+            .get(&e.id)
+            .ok_or_else(|| anyhow!("entry {} vanished", e.display_path()))
+    }
+}
+
+impl Source for VaultSource<'_> {
+    fn entries(&self) -> Result<Vec<Entry>> {
+        Ok(self
+            .vault
+            .list_entries()
+            .into_iter()
+            .map(|e| Entry {
+                id: e.id.to_string(),
+                title: e.title,
+                group_path: e.group_path,
+                attachment_names: e.attachment_names,
+            })
+            .collect())
+    }
+    fn find(&self, path: &str) -> Result<Option<String>> {
+        Ok(self.vault.find_by_title(path).map(|id| id.to_string()))
+    }
+    fn field(&self, e: &Entry, name: &str) -> Result<Option<String>> {
+        Ok(self.vault.get_field(self.id(e)?, name)?)
+    }
+    fn field_names(&self, e: &Entry, prefix: &str) -> Result<Vec<String>> {
+        Ok(self.vault.fields_with_prefix(self.id(e)?, prefix)?)
+    }
+    fn attachment(&self, e: &Entry, name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.vault.read_binary(self.id(e)?, name)?)
+    }
+}
+
+/// The vaults unlocked in the daemon, read through the session-gated RPCs
+/// (`TROVE_SESSION`), so `exec` needn't reopen the vault or ask for its
+/// password.
+pub struct DaemonSource {
+    code: String,
+    entries: Vec<Entry>,
+    /// Custom field names per entry id, fetched once each.
+    custom: std::cell::RefCell<std::collections::HashMap<String, Vec<String>>>,
+}
+
+/// Fields every KeePass entry has, which `ShowEntry` doesn't list by name.
+const STANDARD_FIELDS: [&str; 5] = ["Title", "UserName", "Password", "URL", "Notes"];
+
+impl DaemonSource {
+    pub fn connect() -> Result<Self> {
+        use serde_json::Value;
+        let code = crate::require_session_code()?;
+        let resp = crate::daemon_call(&crate::daemon::Request::List)?;
+        let strings = |v: &Value, k: &str| -> Vec<String> {
+            v.get(k)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let entries = resp
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|e| Entry {
+                id: e
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                title: e
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                group_path: strings(e, "group_path"),
+                attachment_names: strings(e, "attachments"),
+            })
+            .collect();
+        Ok(Self {
+            code,
+            entries,
+            custom: Default::default(),
+        })
+    }
+
+    fn custom_fields(&self, e: &Entry) -> Result<Vec<String>> {
+        if let Some(names) = self.custom.borrow().get(&e.id) {
+            return Ok(names.clone());
+        }
+        let resp = crate::daemon_call(&crate::daemon::Request::ShowEntry {
+            path: e.display_path(),
+        })?;
+        let names: Vec<String> = resp
+            .get("entry")
+            .and_then(|en| en.get("custom_fields"))
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.custom.borrow_mut().insert(e.id.clone(), names.clone());
+        Ok(names)
+    }
+}
+
+impl Source for DaemonSource {
+    fn entries(&self) -> Result<Vec<Entry>> {
+        Ok(self
+            .entries
+            .iter()
+            .map(|e| Entry {
+                id: e.id.clone(),
+                title: e.title.clone(),
+                group_path: e.group_path.clone(),
+                attachment_names: e.attachment_names.clone(),
+            })
+            .collect())
+    }
+    fn find(&self, path: &str) -> Result<Option<String>> {
+        let hit = if path.contains('/') {
+            self.entries.iter().find(|e| e.display_path() == path)
+        } else {
+            self.entries.iter().find(|e| e.title == path)
+        };
+        Ok(hit.map(|e| e.id.clone()))
+    }
+    fn field(&self, e: &Entry, name: &str) -> Result<Option<String>> {
+        if !STANDARD_FIELDS.contains(&name) && !self.custom_fields(e)?.iter().any(|n| n == name) {
+            return Ok(None);
+        }
+        let req = crate::daemon::Request::GetField {
+            path: e.display_path(),
+            field: name.to_string(),
+            code: self.code.clone(),
+        };
+        match crate::daemon::send(&req) {
+            Ok(resp) => match crate::daemon::response_error(&resp) {
+                // A standard field that was never set.
+                Some(msg) if msg.contains("has no field") => Ok(None),
+                Some(msg) => Err(anyhow!("{msg}")),
+                None => Ok(resp
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)),
+            },
+            Err(e) => Err(e),
+        }
+    }
+    fn field_names(&self, e: &Entry, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .custom_fields(e)?
+            .into_iter()
+            .filter(|n| n.starts_with(prefix))
+            .collect())
+    }
+    fn attachment(&self, e: &Entry, name: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        if !e.attachment_names.iter().any(|a| a == name) {
+            return Ok(None);
+        }
+        let resp = crate::daemon_call(&crate::daemon::Request::Get {
+            title: e.display_path(),
+            attachment: name.to_string(),
+            code: self.code.clone(),
+        })?;
+        let data = resp
+            .get("data")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("malformed daemon response: missing 'data'"))?;
+        Ok(Some(
+            base64::engine::general_purpose::STANDARD.decode(data)?,
+        ))
+    }
 }
 
 /// Env-var-safe rendering of an entry title: uppercase, non-alphanumerics
@@ -62,11 +291,11 @@ pub fn env_name_from_title(title: &str) -> String {
 /// Resolve the injections for `scope`: a single entry path, or a group whose
 /// direct and nested entries all contribute. `tmp` receives materialized
 /// attachment files (0600, inside a 0700 dir the caller owns).
-pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
-    let all = v.list_entries();
+pub fn resolve(v: &dyn Source, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
+    let all = v.entries()?;
     let (name, matches) = match scope {
         Scope::Auto(name) => {
-            let entry = v.find_by_title(&name);
+            let entry = v.find(&name)?;
             let group = group_matches(&all, &name);
             match (entry, group.is_empty()) {
                 (Some(_), false) => {
@@ -81,7 +310,7 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
         }
         Scope::Entry(name) => {
             let id = v
-                .find_by_title(&name)
+                .find(&name)?
                 .ok_or_else(|| anyhow!("no entry matches '{name}'"))?;
             (name, all.iter().filter(|e| e.id == id).collect())
         }
@@ -96,7 +325,7 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
 
     let mut out = Vec::new();
     for e in matches {
-        let exec_env = v.get_field(&e.id, "Exec.Env")?;
+        let exec_env = v.field(e, "Exec.Env")?;
         let fallback = env_name_from_title(&e.title);
 
         let mappings = mapped_injections(v, e, tmp)?;
@@ -109,13 +338,13 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
 
         // Attachment-bearing entries inject a FILE path. Prefer the
         // materialization source when declared, else a sole attachment.
-        let att = match v.get_field(&e.id, "Materialize.Source")? {
+        let att = match v.field(e, "Materialize.Source")? {
             Some(src) if e.attachment_names.contains(&src) => Some(src),
             _ if e.attachment_names.len() == 1 => Some(e.attachment_names[0].clone()),
             _ => None,
         };
         if let Some(att_name) = att {
-            if let Some(bytes) = v.read_binary(&e.id, &att_name)? {
+            if let Some(bytes) = v.attachment(e, &att_name)? {
                 let file = materialize(tmp, e, &att_name, &bytes)?;
                 out.push(Injection {
                     name: exec_env
@@ -128,7 +357,7 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
         }
 
         // String secret: the Password field.
-        if let Some(pw) = v.get_field(&e.id, "Password")? {
+        if let Some(pw) = v.field(e, "Password")? {
             if !pw.is_empty() {
                 out.push(Injection {
                     name: exec_env.unwrap_or_else(|| format!("TROVE_{fallback}_PASSWORD")),
@@ -149,8 +378,8 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
 /// `Exec.Env`), resolved and sorted by variable name. A mapping that names a
 /// field or attachment the entry doesn't have is an error rather than a
 /// silently missing variable.
-fn mapped_injections(v: &Vault, e: &EntrySummary, tmp: &Path) -> Result<Vec<Injection>> {
-    let mut names = v.fields_with_prefix(&e.id, "Exec.")?;
+fn mapped_injections(v: &dyn Source, e: &Entry, tmp: &Path) -> Result<Vec<Injection>> {
+    let mut names = v.field_names(e, "Exec.")?;
     names.retain(|n| n != "Exec.Env");
     names.sort();
     let path = e.display_path();
@@ -163,10 +392,10 @@ fn mapped_injections(v: &Vault, e: &EntrySummary, tmp: &Path) -> Result<Vec<Inje
                  (letters, digits and _, not starting with a digit)"
             ));
         }
-        let source = v.get_field(&e.id, &field)?.unwrap_or_default();
+        let source = v.field(e, &field)?.unwrap_or_default();
         let source = source.trim();
         let value = if let Some(att) = source.strip_prefix('@') {
-            let bytes = v.read_binary(&e.id, att)?.ok_or_else(|| {
+            let bytes = v.attachment(e, att)?.ok_or_else(|| {
                 anyhow!("{path}: {field} names attachment '{att}', which it doesn't have")
             })?;
             let file = materialize(tmp, e, att, &bytes)?;
@@ -177,7 +406,7 @@ fn mapped_injections(v: &Vault, e: &EntrySummary, tmp: &Path) -> Result<Vec<Inje
                     "{path}: {field} is empty; set it to a field name or @attachment"
                 ));
             }
-            v.get_field(&e.id, source)?.ok_or_else(|| {
+            v.field(e, source)?.ok_or_else(|| {
                 anyhow!("{path}: {field} names field '{source}', which it doesn't have")
             })?
         };
@@ -192,7 +421,7 @@ fn mapped_injections(v: &Vault, e: &EntrySummary, tmp: &Path) -> Result<Vec<Inje
 /// Write one attachment into the run directory, once: two variables naming
 /// the same attachment share the file. The directory is private to this run,
 /// so a file already there is one this run wrote.
-fn materialize(tmp: &Path, e: &EntrySummary, att: &str, bytes: &[u8]) -> Result<PathBuf> {
+fn materialize(tmp: &Path, e: &Entry, att: &str, bytes: &[u8]) -> Result<PathBuf> {
     let file = tmp.join(format!("{}-{}", e.id, sanitize_filename(att)));
     if !file.exists() {
         write_private(&file, bytes)?;
@@ -207,7 +436,7 @@ fn is_env_name(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn group_matches<'a>(all: &'a [EntrySummary], scope: &str) -> Vec<&'a EntrySummary> {
+fn group_matches<'a>(all: &'a [Entry], scope: &str) -> Vec<&'a Entry> {
     all.iter()
         .filter(|e| {
             let group_path = e.group_path.join("/");
@@ -414,7 +643,7 @@ mod tests {
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
 
-        let mut inj = resolve(&v, Scope::Auto("Infra".into()), &tmp).unwrap();
+        let mut inj = resolve(&VaultSource::new(&v), Scope::Auto("Infra".into()), &tmp).unwrap();
         inj.sort_by(|a, b| a.name.cmp(&b.name));
         let names: Vec<&str> = inj.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(
@@ -453,7 +682,7 @@ mod tests {
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
 
-        let inj = resolve(&v, Scope::Auto("Db/main".into()), &tmp).unwrap();
+        let inj = resolve(&VaultSource::new(&v), Scope::Auto("Db/main".into()), &tmp).unwrap();
         let got: Vec<(&str, &str)> = inj
             .iter()
             .map(|i| (i.name.as_str(), i.value.as_str()))
@@ -477,7 +706,7 @@ mod tests {
 
         // Exec.Env still works alongside the mappings.
         v.set_field(&id, "Exec.Env", "DATABASE_PASSWORD").unwrap();
-        let inj = resolve(&v, Scope::Auto("Db/main".into()), &tmp).unwrap();
+        let inj = resolve(&VaultSource::new(&v), Scope::Auto("Db/main".into()), &tmp).unwrap();
         assert!(inj.iter().any(|i| i.name == "DATABASE_PASSWORD"));
         wipe_dir(&tmp);
     }
@@ -497,7 +726,7 @@ mod tests {
             let id = v.add_entry("e").unwrap();
             v.set_field(&id, "Password", "x").unwrap();
             v.set_field(&id, field, source).unwrap();
-            let err = resolve(&v, Scope::Auto("e".into()), &tmp)
+            let err = resolve(&VaultSource::new(&v), Scope::Auto("e".into()), &tmp)
                 .err()
                 .expect(field);
             assert!(err.to_string().contains(wanted), "{field}: {err}");
@@ -511,12 +740,17 @@ mod tests {
         let tmp = dir.path().join("run2");
         std::fs::create_dir(&tmp).unwrap();
 
-        let inj = resolve(&v, Scope::Auto("Infra/stripe".into()), &tmp).unwrap();
+        let inj = resolve(
+            &VaultSource::new(&v),
+            Scope::Auto("Infra/stripe".into()),
+            &tmp,
+        )
+        .unwrap();
         assert_eq!(inj.len(), 1);
         assert_eq!(inj[0].name, "STRIPE_KEY");
         assert_eq!(inj[0].value, "sk_live_123");
 
-        assert!(resolve(&v, Scope::Auto("No/Such".into()), &tmp).is_err());
+        assert!(resolve(&VaultSource::new(&v), Scope::Auto("No/Such".into()), &tmp).is_err());
         wipe_dir(&tmp);
     }
 }
