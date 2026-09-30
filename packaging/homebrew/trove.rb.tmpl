@@ -47,15 +47,15 @@ class Trove < Formula
 
       Quickstart:
         trove unlock ~/path/to/your.kdbx     # starts troved if needed
-        export SSH_AUTH_SOCK="$(trove agent socket)"
+        export SSH_AUTH_SOCK="$(trove ssh-agent socket)"
         ssh-add -L
 
       For GPG signing (git commit -S):
         ln -sf "$(trove gpg-agent socket)" "${GNUPGHOME:-$HOME/.gnupg}/S.gpg-agent"
 
-      Windows: run trove inside WSL2 (a real Linux environment). This Linux
-      build works there as-is; bridging the agent socket to native-Windows
-      clients needs a relay such as npiperelay.
+      Windows: this Linux build works as-is inside WSL2. For native Windows
+      (PowerShell, Git for Windows) install with Scoop instead; see
+      https://github.com/antimatter-studios/trove#windows
 
       Full quickstart + threat model:
         https://github.com/antimatter-studios/trove#quickstart

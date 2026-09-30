@@ -1,7 +1,8 @@
 # TODO — open items
 
-Working list of outstanding work. Companion to [status.md](status.md), which
-catalogues what *is* built; this one tracks what still needs doing and why.
+Working list of outstanding work: what still needs doing and why. Scope
+decisions are in [scope.md](scope.md); what has shipped is in the
+[CHANGELOG](../CHANGELOG.md).
 
 Ordered by leverage within each section.
 

@@ -1709,6 +1709,9 @@ Standard OpenSSH agent protocol on a separate socket. We implement:
 
 - `SSH_AGENTC_REQUEST_IDENTITIES` (11) → `SSH_AGENT_IDENTITIES_ANSWER` (12)
 - `SSH_AGENTC_SIGN_REQUEST` (13) → `SSH_AGENT_SIGN_RESPONSE` (14)
+- `SSH_AGENTC_REMOVE_IDENTITY` (18) and `SSH_AGENTC_REMOVE_ALL_IDENTITIES` (19) (`ssh-add -d` / `-D`)
+- `SSH_AGENTC_LOCK` (22) and `SSH_AGENTC_UNLOCK` (23) (`ssh-add -x` / `-X`)
+- `SSH_AGENTC_EXTENSION` (27) for `session-bind@openssh.com`
 
 Anything else returns `SSH_AGENT_FAILURE` (5). Supported algorithms: ed25519, RSA >= 2048 bits (signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332 flag selection), ECDSA P-256, ECDSA P-384.
 
@@ -1716,7 +1719,7 @@ Anything else returns `SSH_AGENT_FAILURE` (5). Supported algorithms: ed25519, RS
 
 ### GPG Assuan protocol
 
-Standard Assuan ASCII protocol on a separate socket. The implemented commands are documented in [crates/troved/src/gpg_agent/](../crates/troved/src/gpg_agent/). The minimum required to make `git commit -S` work for an ed25519 OpenPGP key, plus PKDECRYPT for ed25519+cv25519. Unknown commands return `ERR <code> <message>` so clients fail cleanly rather than hang.
+Standard Assuan ASCII protocol on a separate socket. The implemented commands are documented in [crates/troved/src/gpg_agent/](../crates/troved/src/gpg_agent/). It covers `git commit -S` signing and `gpg --decrypt` with ed25519/cv25519 and RSA OpenPGP keys. Unknown commands return `ERR <code> <message>` so clients fail cleanly rather than hang.
 
 ## Per-entry custom-field schema
 
