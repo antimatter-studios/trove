@@ -875,6 +875,24 @@ enum GpgAgentOp {
         #[arg(long)]
         json: bool,
     },
+
+    /// Import the public half of every vault GPG key into gpg's keyring.
+    ///
+    /// gpg only asks an agent to sign with a key it already knows, so a key
+    /// that lives only in the vault is invisible to `gpg` and `git commit -S`
+    /// until its public key is in the keyring. This derives each public key
+    /// from the stored secret-key export and runs `gpg --import`. Only public
+    /// keys are imported, and importing again changes nothing. The keyring
+    /// keeps them after `trove lock`; remove one with `gpg --delete-keys`.
+    ///
+    /// Reads the vaults unlocked in the running daemon, or the global
+    /// `--vault <path>` directly.
+    Import {
+        /// Write the public keys (binary OpenPGP) to stdout instead of
+        /// importing them.
+        #[arg(long)]
+        print: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1725,6 +1743,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::GpgAgent {
             op: GpgAgentOp::List { json },
         } => cmd_gpg_agent_list(json),
+        Command::GpgAgent {
+            op: GpgAgentOp::Import { print },
+        } => cmd_gpg_agent_import(vault, pw_stdin, print),
         Command::Materialize => cmd_materialize(require_vault(vault)?, pw_stdin),
         Command::Group {
             op: GroupOp::List { json },
@@ -2773,6 +2794,100 @@ fn cmd_gpg_agent_list(json: bool) -> Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// `trove gpg-agent import` — put each vault GPG key's public key into gpg's
+/// keyring (or on stdout with `--print`).
+fn cmd_gpg_agent_import(vault: Option<&Path>, pw_stdin: bool, print: bool) -> Result<()> {
+    use std::io::{IsTerminal as _, Write as _};
+    let keys: Vec<(String, Vec<u8>)> = match vault {
+        Some(path) => {
+            let v = open_vault(path, pw_stdin)?;
+            troved::handler::gpg_public_keys_from_vault(&v, None)
+        }
+        None => {
+            let resp = match daemon::send(&daemon::Request::GpgPublicKeys) {
+                Ok(r) => r,
+                Err(e) if daemon::is_daemon_not_running(&e) => {
+                    return Err(DaemonClassified {
+                        message: "no trove daemon is running, so nothing is unlocked; \
+                                  `trove unlock <VAULT>` first, or pass --vault <PATH>"
+                            .to_string(),
+                        exit: EXIT_USER_ERROR,
+                    }
+                    .into())
+                }
+                Err(e) => return Err(e),
+            };
+            if let Some(msg) = daemon::response_error(&resp) {
+                return Err(DaemonClassified {
+                    message: msg,
+                    exit: EXIT_USER_ERROR,
+                }
+                .into());
+            }
+            use base64::Engine as _;
+            resp.get("gpg_public_keys")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|k| {
+                    let entry = k.get("entry")?.as_str()?.to_string();
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(k.get("export_b64")?.as_str()?)
+                        .ok()?;
+                    Some((entry, bytes))
+                })
+                .collect()
+        }
+    };
+    if keys.is_empty() {
+        eprintln!("trove: no GPG keys in the vault");
+        return Ok(());
+    }
+    let all: Vec<u8> = keys.iter().flat_map(|(_, b)| b.iter().copied()).collect();
+    if print {
+        if std::io::stdout().is_terminal() {
+            return Err(DaemonClassified {
+                message: "--print writes binary OpenPGP data; redirect it, e.g. \
+                          `trove gpg-agent import --print > vault-keys.gpg`"
+                    .to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into());
+        }
+        std::io::stdout().write_all(&all)?;
+        return Ok(());
+    }
+    let mut child = std::process::Command::new("gpg")
+        .args(["--batch", "--import"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| DaemonClassified {
+            message: format!(
+                "couldn't run gpg ({e}); write the keys to a file with --print \
+                 and import them yourself"
+            ),
+            exit: EXIT_USER_ERROR,
+        })?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(&all)
+        .context("writing to gpg")?;
+    let status = child.wait().context("waiting for gpg")?;
+    if !status.success() {
+        return Err(DaemonClassified {
+            message: format!("gpg --import failed ({status})"),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    for (entry, _) in &keys {
+        eprintln!("trove: imported the public key from {entry}");
+    }
+    Ok(())
 }
 
 fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {

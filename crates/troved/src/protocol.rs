@@ -81,6 +81,10 @@ pub enum Request {
     /// List the GPG keys the agent is currently serving. Read-only; returns an
     /// empty list when locked.
     GpgAgentList,
+    /// The public half of every GPG key the unlocked vaults hold, as the bytes
+    /// `gpg --export` would give, one export per entry. Read-only; public keys
+    /// only, so no session code. Empty when nothing is unlocked.
+    GpgPublicKeys,
     /// Create a new, private SSH agent socket serving no keys, and return its
     /// path for the caller to export as `SSH_AUTH_SOCK`.
     ///
@@ -385,6 +389,7 @@ impl std::fmt::Debug for Request {
             Request::Status => f.write_str("Status"),
             Request::SshAgentList => f.write_str("SshAgentList"),
             Request::GpgAgentList => f.write_str("GpgAgentList"),
+            Request::GpgPublicKeys => f.write_str("GpgPublicKeys"),
             Request::SshAgentEmpty => f.write_str("SshAgentEmpty"),
             Request::SshAgentAdd { socket, entry } => f
                 .debug_struct("SshAgentAdd")
@@ -705,6 +710,15 @@ pub struct GpgKeyDto {
     pub comment: String,
 }
 
+/// One entry's GPG public keys, for `gpg-agent import`.
+#[derive(Debug, Serialize)]
+pub struct GpgPublicKeyDto {
+    /// The entry path holding the secret-key export.
+    pub entry: String,
+    /// Base64 of the OpenPGP public-key export (binary, not armored).
+    pub export_b64: String,
+}
+
 // This is a wire-level response; boxing its payload would not reduce serialized
 // size and would add indirection to every response construction and consumer.
 #[allow(clippy::large_enum_variant)]
@@ -853,6 +867,10 @@ pub enum OkBody {
     GpgAgentList {
         gpg_keys: Vec<GpgKeyDto>,
     },
+    /// Response to `GpgPublicKeys`.
+    GpgPublicKeys {
+        gpg_public_keys: Vec<GpgPublicKeyDto>,
+    },
     /// Response to `SshAgentEmpty`: where the new private agent listens.
     SshAgentSocket {
         ssh_socket: String,
@@ -967,6 +985,9 @@ impl Response {
     }
     pub fn ok_ssh_agent_list(ssh_keys: Vec<SshKeyDto>) -> Self {
         Response::Ok(OkBody::SshAgentList { ssh_keys })
+    }
+    pub fn ok_gpg_public_keys(gpg_public_keys: Vec<GpgPublicKeyDto>) -> Self {
+        Response::Ok(OkBody::GpgPublicKeys { gpg_public_keys })
     }
     pub fn ok_gpg_agent_list(gpg_keys: Vec<GpgKeyDto>) -> Self {
         Response::Ok(OkBody::GpgAgentList { gpg_keys })
