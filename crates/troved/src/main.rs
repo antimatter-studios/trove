@@ -489,10 +489,11 @@ mod tests {
 
         // Spawn the daemon's main on a task. We can't call `main()` directly
         // because it's `#[tokio::main]`, but we can replicate the body.
+        // Bind before spawning so the socket is ready when the client
+        // connects; polling for it with a deadline flakes on a busy machine.
         let sock_path = tmp.clone();
+        let mut listener = ipc::bind(&sock_path).await.unwrap();
         let server = tokio::spawn(async move {
-            let mut listener = ipc::bind(&sock_path).await.unwrap();
-
             let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
             let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
@@ -542,15 +543,6 @@ mod tests {
 
             let _ = std::fs::remove_file(&sock_path);
         });
-
-        // Wait briefly for the listener to be ready.
-        for _ in 0..50 {
-            if tmp.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(tmp.exists(), "socket never appeared");
 
         let stream = ipc::connect(&tmp).await.expect("connect");
         let (r, mut w) = tokio::io::split(stream);
