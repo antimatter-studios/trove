@@ -104,6 +104,21 @@ pub enum Request {
         socket: String,
         entry: String,
     },
+    /// Add every SSH key whose entry matches to the scoped agent at `socket`,
+    /// in one call.
+    ///
+    /// `pattern` is a glob over entry paths (`Infra/*`): `*` matches any run of
+    /// characters, `/` included, and `?` exactly one. `tag` keeps entries that
+    /// carry the tag, directly or through their group. With both, a key must
+    /// match both; with neither, the request is refused. `socket` is checked
+    /// as for [`Request::SshAgentAdd`].
+    SshAgentAddMatching {
+        socket: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+    },
     /// Tear down the private agent listening at `socket`: stop serving it,
     /// drop its keys and unlink the socket file. The other private agents, and
     /// the main one, are left alone.
@@ -395,6 +410,16 @@ impl std::fmt::Debug for Request {
                 .debug_struct("SshAgentAdd")
                 .field("socket", socket)
                 .field("entry", entry)
+                .finish(),
+            Request::SshAgentAddMatching {
+                socket,
+                pattern,
+                tag,
+            } => f
+                .debug_struct("SshAgentAddMatching")
+                .field("socket", socket)
+                .field("pattern", pattern)
+                .field("tag", tag)
                 .finish(),
             Request::SshAgentClose { socket } => f
                 .debug_struct("SshAgentClose")
@@ -887,6 +912,14 @@ pub enum OkBody {
         ssh_served: usize,
         ssh_warnings: Vec<String>,
     },
+    /// Response to `SshAgentAddMatching`: every key that went in, sorted by
+    /// comment, and how many the agent serves now.
+    SshAgentAddedMatching {
+        ssh_socket: String,
+        ssh_added_keys: Vec<SshKeyDto>,
+        ssh_served: usize,
+        ssh_warnings: Vec<String>,
+    },
     /// Response to `SshAgentClose`: the socket that was torn down, and how
     /// many keys it was serving when it went.
     SshAgentClosed {
@@ -1006,6 +1039,19 @@ impl Response {
             ssh_socket,
             ssh_added,
             ssh_replaced,
+            ssh_served,
+            ssh_warnings,
+        })
+    }
+    pub fn ok_ssh_agent_added_matching(
+        ssh_socket: String,
+        ssh_added_keys: Vec<SshKeyDto>,
+        ssh_served: usize,
+        ssh_warnings: Vec<String>,
+    ) -> Self {
+        Response::Ok(OkBody::SshAgentAddedMatching {
+            ssh_socket,
+            ssh_added_keys,
             ssh_served,
             ssh_warnings,
         })

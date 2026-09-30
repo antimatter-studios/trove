@@ -717,16 +717,7 @@ async fn handle_request(
             let dto = crate::protocol::SshKeyDto::of(&key, now);
             match scoped::add(scoped_agents, std::path::Path::new(&socket), key).await {
                 Ok(outcome) => {
-                    let mut warnings = Vec::new();
-                    if outcome.served > scoped::MAX_AUTH_TRIES_DEFAULT {
-                        warnings.push(format!(
-                            "this agent now serves {} keys; sshd's MaxAuthTries defaults to {}, \
-                             and every key an agent lists is offered and counted against it, \
-                             so a server will refuse the connection before reaching the later ones",
-                            outcome.served,
-                            scoped::MAX_AUTH_TRIES_DEFAULT
-                        ));
-                    }
+                    let warnings = max_auth_tries_warning(outcome.served).into_iter().collect();
                     Handled {
                         response: Response::ok_ssh_agent_added(
                             socket,
@@ -742,6 +733,48 @@ async fn handle_request(
                     response: Response::err(e.to_string()),
                     shutdown: false,
                 },
+            }
+        }
+
+        Request::SshAgentAddMatching {
+            socket,
+            pattern,
+            tag,
+        } => {
+            // Held throughout, as for `SshAgentAdd`: a lock landing mid-add must
+            // happen entirely before or entirely after.
+            let state_guard = state.lock().await;
+            let keys =
+                match find_ssh_keys_matching(&state_guard, pattern.as_deref(), tag.as_deref()) {
+                    Ok(k) => k,
+                    Err(msg) => {
+                        return Handled {
+                            response: Response::err(msg),
+                            shutdown: false,
+                        }
+                    }
+                };
+            let mut added = Vec::with_capacity(keys.len());
+            let mut served = 0;
+            for key in keys {
+                let dto = crate::protocol::SshKeyDto::of(&key, std::time::Instant::now());
+                match scoped::add(scoped_agents, std::path::Path::new(&socket), key).await {
+                    Ok(outcome) => {
+                        served = outcome.served;
+                        added.push(dto);
+                    }
+                    Err(e) => {
+                        return Handled {
+                            response: Response::err(e.to_string()),
+                            shutdown: false,
+                        }
+                    }
+                }
+            }
+            let warnings = max_auth_tries_warning(served).into_iter().collect();
+            Handled {
+                response: Response::ok_ssh_agent_added_matching(socket, added, served, warnings),
+                shutdown: false,
             }
         }
 
@@ -2067,6 +2100,99 @@ fn find_ssh_key(set: &VaultSet, entry: &str) -> Result<LoadedKey, String> {
     }
 }
 
+/// Every SSH key in the unlocked vaults whose entry matches `pattern` (a glob
+/// over the key's entry path) and carries `tag`, sorted by comment, with the
+/// same keypair seen in several vaults collapsed to one. At least one of the
+/// two must be given, and something must match.
+fn find_ssh_keys_matching(
+    set: &VaultSet,
+    pattern: Option<&str>,
+    tag: Option<&str>,
+) -> Result<Vec<LoadedKey>, String> {
+    if pattern.is_none() && tag.is_none() {
+        return Err("name a pattern or a tag to add keys by".to_string());
+    }
+    if set.is_empty() {
+        return Err("no vault is unlocked".to_string());
+    }
+    let mut found: Vec<LoadedKey> = Vec::new();
+    for (vault, filter) in set.iter_with_filters() {
+        let mut keys = load_ssh_keys_from_vault_filtered(vault, filter);
+        if let Some(tag) = tag {
+            let tagged: Vec<Vec<u8>> = load_ssh_keys_from_vault_filtered(vault, Some(tag))
+                .into_iter()
+                .map(|k| k.public_blob)
+                .collect();
+            keys.retain(|k| tagged.contains(&k.public_blob));
+        }
+        if let Some(pattern) = pattern {
+            keys.retain(|k| {
+                // The comment is `path` or `path:attachment`; a pattern may
+                // name either.
+                let path = k.comment.rsplit_once(':').map_or(&*k.comment, |(p, _)| p);
+                glob_match(pattern, &k.comment) || glob_match(pattern, path)
+            });
+        }
+        for key in keys {
+            if let Some(i) = found.iter().position(|k| k.public_blob == key.public_blob) {
+                found[i] = key;
+            } else {
+                found.push(key);
+            }
+        }
+    }
+    if found.is_empty() {
+        let what = match (pattern, tag) {
+            (Some(p), Some(t)) => format!("matches '{p}' with tag '{t}'"),
+            (Some(p), None) => format!("matches '{p}'"),
+            (None, Some(t)) => format!("has tag '{t}'"),
+            (None, None) => unreachable!("checked above"),
+        };
+        return Err(format!("no SSH key in the unlocked vaults {what}"));
+    }
+    found.sort_by(|a, b| a.comment.cmp(&b.comment));
+    Ok(found)
+}
+
+/// Shell-style glob: `*` matches any run of characters (`/` included), `?`
+/// exactly one. Everything else matches itself.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    // Where the last `*` was, and how much of the text it has swallowed.
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if let Some((sp, st)) = star {
+            pi = sp + 1;
+            ti = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
+}
+
+/// The warning for an agent serving more keys than sshd's default
+/// `MaxAuthTries`, if it does.
+fn max_auth_tries_warning(served: usize) -> Option<String> {
+    (served > scoped::MAX_AUTH_TRIES_DEFAULT).then(|| {
+        format!(
+            "this agent now serves {served} keys; sshd's MaxAuthTries defaults to {}, \
+             and every key an agent lists is offered and counted against it, \
+             so a server will refuse the connection before reaching the later ones",
+            scoped::MAX_AUTH_TRIES_DEFAULT
+        )
+    })
+}
+
 /// The 20-byte keygrip identifying a loaded GPG key on the Assuan wire,
 /// whichever role the key plays.
 fn gpg_keygrip(key: &LoadedGpgKey) -> [u8; 20] {
@@ -2739,6 +2865,20 @@ fn skipped_keys_in(vault: &Vault, filter: Option<&str>) -> Vec<SkippedKeyDto> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glob_match_handles_stars_and_question_marks() {
+        assert!(glob_match("Infra/*", "Infra/s1"));
+        assert!(glob_match("Infra/*", "Infra/db/s2"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("*/s?", "Infra/s1"));
+        assert!(glob_match("a*b*c", "aXXbYYc"));
+        assert!(glob_match("Infra/s1", "Infra/s1"));
+        assert!(!glob_match("Infra/*", "Web/site"));
+        assert!(!glob_match("Infra/s?", "Infra/s10"));
+        assert!(!glob_match("Infra/s1", "Infra/s10"));
+        assert!(!glob_match("a*b", "aXbY"));
+    }
 
     #[test]
     fn session_matches_needs_the_exact_code_and_uid() {
