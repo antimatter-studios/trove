@@ -10,6 +10,13 @@
 //! `KUBECONFIG=/private/tmp/.../kubeconfig`). Without `Exec.Env` the
 //! fallback is `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`, title
 //! uppercased with non-alphanumerics collapsed to `_`.
+//!
+//! An entry that needs more than one variable maps each explicitly with
+//! `Exec.<VAR>` fields naming the source: another field
+//! (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`, `Exec.PGHOST=URL`,
+//! or any custom field) or, with a leading `@`, an attachment whose
+//! materialized path is exported (`Exec.PGSSLROOTCERT=@ca.pem`). Such an
+//! entry exports only its mappings, plus `Exec.Env` if it also has one.
 
 use std::path::{Path, PathBuf};
 
@@ -92,6 +99,14 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
         let exec_env = v.get_field(&e.id, "Exec.Env")?;
         let fallback = env_name_from_title(&e.title);
 
+        let mappings = mapped_injections(v, e, tmp)?;
+        if !mappings.is_empty() {
+            out.extend(mappings);
+            if exec_env.is_none() {
+                continue;
+            }
+        }
+
         // Attachment-bearing entries inject a FILE path. Prefer the
         // materialization source when declared, else a sole attachment.
         let att = match v.get_field(&e.id, "Materialize.Source")? {
@@ -101,8 +116,7 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
         };
         if let Some(att_name) = att {
             if let Some(bytes) = v.read_binary(&e.id, &att_name)? {
-                let file = tmp.join(format!("{}-{}", e.id, sanitize_filename(&att_name)));
-                write_private(&file, &bytes)?;
+                let file = materialize(tmp, e, &att_name, &bytes)?;
                 out.push(Injection {
                     name: exec_env
                         .clone()
@@ -129,6 +143,68 @@ pub fn resolve(v: &Vault, scope: Scope, tmp: &Path) -> Result<Vec<Injection>> {
         ));
     }
     Ok(out)
+}
+
+/// The `Exec.<VAR>` mappings on one entry (every `Exec.*` field but
+/// `Exec.Env`), resolved and sorted by variable name. A mapping that names a
+/// field or attachment the entry doesn't have is an error rather than a
+/// silently missing variable.
+fn mapped_injections(v: &Vault, e: &EntrySummary, tmp: &Path) -> Result<Vec<Injection>> {
+    let mut names = v.fields_with_prefix(&e.id, "Exec.")?;
+    names.retain(|n| n != "Exec.Env");
+    names.sort();
+    let path = e.display_path();
+    let mut out = Vec::with_capacity(names.len());
+    for field in names {
+        let var = &field["Exec.".len()..];
+        if !is_env_name(var) {
+            return Err(anyhow!(
+                "{path}: '{field}' doesn't name a valid environment variable \
+                 (letters, digits and _, not starting with a digit)"
+            ));
+        }
+        let source = v.get_field(&e.id, &field)?.unwrap_or_default();
+        let source = source.trim();
+        let value = if let Some(att) = source.strip_prefix('@') {
+            let bytes = v.read_binary(&e.id, att)?.ok_or_else(|| {
+                anyhow!("{path}: {field} names attachment '{att}', which it doesn't have")
+            })?;
+            let file = materialize(tmp, e, att, &bytes)?;
+            file.to_string_lossy().into_owned()
+        } else {
+            if source.is_empty() {
+                return Err(anyhow!(
+                    "{path}: {field} is empty; set it to a field name or @attachment"
+                ));
+            }
+            v.get_field(&e.id, source)?.ok_or_else(|| {
+                anyhow!("{path}: {field} names field '{source}', which it doesn't have")
+            })?
+        };
+        out.push(Injection {
+            name: var.to_string(),
+            value,
+        });
+    }
+    Ok(out)
+}
+
+/// Write one attachment into the run directory, once: two variables naming
+/// the same attachment share the file. The directory is private to this run,
+/// so a file already there is one this run wrote.
+fn materialize(tmp: &Path, e: &EntrySummary, att: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let file = tmp.join(format!("{}-{}", e.id, sanitize_filename(att)));
+    if !file.exists() {
+        write_private(&file, bytes)?;
+    }
+    Ok(file)
+}
+
+/// A POSIX-portable environment variable name.
+fn is_env_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn group_matches<'a>(all: &'a [EntrySummary], scope: &str) -> Vec<&'a EntrySummary> {
@@ -357,6 +433,75 @@ mod tests {
         wipe_dir(&tmp);
         assert!(!std::path::Path::new(&kube.value).exists(), "wiped");
         assert!(!tmp.exists(), "run dir removed");
+    }
+
+    #[test]
+    fn exec_mappings_export_several_fields_and_attachments() {
+        let dir = TempDir::new().unwrap();
+        let mut v = Vault::create(&dir.path().join("m.kdbx"), "pw").unwrap();
+        let id = v.add_entry("Db/main").unwrap();
+        v.set_field(&id, "UserName", "app").unwrap();
+        v.set_field(&id, "Password", "pg-secret").unwrap();
+        v.set_field(&id, "URL", "db.internal").unwrap();
+        v.set_field(&id, "Port", "5433").unwrap();
+        v.attach_binary(&id, "ca.pem", b"-----CA-----\n").unwrap();
+        v.set_field(&id, "Exec.PGUSER", "UserName").unwrap();
+        v.set_field(&id, "Exec.PGPASSWORD", "Password").unwrap();
+        v.set_field(&id, "Exec.PGHOST", "URL").unwrap();
+        v.set_field(&id, "Exec.PGPORT", "Port").unwrap();
+        v.set_field(&id, "Exec.PGSSLROOTCERT", "@ca.pem").unwrap();
+        let tmp = dir.path().join("run");
+        std::fs::create_dir(&tmp).unwrap();
+
+        let inj = resolve(&v, Scope::Auto("Db/main".into()), &tmp).unwrap();
+        let got: Vec<(&str, &str)> = inj
+            .iter()
+            .map(|i| (i.name.as_str(), i.value.as_str()))
+            .collect();
+        assert_eq!(
+            &got[..4],
+            &[
+                ("PGHOST", "db.internal"),
+                ("PGPASSWORD", "pg-secret"),
+                ("PGPORT", "5433"),
+                ("PGSSLROOTCERT", got[3].1),
+            ]
+        );
+        assert_eq!(got[4], ("PGUSER", "app"));
+        assert_eq!(
+            got.len(),
+            5,
+            "no TROVE_ fallback once mappings exist: {got:?}"
+        );
+        assert_eq!(std::fs::read(got[3].1).unwrap(), b"-----CA-----\n");
+
+        // Exec.Env still works alongside the mappings.
+        v.set_field(&id, "Exec.Env", "DATABASE_PASSWORD").unwrap();
+        let inj = resolve(&v, Scope::Auto("Db/main".into()), &tmp).unwrap();
+        assert!(inj.iter().any(|i| i.name == "DATABASE_PASSWORD"));
+        wipe_dir(&tmp);
+    }
+
+    #[test]
+    fn exec_mappings_fail_loudly_on_bad_config() {
+        let dir = TempDir::new().unwrap();
+        let tmp = dir.path().join("run");
+        std::fs::create_dir(&tmp).unwrap();
+        for (field, source, wanted) in [
+            ("Exec.PGHOST", "NoSuchField", "NoSuchField"),
+            ("Exec.CERT", "@missing.pem", "missing.pem"),
+            ("Exec.1BAD", "Password", "valid environment variable"),
+            ("Exec.EMPTY", "", "empty"),
+        ] {
+            let mut v = Vault::create(&dir.path().join(format!("{wanted}.kdbx")), "pw").unwrap();
+            let id = v.add_entry("e").unwrap();
+            v.set_field(&id, "Password", "x").unwrap();
+            v.set_field(&id, field, source).unwrap();
+            let err = resolve(&v, Scope::Auto("e".into()), &tmp)
+                .err()
+                .expect(field);
+            assert!(err.to_string().contains(wanted), "{field}: {err}");
+        }
     }
 
     #[test]

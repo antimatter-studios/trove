@@ -627,8 +627,10 @@ enum Command {
     /// Naming: an entry's `Exec.Env` custom field names the variable
     /// (`Exec.Env=KUBECONFIG` on a kubeconfig attachment →
     /// `KUBECONFIG=/tmp/.../kubeconfig` in the child). Without it:
-    /// `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`. The child's exit
-    /// code becomes trove's. Offline-only: requires `--vault`.
+    /// `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`. For several
+    /// variables from one entry, map each with `Exec.<VAR>` naming a field
+    /// or `@attachment` (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`).
+    /// The child's exit code becomes trove's. Offline-only: requires `--vault`.
     ///
     /// If an entry and group share a name, use `--entry PATH` or `--group PATH`.
     /// Example: `trove --vault v.kdbx exec Infra/kubeconfig-prod -- bash`
