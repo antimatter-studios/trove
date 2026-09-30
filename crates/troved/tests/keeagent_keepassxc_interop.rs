@@ -238,3 +238,111 @@ fn rewriting_the_key_name_keeps_the_rest_of_the_policy() {
     // KeePassXC writes UTF-16; a round trip through trove should not flip it.
     assert_eq!(&rewritten[..2], &[0xFF, 0xFE], "still UTF-16 with a BOM");
 }
+
+/// Major and minor version from a kdbx header.
+fn kdbx_version(path: &Path) -> (u16, u16) {
+    let bytes = std::fs::read(path).expect("read vault");
+    (
+        u16::from_le_bytes([bytes[10], bytes[11]]),
+        u16::from_le_bytes([bytes[8], bytes[9]]),
+    )
+}
+
+/// KeePassXC's own KDBX 3.1 vaults keep attachments in one pool that entries
+/// point into by id, and write an empty attachment as a self-closing element.
+/// keepass-rs used to give every pooled attachment the same id, so only one
+/// survived, and failed to open the vault at all when one was empty. Two SSH
+/// entries share one key file but carry their own settings, alongside an empty
+/// attachment: both keys must load, before and after trove saves the vault.
+#[test]
+fn trove_loads_keys_from_a_keepassxc_kdbx3_vault() {
+    use base64::Engine as _;
+    let Some(bin) = oracle() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    let entry = |uuid: &str, title: &str, key_name: &str, settings_ref: usize| {
+        format!(
+            "<Entry><UUID>{uuid}</UUID>\
+             <String><Key>Title</Key><Value>{title}</Value></String>\
+             <Binary><Key>{key_name}</Key><Value Ref=\"0\"/></Binary>\
+             <Binary><Key>{settings}</Key><Value Ref=\"{settings_ref}\"/></Binary>\
+             <Binary><Key>empty.txt</Key><Value Ref=\"3\"/></Binary>\
+             </Entry>",
+            settings = keeagent::ATTACHMENT_NAME,
+        )
+    };
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\
+         <KeePassFile><Meta><Generator>trove-test</Generator><Binaries>\
+         <Binary ID=\"0\">{key}</Binary>\
+         <Binary ID=\"1\">{first}</Binary>\
+         <Binary ID=\"2\">{second}</Binary>\
+         <Binary ID=\"3\"></Binary>\
+         </Binaries></Meta><Root><Group>\
+         <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID><Name>Root</Name>{e1}{e2}\
+         </Group></Root></KeePassFile>",
+        key = b64(KEY),
+        first = b64(&keeagent::settings_xml("id")),
+        second = b64(&keeagent::settings_xml("id2")),
+        e1 = entry("AQAAAAAAAAAAAAAAAAAAAA==", "first", "id", 1),
+        e2 = entry("AgAAAAAAAAAAAAAAAAAAAA==", "second", "id2", 2),
+    );
+    let xml_path = tmp.path().join("import.xml");
+    std::fs::write(&xml_path, xml).expect("stage xml");
+    let vault = tmp.path().join("v3.kdbx");
+
+    // `import -p` asks for the new password twice.
+    let (ok, log) = {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = Command::new(&bin)
+            .args(["import", "-p"])
+            .arg(&xml_path)
+            .arg(&vault)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn keepassxc-cli");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(format!("{PASSWORD}\n{PASSWORD}\n").as_bytes())
+            .expect("write password");
+        let out = child.wait_with_output().expect("wait");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    assert!(ok, "keepassxc-cli should import the xml: {log}");
+    assert_eq!(
+        kdbx_version(&vault),
+        (3, 1),
+        "keepassxc imports to KDBX 3.1"
+    );
+
+    let opened = Vault::open(&vault, PASSWORD).expect("trove opens keepassxc's 3.1 vault");
+    assert_eq!(
+        load_ssh_keys_from_vault(&opened).len(),
+        2,
+        "both entries' keys load from the 3.1 attachment pool"
+    );
+    let first = opened.find_by_title("first").expect("first entry");
+    assert_eq!(
+        opened.read_binary(&first, "empty.txt").expect("read"),
+        Some(Vec::new()),
+        "the empty attachment reads as empty"
+    );
+
+    // Saving writes KDBX 4.1, and nothing is lost on the way.
+    let mut writable = opened;
+    writable.save().expect("save");
+    assert_eq!(kdbx_version(&vault), (4, 1), "trove saves as KDBX 4.1");
+    let reopened = Vault::open(&vault, PASSWORD).expect("reopen");
+    assert_eq!(load_ssh_keys_from_vault(&reopened).len(), 2);
+    let (ok, log) = kpxc(&bin, &["ls", vault.to_str().unwrap()]);
+    assert!(ok, "keepassxc-cli opens trove's re-save: {log}");
+}

@@ -1,9 +1,12 @@
 //! `trove-core` — kdbx I/O and vault primitives.
 //!
 //! Format compatibility with KeePassXC is non-negotiable: this crate must
-//! round-trip any valid `.kdbx` file. Scope is KDBX 4 with a password master
-//! key, optionally composited with a keyfile (`*_with_key`; any format
-//! KeePassXC accepts). Hardware tokens and KDBX 3 land later.
+//! round-trip any valid `.kdbx` file. Vaults open with a password master key,
+//! optionally composited with a keyfile (`*_with_key`; any format KeePassXC
+//! accepts). KDBX 3.1 and 4.x vaults both open; saving always writes KDBX 4.1,
+//! so the first write upgrades a 3.1 vault (`db-info` shows the version).
+//! KeePassXC reads 4.1, and the upgrade keeps the vault's KDF, outer cipher
+//! and compression.
 //!
 //! As of v0.0.10, trove-core depends on the published `keepass = "0.12"` crate
 //! directly — no more vendored fork. The earlier vendored 0.7.33 + three
