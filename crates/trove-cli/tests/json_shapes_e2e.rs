@@ -241,6 +241,13 @@ fn status_spec() -> Value {
         "ssh_key_count": "integer",
         "gpg_key_count": "integer",
         "materialized_file_count": "integer",
+        "skipped_keys": [{
+            "agent": "string",
+            "vault": "string",
+            "entry": "string",
+            "attachment": "string",
+            "reason": "string",
+        }],
     })
 }
 
@@ -281,6 +288,15 @@ fn seed(trove: &Path, dir: &Path, out_dir: &Path) -> PathBuf {
     v.set_field(&kube, "Materialize.blob.TTL", "3600").unwrap();
     v.set_field(&kube, "Materialize.blob.AllowDiskBacked", "true")
         .unwrap();
+
+    // Looks like a key but isn't one, so status lists it under skipped_keys.
+    let broken = v.add_entry("Infra/broken").expect("add broken key");
+    v.attach_binary(
+        &broken,
+        "id",
+        b"-----BEGIN OPENSSH PRIVATE KEY-----\nnot a key\n-----END OPENSSH PRIVATE KEY-----\n",
+    )
+    .unwrap();
 
     let gpg = v.add_entry("Infra/signing").expect("add gpg");
     v.attach_binary(
@@ -491,6 +507,11 @@ mod daemon {
             "unlock: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("ssh key Infra/broken (id) not loaded"),
+            "unlock should warn about the skipped key:\n{stderr}"
+        );
         let code = String::from_utf8_lossy(&out.stdout)
             .lines()
             .find_map(|l| l.strip_prefix("export TROVE_SESSION="))
@@ -535,6 +556,7 @@ mod daemon {
 
         let status = json_out(&daemon(&["status", "--json"]), "status", true);
         assert_eq!(status["daemon_running"], true);
+        assert_has("status", &status["skipped_keys"], "entry", "Infra/broken");
         assert_shape("status", &status, &status_spec());
 
         let idle = json_out(&daemon(&["idle", "get", "--json"]), "idle get", true);

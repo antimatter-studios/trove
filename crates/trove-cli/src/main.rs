@@ -6291,6 +6291,13 @@ fn cmd_unlock(
         }
     }
 
+    // Keys the agents couldn't load (encrypted, unsupported algorithm, ...).
+    // An auto-spawned daemon's stderr goes nowhere, so this is the only place
+    // the user finds out why a key is missing.
+    for k in skipped_keys(&resp) {
+        eprintln!("trove: warning: {k}");
+    }
+
     // Same deal for keys that didn't make it into the user's own ssh-agent.
     // Forwarding never fails the unlock, but a key that's silently absent is
     // only discovered later by a `git push` that asks for a password.
@@ -6506,6 +6513,26 @@ fn cmd_status(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The daemon's `skipped_keys`, one readable line each:
+/// `ssh key Work/SSH/github (id) not loaded: <reason>`.
+fn skipped_keys(resp: &Value) -> Vec<String> {
+    let Some(keys) = resp.get("skipped_keys").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    keys.iter()
+        .map(|k| {
+            let field = |name: &str| k.get(name).and_then(Value::as_str).unwrap_or("?");
+            format!(
+                "{} key {} ({}) not loaded: {}",
+                field("agent"),
+                field("entry"),
+                field("attachment"),
+                field("reason")
+            )
+        })
+        .collect()
+}
+
 fn status_json(resp: &Value, daemon_running: bool) -> Value {
     let vault_paths = resp
         .get("vault_paths")
@@ -6525,6 +6552,7 @@ fn status_json(resp: &Value, daemon_running: bool) -> Value {
         "ssh_key_count": resp.get("ssh_keys").and_then(Value::as_u64).unwrap_or(0),
         "gpg_key_count": resp.get("gpg_keys").and_then(Value::as_u64).unwrap_or(0),
         "materialized_file_count": resp.get("materialized").and_then(Value::as_u64).unwrap_or(0),
+        "skipped_keys": resp.get("skipped_keys").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
     })
 }
 
@@ -6576,6 +6604,13 @@ fn print_status(resp: &Value) {
     println!("SSH keys:        {ssh} loaded");
     println!("GPG keys:        {gpg} loaded");
     println!("Materialized:    {mat} files");
+    let skipped = skipped_keys(resp);
+    if !skipped.is_empty() {
+        println!("Skipped keys:    {}", skipped.len());
+        for line in skipped {
+            println!("                 {line}");
+        }
+    }
 }
 
 /// `trove daemons list` — enumerate every trove daemon on the system (live or
