@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
@@ -139,6 +140,29 @@ use crate::ssh_agent::wire::{
 /// writes (unlock / lock) and we want concurrent in-flight signs to not
 /// block each other.
 pub type KeyStore = Arc<RwLock<Vec<LoadedKey>>>;
+
+/// Start every key's lifetime from `now`. An unlock does this for the whole
+/// set, so unlocking restores keys whose lifetime had run out.
+pub fn start_lifetimes(keys: &mut [LoadedKey], now: Instant) {
+    for key in keys {
+        key.start_lifetime(now);
+    }
+}
+
+/// Keep the running lifetimes of keys `old` already served when `new` replaces
+/// it. Rebuilding the store after a write to any vault must not hand an
+/// expired key back, or restart the clock on the others. Keys that are new, or
+/// whose lifetime setting changed, start from `now`.
+pub fn carry_lifetimes(old: &[LoadedKey], new: &mut [LoadedKey], now: Instant) {
+    for key in new {
+        match old.iter().find(|o| o.public_blob == key.public_blob) {
+            Some(o) if o.forward.lifetime_secs == key.forward.lifetime_secs => {
+                key.expires_at = o.expires_at;
+            }
+            _ => key.start_lifetime(now),
+        }
+    }
+}
 
 /// Decide where the SSH agent socket should live. Order:
 ///   1. `TROVE_SSH_SOCK` env var.
@@ -410,10 +434,12 @@ async fn serve_connection(
                 let (items, stale): (Vec<(Vec<u8>, String)>, bool) = {
                     let guard = store.read().await;
                     let offer = hostkey::offers(&guard, bound_host, strict_host_keys);
+                    let now = Instant::now();
                     (
                         offer
                             .indices
                             .into_iter()
+                            .filter(|&i| !guard[i].is_expired(now))
                             .map(|i| (guard[i].public_blob.clone(), guard[i].comment.clone()))
                             .collect(),
                         offer.stale,
@@ -466,9 +492,10 @@ async fn serve_connection(
                 // §3.3 / draft-miller-ssh-agent §4.5.1.
                 let sig_blob: Option<Vec<u8>> = {
                     let guard = store.read().await;
+                    let now = Instant::now();
                     guard
                         .iter()
-                        .find(|k| k.public_blob == key_blob)
+                        .find(|k| k.public_blob == key_blob && !k.is_expired(now))
                         .and_then(|k| k.sign(&data, flags).ok())
                 };
                 let resp = match sig_blob {
@@ -506,6 +533,60 @@ pub async fn shutdown_stream(mut stream: ipc::Stream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn key(comment: &str, lifetime_secs: Option<u32>) -> LoadedKey {
+        let pem = keys::generate_private_key(keys::KeyType::Ed25519, comment).expect("generate");
+        let mut k = keys::parse_private_key(&pem, comment).expect("parse");
+        k.forward.lifetime_secs = lifetime_secs;
+        k
+    }
+
+    #[test]
+    fn lifetimes_start_only_for_keys_that_set_one() {
+        let now = Instant::now();
+        let mut keys = vec![key("timed", Some(60)), key("forever", None)];
+        start_lifetimes(&mut keys, now);
+        assert_eq!(keys[0].expires_at, Some(now + Duration::from_secs(60)));
+        assert_eq!(keys[1].expires_at, None);
+        assert!(!keys[0].is_expired(now));
+        assert!(keys[0].is_expired(now + Duration::from_secs(60)));
+        assert!(!keys[1].is_expired(now + Duration::from_secs(1_000_000)));
+    }
+
+    #[test]
+    fn a_rebuild_keeps_running_lifetimes_and_starts_new_ones() {
+        let then = Instant::now();
+        let later = then + Duration::from_secs(30);
+        let mut old = vec![key("kept", Some(60)), key("changed", Some(60))];
+        start_lifetimes(&mut old, then);
+
+        // The same keys reloaded from the vault, plus one that is new; the
+        // second entry's lifetime was edited in between.
+        let pem_of = |k: &LoadedKey| k.public_blob.clone();
+        let mut new = vec![key("new", Some(60))];
+        for (i, lifetime) in [(0, Some(60)), (1, Some(10))] {
+            let mut k = key("reloaded", lifetime);
+            k.public_blob = pem_of(&old[i]);
+            new.push(k);
+        }
+        carry_lifetimes(&old, &mut new, later);
+
+        assert_eq!(
+            new[0].expires_at,
+            Some(later + Duration::from_secs(60)),
+            "new key starts now"
+        );
+        assert_eq!(
+            new[1].expires_at, old[0].expires_at,
+            "unchanged key keeps its clock"
+        );
+        assert_eq!(
+            new[2].expires_at,
+            Some(later + Duration::from_secs(10)),
+            "a changed lifetime starts over"
+        );
+    }
 
     #[test]
     fn resolve_ssh_socket_honours_explicit_override() {

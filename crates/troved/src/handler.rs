@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
@@ -178,7 +178,7 @@ pub async fn handle(
                         Some(mint_session_code())
                     };
                     let mut sess = session.lock().await;
-                    let (ssh, gpg) = {
+                    let (mut ssh, gpg) = {
                         let mut guard = state.lock().await;
                         guard.insert_with_filter(vault, filter.clone());
                         if let Some(code) = &code {
@@ -221,6 +221,7 @@ pub async fn handle(
 
                     let forward = ssh_agent::forward_on_unlock(&ssh, timeout_secs).await;
 
+                    ssh_agent::start_lifetimes(&mut ssh, Instant::now());
                     {
                         let mut keys = key_store.write().await;
                         *keys = ssh;
@@ -476,15 +477,12 @@ pub async fn handle(
         }
 
         Request::SshAgentList => {
-            use base64::Engine as _;
             let keys = key_store.read().await;
+            let now = Instant::now();
             let dtos = keys
                 .iter()
-                .map(|k| crate::protocol::SshKeyDto {
-                    algo: k.algorithm_name().to_string(),
-                    blob_b64: base64::engine::general_purpose::STANDARD.encode(&k.public_blob),
-                    comment: k.comment.clone(),
-                })
+                .filter(|k| !k.is_expired(now))
+                .map(|k| crate::protocol::SshKeyDto::of(k, now))
                 .collect();
             Handled {
                 response: Response::ok_ssh_agent_list(dtos),
@@ -513,7 +511,6 @@ pub async fn handle(
         }
 
         Request::SshAgentAdd { socket, entry } => {
-            use base64::Engine as _;
             // The vault-state lock is held for the whole of this: resolving the
             // entry, and installing the key it yields. `Lock` takes the same
             // lock while it tears the scoped agents down, so a lock landing
@@ -525,7 +522,8 @@ pub async fn handle(
             let state_guard = state.lock().await;
             // Resolve the entry first: naming something that isn't there is the
             // likely mistake, and it should fail before we touch any agent.
-            let key = match find_ssh_key(&state_guard, &entry) {
+            let now = Instant::now();
+            let mut key = match find_ssh_key(&state_guard, &entry) {
                 Ok(k) => k,
                 Err(msg) => {
                     return Handled {
@@ -534,11 +532,9 @@ pub async fn handle(
                     }
                 }
             };
-            let dto = crate::protocol::SshKeyDto {
-                algo: key.algorithm_name().to_string(),
-                blob_b64: base64::engine::general_purpose::STANDARD.encode(&key.public_blob),
-                comment: key.comment.clone(),
-            };
+            // Counted from the add, as `ssh-add -t` does.
+            key.start_lifetime(now);
+            let dto = crate::protocol::SshKeyDto::of(&key, now);
             match scoped::add(scoped_agents, std::path::Path::new(&socket), key).await {
                 Ok(outcome) => {
                     let mut warnings = Vec::new();
@@ -586,20 +582,17 @@ pub async fn handle(
         }
 
         Request::SshAgentSockets => {
-            use base64::Engine as _;
             let registry = scoped_agents.read().await;
             let mut sockets = Vec::with_capacity(registry.len());
+            let now = Instant::now();
             for agent in registry.iter() {
                 let keys = agent
                     .store
                     .read()
                     .await
                     .iter()
-                    .map(|k| crate::protocol::SshKeyDto {
-                        algo: k.algorithm_name().to_string(),
-                        blob_b64: base64::engine::general_purpose::STANDARD.encode(&k.public_blob),
-                        comment: k.comment.clone(),
-                    })
+                    .filter(|k| !k.is_expired(now))
+                    .map(|k| crate::protocol::SshKeyDto::of(k, now))
                     .collect();
                 sockets.push(crate::protocol::ScopedSocketDto {
                     socket: crate::ipc::client_address(&agent.socket),
@@ -613,7 +606,6 @@ pub async fn handle(
         }
 
         Request::SshAgentWhich { host_keys } => {
-            use base64::Engine as _;
             let declared = hostkey::parse_declarations(&host_keys.join("\n"));
             // Every question resolves against one host at a time, but a server
             // presents a host key per algorithm and the client sees whichever
@@ -657,14 +649,11 @@ pub async fn handle(
                 let host = declared.first().copied();
                 offered = ssh_agent::hostkey::offers(&keys, host, strict).indices;
             }
+            let now = Instant::now();
             let dtos = offered
                 .into_iter()
-                .map(|i| crate::protocol::SshKeyDto {
-                    algo: keys[i].algorithm_name().to_string(),
-                    blob_b64: base64::engine::general_purpose::STANDARD
-                        .encode(&keys[i].public_blob),
-                    comment: keys[i].comment.clone(),
-                })
+                .filter(|&i| !keys[i].is_expired(now))
+                .map(|i| crate::protocol::SshKeyDto::of(&keys[i], now))
                 .collect();
             let fingerprints = declared
                 .iter()
@@ -1145,7 +1134,7 @@ async fn add_ssh(
     // Mutate the held vault and persist, then reload the agent key set off the
     // now-updated vault — all under the state lock, moving the reloaded Vec out
     // so we never hold the state lock across the key_store write below.
-    let reloaded = {
+    let mut reloaded = {
         let mut guard = state.lock().await;
         let (vault, existing) = match guard.route_upsert(path) {
             Ok(found) => found,
@@ -1220,6 +1209,7 @@ async fn add_ssh(
     };
     {
         let mut keys = key_store.write().await;
+        ssh_agent::carry_lifetimes(&keys, &mut reloaded, Instant::now());
         *keys = reloaded;
     }
     Handled {
@@ -1900,10 +1890,11 @@ async fn rebuild_agent_stores(
     gpg_store: &GpgKeyStore,
     scoped_agents: &ScopedAgents,
 ) {
-    let (ssh, gpg) = union_agent_keys(set);
+    let (mut ssh, gpg) = union_agent_keys(set);
     let still_served: Vec<Vec<u8>> = ssh.iter().map(|k| k.public_blob.clone()).collect();
     {
         let mut keys = key_store.write().await;
+        ssh_agent::carry_lifetimes(&keys, &mut ssh, Instant::now());
         *keys = ssh;
     }
     {

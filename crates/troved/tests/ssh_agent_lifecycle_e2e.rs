@@ -222,3 +222,48 @@ async fn locking_the_agent_hides_keys_until_unlocked() {
         "keys should be visible again after unlock: {out}"
     );
 }
+
+/// An entry's KeeAgent lifetime applies to trove's own agent: once it runs
+/// out, `ssh-add -l` stops listing the key and a signature is refused, while
+/// the vault (and so the store) stays as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_past_its_lifetime_is_neither_listed_nor_used() {
+    if !have("ssh-add") {
+        eprintln!("skipping: ssh-add not installed");
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let (sock, store) = start_agent(&tmp).await;
+    {
+        let mut keys = store.write().await;
+        keys[0].forward.lifetime_secs = Some(1);
+        ssh_agent::start_lifetimes(&mut keys, std::time::Instant::now());
+    }
+    let publine = troved::ssh_agent::keys::openssh_public_line(KEY, "lifecycle@trove")
+        .expect("derive public line");
+    let pubpath = tmp.path().join("id.pub");
+    std::fs::write(&pubpath, &publine).expect("write pub");
+
+    let (ok, out) = ssh_add(&sock, &["-l"]);
+    assert!(
+        ok && out.contains("lifecycle@trove"),
+        "listed while live: {out}"
+    );
+    let (ok, out) = ssh_add(&sock, &["-T", pubpath.to_str().unwrap()]);
+    assert!(ok, "signs while live: {out}");
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    let (_, out) = ssh_add(&sock, &["-l"]);
+    assert!(
+        out.contains("no identities"),
+        "not listed once expired: {out}"
+    );
+    let (ok, out) = ssh_add(&sock, &["-T", pubpath.to_str().unwrap()]);
+    assert!(!ok, "signing refused once expired: {out}");
+    assert_eq!(
+        store.read().await.len(),
+        1,
+        "expiry hides the key, it doesn't remove it"
+    );
+}

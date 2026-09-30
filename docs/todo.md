@@ -50,7 +50,7 @@ sites** outside tests. Blocked on nothing except the parser below.
 | Field | Verdict |
 |---|---|
 | `RemoveAtDatabaseClose` | **deliberately not honoured** for our own agent — lock always drops the store, and honouring `false` would mean retaining a key past lock. Needed for the forwarding path only. |
-| `UseLifetimeConstraintWhenSigning` + `LifetimeConstraintDuration` | **implement** — gives a per-key TTL narrower than the global idle-lock. Nothing blocking. |
+| `UseLifetimeConstraintWhenSigning` + `LifetimeConstraintDuration` | **done** — trove's own agent and private sockets stop serving the key when the lifetime runs out, counted from unlock (or `ssh-agent add`). |
 | `UseConfirmConstraintWhenSigning` | **blocked** on having a UI to prompt with (see item 6). Implementable for forwarding today, since the external agent prompts. |
 
 ### 5. RSA `PKDECRYPT`

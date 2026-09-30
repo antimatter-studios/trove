@@ -1057,10 +1057,17 @@ The keys the main agent serves; `[]` when no daemon is running.
   {
     "algo": string,      // "ssh-ed25519"
     "blob_b64": string,  // base64 public-key blob, as in authorized_keys
-    "comment": string
+    "comment": string,
+    "expires_in_secs": number  // only when the entry sets a lifetime
   }
 ]
 ```
+
+An entry whose `KeeAgent.settings` sets a lifetime (KeePassXC's "Remove key
+from agent after") is served for that long after unlock, or after
+`ssh-agent add` for a private socket. After that the key is no longer listed
+and signing with it is refused, though the vault stays unlocked. Unlocking
+again restarts the lifetime.
 
 ```json
 [{"algo": "ssh-ed25519", "blob_b64": "AAAAC3NzaC1lZDI1NTE5AAAA…", "comment": "Infra/s1"}]

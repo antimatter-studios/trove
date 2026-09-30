@@ -28,6 +28,8 @@ use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use ssh_key::private::{KeypairData, RsaKeypair};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, PrivateKey};
+use std::time::{Duration, Instant};
+
 use zeroize::Zeroizing;
 
 use super::keeagent::ForwardPolicy;
@@ -78,9 +80,16 @@ pub struct LoadedKey {
     /// Comment shown by `ssh-add -l`. We use the entry title.
     pub comment: String,
     /// What the owning entry's `KeeAgent.settings` asked for regarding the copy
-    /// pushed into the user's own ssh-agent. Irrelevant to how trove's own agent
-    /// serves this key — see [`super::keeagent::ForwardPolicy`].
+    /// pushed into the user's own ssh-agent — see
+    /// [`super::keeagent::ForwardPolicy`]. trove's own agent honours only its
+    /// lifetime, through [`Self::expires_at`].
     pub forward: ForwardPolicy,
+    /// When this key stops being offered and signing with it is refused, if
+    /// the entry set a lifetime. `None` until the key enters an agent's store
+    /// ([`Self::start_lifetime`]), and for keys without a lifetime. The vault
+    /// stays unlocked past it; an expired key is only hidden, since the
+    /// decrypted vault holds the same bytes anyway.
+    pub expires_at: Option<Instant>,
     /// Host keys the owning entry declares this key is for, as SHA-256 digests
     /// of the servers' public-key blobs. Read from the entry's
     /// `SshAgent.HostKeys` field; empty when the entry says nothing, which is
@@ -147,6 +156,19 @@ pub enum SignError {
 }
 
 impl LoadedKey {
+    /// Start the entry's lifetime, if it set one, counting from `now`.
+    pub fn start_lifetime(&mut self, now: Instant) {
+        self.expires_at = self
+            .forward
+            .lifetime_secs
+            .map(|secs| now + Duration::from_secs(u64::from(secs)));
+    }
+
+    /// Whether the lifetime has run out at `now`. A key with none never does.
+    pub fn is_expired(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|at| now >= at)
+    }
+
     /// SSH algorithm identifier for the *public key* (e.g. "ssh-ed25519",
     /// "ssh-rsa", "ecdsa-sha2-nistp256"). Useful for diagnostics; not used on
     /// the wire (the public_blob already encodes it).
@@ -422,6 +444,7 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
         // Filled by the loader that can see the owning entry's fields; a bare
         // parse has no entry to read.
         host_keys: Vec::new(),
+        expires_at: None,
         private_key: pk,
     })
 }
