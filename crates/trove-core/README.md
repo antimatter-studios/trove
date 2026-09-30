@@ -24,6 +24,14 @@ for entry in vault.list_entries() {
 Scope today is KDBX 4 with a password master key. The crate forbids `unsafe`
 and delegates protected-value handling to the underlying `keepass` crate.
 
+## Stability
+
+From 1.0 the public API follows semantic versioning; see
+[docs/stability.md](https://github.com/antimatter-studios/trove/blob/main/docs/stability.md).
+Structs and enums that may grow, including `Error`, are `#[non_exhaustive]`:
+match `Error` with a wildcard arm, and build a `SearchQuery` from
+`SearchQuery::default()` with its `with_*` methods.
+
 ## License
 
 Licensed under either of Apache-2.0 or MIT at your option.
