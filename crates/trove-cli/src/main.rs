@@ -7,6 +7,7 @@
 
 mod clip;
 mod daemon;
+mod doctor;
 mod exec;
 mod gitcred;
 mod hibp;
@@ -279,6 +280,17 @@ enum Command {
         /// them. Errors if no vault is unlocked at that path.
         #[arg(long = "vault", value_name = "PATH")]
         vault: Option<PathBuf>,
+    },
+
+    /// Check the setup around trove: the daemon and its version, stray
+    /// daemons, where `SSH_AUTH_SOCK` and gpg's agent socket point, the vault
+    /// file (`--vault` or `TROVE_VAULT`) and `.env.trove` permissions.
+    ///
+    /// Read-only, and never starts a daemon. Exits 1 if any check fails.
+    Doctor {
+        /// Print the checks as a JSON object.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Print a human-readable summary of the running `troved`'s state:
@@ -1745,6 +1757,7 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_unlock(&vault, timeout, filter, export, shell, detach, pw_stdin),
         Command::Lock { vault } => cmd_lock(vault.as_deref()),
         Command::Status { json } => cmd_status(json),
+        Command::Doctor { json } => cmd_doctor(vault, json),
         #[cfg(unix)]
         Command::Daemons { op } => match op.unwrap_or(DaemonsOp::List { json: false }) {
             DaemonsOp::List { json } => cmd_daemons_list(json),
@@ -6508,6 +6521,30 @@ fn cmd_lock(vault: Option<&std::path::Path>) -> Result<()> {
 }
 
 /// `trove status` — pretty-print the daemon's `Status` response.
+/// `trove doctor` — run the pre-flight checks in [`doctor`] and report them.
+fn cmd_doctor(vault: Option<&Path>, json: bool) -> Result<()> {
+    let checks = doctor::run_checks(vault);
+    let failed = checks
+        .iter()
+        .filter(|c| c.status == doctor::Level::Fail)
+        .count();
+    if json {
+        let checks: Vec<Value> = checks.iter().map(doctor::Check::to_json).collect();
+        let out = serde_json::json!({ "ok": failed == 0, "checks": checks });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        doctor::print(&checks);
+    }
+    if failed > 0 {
+        return Err(DaemonClassified {
+            message: format!("{failed} check(s) failed"),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn cmd_status(json: bool) -> Result<()> {
     // `status` never autospawns. The daemon runs only while a vault is unlocked
     // (or materialized files still need cleanup), so "no daemon" is itself the

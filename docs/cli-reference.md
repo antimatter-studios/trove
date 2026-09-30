@@ -714,8 +714,8 @@ remains nonzero in that case.
 
 ## JSON output
 
-Sixteen commands take `--json`: `list`, `search`, `show`, `describe`,
-`group list`, `db-info`, `estimate`, `analyze`, `status`, `idle get`,
+Seventeen commands take `--json`: `list`, `search`, `show`, `describe`,
+`group list`, `db-info`, `estimate`, `analyze`, `status`, `doctor`, `idle get`,
 `materialize-status`, `ssh-agent list`, `ssh-agent sockets`, `gpg-agent list`,
 `daemons list` and `keychain status`. Each prints one pretty-printed JSON
 document on stdout; errors still go to stderr with the usual
@@ -1003,6 +1003,24 @@ about the same keys on stderr. The human `trove status` output lists them under
   "vault_paths": ["/home/me/vaults/work.kdbx"]
 }
 ```
+
+### `trove doctor --json`
+
+```
+{
+  "ok": bool,          // false when any check failed
+  "checks": [{
+    "name": string,    // daemon, version, keys, daemons, ssh-agent, gpg-agent, vault, env-file
+    "status": string,  // ok, info, warn or fail
+    "detail": string,
+    "hint": string | null
+  }]
+}
+```
+
+Printed whether or not a check failed; a failure also makes the command exit 1.
+Which checks appear depends on the machine: `version` and `keys` only with a
+daemon running, `daemons` only on Unix, `env-file` once per `.env.trove` found.
 
 ### `trove idle get --json`
 
@@ -1515,6 +1533,30 @@ daemon understands them, with a warning that the versions differ
 fails with an error that names both versions and says to restart it: stop it
 with `trove daemons kill --all` (on Windows, end `troved.exe`), then re-run.
 The next command starts the current daemon, and vaults need unlocking again.
+
+## trove doctor
+
+```
+trove [--vault <PATH>] doctor [--json]
+```
+
+Check the setup around trove and say what to fix. Read-only, and it never starts
+a daemon.
+
+| check | looks at |
+| --- | --- |
+| `daemon` | whether troved is running on the control socket this CLI uses |
+| `version` | the running daemon is the same build as the CLI |
+| `keys` | keys in the unlocked vaults the agents couldn't load, and why |
+| `daemons` | live daemons on other sockets, and files left by dead ones (Unix) |
+| `ssh-agent` | `SSH_AUTH_SOCK`: unset, trove's agent, a private one from `ssh-agent empty`, another live agent, or nothing listening |
+| `gpg-agent` | whether gpg's agent socket (`gpgconf --list-dirs agent-socket`) is a symlink to trove's |
+| `vault` | the vault from `--vault` or `TROVE_VAULT` opens and is KDBX 4 (KDBX 3.1 is a warning) |
+| `env-file` | each `.env.trove` a bare `--env` would find is readable only by its owner |
+
+Each line is `ok`, `info`, `warn` or `FAIL`, with a suggested fix under it where
+there is one. Exits 1 if any check fails. See
+[`trove doctor --json`](#trove-doctor---json) for the JSON form.
 
 ## trove daemons *(Unix only)*
 
