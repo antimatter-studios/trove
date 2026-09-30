@@ -3,6 +3,7 @@ name = "trove-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Command-line client for trove"
 
 [[bin]]

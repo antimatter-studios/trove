@@ -3,6 +3,7 @@ name = "troved"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Headless daemon for trove: holds unlocked vault state and serves clients over IPC"
 
 [lib]

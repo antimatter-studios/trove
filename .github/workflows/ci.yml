@@ -7,6 +7,7 @@
 #   - Fmt (ubuntu-latest):                 cargo fmt --all -- --check
 #   - Semver (ubuntu-latest):              cargo semver-checks on trove-core
 #   - Fuzz lockfile (ubuntu-latest):       crates/troved/fuzz/Cargo.lock resolves --locked
+#   - Deny (ubuntu-latest):                cargo deny: licences, bans, sources
 #   - Audit (ubuntu-latest):               cargo audit (advisory check)
 #
 # Notes:
@@ -210,6 +211,34 @@ jobs:
           cargo metadata --locked --format-version 1 \
             --manifest-path crates/troved/fuzz/Cargo.toml > /dev/null \
             || { echo "::error::crates/troved/fuzz/Cargo.lock is stale; run: cargo update --manifest-path crates/troved/fuzz/Cargo.toml --workspace, and commit it"; exit 1; }
+
+  deny:
+    name: Deny (${{ matrix.graph }})
+    runs-on: ubuntu-latest
+    # Licences, bans and sources per deny.toml. Advisories stay with the
+    # Audit job. The desktop crate has its own lockfile, so it's checked
+    # separately against the same policy.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - graph: workspace
+            manifest: Cargo.toml
+          - graph: desktop
+            manifest: trove-desktop/src-tauri/Cargo.toml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          command: check bans licenses sources
+          arguments: --config deny.toml
+          # The action image's own cargo predates multi-line inline tables
+          # (troved's windows-sys dependency) and can't read the manifests.
+          rust-version: stable
 
   semver:
     name: Semver (trove-core)

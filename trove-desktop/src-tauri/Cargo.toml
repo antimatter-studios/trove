@@ -4,6 +4,7 @@ version = "0.25.0"
 description = "Trove — a desktop vault manager"
 authors = ["Chris Thomas"]
 license = "MIT"
+publish = false
 edition = "2021"
 
 [lib]
