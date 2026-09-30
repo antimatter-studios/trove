@@ -1,0 +1,54 @@
+# cargo-deny policy: licences, bans and sources. Advisories are checked by
+# `cargo audit` in the same CI job, so they are not repeated here.
+# CI runs this against the workspace and, with `--manifest-path`, against
+# trove-desktop/src-tauri, which has its own lockfile.
+
+[graph]
+all-features = true
+
+[licenses]
+# Permissive licences only. Anything else, notably copyleft, fails the check
+# until someone decides it is acceptable and adds it here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# One allowlist covers two graphs, so a licence only one of them uses is fine.
+unused-allowed-license = "allow"
+# MPL-2.0 is file-level copyleft: fine to link unmodified, but it should stay
+# a named exception rather than a blanket allowance. These come in through
+# Tauri's webview stack in the desktop app.
+exceptions = [
+    { name = "cssparser", allow = ["MPL-2.0"] },
+    { name = "cssparser-macros", allow = ["MPL-2.0"] },
+    { name = "dtoa-short", allow = ["MPL-2.0"] },
+    { name = "option-ext", allow = ["MPL-2.0"] },
+    { name = "selectors", allow = ["MPL-2.0"] },
+]
+
+[bans]
+# Several majors of the windows-sys family and friends come in through
+# different dependencies; report them, don't fail on them.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The keepass-rs fork trove pins through [patch.crates-io].
+allow-git = ["https://github.com/antimatter-studios/keepass-rs"]
