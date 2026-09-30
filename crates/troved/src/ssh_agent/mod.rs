@@ -247,11 +247,8 @@ pub type AgentLock = Arc<tokio::sync::RwLock<Option<[u8; 32]>>>;
 /// Constant-time comparison of two 32-byte digests, so a wrong passphrase
 /// can't be recovered a byte at a time by timing the reply.
 fn digests_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut diff = 0u8;
-    for i in 0..32 {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 fn passphrase_digest(passphrase: &[u8]) -> [u8; 32] {

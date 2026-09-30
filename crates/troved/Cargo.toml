@@ -33,6 +33,8 @@ ssh-key = { version = "0.6", default-features = false, features = ["std", "alloc
 # build pkcs1v15::SigningKey<Sha256> directly when the SHA-256 bit is set.
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
 sha2 = { version = "0.10", default-features = false, features = ["std", "oid"] }
+# Constant-time comparison for session codes and passphrase digests.
+subtle = { version = "2.6", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 # v0.0.3.0: GPG agent. We hand-roll OpenPGP secret-key packet parsing for the
 # narrow ed25519/EdDSA subcase (algo 22 + curve Ed25519) — pulling in rPGP

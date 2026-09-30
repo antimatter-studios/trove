@@ -95,7 +95,9 @@ The same-UID **extraction** gap for the `get` surface (adversary #4) is now
 mitigated: per-unlock **session codes** + `SO_PEERCRED` move that adversary
 from "accepted" toward "mitigated for the unlock window" — extraction now requires
 *actively* stealing the one-time code from the unlocking shell's environment, not
-just passively benefiting from the unlock. See
+just passively benefiting from the unlock. The daemon compares codes in constant
+time, so a caller probing codes learns nothing from how fast a refusal comes
+back. See
 [provisioning-sessions.md](provisioning-sessions.md). (The agent sockets remain
 same-UID-openable by design — they never expose private bytes, only signatures, so
 unlock-once is already safe there.)
