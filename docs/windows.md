@@ -1,5 +1,7 @@
 # Windows — agent integration notes
 
+Native Windows is experimental: see [stability.md](stability.md#platforms).
+
 Status: **notes, not implemented.** Native Windows builds work (named-pipe IPC,
 control/ssh/gpg channels), but trove serves its agents on its *own* pipe names,
 so no Windows client finds them without `SSH_AUTH_SOCK` pointing at a hashed

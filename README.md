@@ -28,7 +28,7 @@ brew install --cask antimatter-studios/tap/trove-desktop
 
 ### Windows
 
-Native Windows and WSL2 are two independent worlds — install trove in whichever shell you actually use:
+Native Windows is **experimental**: it builds in CI, but hasn't been run on a real Windows machine yet (see [docs/stability.md](docs/stability.md#platforms)). Native Windows and WSL2 are two independent worlds — install trove in whichever shell you actually use:
 
 - **Native (PowerShell / cmd)** — via [Scoop](https://scoop.sh):
 
@@ -225,7 +225,7 @@ is visible instead of silently blocking `unlock`. `trove daemons kill --all`
 stops them: gracefully over the control socket, escalating to a signal for a
 wedged one, and clearing stale files.
 
-See [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, [docs/threat-model.md](docs/threat-model.md) for what this defends against, and [docs/macos.md](docs/macos.md) / [docs/windows.md](docs/windows.md) for how agent integration differs per platform. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is deliberately **excluded** from the workspace (it pins EOL `keepass` producers to test cross-version compatibility, and those drag in advisories the app's graph shouldn't carry), so `cargo test --workspace` does **not** run it — use `cargo test --manifest-path crates/keepass-spec-tests/Cargo.toml`. The `interop_*` tests there are oracle-mandatory: they fail rather than skip when `keepassxc-cli` is missing.
+See [docs/stability.md](docs/stability.md) for what the 1.0 stability promise covers and how things are deprecated, [docs/cli-reference.md](docs/cli-reference.md) for the full command + RPC surface, [docs/architecture.md](docs/architecture.md) for how the pieces fit together, [docs/threat-model.md](docs/threat-model.md) for what this defends against, and [docs/macos.md](docs/macos.md) / [docs/windows.md](docs/windows.md) for how agent integration differs per platform. The kdbx-format test suite (round-trip matrix, malformed-input rejection, keyfile formats, binary pool) lives at [crates/keepass-spec-tests/tests/](crates/keepass-spec-tests/tests/), is regenerated programmatically from a seeded RNG on every run, and exercises the published `keepass = "0.12"` crate directly with no trove-core involvement; the test crate is deliberately **excluded** from the workspace (it pins EOL `keepass` producers to test cross-version compatibility, and those drag in advisories the app's graph shouldn't carry), so `cargo test --workspace` does **not** run it — use `cargo test --manifest-path crates/keepass-spec-tests/Cargo.toml`. The `interop_*` tests there are oracle-mandatory: they fail rather than skip when `keepassxc-cli` is missing.
 
 ## Shipped (v0.5.0)
 
