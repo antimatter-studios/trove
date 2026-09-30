@@ -201,7 +201,7 @@ pub fn private_tmp_dir() -> Result<PathBuf> {
     let mut rng = rand::rngs::OsRng;
     let suffix =
         private_tmp_suffix(|bytes| rng.try_fill_bytes(bytes).map_err(anyhow::Error::from))?;
-    let dir = std::env::temp_dir().join(format!("trove-exec-{}-{suffix}", std::process::id()));
+    let dir = base_dir().join(format!("trove-exec-{}-{suffix}", std::process::id()));
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -215,6 +215,44 @@ pub fn private_tmp_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Where the per-run directory goes. On Linux, the first memory-backed choice
+/// of `$XDG_RUNTIME_DIR` and `/dev/shm`, since `/tmp` is often on disk and
+/// materialized files there can reach swap-free storage, backups and
+/// snapshots. Elsewhere, and when neither is available, the OS temp dir.
+fn base_dir() -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    pick_base_dir(
+        runtime.as_deref(),
+        std::env::temp_dir(),
+        troved::materialize::paths::is_tmpfs_backed,
+    )
+}
+
+fn pick_base_dir(
+    runtime: Option<&Path>,
+    temp: PathBuf,
+    memory_backed: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    if cfg!(target_os = "linux") {
+        let candidates = runtime.into_iter().chain([Path::new("/dev/shm")]);
+        for dir in candidates {
+            if dir.is_dir() && memory_backed(dir) {
+                return dir.to_path_buf();
+            }
+        }
+    }
+    temp
+}
+
+/// Whether files written under `dir` may land on disk, as far as trove can
+/// tell. Only Linux can say no; macOS and Windows have no memory-backed
+/// filesystem to check for.
+pub fn is_disk_backed(dir: &Path) -> bool {
+    !(cfg!(target_os = "linux") && troved::materialize::paths::is_tmpfs_backed(dir))
+}
+
 fn private_tmp_suffix(fill: impl FnOnce(&mut [u8]) -> Result<()>) -> Result<String> {
     let mut bytes = [0u8; 12];
     fill(&mut bytes).context("getting OS randomness for private exec directory")?;
@@ -225,6 +263,29 @@ fn private_tmp_suffix(fill: impl FnOnce(&mut [u8]) -> Result<()>) -> Result<Stri
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn base_dir_prefers_a_memory_backed_runtime_dir_on_linux() {
+        let runtime = TempDir::new().unwrap();
+        let temp = PathBuf::from("/fallback-temp");
+        let picked = pick_base_dir(Some(runtime.path()), temp.clone(), |d| d == runtime.path());
+        if cfg!(target_os = "linux") {
+            assert_eq!(picked, runtime.path());
+        } else {
+            assert_eq!(picked, temp, "only Linux looks past the OS temp dir");
+        }
+    }
+
+    #[test]
+    fn base_dir_falls_back_to_the_temp_dir_when_nothing_is_memory_backed() {
+        let runtime = TempDir::new().unwrap();
+        let temp = PathBuf::from("/fallback-temp");
+        assert_eq!(
+            pick_base_dir(Some(runtime.path()), temp.clone(), |_| false),
+            temp
+        );
+        assert_eq!(pick_base_dir(None, temp.clone(), |_| false), temp);
+    }
 
     #[test]
     fn env_names_are_sanitized() {
