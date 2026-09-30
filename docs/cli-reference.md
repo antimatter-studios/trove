@@ -1061,19 +1061,23 @@ daemon running, `daemons` only on Unix, `env-file` once per `.env.trove` found.
       "target_path": string,
       "vault"?: string,                         // the unlocked vault it came from
       "ttl_remaining_seconds": integer | null,  // null without a TTL
-      "exists": bool                            // whether the file is on disk now
+      "exists": bool,                           // whether the file is there now
+      "memory_backed": bool                     // true only on a Linux tmpfs
     }
   ]
 }
 ```
 
-`materialized` is `[]` when nothing is materialized.
+`materialized` is `[]` when nothing is materialized. `memory_backed` is `false`
+on macOS and Windows even for `/tmp`: neither has tmpfs, so the bytes are on
+disk and the wipe on lock is best effort.
 
 ```json
 {
   "materialized": [
     {
       "exists": true,
+      "memory_backed": true,
       "target_path": "/run/user/1000/kubeconfig",
       "title": "kube",
       "ttl_remaining_seconds": 3597,

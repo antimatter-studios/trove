@@ -673,6 +673,10 @@ pub struct MaterializeStatus {
     /// `true` if the file currently exists on disk. (Best-effort: race
     /// window between this stat and the user reading the response.)
     pub exists: bool,
+    /// `true` only when the target is on a memory-backed filesystem (tmpfs),
+    /// which only Linux can confirm. macOS has no tmpfs, so a file there is
+    /// on disk even when its path passes the `/tmp` allowlist.
+    pub memory_backed: bool,
 }
 
 /// Snapshot the current materialized-file store as serialisable status.
@@ -695,6 +699,7 @@ pub async fn status_snapshot(store: &MaterializedStore) -> Vec<MaterializeStatus
                 },
             ),
             exists: m.target.exists(),
+            memory_backed: paths::is_tmpfs_backed(&m.target),
         })
         .collect()
 }

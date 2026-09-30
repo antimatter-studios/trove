@@ -7091,7 +7091,18 @@ fn cmd_materialize_status(json: bool) -> Result<()> {
                 .unwrap_or_else(|| "?".to_string()),
             None => "none".to_string(),
         };
-        println!("{title}  {target}  ttl={ttl_str}  exists={exists}");
+        // Say plainly when the bytes are on disk: only Linux tmpfs keeps them
+        // off it, and macOS has none.
+        let backing = if entry
+            .get("memory_backed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "memory"
+        } else {
+            "disk"
+        };
+        println!("{title}  {target}  ttl={ttl_str}  exists={exists}  backing={backing}");
     }
     Ok(())
 }
