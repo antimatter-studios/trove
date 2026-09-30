@@ -191,6 +191,7 @@ impl Default for ForwardPolicy {
 }
 
 /// Load decision after reading KeeAgent.settings.
+#[derive(Debug)]
 pub enum Decision {
     /// Load `attachment` as the SSH private key, and treat `forward` as the
     /// entry's wishes for the copy pushed to the user's own agent.
@@ -198,8 +199,10 @@ pub enum Decision {
         attachment: String,
         forward: ForwardPolicy,
     },
-    /// Skip this entry (settings say not to load, or type unsupported).
+    /// Skip this entry: the settings say not to load it.
     Skip,
+    /// The settings ask for a key trove can't load, for the given reason.
+    Unusable(String),
 }
 
 /// Point existing settings at a renamed key attachment, preserving everything
@@ -218,9 +221,9 @@ pub fn rewrite_key_attachment(bytes: &[u8], new_name: &str) -> Option<Vec<u8>> {
         lifetime_secs,
         confirm,
         remove_at_close,
-    } = match parse(bytes, "") {
+    } = match parse(bytes) {
         Decision::Load { forward, .. } => forward,
-        Decision::Skip => return None,
+        Decision::Skip | Decision::Unusable(_) => return None,
     };
     let encoding = if decode(bytes).is_some() && bytes.starts_with(&[0xFF, 0xFE]) {
         Encoding::Utf16Le
@@ -291,17 +294,13 @@ pub fn decode(bytes: &[u8]) -> Option<String> {
 
 /// Parse the bytes of a `KeeAgent.settings` attachment.
 ///
-/// Returns `Skip` on parse failure — conservative, avoids loading a key the
-/// user didn't opt in to.
-pub fn parse(bytes: &[u8], entry_title: &str) -> Decision {
+/// Returns `Unusable` on parse failure — conservative, avoids loading a key
+/// the user didn't opt in to, and says why.
+pub fn parse(bytes: &[u8]) -> Decision {
     let decoded = match decode(bytes) {
         Some(s) => s,
         None => {
-            eprintln!(
-                "keeagent: '{}': KeeAgent.settings is neither UTF-8 nor UTF-16, skipping",
-                entry_title
-            );
-            return Decision::Skip;
+            return Decision::Unusable("KeeAgent.settings is neither UTF-8 nor UTF-16".into());
         }
     };
     let xml = decoded.as_str();
@@ -331,28 +330,26 @@ pub fn parse(bytes: &[u8], entry_title: &str) -> Decision {
                 attachment: name,
                 forward,
             },
-            _ => {
-                eprintln!(
-                    "keeagent: '{}': SelectedType=Attachment but AttachmentName missing",
-                    entry_title
-                );
-                Decision::Skip
-            }
+            _ => Decision::Unusable(
+                "KeeAgent.settings selects an attachment but doesn't name it".into(),
+            ),
         },
-        Some(other) => {
-            eprintln!(
-                "keeagent: '{}': SelectedType='{}' not supported (Attachment only); skipping",
-                entry_title, other
-            );
-            Decision::Skip
-        }
-        None => {
-            eprintln!(
-                "keeagent: '{}': SelectedType tag missing in KeeAgent.settings",
-                entry_title
-            );
-            Decision::Skip
-        }
+        // KeeAgent's "external file" option: the entry stores a path, not the
+        // key. That file is outside the vault's protection, and trove only
+        // serves keys the vault holds.
+        Some("file") => Decision::Unusable(match str_tag(xml, "FileName") {
+            Some(path) if !path.is_empty() => format!(
+                "KeeAgent.settings points at the external key file {path}; trove only \
+                 loads keys stored in the vault, so add it with `trove add ssh`"
+            ),
+            _ => "KeeAgent.settings points at an external key file; trove only loads keys \
+                  stored in the vault, so add it with `trove add ssh`"
+                .into(),
+        }),
+        Some(other) => Decision::Unusable(format!(
+            "KeeAgent.settings SelectedType '{other}' isn't supported (only attachment)"
+        )),
+        None => Decision::Unusable("KeeAgent.settings has no SelectedType".into()),
     }
 }
 
@@ -416,7 +413,7 @@ mod tests {
 
     #[test]
     fn reads_a_real_keepassxc_utf16_blob() {
-        match parse(&keepassxc_utf16("gitea_ed25519"), "gitea") {
+        match parse(&keepassxc_utf16("gitea_ed25519")) {
             Decision::Load {
                 attachment,
                 forward,
@@ -425,7 +422,9 @@ mod tests {
                 assert_eq!(forward.lifetime_secs, Some(600), "WhenAdding spelling");
                 assert!(!forward.confirm);
             }
-            Decision::Skip => panic!("a marked KeePassXC entry must not be skipped"),
+            Decision::Skip | Decision::Unusable(_) => {
+                panic!("a marked KeePassXC entry must not be skipped")
+            }
         }
     }
 
@@ -433,7 +432,7 @@ mod tests {
     fn utf16_without_a_bom_is_still_read() {
         let with_bom = keepassxc_utf16("id_ed25519");
         let no_bom = &with_bom[2..];
-        assert!(matches!(parse(no_bom, "e"), Decision::Load { .. }));
+        assert!(matches!(parse(no_bom), Decision::Load { .. }));
     }
 
     #[test]
@@ -447,7 +446,7 @@ mod tests {
         for u in text.encode_utf16() {
             be.extend_from_slice(&u.to_be_bytes());
         }
-        assert!(matches!(parse(&be, "e"), Decision::Load { .. }));
+        assert!(matches!(parse(&be), Decision::Load { .. }));
     }
 
     #[test]
@@ -460,7 +459,7 @@ mod tests {
                  </Location></EntrySettings>"
             );
             assert!(
-                matches!(parse(xml.as_bytes(), "e"), Decision::Load { .. }),
+                matches!(parse(xml.as_bytes()), Decision::Load { .. }),
                 "SelectedType={variant} should load"
             );
         }
@@ -472,13 +471,13 @@ mod tests {
     fn both_encodings_we_write_round_trip() {
         for enc in [Encoding::Utf8, Encoding::Utf16Le] {
             let bytes = settings_xml_encoded("id_ed25519", true, enc);
-            match parse(&bytes, "e") {
+            match parse(&bytes) {
                 Decision::Load { attachment, .. } => assert_eq!(attachment, "id_ed25519"),
-                Decision::Skip => panic!("{enc:?} did not round-trip"),
+                Decision::Skip | Decision::Unusable(_) => panic!("{enc:?} did not round-trip"),
             }
             let off = settings_xml_encoded("id_ed25519", false, enc);
             assert!(
-                matches!(parse(&off, "e"), Decision::Skip),
+                matches!(parse(&off), Decision::Skip),
                 "{enc:?} opt-out must skip"
             );
         }
@@ -537,15 +536,15 @@ mod tests {
     }
 
     fn policy_of(bytes: &[u8]) -> ForwardPolicy {
-        match parse(bytes, "e") {
+        match parse(bytes) {
             Decision::Load { forward, .. } => forward,
-            Decision::Skip => panic!("expected Load"),
+            Decision::Skip | Decision::Unusable(_) => panic!("expected Load"),
         }
     }
 
     #[test]
     fn loads_declared_attachment() {
-        let d = parse(&xml(true, true, "Attachment", "id_rsa"), "e");
+        let d = parse(&xml(true, true, "Attachment", "id_rsa"));
         assert!(matches!(d, Decision::Load { ref attachment, .. } if attachment == "id_rsa"));
     }
 
@@ -598,7 +597,7 @@ mod tests {
     #[test]
     fn our_own_settings_blob_round_trips() {
         let blob = settings_xml("id");
-        match parse(&blob, "e") {
+        match parse(&blob) {
             Decision::Load {
                 attachment,
                 forward,
@@ -606,14 +605,16 @@ mod tests {
                 assert_eq!(attachment, "id");
                 assert_eq!(forward, ForwardPolicy::default());
             }
-            Decision::Skip => panic!("trove's own settings blob must parse as Load"),
+            Decision::Skip | Decision::Unusable(_) => {
+                panic!("trove's own settings blob must parse as Load")
+            }
         }
     }
 
     #[test]
     fn skips_when_allow_false() {
         assert!(matches!(
-            parse(&xml(false, true, "Attachment", "id_rsa"), "e"),
+            parse(&xml(false, true, "Attachment", "id_rsa")),
             Decision::Skip
         ));
     }
@@ -621,22 +622,53 @@ mod tests {
     #[test]
     fn skips_when_add_at_open_false() {
         assert!(matches!(
-            parse(&xml(true, false, "Attachment", "id_rsa"), "e"),
+            parse(&xml(true, false, "Attachment", "id_rsa")),
             Decision::Skip
         ));
     }
 
     #[test]
-    fn skips_file_type() {
+    fn an_external_key_file_is_unusable_and_names_the_file() {
+        let bytes = br#"<?xml version="1.0"?>
+<EntrySettings>
+  <AllowUseOfSshKey>true</AllowUseOfSshKey>
+  <AddAtDatabaseOpen>true</AddAtDatabaseOpen>
+  <Location>
+    <SelectedType>file</SelectedType>
+    <AttachmentName />
+    <FileName>/home/user/.ssh/id_rsa</FileName>
+  </Location>
+</EntrySettings>"#;
+        match parse(bytes) {
+            Decision::Unusable(reason) => {
+                assert!(reason.contains("/home/user/.ssh/id_rsa"), "{reason}");
+                assert!(reason.contains("trove add ssh"), "{reason}");
+            }
+            other => panic!("expected Unusable, got {other:?}"),
+        }
         assert!(matches!(
-            parse(&xml(true, true, "File", "/home/user/.ssh/id_rsa"), "e"),
+            parse(&xml(true, true, "File", "")),
+            Decision::Unusable(_)
+        ));
+    }
+
+    #[test]
+    fn an_external_key_file_the_entry_opted_out_of_is_just_skipped() {
+        assert!(matches!(
+            parse(&xml(false, true, "File", "")),
             Decision::Skip
         ));
     }
 
     #[test]
-    fn skips_bad_utf8() {
-        assert!(matches!(parse(&[0xFF, 0xFE], "e"), Decision::Skip));
+    fn undecodable_settings_are_unusable() {
+        // A UTF-16LE BOM followed by a lone surrogate.
+        assert!(matches!(
+            parse(&[0xFF, 0xFE, 0x00, 0xD8]),
+            Decision::Unusable(_)
+        ));
+        // A bare BOM decodes to nothing, which asks for nothing.
+        assert!(matches!(parse(&[0xFF, 0xFE]), Decision::Skip));
     }
 
     #[test]
@@ -647,6 +679,6 @@ mod tests {
   <AddAtDatabaseOpen>true</AddAtDatabaseOpen>
   <Location><SelectedType>Attachment</SelectedType></Location>
 </EntrySettings>"#;
-        assert!(matches!(parse(bytes, "e"), Decision::Skip));
+        assert!(matches!(parse(bytes), Decision::Unusable(_)));
     }
 }

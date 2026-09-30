@@ -1005,8 +1005,9 @@ are `null`.
 
 `skipped_keys` lists every key in the unlocked vaults that troved found but
 couldn't load: a passphrase-protected key its entry's Password doesn't
-decrypt, an RSA key under 2048 bits, an
-unsupported algorithm, an OpenPGP export with no signing key. `unlock` warns
+decrypt, an RSA key under 2048 bits, an unsupported algorithm, a KeeAgent entry
+that points at an external key file instead of holding the key, an OpenPGP
+export with no signing key. `unlock` warns
 about the same keys on stderr. The human `trove status` output lists them under
 "Skipped keys" when there are any.
 
