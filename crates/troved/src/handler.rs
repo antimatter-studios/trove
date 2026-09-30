@@ -2402,7 +2402,7 @@ fn try_load_ssh_attachment(
         Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
             eprintln!(
                 "ssh-agent: skipping {}/{}: unsupported key algorithm {} \
-                 (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)",
+                 (supported: ed25519, rsa>=2048, ecdsa-nistp256/384/521)",
                 display, attachment_name, alg
             );
             None

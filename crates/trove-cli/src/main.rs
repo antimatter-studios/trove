@@ -3562,8 +3562,9 @@ fn validate_ssh_private_key(bytes: &[u8], comment: &str) -> Result<()> {
         ))),
         Err(ParseError::UnsupportedAlgorithm(alg)) => Err(user_err(format!(
             "unsupported key algorithm: {alg} \
-             (supported: ed25519, rsa>=2048, ecdsa-nistp256, ecdsa-nistp384)"
+             (supported: ed25519, rsa>=2048, ecdsa-nistp256/384/521)"
         ))),
+        Err(e @ ParseError::Dsa) => Err(user_err(e.to_string())),
         Err(ParseError::NotOpenssh(detail)) => {
             if looks_like_public_key(bytes) {
                 Err(user_err(

@@ -5,11 +5,11 @@
 //!   * RSA (>= 2048 bits)  — hash chosen at sign time per agent flag bits
 //!   * ECDSA P-256 (nistp256)
 //!   * ECDSA P-384 (nistp384)
+//!   * ECDSA P-521 (nistp521)
 //!
 //! We deliberately skip:
 //!   * RSA below 2048 bits (weak; warn and skip).
-//!   * DSA (deprecated by OpenSSH; weak, fixed-160-bit).
-//!   * ECDSA P-521 (rare; can be added if there's demand).
+//!   * DSA (removed from current OpenSSH, so no server takes it).
 //!
 //! All signing happens through `ssh_key::PrivateKey`, which keeps key bytes
 //! inside RustCrypto's zeroizing wrappers. Our `LoadedKey` only stores the
@@ -121,6 +121,8 @@ pub enum ParseError {
     NotOpenssh(String),
     #[error("unsupported key algorithm: {0}")]
     UnsupportedAlgorithm(String),
+    #[error("DSA keys are not supported: OpenSSH removed DSA, so current servers reject them")]
+    Dsa,
     #[error("encrypted private keys are not supported")]
     Encrypted,
     #[error("RSA key too short: {0} bits (minimum 2048)")]
@@ -370,7 +372,7 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
         return Err(ParseError::Encrypted);
     }
 
-    // Algorithm gate — we accept ed25519, rsa, ecdsa(p256), ecdsa(p384).
+    // Algorithm gate — we accept ed25519, rsa, ecdsa(p256/p384/p521).
     match pk.algorithm() {
         Algorithm::Ed25519 => {}
         Algorithm::Rsa { .. } => {
@@ -394,6 +396,10 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
         Algorithm::Ecdsa {
             curve: EcdsaCurve::NistP384,
         } => {}
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP521,
+        } => {}
+        Algorithm::Dsa => return Err(ParseError::Dsa),
         other => {
             return Err(ParseError::UnsupportedAlgorithm(other.as_str().to_string()));
         }
@@ -538,9 +544,10 @@ fn openssh_pem_body(s: &str) -> Option<Zeroizing<Vec<u8>>> {
 /// width, or `None` if there is nothing to fix.
 ///
 /// The scalar is an `mpint`, which drops leading zero bytes, so ssh-keygen
-/// writes a P-256 key with a 31-byte scalar about once in 256. ssh-key 0.6.7
-/// only accepts exactly the curve size (or one more, for a sign byte) and
-/// fails such a key with "length invalid". Zero-padding the scalar to the curve
+/// writes a P-256 key with a 31-byte scalar about once in 256, and a P-521
+/// key (whose top byte is only ever 0 or 1) with a 65-byte one about half the
+/// time. ssh-key 0.6.7 only accepts exactly the curve size (or one more, for a
+/// sign byte) and fails such a key with "length invalid". Zero-padding the scalar to the curve
 /// size is the same number, in a form ssh-key reads.
 fn pad_short_ecdsa_scalar(blob: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     const MAGIC: &[u8] = b"openssh-key-v1\0";
@@ -563,6 +570,7 @@ fn pad_short_ecdsa_scalar(blob: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     let size = match key_type {
         b"ecdsa-sha2-nistp256" => 32,
         b"ecdsa-sha2-nistp384" => 48,
+        b"ecdsa-sha2-nistp521" => 66,
         _ => return None,
     };
     let curve = private.string()?;
@@ -800,23 +808,55 @@ dHJvdmUudGVzdAEC
         assert!(matches!(res, Err(ParseError::NotOpenssh(_))));
     }
 
-    /// We deliberately skip ECDSA P-521. Parsing must report it as
-    /// `UnsupportedAlgorithm` rather than panic or silently accept it.
     #[test]
-    fn rejects_ecdsa_p521_as_unsupported() {
-        // Generating a P-521 key with ssh-key requires the `p521` feature,
-        // which we don't enable. Instead we verify our gate by feeding a
-        // synthetic but parseable key: easiest is to call `ssh-keygen`
-        // through the test harness if available, otherwise skip silently —
-        // the gate itself is exercised through the match arms in
-        // `parse_private_key`. We at least sanity-check the rejection path
-        // for a totally bogus PEM that *says* it's a key but isn't ours.
-        // (Without `p521` we can't synthesise a real one in-process.)
-        let res = parse_private_key(
-            b"-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n-----END OPENSSH PRIVATE KEY-----\n",
-            "x",
-        );
-        assert!(matches!(res, Err(ParseError::NotOpenssh(_))));
+    fn parses_ecdsa_p521_and_signs() {
+        let pk = random_key(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP521,
+        });
+        let pem = pem_of(&pk);
+        let loaded = parse_private_key(pem.as_bytes(), "test@p521").expect("parse p521");
+        assert_eq!(&loaded.public_blob[0..4], &19u32.to_be_bytes());
+        assert_eq!(&loaded.public_blob[4..23], b"ecdsa-sha2-nistp521");
+        let sig = loaded.sign(b"hello", 0).expect("sign p521");
+        assert_eq!(&sig[4..23], b"ecdsa-sha2-nistp521");
+        loaded.agent_add_body("p521").expect("forward body");
+    }
+
+    /// ssh-keygen writes a P-521 scalar as 65 bytes whenever its top byte is
+    /// zero, about half of all keys. Generate until one turns up (odds of
+    /// missing in 32 tries: 1 in 4 billion) and check it loads and signs.
+    #[test]
+    fn parses_ssh_keygen_p521_keys_with_a_short_scalar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..32 {
+            let path = dir.path().join(format!("k{i}"));
+            let status = std::process::Command::new("ssh-keygen")
+                .args([
+                    "-q", "-t", "ecdsa", "-b", "521", "-N", "", "-C", "p521", "-f",
+                ])
+                .arg(&path)
+                .status();
+            let Ok(status) = status else {
+                eprintln!("SKIP: ssh-keygen not on $PATH");
+                return;
+            };
+            assert!(status.success(), "ssh-keygen failed");
+            let pem = std::fs::read_to_string(&path).expect("read key");
+            if PrivateKey::from_openssh(&pem).is_ok() {
+                continue; // full-width scalar; try another
+            }
+            let loaded = parse_private_key(pem.as_bytes(), "p521").expect("parse short p521");
+            assert_eq!(&loaded.public_blob[4..23], b"ecdsa-sha2-nistp521");
+            let pub_line = std::fs::read_to_string(path.with_extension("pub")).expect("read pub");
+            assert_eq!(
+                openssh_public_line(pem.as_bytes(), "p521").expect("public line"),
+                pub_line,
+                "derived public key differs from ssh-keygen's"
+            );
+            loaded.sign(b"hello", 0).expect("sign");
+            return;
+        }
+        panic!("32 ssh-keygen P-521 keys and none with a short scalar");
     }
 
     /// Generate a fresh 2048-bit RSA key via the `rsa` crate. Slow (a few

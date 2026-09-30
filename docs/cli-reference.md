@@ -1713,9 +1713,9 @@ Standard OpenSSH agent protocol on a separate socket. We implement:
 - `SSH_AGENTC_LOCK` (22) and `SSH_AGENTC_UNLOCK` (23) (`ssh-add -x` / `-X`)
 - `SSH_AGENTC_EXTENSION` (27) for `session-bind@openssh.com`
 
-Anything else returns `SSH_AGENT_FAILURE` (5). Supported algorithms: ed25519, RSA >= 2048 bits (signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332 flag selection), ECDSA P-256, ECDSA P-384.
+Anything else returns `SSH_AGENT_FAILURE` (5). Supported algorithms: ed25519, RSA >= 2048 bits (signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332 flag selection), ECDSA P-256, P-384 and P-521.
 
-`ssh-add` and friends will only see identities for entries whose `id` attachment parses as one of the supported algorithms. Encrypted, weak (RSA < 2048), or unsupported (DSA, P-521, Ed448) keys are skipped at unlock time with a one-line warning to stderr.
+`ssh-add` and friends will only see identities for entries whose `id` attachment parses as one of the supported algorithms. Encrypted, weak (RSA < 2048) or DSA keys (removed from current OpenSSH) are skipped at unlock time with a one-line warning to stderr.
 
 ### GPG Assuan protocol
 
