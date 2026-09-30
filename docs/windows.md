@@ -2,11 +2,11 @@
 
 Native Windows is experimental: see [stability.md](stability.md#platforms).
 
-Status: **notes, not implemented.** Native Windows builds work (named-pipe IPC,
-control/ssh/gpg channels), but trove serves its agents on its *own* pipe names,
-so no Windows client finds them without `SSH_AUTH_SOCK` pointing at the hashed
-pipe name (`trove ssh-agent socket` prints it). This captures what makes Windows
-different and what to do about it.
+Status: native Windows builds work (named-pipe IPC, control/ssh/gpg channels).
+The SSH agent also serves `\\.\pipe\openssh-ssh-agent` when nothing else
+has it, so Windows OpenSSH finds it with `SSH_AUTH_SOCK` unset. Forwarding into
+another agent when that pipe is taken isn't built yet. This captures what makes
+Windows different and what is left to do.
 
 ## The core difference: Windows has a well-known agent pipe
 
@@ -49,8 +49,14 @@ and the policy is simple:
 
 `ipc::pipe_name` ([crates/troved/src/ipc.rs](../crates/troved/src/ipc.rs))
 derives `\\.\pipe\trove-<fnv1a-hash>` from the socket path. Deterministic and
-collision-free, but not a name anything else looks for. Nothing binds the
-well-known agent pipe.
+collision-free, but not a name anything else looks for; `trove ssh-agent
+socket` prints it.
+
+The SSH agent additionally binds `\\.\pipe\openssh-ssh-agent` at startup, with
+the same keys and the same `ssh-add -x` lock. If another process already owns
+it (typically the OpenSSH Authentication Agent service, when enabled), troved
+logs that and serves only its own pipe; clients then need `SSH_AUTH_SOCK` set to
+it. `TROVE_SSH_OPENSSH_PIPE=0` turns the well-known pipe off.
 
 ## Three client worlds, only one of which the pipe serves
 
@@ -116,8 +122,8 @@ The threat model's [three barriers](threat-model.md) are not all present here.
 
 ## Suggested order
 
-1. Bind `\\.\pipe\openssh-ssh-agent` when free; fall back to forwarding when
-   taken. Biggest win, no key material leaves troved.
+1. ~~Bind `\\.\pipe\openssh-ssh-agent` when free.~~ Done; the forwarding
+   fallback for when it's taken needs step 2.
 2. Port `ssh_agent::forward` to named pipes so the fallback exists.
 3. Settle the Git for Windows question and fix the README either way.
 4. Investigate Gpg4win's assuan socket emulation before touching gpg on Windows.
