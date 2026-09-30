@@ -43,6 +43,11 @@ can read another process's argv is a same-user attacker, who can already read
 the clipboard directly — so the hash does not widen exposure beyond what that
 attacker already has. Accepted as consistent with the clipboard threat model
 (same-user processes are trusted-ish; cross-user is blocked by OS perms).
+
+**Update 2026-09-30 — fixed.** The premise was wrong: `ps` shows every
+user's argv on macOS and on Linux without `hidepid`, so the hash was visible
+across users. The clearer now reads the hash from stdin, and
+`crates/trove-cli/tests/clip_e2e.rs` checks the clearer's argv (#252).
 Documented here rather than changed, because the alternatives (a shared key
 on argv, or the secret on disk) are each worse.
 
