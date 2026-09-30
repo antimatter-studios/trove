@@ -20,6 +20,10 @@ Crate source referenced below is the published crate, e.g.
 
 ## Bug A — KDBX-3.1 reader collapses every attachment to id 0
 
+**Status:** fixed on the antimatter-studios/keepass-rs `trove` branch that trove
+pins, and sent upstream as sseemayer/keepass-rs#384. The matrix still links the
+published crates, so its `Xfail` stays until a release carries the fix.
+
 - **Product:** `keepass` crate (keepass-rs)
 - **Affected versions:** 0.12.5 **and** 0.13.10 (current)
 - **Severity:** high — silent data loss / corruption: a vault written by
@@ -86,6 +90,10 @@ Producer `keepassxc-cli` (writes KDBX 3.1) → consumer `keepass` crate, fixture
 ---
 
 ## Bug B — KDBX-3.1 reader can't open a vault containing a zero-byte attachment
+
+**Status:** fixed on the antimatter-studios/keepass-rs `trove` branch that trove
+pins, and sent upstream as sseemayer/keepass-rs#384. The matrix still links the
+published crates, so its `Xfail` stays until a release carries the fix.
 
 - **Product:** `keepass` crate (keepass-rs)
 - **Affected versions:** 0.12.5 **and** 0.13.10 (current)
