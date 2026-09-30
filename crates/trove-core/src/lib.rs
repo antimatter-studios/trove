@@ -46,7 +46,7 @@ pub const RECYCLE_BIN_GROUP: &str = "Recycle Bin";
 /// keepass-rs keeps child groups in a set, so a KDBX written by it carries no
 /// folder order of its own. Anything that lets people arrange folders records
 /// the position here instead; KeePassXC preserves unknown custom data.
-pub const GROUP_POSITION_KEY: &str = "Trove.Position";
+const GROUP_POSITION_KEY: &str = "Trove.Position";
 
 /// Stable identifier for an entry within a vault.
 ///
@@ -79,6 +79,7 @@ impl std::str::FromStr for EntryId {
 
 /// Non-secret summary of an entry. Suitable for listing without unlocking secrets.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EntrySummary {
     pub id: EntryId,
     pub title: String,
@@ -105,13 +106,29 @@ pub struct EntrySummary {
 /// Exact field constraint for a vault search. Names compare without case;
 /// values compare exactly and only unprotected fields are eligible.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SearchFieldFilter {
     pub name: String,
     pub value: Option<String>,
 }
 
+impl SearchFieldFilter {
+    /// Match entries that have a field called `name`, holding exactly
+    /// `value` when one is given.
+    pub fn new(name: impl Into<String>, value: Option<String>) -> Self {
+        Self {
+            name: name.into(),
+            value,
+        }
+    }
+}
+
 /// Filters shared by offline and daemon-backed entry search.
+///
+/// Start from [`SearchQuery::default`] and add filters with the `with_*`
+/// methods.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct SearchQuery {
     pub term: Option<String>,
     pub fields: Vec<SearchFieldFilter>,
@@ -119,8 +136,36 @@ pub struct SearchQuery {
     pub attachments: Vec<String>,
 }
 
+impl SearchQuery {
+    /// Match a case-insensitive term against the entry's unprotected fields,
+    /// group path, tags and attachment names.
+    pub fn with_term(mut self, term: Option<String>) -> Self {
+        self.term = term;
+        self
+    }
+
+    /// Require a field matching at least one of these constraints.
+    pub fn with_fields(mut self, fields: Vec<SearchFieldFilter>) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    /// Require at least one of these tags, direct or inherited.
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Require an attachment whose name matches at least one of these globs.
+    pub fn with_attachments(mut self, attachments: Vec<String>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+}
+
 /// An entry summary and the safe metadata surfaces that caused it to match.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SearchHit {
     pub entry: EntrySummary,
     pub matched: Vec<String>,
@@ -128,6 +173,7 @@ pub struct SearchHit {
 
 /// Non-secret summary of a group and its direct/inherited KeePass tags.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GroupSummary {
     /// Names of the groups from the database root to this group. Empty for
     /// the root group itself.
@@ -144,6 +190,7 @@ pub struct GroupSummary {
 /// Safe metadata for agent discovery. Values are limited to unprotected
 /// `About.*` fields; password and attachment contents are never included.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntryDescription {
     pub path: String,
     pub username: Option<String>,
@@ -156,6 +203,7 @@ pub struct EntryDescription {
 
 /// Attachment name and byte size, without the attachment contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AttachmentDescription {
     pub name: String,
     pub size: usize,
@@ -163,6 +211,7 @@ pub struct AttachmentDescription {
 
 /// A preflighted recursive group transfer, suitable for dry-run output.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct GroupTransferPlan {
     /// Source and destination paths for entries, in stable path order.
     pub entries: Vec<(String, String)>,
@@ -207,6 +256,7 @@ impl EntrySummary {
 
 /// Counts from a [`Vault::merge_from`], by merge-event kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MergeSummary {
     pub created: usize,
     pub updated: usize,
@@ -237,6 +287,7 @@ impl MergeSummary {
 
 /// What a [`Vault::sync_with`] did in each direction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncSummary {
     /// Changes the other copy brought into this vault.
     pub pulled: MergeSummary,
@@ -250,6 +301,7 @@ pub struct SyncSummary {
 
 /// Non-secret database facts for `db-info`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DbInfo {
     pub version: String,
     pub cipher: String,
@@ -262,6 +314,7 @@ pub struct DbInfo {
 
 /// One generated TOTP code plus its validity window, for display.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TotpCode {
     /// The code digits (6–8 chars, or whatever the URI specifies).
     pub code: String,
@@ -287,6 +340,7 @@ pub use keepass::ChallengeResponseKey;
 
 /// What a [`Vault::rename_attachment`] moved, so a caller can finish the job.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RenamedAttachment {
     /// The settings that followed the attachment, by their new names.
     pub moved_fields: Vec<String>,

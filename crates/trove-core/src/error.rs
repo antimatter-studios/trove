@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("vault file already exists: {0}")]
     AlreadyExists(PathBuf),

@@ -1571,10 +1571,7 @@ async fn search(
             if name.is_empty() {
                 return Err("search field name cannot be empty".to_string());
             }
-            Ok(SearchFieldFilter {
-                name: name.to_string(),
-                value,
-            })
+            Ok(SearchFieldFilter::new(name, value))
         })
         .collect();
     let field_filters = match field_filters {
@@ -1591,12 +1588,11 @@ async fn search(
     // Searches the union — a hit in any unlocked vault counts. Unlike a
     // title-addressed read there is nothing to disambiguate: search returns
     // every match by design.
-    let query = SearchQuery {
-        term,
-        fields: field_filters,
-        tags: tags.to_vec(),
-        attachments: attachments.to_vec(),
-    };
+    let query = SearchQuery::default()
+        .with_term(term)
+        .with_fields(field_filters)
+        .with_tags(tags.to_vec())
+        .with_attachments(attachments.to_vec());
     let entries: Vec<EntryDto> = guard
         .iter()
         .flat_map(|vault| vault.search_entries_with(&query))

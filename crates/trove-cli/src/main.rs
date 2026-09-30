@@ -4766,12 +4766,11 @@ fn cmd_search(vault: Option<&Path>, options: SearchOptions, pw_stdin: bool) -> R
             "search needs a term or at least one --field, --tag, or --attachment filter"
         ));
     }
-    let query = SearchQuery {
-        term: options.term.clone(),
-        fields: fields.clone(),
-        tags: options.tags.clone(),
-        attachments: options.attachments.clone(),
-    };
+    let query = SearchQuery::default()
+        .with_term(options.term.clone())
+        .with_fields(fields.clone())
+        .with_tags(options.tags.clone())
+        .with_attachments(options.attachments.clone());
     match vault {
         Some(path) => {
             let v = open_vault(path, pw_stdin)?;
@@ -4838,10 +4837,7 @@ fn parse_search_fields(fields: &[String]) -> Result<Vec<SearchFieldFilter>> {
             if name.is_empty() {
                 return Err(anyhow!("search field name cannot be empty"));
             }
-            Ok(SearchFieldFilter {
-                name: name.to_string(),
-                value,
-            })
+            Ok(SearchFieldFilter::new(name, value))
         })
         .collect()
 }
@@ -5227,14 +5223,14 @@ fn group_transfer_from_json(value: &Value) -> Result<GroupTransferPlan> {
             })
             .collect()
     };
-    Ok(GroupTransferPlan {
-        entries: parse_pairs(entries)?,
-        groups: parse_pairs(groups)?,
-        materialize_fields_removed: value
-            .get("materialize_fields_removed")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize,
-    })
+    let mut plan = GroupTransferPlan::default();
+    plan.entries = parse_pairs(entries)?;
+    plan.groups = parse_pairs(groups)?;
+    plan.materialize_fields_removed = value
+        .get("materialize_fields_removed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    Ok(plan)
 }
 
 fn print_group_transfer(
@@ -6896,6 +6892,9 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
                 | CoreError::NoTotp(_)
                 | CoreError::Totp(_)
                 | CoreError::Io(_) => EXIT_USER_ERROR,
+                // `Error` is non_exhaustive: a variant added later counts as
+                // a user error until it is classified here.
+                _ => EXIT_USER_ERROR,
             };
         }
     }

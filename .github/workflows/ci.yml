@@ -5,6 +5,7 @@
 #   - Test (ubuntu-latest, macos-latest): cargo test --workspace --locked
 #   - Clippy (ubuntu-latest):              cargo clippy ... -- -D warnings (--no-deps)
 #   - Fmt (ubuntu-latest):                 cargo fmt --all -- --check
+#   - Semver (ubuntu-latest):              cargo semver-checks on trove-core
 #   - Audit (ubuntu-latest):               cargo audit (advisory check)
 #
 # Notes:
@@ -191,6 +192,70 @@ jobs:
         # Check-only; do not auto-format. If this fails, run the fmt-fix
         # workflow (manual dispatch) or `cargo fmt --all` locally.
         run: cargo fmt --all -- --check
+
+  semver:
+    name: Semver (trove-core)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The baseline is a git revision, which has to be in the clone.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
+        with:
+          key: ubuntu-latest-semver-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: semver
+          # Cache the cargo-semver-checks binary across runs.
+          cache-all-crates: true
+
+      - name: Install cargo-semver-checks
+        run: |
+          if ! command -v cargo-semver-checks >/dev/null 2>&1; then
+            cargo install --locked cargo-semver-checks
+          fi
+
+      - name: cargo semver-checks
+        # Each change is checked against the code it lands on: the PR's base,
+        # or the previous main commit on a push. Checking against the last
+        # crates.io release instead would fail every PR after a deliberate
+        # break until the next release. A manual run checks against crates.io.
+        #
+        # A break has to be declared with `!` in the conventional-commit
+        # header (the PR title, which becomes the squash commit), e.g.
+        # `feat(core)!: ...`. Otherwise no break is allowed: `patch` before
+        # 1.0, where cargo treats 0.y.z -> 0.y.(z+1) as compatible, and
+        # `minor` from 1.0. Retitling a PR needs a new push to rerun this.
+        #
+        # Default features only: the tool builds the crate without our
+        # Cargo.lock, and the `yubikey` feature's `challenge_response`
+        # doesn't build against the newest `nusb`.
+        env:
+          HEADER: ${{ github.event.pull_request.title || github.event.head_commit.message }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          header=$(printf '%s\n' "$HEADER" | head -n1)
+          version=$(cargo metadata --no-deps --format-version 1 --locked |
+            jq -r '.packages[] | select(.name == "trove-core") | .version')
+          if [[ "$header" =~ ^[a-z]+(\([^\)]*\))?!: ]]; then
+            release=major
+          elif [[ "$version" == 0.* ]]; then
+            release=patch
+          else
+            release=minor
+          fi
+          baseline=()
+          if [[ -n "$BASE" && ! "$BASE" =~ ^0+$ ]]; then
+            baseline=(--baseline-rev "$BASE")
+          fi
+          echo "release type: $release, baseline: ${BASE:-crates.io}"
+          cargo semver-checks --package trove-core --default-features \
+            --release-type "$release" "${baseline[@]}"
 
   audit:
     name: Audit
