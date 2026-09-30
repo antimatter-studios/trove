@@ -4524,10 +4524,7 @@ fn cmd_keychain(action: &KeychainAction, pw_stdin: bool) -> Result<()> {
             if *json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "stored": stored,
-                        "vault": description,
-                    }))?
+                    serde_json::to_string_pretty(&keychain_status_json(stored, &description))?
                 );
             } else if stored {
                 println!("stored: {description}");
@@ -4537,6 +4534,15 @@ fn cmd_keychain(action: &KeychainAction, pw_stdin: bool) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `keychain status --json`. A function so a unit test can pin its shape: the
+/// command itself needs a terminal and a keychain.
+fn keychain_status_json(stored: bool, vault: &str) -> Value {
+    serde_json::json!({
+        "stored": stored,
+        "vault": vault,
+    })
 }
 
 fn cmd_show(
@@ -7246,6 +7252,16 @@ mod classify_tests {
     #[test]
     fn classify_exit_defaults_to_user_error() {
         assert_eq!(classify_exit(&anyhow!("totally unknown")), EXIT_USER_ERROR);
+    }
+
+    /// `keychain status --json` is covered by the stability promise, and the
+    /// e2e shape tests can't reach it.
+    #[test]
+    fn keychain_status_json_shape() {
+        assert_eq!(
+            keychain_status_json(true, "/v.kdbx"),
+            serde_json::json!({"stored": true, "vault": "/v.kdbx"})
+        );
     }
 }
 

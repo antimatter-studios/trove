@@ -26,6 +26,31 @@ trove [OPTIONS] <COMMAND>
 
 `unlock` is the exception: it is inherently daemon-directed, so it keeps its own positional `<VAULT>` and ignores `--vault`.
 
+## Exit codes
+
+From [`classify_exit`](../crates/trove-cli/src/main.rs), which walks the whole
+error chain:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | User-recoverable error: bad path, missing entry or group, entry/group/attachment already exists, non-empty group, missing or invalid TOTP, I/O error, no daemon or nothing unlocked, and anything not listed under 2 |
+| 2 | Vault-level error: bad password or keyfile, corrupt or unreadable kdbx, or the file changed on disk in a way a save could not merge. From the daemon, only `unlock` reports 2, for an error mentioning a password, kdbx or decryption |
+
+Outside `classify_exit`:
+
+- A command-line usage error (unknown flag, missing argument) exits **2**,
+  clap's code, the same as a vault error. `--help` and `--version` exit 0.
+  `--env <PATH>` written without `=` exits 1 with a hint.
+- `trove exec` exits with the child's exit code, or 1 when the child was
+  killed by a signal.
+- `trove unlock` that opens a session subshell (`--shell`, or a terminal
+  without `--export`) exits with the shell's exit code: on Unix the shell
+  replaces `trove`.
+- `trove analyze` exits 1 when it finds a breached or empty password, with or
+  without `--json`.
+- `trove daemons kill` exits 1 if any target could not be stopped.
+
 ## trove unlock
 
 ```
@@ -42,14 +67,6 @@ agent keys and materialized files remain available.
 
 Entry-addressing commands accept a `group/sub/title` **entry path**; intermediate groups are created on write as needed.
 
-Exit codes (from [`classify_exit`](../crates/trove-cli/src/main.rs)):
-
-| Code | Meaning |
-| --- | --- |
-| 0 | Success |
-| 1 | User-recoverable error (bad path, missing entry, I/O error) |
-| 2 | Vault-level error (bad password, corrupt kdbx) |
-
 ## trove init
 
 ```
@@ -63,10 +80,14 @@ Backed by [`Vault::create`](../crates/trove-core/src/lib.rs). The default kdbx c
 ## trove list
 
 ```
-trove [--vault <PATH>] list
+trove [--vault <PATH>] list [--json] [--show-id]
 ```
 
-Print one line per entry: `<uuid>  <path>  [attachments: ...]`. Recursively walks all groups. With `--vault` it reads the file directly (offline); without it, it lists the daemon's currently unlocked vault.
+Print one line per entry: its path and a summary of its attachments, with the
+entry's UUID first when `--show-id` is given. Recursively walks all groups.
+With `--vault` it reads the file directly (offline); without it, it lists the
+daemon's currently unlocked vault. `--json` prints
+[entry summaries](#trove-list---json-trove-search---json).
 
 ## trove show
 
@@ -85,6 +106,7 @@ reveals protected values where the selected mode returns them.
 | `--base64` | With exactly one `--attr`, print its value as standard base64 with no wrapping. A terminal gets a final newline; a pipe gets none. |
 | `--show-protected` | Reveal protected values instead of masking/refusing. |
 | `--totp` | Print the entry's CURRENT TOTP code (from its `otp` otpauth URI, KeePassXC's format). Stdout is exactly the code (pipes cleanly); a TTY gets the remaining validity on stderr. Daemon mode uses the code-gated `GetTotp` RPC — only the ephemeral code crosses the wire, never the shared secret. |
+| `--json` | Print the entry as one [JSON object](#trove-show---json). Not with `--attr` or `--totp`. |
 
 Daemon mode: the summary view uses the ungated `ShowEntry` RPC (which never
 carries protected values); `--attr` values and the revealed password go
@@ -101,8 +123,8 @@ includes the path, username, URL, unprotected notes, whether a password is
 present, attachment names and sizes, and unprotected custom fields whose names
 start with `About.`. Protected values and attachment contents are never
 returned. `About.*` is an optional naming convention, not a fixed schema:
-Trove does not validate field names or interpret their meanings. Use `--json`
-for structured output suitable for agents.
+Trove does not validate field names or interpret their meanings. Use
+[`--json`](#trove-describe---json) for structured output suitable for agents.
 
 The daemon view is read-only and does not require `TROVE_SESSION`; with multiple
 vaults unlocked, Trove asks you to leave only one open to disambiguate group
@@ -128,10 +150,11 @@ repeated filters within a category are alternatives.
   `?` wildcards, e.g. `--attachment '*.p8'`.
 
 Without a term, at least one filter is required. Human output remains
-list-shaped. `--json` returns entry summaries with a `matched` array naming
-the safe surfaces that caused each hit, such as `field About.Purpose`,
-`tag signing`, or `attachment AuthKey_1234.p8`. Protected names and values do
-not participate in substring or exact field searches.
+list-shaped. `--json` returns [entry summaries](#trove-list---json-trove-search---json)
+with a `matched` array naming the safe surfaces that caused each hit, such as
+`field About.Purpose`, `tag signing`, or `attachment AuthKey_1234.p8`.
+Protected names and values do not participate in substring or exact field
+searches.
 
 ## trove edit
 
@@ -618,11 +641,12 @@ retune the Argon2 KDF. At least one change required. Offline-only.
 ## trove db-info
 
 ```
-trove --vault <PATH> db-info
+trove --vault <PATH> db-info [--json]
 ```
 
 Non-secret facts: format version, cipher, compression, KDF parameters,
 entry/group counts, recycle-bin presence. Offline-only.
+[`--json`](#trove-db-info---json) prints them as one object.
 
 ## trove clip
 
@@ -661,8 +685,8 @@ trove estimate [PASSWORD] [--json]
 zxcvbn strength rating: length, entropy bits, 0–4 score, and the estimator's
 warning/suggestions. Omit the argument to read one line from stdin — the
 preferred form, since argv is visible in `ps` and shell history.
-`--json` emits `{length, guesses, entropy_bits, score, warning, suggestions}`;
-the password itself is never included.
+[`--json`](#trove-estimate---json) prints the same facts as one object; the
+password itself is never included.
 
 ## trove analyze
 
@@ -675,33 +699,432 @@ binary-searched in the sorted `pwned-passwords` dump at `<FILE>` (the multi-GB
 file is seeked, never loaded; nothing is ever sent anywhere). Breached entries
  print as `<path>  seen N times in breaches`. Exits 1 when anything is
  breached — scriptable as a CI gate. Offline-only: requires `--vault`.
-`--json` writes one object with `checked_passwords`, `breached_passwords`, and
- `empty_passwords`, and `findings` to stdout, including when a finding is
- present; the exit code remains nonzero in that case. Empty or missing
- passwords print as `<path>  empty password` in human mode and are counted
- separately from passwords checked against the dump. JSON findings identify
- breached entries with `breach_count` and empty entries with
- `finding: "empty_password"`.
+Empty or missing passwords print as `<path>  empty password` in human mode,
+fail the audit the same way, and are counted separately from passwords
+checked against the dump. [`--json`](#trove-analyze---json) writes the counts
+and findings as one object, including when a finding is present; the exit code
+remains nonzero in that case.
 
-## Read and status commands
+## JSON output
 
-These commands keep human-readable output by default. `--json` emits stable
-objects and arrays for scripts:
+Sixteen commands take `--json`: `list`, `search`, `show`, `describe`,
+`group list`, `db-info`, `estimate`, `analyze`, `status`, `idle get`,
+`materialize-status`, `ssh-agent list`, `ssh-agent sockets`, `gpg-agent list`,
+`daemons list` and `keychain status`. Each prints one pretty-printed JSON
+document on stdout; errors still go to stderr with the usual
+[exit codes](#exit-codes).
 
-| Command | JSON shape |
-| --- | --- |
-| `trove status --json` | `{daemon_running, vault_paths, idle_timeout_seconds, idle_remaining_seconds, ssh_key_count, gpg_key_count, materialized_file_count}`; absent daemon reports `false`, empty paths, zero counts, and null timers. |
-| `trove materialize-status --json` | `{materialized: [{title, target_path, vault, ttl_remaining_seconds, exists}, ...]}`; empty state is an empty array. |
-| `trove idle get --json` | `{timeout_seconds, remaining_seconds}`; `remaining_seconds` is null when no idle countdown is active. |
-| `trove ssh-agent list --json` | Array of `{algo, blob_b64, comment}` public identities; `[]` when no daemon is running. |
-| `trove ssh-agent sockets --json` | Array of `{socket, keys: [{algo, blob_b64, comment}]}` private agent sockets; `[]` when no daemon is running. |
-| `trove gpg-agent list --json` | Array of `{keygrip, key_type, comment}`; `[]` when no daemon is running. |
-| `trove keychain status <VAULT> --json` | `{stored, vault}`; does not include the stored password. macOS only. |
+These shapes are covered by the [stability promise](stability.md): a minor
+version may add fields, but never renames, removes or retypes one. Parse by
+name, ignore fields you don't know, and don't rely on key order (keys currently
+come out sorted). The shapes are pinned by
+[json_shapes_e2e.rs](../crates/trove-cli/tests/json_shapes_e2e.rs), so a change
+fails CI until this section is updated with it.
 
- For example, `trove status --json | jq '.ssh_key_count'` prints the current
- identity count without parsing display text. Daemon-backed commands retain
- their documented session and daemon requirements; JSON output does not grant
- additional access.
+Notation below: `string`, `integer` (a whole number), `number` (may have a
+fraction), `bool`; `T | null` means the key is always there but may be null;
+`"key"?` means the key may be missing; `[T]` is an array of `T`;
+`{string: T}` is an object with arbitrary keys.
+
+JSON output doesn't grant extra access: daemon-backed commands keep their
+session and daemon requirements. For example,
+`trove status --json | jq '.ssh_key_count'` prints the identity count without
+parsing display text.
+
+### `trove list --json`, `trove search --json`
+
+An array of entry summaries, in vault order:
+
+```
+[
+  {
+    "id": string,               // entry UUID
+    "title": string,
+    "path"?: string,            // "Web/forge"; offline (--vault) only, see below
+    "username": string | null,
+    "url": string | null,
+    "attachments": [string],    // attachment names
+    "group_path": [string],     // containing groups, root first; [] at the top level
+    "tags": [string],           // the entry's own tags
+    "inherited_tags": [string], // tags of containing groups, root first
+    "matched"?: [string]        // search only: what caused the hit
+  }
+]
+```
+
+Daemon mode leaves out `path`; join `group_path` and `title` with `/` to get
+it. `matched` names each surface that matched: `title`, `username`, `url`,
+`notes`, `group_path`, `field <NAME>`, `tag <TAG>` or `attachment <NAME>`.
+
+```json
+[
+  {
+    "attachments": ["recovery.txt"],
+    "group_path": ["Web"],
+    "id": "73d1336a-9fc5-41d7-83e3-b4c15e03387a",
+    "inherited_tags": ["team"],
+    "matched": ["title", "url"],
+    "path": "Web/forge",
+    "tags": ["web"],
+    "title": "forge",
+    "url": "https://forge.example",
+    "username": "octo"
+  }
+]
+```
+
+### `trove show --json`
+
+One object:
+
+```
+{
+  "path": string,
+  "title": string,
+  "username": string | null,
+  "url": string | null,
+  "notes": string | null,
+  "password"?: string,          // only with --show-protected
+  "fields": {string: string | null},
+  "attachments": [string],
+  "tags": [string],
+  "inherited_tags": [string]
+}
+```
+
+`fields` holds the custom fields, keyed by name. Offline, the values are
+strings. In daemon mode they are all `null`: the summary carries names only, and
+each value is a separate code-gated read, so fetch the ones you want with
+`--attr`. Protected fields (`otp`) are left out unless `--show-protected` is
+given.
+
+```json
+{
+  "attachments": ["recovery.txt"],
+  "fields": {"About.Purpose": "code hosting"},
+  "inherited_tags": ["team"],
+  "notes": "work account",
+  "path": "Web/forge",
+  "tags": ["web"],
+  "title": "forge",
+  "url": "https://forge.example",
+  "username": "octo"
+}
+```
+
+### `trove describe --json`
+
+An array with one object per described entry (one for an entry path, every
+entry at or under it for a group path). Same shape in both modes:
+
+```
+[
+  {
+    "path": string,
+    "username": string | null,
+    "url": string | null,
+    "notes": string | null,
+    "has_password": bool,
+    "attributes": {string: string},   // unprotected About.* fields
+    "attachments": [
+      {"name": string, "size": integer}   // size in bytes
+    ]
+  }
+]
+```
+
+```json
+[
+  {
+    "attachments": [{"name": "recovery.txt", "size": 6}],
+    "attributes": {"About.Purpose": "code hosting"},
+    "has_password": true,
+    "notes": "work account",
+    "path": "Web/forge",
+    "url": "https://forge.example",
+    "username": "octo"
+  }
+]
+```
+
+### `trove group list --json`
+
+An array with one object per group, `Root` and empty groups included:
+
+```
+[
+  {
+    "path": string,             // "Root", "Web", "Web/Team"
+    "tags": [string],           // the group's own tags
+    "inherited_tags": [string]  // tags of its ancestors
+  }
+]
+```
+
+```json
+[
+  {"inherited_tags": [], "path": "Root", "tags": []},
+  {"inherited_tags": [], "path": "Web", "tags": ["team"]}
+]
+```
+
+### `trove db-info --json`
+
+```
+{
+  "path": string,        // the --vault path as given
+  "version": string,     // "KDBX4.1"
+  "cipher": string,      // "AES256"
+  "compression": string, // "GZip"
+  "kdf": string,         // free-form description of the KDF and its parameters
+  "entries": integer,
+  "groups": integer,     // not counting the root group
+  "recycle_bin": bool
+}
+```
+
+```json
+{
+  "cipher": "AES256",
+  "compression": "GZip",
+  "entries": 1,
+  "groups": 1,
+  "kdf": "Argon2 { iterations: 50, memory: 1048576, parallelism: 4, version: Version13 }",
+  "path": "/home/me/vaults/work.kdbx",
+  "recycle_bin": false,
+  "version": "KDBX4.1"
+}
+```
+
+### `trove estimate --json`
+
+```
+{
+  "length": integer,        // characters
+  "guesses": integer,       // zxcvbn's guess estimate
+  "entropy_bits": number,   // log2(guesses)
+  "score": integer,         // 0 (weakest) to 4
+  "warning": string | null,
+  "suggestions": [string]
+}
+```
+
+```json
+{
+  "entropy_bits": 12.972441366563535,
+  "guesses": 8037,
+  "length": 7,
+  "score": 1,
+  "suggestions": ["Add another word or two. Uncommon words are better."],
+  "warning": "This is a very common password."
+}
+```
+
+### `trove analyze --json`
+
+```
+{
+  "checked_passwords": integer,   // looked up in the dump
+  "breached_passwords": integer,
+  "empty_passwords": integer,     // empty or missing, not looked up
+  "findings": [
+    {"entry_path": string, "breach_count": integer}   // a breached password
+    | {"entry_path": string, "finding": "empty_password"}
+  ]
+}
+```
+
+A breached finding has `breach_count` and no `finding`; an empty one has
+`finding` and no `breach_count`. The command exits 1 whenever `findings` is
+not empty.
+
+```json
+{
+  "breached_passwords": 1,
+  "checked_passwords": 1,
+  "empty_passwords": 1,
+  "findings": [
+    {"breach_count": 1337, "entry_path": "Web/forge"},
+    {"entry_path": "bare", "finding": "empty_password"}
+  ]
+}
+```
+
+### `trove status --json`
+
+```
+{
+  "daemon_running": bool,
+  "vault_paths": [string],                  // every unlocked vault
+  "idle_timeout_seconds": integer | null,   // 0 when auto-lock is off
+  "idle_remaining_seconds": integer | null, // null when no countdown is running
+  "ssh_key_count": integer,
+  "gpg_key_count": integer,
+  "materialized_file_count": integer
+}
+```
+
+With no daemon running it still succeeds: `daemon_running` is `false`,
+`vault_paths` is empty, the counts are 0 and both timers are `null`.
+
+```json
+{
+  "daemon_running": true,
+  "gpg_key_count": 1,
+  "idle_remaining_seconds": 597,
+  "idle_timeout_seconds": 600,
+  "materialized_file_count": 1,
+  "ssh_key_count": 1,
+  "vault_paths": ["/home/me/vaults/work.kdbx"]
+}
+```
+
+### `trove idle get --json`
+
+```
+{
+  "timeout_seconds": integer,           // 0 when auto-lock is off
+  "remaining_seconds": integer | null   // null when no countdown is running
+}
+```
+
+```json
+{"remaining_seconds": 597, "timeout_seconds": 600}
+```
+
+### `trove materialize-status --json`
+
+```
+{
+  "materialized": [
+    {
+      "title": string,                          // entry title
+      "target_path": string,
+      "vault"?: string,                         // the unlocked vault it came from
+      "ttl_remaining_seconds": integer | null,  // null without a TTL
+      "exists": bool                            // whether the file is on disk now
+    }
+  ]
+}
+```
+
+`materialized` is `[]` when nothing is materialized.
+
+```json
+{
+  "materialized": [
+    {
+      "exists": true,
+      "target_path": "/run/user/1000/kubeconfig",
+      "title": "kube",
+      "ttl_remaining_seconds": 3597,
+      "vault": "/home/me/vaults/work.kdbx"
+    }
+  ]
+}
+```
+
+### `trove ssh-agent list --json`
+
+The keys the main agent serves; `[]` when no daemon is running.
+
+```
+[
+  {
+    "algo": string,      // "ssh-ed25519"
+    "blob_b64": string,  // base64 public-key blob, as in authorized_keys
+    "comment": string
+  }
+]
+```
+
+```json
+[{"algo": "ssh-ed25519", "blob_b64": "AAAAC3NzaC1lZDI1NTE5AAAA…", "comment": "Infra/s1"}]
+```
+
+### `trove ssh-agent sockets --json`
+
+The private sockets from `ssh-agent empty`, in creation order, each with its
+keys in the `ssh-agent list` shape; `[]` when no daemon is running.
+
+```
+[
+  {
+    "socket": string,
+    "keys": [{"algo": string, "blob_b64": string, "comment": string}]
+  }
+]
+```
+
+```json
+[
+  {
+    "keys": [{"algo": "ssh-ed25519", "blob_b64": "AAAAC3NzaC1lZDI1NTE5AAAA…", "comment": "Infra/s1"}],
+    "socket": "/run/user/1000/trove-ssh-3f9c0a1b2d4e5f60.sock"
+  }
+]
+```
+
+### `trove gpg-agent list --json`
+
+The GPG keys the agent serves; `[]` when no daemon is running.
+
+```
+[
+  {
+    "keygrip": string,   // lowercase hex, gpg-agent's key identifier
+    "key_type": string,  // algorithm/role, e.g. "ed25519/sign"
+    "comment": string
+  }
+]
+```
+
+```json
+[{"comment": "git-signing", "key_type": "ed25519/sign", "keygrip": "237e7f46842208d3fbe82251a64a3b8bab609a27"}]
+```
+
+### `trove daemons list --json`
+
+Unix only. One object per daemon found; `[]` when there are none.
+
+```
+[
+  {
+    "control_socket": string,
+    "lock_path": string,
+    "pid": integer | null,    // null when the lockfile carries no PID
+    "alive": bool,            // false: leftover files of a dead daemon
+    "socket_exists": bool
+  }
+]
+```
+
+```json
+[
+  {
+    "alive": true,
+    "control_socket": "/run/user/1000/trove.sock",
+    "lock_path": "/run/user/1000/trove.lock",
+    "pid": 48213,
+    "socket_exists": true
+  }
+]
+```
+
+### `trove keychain status --json`
+
+macOS only. Never includes the stored password.
+
+```
+{
+  "stored": bool,
+  "vault": string   // the keychain account: the vault's absolute path
+}
+```
+
+```json
+{"stored": true, "vault": "/Users/me/vaults/work.kdbx"}
+```
 
 ## trove ssh-agent
 
@@ -838,7 +1261,8 @@ trove ssh-agent sockets [--json]
 
 List the private sockets the daemon serves, in creation order, with the keys on
 each one as indented `ssh-add -L` lines. Use it to find sockets a caller forgot
-to close. Prints nothing (or `[]` with `--json`) when no daemon is running.
+to close. Prints nothing (or `[]` with [`--json`](#trove-ssh-agent-sockets---json))
+when no daemon is running.
 
 ### Telling the agent which server a key is for
 
@@ -1075,8 +1499,8 @@ current one and is otherwise invisible).
 files from a crashed/killed daemon). Liveness is decided by a non-blocking probe
 of the singleton `flock`, which the kernel releases the instant the holder dies,
 so it needs no PID bookkeeping; the PID is read from the lockfile the live daemon
-stamped. `--json` emits an array of `{control_socket, lock_path, pid, alive,
-socket_exists}`. Read-only — never spawns a daemon.
+stamped. [`--json`](#trove-daemons-list---json) emits an array of daemon
+records. Read-only — never spawns a daemon.
 
 `kill` stops a straggler. Pass a `SOCKET` from `list`, or `--all` for every
 daemon found. A **live** daemon is asked to shut down over its control socket
