@@ -472,6 +472,13 @@ enum Command {
         /// Remove all KeePass-native tags before applying `--tag` values.
         #[arg(long = "clear-tags")]
         clear_tags: bool,
+        /// Set when the entry expires: a date (2030-06-15, midnight UTC) or a
+        /// UTC time (2030-06-15T08:30:00Z). Advisory, as in KeePassXC.
+        #[arg(long, value_name = "WHEN", conflicts_with = "no_expiry")]
+        expires: Option<String>,
+        /// Make the entry never expire.
+        #[arg(long)]
+        no_expiry: bool,
     },
 
     /// Remove an entry. Default is the KeePassXC behavior: move it to the
@@ -2046,6 +2053,8 @@ fn run(cli: Cli) -> Result<()> {
             tags,
             untags,
             clear_tags,
+            expires,
+            no_expiry,
         } => cmd_edit(
             vault,
             &entry_path,
@@ -2059,6 +2068,12 @@ fn run(cli: Cli) -> Result<()> {
             &tags,
             &untags,
             clear_tags,
+            // Some(Some(when)) sets an expiry, Some(None) clears it.
+            match (expires, no_expiry) {
+                (Some(when), _) => Some(Some(when)),
+                (None, true) => Some(None),
+                (None, false) => None,
+            },
             pw_stdin,
         ),
         Command::Rm {
@@ -4946,6 +4961,7 @@ fn print_show_summary(
     attachments: &[String],
     tags: &[String],
     inherited_tags: &[String],
+    expires: Option<&str>,
 ) {
     println!("Path: {display_path}");
     println!("Title: {title}");
@@ -4968,6 +4984,43 @@ fn print_show_summary(
     if !inherited_tags.is_empty() {
         println!("Inherited tags: {}", inherited_tags.join(", "));
     }
+    if let Some(when) = expires {
+        let expired = is_expired(when);
+        println!("Expires: {when}{}", if expired { " (expired)" } else { "" });
+    }
+}
+
+/// Whether an RFC 3339 UTC expiry time is in the past. RFC 3339 UTC strings
+/// of the same shape sort as times, so a string compare is enough.
+fn is_expired(when: &str) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (now / 86_400) as i64;
+    let secs = now % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    let now = format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    );
+    when < now.as_str()
+}
+
+/// Howard Hinnant's civil_from_days: days since the Unix epoch to a date.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
 }
 
 /// One entry as the JSON shape `show --json` prints.
@@ -4994,6 +5047,7 @@ struct ShowJson<'a> {
     attachments: &'a [String],
     tags: &'a [String],
     inherited_tags: &'a [String],
+    expires: Option<&'a str>,
 }
 
 fn entry_show_json(e: ShowJson<'_>) -> Value {
@@ -5016,6 +5070,7 @@ fn entry_show_json(e: ShowJson<'_>) -> Value {
         "inherited_tags".into(),
         Value::from(e.inherited_tags.to_vec()),
     );
+    out.insert("expires".into(), e.expires.map_or(Value::Null, Value::from));
     Value::Object(out)
 }
 
@@ -5204,6 +5259,7 @@ fn cmd_show(
                         attachments: &summary.attachment_names,
                         tags: &summary.tags,
                         inherited_tags: &summary.inherited_tags,
+                        expires: summary.expires.as_deref(),
                     }))?
                 );
                 return Ok(());
@@ -5219,6 +5275,7 @@ fn cmd_show(
                 &summary.attachment_names,
                 &summary.tags,
                 &summary.inherited_tags,
+                summary.expires.as_deref(),
             );
         }
         None => {
@@ -5310,6 +5367,7 @@ fn cmd_show(
                         attachments: &list("attachments"),
                         tags: &list("tags"),
                         inherited_tags: &list("inherited_tags"),
+                        expires: s("expires").as_deref(),
                     }))?
                 );
                 return Ok(());
@@ -5325,6 +5383,7 @@ fn cmd_show(
                 &list("attachments"),
                 &list("tags"),
                 &list("inherited_tags"),
+                s("expires").as_deref(),
             );
         }
     }
@@ -5528,6 +5587,7 @@ fn cmd_edit(
     tags: &[String],
     untags: &[String],
     clear_tags: bool,
+    expiry: Option<Option<String>>,
     pw_stdin: bool,
 ) -> Result<()> {
     let mut sets = std::collections::BTreeMap::new();
@@ -5546,16 +5606,17 @@ fn cmd_edit(
             prompt_entry_password().context("reading new password")?,
         );
     }
-    if sets.is_empty()
+    let other_changes = !(sets.is_empty()
         && unsets.is_empty()
         && title.is_none()
         && tags.is_empty()
         && untags.is_empty()
-        && !clear_tags
-    {
+        && !clear_tags);
+    if !other_changes && expiry.is_none() {
         return Err(anyhow!(
             "nothing to change: pass --title/--username/--url/--notes, \
-             --password-prompt, --set/--unset, --tag/--untag or --clear-tags"
+             --password-prompt, --set/--unset, --tag/--untag, --clear-tags, \
+             --expires or --no-expiry"
         ));
     }
     match vault {
@@ -5596,10 +5657,26 @@ fn cmd_edit(
                 }
                 v.set_tags(&id, &current).context("setting tags")?;
             }
+            if let Some(when) = &expiry {
+                v.set_entry_expiry(&id, when.as_deref())?;
+            }
             v.save().context("saving vault")?;
         }
         None => {
             let code = require_session_code()?;
+            // Expiry first: a --title in the same edit renames the entry, and
+            // the path would no longer find it afterwards.
+            if let Some(when) = expiry {
+                daemon_call(&daemon::Request::SetExpiry {
+                    path: entry_path.to_string(),
+                    expires: when,
+                    code: code.clone(),
+                })?;
+            }
+            if !other_changes {
+                println!("updated '{entry_path}'");
+                return Ok(());
+            }
             daemon_call(&daemon::Request::EditEntry {
                 path: entry_path.to_string(),
                 title: title.map(str::to_string),

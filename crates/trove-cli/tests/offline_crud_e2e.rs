@@ -1006,3 +1006,113 @@ fn list_names_the_ssh_key_and_ignores_keeagent_settings() {
         "and it counts as a key:\n{text}"
     );
 }
+
+#[test]
+fn edit_sets_and_clears_expiry_and_show_reports_it() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("expiry.kdbx");
+    let v = vault.to_str().unwrap();
+    let pw = format!("{PASSWORD}\n");
+    let mut vault_obj = Vault::create(&vault, PASSWORD).unwrap();
+    vault_obj.add_entry("Web/old").unwrap();
+    vault_obj.add_entry("Web/new").unwrap();
+    vault_obj.save().unwrap();
+    drop(vault_obj);
+
+    for (entry, when) in [
+        ("Web/old", "2001-02-03"),
+        ("Web/new", "2999-01-01T12:00:00Z"),
+    ] {
+        assert_ok(
+            &run_trove(
+                &trove,
+                &[
+                    "--vault",
+                    v,
+                    "--password-stdin",
+                    "edit",
+                    entry,
+                    "--expires",
+                    when,
+                ],
+                &pw,
+            ),
+            "edit --expires",
+        );
+    }
+    let old = stdout_str(&run_trove(
+        &trove,
+        &["--vault", v, "--password-stdin", "show", "Web/old"],
+        &pw,
+    ));
+    assert!(
+        old.contains("Expires: 2001-02-03T00:00:00+00:00 (expired)"),
+        "{old}"
+    );
+    let new = stdout_str(&run_trove(
+        &trove,
+        &["--vault", v, "--password-stdin", "show", "Web/new"],
+        &pw,
+    ));
+    assert!(
+        new.contains("Expires: 2999-01-01T12:00:00+00:00") && !new.contains("expired"),
+        "{new}"
+    );
+    let json = stdout_str(&run_trove(
+        &trove,
+        &[
+            "--vault",
+            v,
+            "--password-stdin",
+            "show",
+            "Web/new",
+            "--json",
+        ],
+        &pw,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["expires"], "2999-01-01T12:00:00+00:00");
+
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                v,
+                "--password-stdin",
+                "edit",
+                "Web/new",
+                "--no-expiry",
+            ],
+            &pw,
+        ),
+        "edit --no-expiry",
+    );
+    let new = stdout_str(&run_trove(
+        &trove,
+        &["--vault", v, "--password-stdin", "show", "Web/new"],
+        &pw,
+    ));
+    assert!(!new.contains("Expires"), "{new}");
+
+    assert_fails(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                v,
+                "--password-stdin",
+                "edit",
+                "Web/new",
+                "--expires",
+                "soon",
+            ],
+            &pw,
+        ),
+        "edit --expires soon",
+    );
+}

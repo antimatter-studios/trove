@@ -213,6 +213,7 @@ fn show_spec(field_values: &str) -> Value {
         "attachments": ["string"],
         "tags": ["string"],
         "inherited_tags": ["string"],
+        "expires": "string|null",
     })
 }
 
