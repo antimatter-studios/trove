@@ -11,6 +11,7 @@
 compile_error!("troved currently supports macOS, Linux and Windows only");
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +33,16 @@ use troved::ssh_agent::{self, KeyStore};
 /// Default idle-lock timeout when no `TROVE_IDLE_TIMEOUT` env var is set.
 /// 15 minutes matches the spec ("v0.0.6.0 default").
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
+
+/// Set by `--resident`: stay up after the last vault locks (explicitly or on
+/// idle), so a service manager (launchd, systemd, `brew services`) keeps the
+/// agent sockets available between unlocks. Only an explicit `shutdown` or a
+/// signal stops a resident daemon.
+static RESIDENT: AtomicBool = AtomicBool::new(false);
+
+fn resident() -> bool {
+    RESIDENT.load(Ordering::Relaxed)
+}
 
 /// Read the idle timeout override from the environment. Empty / unset / bad
 /// values fall back to the default. `0` disables auto-lock entirely.
@@ -108,7 +119,7 @@ fn build_lock_callback(
             // files still need cleanup.)
             let vault_open = !state.lock().await.is_empty();
             let has_materialized = !mat_store.read().await.is_empty();
-            if !vault_open && !has_materialized {
+            if !vault_open && !has_materialized && !resident() {
                 shutdown.notify_one();
             }
         });
@@ -183,6 +194,7 @@ async fn handle_connection(
 
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
+                let explicit_shutdown = matches!(req, Request::Shutdown);
                 let handled = handle(
                     req,
                     &state,
@@ -195,7 +207,7 @@ async fn handle_connection(
                     peer_uid,
                 )
                 .await;
-                if handled.shutdown {
+                if handled.shutdown && (explicit_shutdown || !resident()) {
                     // Best-effort: write the ack, then signal the main loop.
                     let _ = write_response(&mut write_half, &handled.response).await;
                     shutdown.notify_one();
@@ -232,6 +244,9 @@ async fn main() -> Result<()> {
     {
         println!("troved {}", env!("TROVE_BUILD_VERSION"));
         return Ok(());
+    }
+    if std::env::args().skip(1).any(|a| a == "--resident") {
+        RESIDENT.store(true, Ordering::Relaxed);
     }
 
     // Banner the build version + pid on every startup. The daemon boots rarely
@@ -321,6 +336,9 @@ async fn main() -> Result<()> {
         shutdown.clone(),
     );
     let idle: Arc<IdleTracker> = IdleTracker::new(idle_timeout, lock_cb);
+    if resident() {
+        eprintln!("resident: staying up after the last vault locks");
+    }
     eprintln!(
         "idle-lock timeout: {} seconds{}",
         idle_timeout.as_secs(),

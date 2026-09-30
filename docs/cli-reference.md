@@ -1550,10 +1550,12 @@ socket/lock files removed. Exits non-zero if any target could not be stopped.
 ## troved — the daemon
 
 ```
-troved
+troved [--resident]
 ```
 
 Long-running. Listens on three Unix sockets; serves clients until `shutdown` RPC, SIGINT, or SIGTERM. Removes its own socket files on exit.
+
+Without `--resident`, it also exits once the last vault is locked (by `trove lock` or the idle timer) and nothing materialized is left to clean up; the next `trove` command starts a fresh one. `--resident` keeps it running after that, with its agent sockets up and empty, for a service manager to own. The launchd agent and systemd user unit in [`packaging/`](../packaging/) and `brew services start trove` all run `troved --resident` and restart it if it dies, but not after a clean exit.
 
 Permission model: every socket is bound by the daemon, then `chmod 0600` so only the same UID can connect.
 
