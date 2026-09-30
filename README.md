@@ -146,7 +146,7 @@ export SSH_AUTH_SOCK="$(trove ssh-agent socket)"
 # materialization plan in one shot.
 trove unlock my-vault.kdbx
 
-ssh-add -L          # should list every ed25519/RSA-3072+/P-256/P-384 key in the vault
+ssh-add -L          # should list every ed25519/RSA-3072+/ECDSA key in the vault
 ssh github.com      # signs against the daemon
 ```
 

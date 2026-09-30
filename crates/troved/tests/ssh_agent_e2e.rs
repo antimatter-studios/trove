@@ -101,6 +101,21 @@ async fn ssh_add_lists_and_dumps_vault_ecdsa_p384_key() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_add_lists_and_dumps_vault_ecdsa_p521_key() {
+    if !have_tool("ssh-keygen") || !have_tool("ssh-add") {
+        eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
+        return;
+    }
+    run_e2e_for(
+        &["-t", "ecdsa", "-b", "521"],
+        "ecdsa-sha2-nistp521",
+        "(ECDSA)",
+        "test@trove-p521",
+    )
+    .await;
+}
+
 /// Drive the full vault → agent → ssh-add round-trip for a single key type.
 ///
 /// `keygen_args` is the prefix passed to `ssh-keygen` (e.g. `["-t","rsa","-b","3072"]`);

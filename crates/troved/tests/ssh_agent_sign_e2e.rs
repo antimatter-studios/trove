@@ -123,6 +123,15 @@ async fn agent_signs_and_verifies_ecdsa_p384() {
     sign_and_verify(&["-t", "ecdsa", "-b", "384"], 0).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_signs_and_verifies_ecdsa_p521() {
+    if !have_tool("ssh-keygen") {
+        eprintln!("SKIP: ssh-keygen not on $PATH");
+        return;
+    }
+    sign_and_verify(&["-t", "ecdsa", "-b", "521"], 0).await;
+}
+
 async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
     let tmp = TempDir::new().expect("tempdir");
     let key_path = tmp.path().join("k");
