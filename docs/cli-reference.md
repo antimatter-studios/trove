@@ -356,6 +356,36 @@ trove [--vault <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE> <COMMENT>
 
 Stores the private key in the `id` attachment, the derived public key in `id.pub`, and `KeeAgent.settings`. An existing entry has its attachments replaced in place. See also `trove generate ssh` (mints a keypair in-tool).
 
+### trove import-ssh
+
+```
+trove [--vault <PATH>] import-ssh [DIR] [--group <GROUP>] [--yes] [--dry-run]
+```
+
+| Argument / flag | Description |
+| --- | --- |
+| `[DIR]` | Directory to scan, not recursively. Default `~/.ssh`. |
+| `--group <GROUP>` | Group for the new entries. Default `ssh`. |
+| `--yes`, `-y` | Import every usable key without asking. |
+| `--dry-run` | List what would be imported and what would be skipped; change nothing. |
+
+Bootstraps a vault from existing keys without a `trove add ssh` per key. Every
+regular file holding a PEM private key or a PuTTY key is offered, whatever its
+name; `known_hosts`, `config`, `authorized_keys` and `*.pub` never are. Each
+key becomes `<GROUP>/<file name>`, stored as `add ssh` stores it, with the
+comment from the matching `.pub` (or the file name when there is none).
+
+A passphrase-protected key is decrypted on the terminal, as `add ssh` does, and
+stored without its passphrase; with no terminal it is skipped. Keys trove can't
+serve are listed on stderr with the reason and left out: DSA, RSA under 2048
+bits and PuTTY `.ppk`. So is a key whose entry already exists; importing never
+overwrites. Without `--yes` it asks
+about each key on the terminal, and refuses to run when there is none to ask on
+(including with `--password-stdin`). The key files are never changed or removed.
+
+Offline, the vault is opened once and saved once. Through the daemon, each key
+is served by the agent as soon as it is stored.
+
 ### trove add gpg
 
 ```
