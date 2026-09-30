@@ -55,4 +55,7 @@ pub enum Error {
 
     #[error("totp error: {0}")]
     Totp(String),
+
+    #[error("challenge-response key: {0}")]
+    ChallengeResponse(String),
 }

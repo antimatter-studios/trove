@@ -1491,18 +1491,17 @@ fn global_keyfile() -> Option<&'static [u8]> {
 /// once in `run()` (device lookup happens there, so a missing YubiKey fails
 /// fast before any password prompt). Same read-once model as [`KEY_FILE`].
 #[cfg(feature = "yubikey")]
-static CHALLENGE_RESPONSE: std::sync::OnceLock<Option<trove_core::ChallengeResponseKey>> =
+static CHALLENGE_RESPONSE: std::sync::OnceLock<Option<trove_core::ChallengeResponse>> =
     std::sync::OnceLock::new();
 
 #[cfg(feature = "yubikey")]
-fn global_challenge_response() -> Option<&'static trove_core::ChallengeResponseKey> {
+fn global_challenge_response() -> Option<&'static trove_core::ChallengeResponse> {
     CHALLENGE_RESPONSE.get().and_then(|o| o.as_ref())
 }
 
 /// Resolve `--yubikey SLOT[:SERIAL]` to a device-backed provider.
 #[cfg(feature = "yubikey")]
-fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponseKey> {
-    use trove_core::ChallengeResponseKey;
+fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponse> {
     let (slot, serial) = match spec.split_once(':') {
         Some((s, ser)) => (
             s,
@@ -1510,15 +1509,12 @@ fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponseKey> {
         ),
         None => (spec, None),
     };
-    if !["1", "2"].contains(&slot) {
-        return Err(anyhow!("--yubikey slot must be 1 or 2, got '{slot}'"));
-    }
-    let yubikey = ChallengeResponseKey::get_yubikey(serial)
-        .map_err(|e| anyhow!("locating YubiKey: {e:?}"))?;
-    Ok(ChallengeResponseKey::YubikeyChallenge(
-        yubikey,
-        slot.to_string(),
-    ))
+    let slot = match slot {
+        "1" => 1,
+        "2" => 2,
+        _ => return Err(anyhow!("--yubikey slot must be 1 or 2, got '{slot}'")),
+    };
+    Ok(trove_core::ChallengeResponse::yubikey(slot, serial)?)
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -1599,9 +1595,7 @@ fn run(cli: Cli) -> Result<()> {
         // before any password prompt.
         let cr = match (&cli.yubikey, &cli.cr_secret_hex) {
             (Some(spec), _) => Some(resolve_yubikey(spec)?),
-            (None, Some(hex)) => Some(trove_core::ChallengeResponseKey::LocalChallenge(
-                hex.clone(),
-            )),
+            (None, Some(hex)) => Some(trove_core::ChallengeResponse::software(hex.clone())),
             (None, None) => None,
         };
         CHALLENGE_RESPONSE.set(cr).expect("run() is called once");
