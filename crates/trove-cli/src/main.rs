@@ -11,6 +11,7 @@ mod doctor;
 mod exec;
 mod gitcred;
 mod hibp;
+mod import_ssh;
 mod ipc;
 mod keychain;
 mod pwgen;
@@ -291,6 +292,34 @@ enum Command {
         /// Print the checks as a JSON object.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Copy the SSH private keys in a directory (`~/.ssh` by default) into the
+    /// vault, one entry per key, asking about each.
+    ///
+    /// Keys are found by content, so any file holding a private key is offered
+    /// whatever its name; `known_hosts`, `config`, `authorized_keys` and
+    /// `*.pub` never are. The title is the file name, the comment comes from
+    /// the matching `.pub`. A passphrase-protected key is decrypted on the
+    /// terminal and stored without its passphrase. Keys trove can't serve
+    /// (DSA, RSA under 2048 bits, PuTTY `.ppk`) are listed with the reason and
+    /// left out, and so is a key whose entry already exists. The files themselves
+    /// are never changed or removed.
+    ///
+    /// Targets the vault unlocked in the running daemon by default; pass the
+    /// global `--vault <path>` to write a kdbx file directly.
+    ImportSsh {
+        /// Directory to scan. Defaults to ~/.ssh.
+        dir: Option<PathBuf>,
+        /// Group to create the entries in.
+        #[arg(long, default_value = "ssh")]
+        group: String,
+        /// Import every usable key without asking.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Show what would be imported, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Print a human-readable summary of the running `troved`'s state:
@@ -1679,6 +1708,12 @@ fn run(cli: Cli) -> Result<()> {
         Command::Add {
             resource: AddResource::Gpg { title, key },
         } => cmd_add_gpg(vault, &title, &key, pw_stdin),
+        Command::ImportSsh {
+            dir,
+            group,
+            yes,
+            dry_run,
+        } => cmd_import_ssh(dir, &group, yes, dry_run, vault, pw_stdin),
         Command::Add {
             resource:
                 AddResource::File {
@@ -3382,31 +3417,7 @@ fn store_ssh_key(
         // Offline: open the kdbx file directly and write to it.
         Some(vault_path) => {
             let mut vault = open_vault(vault_path, pw_stdin)?;
-            let id = match vault.find_by_title(entry_path) {
-                Some(existing) => existing,
-                None => vault
-                    .add_entry(entry_path)
-                    .with_context(|| format!("creating entry '{entry_path}'"))?,
-            };
-            vault
-                .attach_binary(&id, SSH_KEY_ATTACHMENT, key_bytes)
-                .context("attaching ssh key")?;
-            // KeeAgent.settings so KeePassXC's SSH agent picks this entry up.
-            let settings = troved::ssh_agent::keeagent::settings_xml(SSH_KEY_ATTACHMENT);
-            vault
-                .attach_binary(&id, troved::ssh_agent::keeagent::ATTACHMENT_NAME, &settings)
-                .context("attaching KeeAgent.settings")?;
-            // Persist the public key as real data so any tool can read it
-            // without deriving it from the private key (a trove-only ability).
-            let pub_line = ssh_public_line(key_bytes, comment)?;
-            vault
-                .attach_binary(&id, SSH_PUBKEY_ATTACHMENT, pub_line.as_bytes())
-                .context("attaching public key")?;
-            if let Some(user) = user {
-                vault
-                    .set_field(&id, "UserName", user)
-                    .context("setting UserName")?;
-            }
+            let id = attach_ssh_key(&mut vault, entry_path, key_bytes, comment, user)?;
             vault.save().context("saving vault")?;
             println!("{verb} ssh key on entry {id} ({entry_path})");
             Ok(())
@@ -3447,6 +3458,240 @@ fn store_ssh_key(
             Ok(())
         }
     }
+}
+
+/// Put an SSH private key on an entry of an open vault, creating the entry if
+/// needed: the key, `KeeAgent.settings` and the derived `id.pub`. The caller
+/// saves.
+fn attach_ssh_key(
+    vault: &mut Vault,
+    entry_path: &str,
+    key_bytes: &[u8],
+    comment: &str,
+    user: Option<&str>,
+) -> Result<trove_core::EntryId> {
+    let id = match vault.find_by_title(entry_path) {
+        Some(existing) => existing,
+        None => vault
+            .add_entry(entry_path)
+            .with_context(|| format!("creating entry '{entry_path}'"))?,
+    };
+    vault
+        .attach_binary(&id, SSH_KEY_ATTACHMENT, key_bytes)
+        .context("attaching ssh key")?;
+    // KeeAgent.settings so KeePassXC's SSH agent picks this entry up.
+    let settings = troved::ssh_agent::keeagent::settings_xml(SSH_KEY_ATTACHMENT);
+    vault
+        .attach_binary(&id, troved::ssh_agent::keeagent::ATTACHMENT_NAME, &settings)
+        .context("attaching KeeAgent.settings")?;
+    // Persist the public key as real data so any tool can read it
+    // without deriving it from the private key (a trove-only ability).
+    let pub_line = ssh_public_line(key_bytes, comment)?;
+    vault
+        .attach_binary(&id, SSH_PUBKEY_ATTACHMENT, pub_line.as_bytes())
+        .context("attaching public key")?;
+    if let Some(user) = user {
+        vault
+            .set_field(&id, "UserName", user)
+            .context("setting UserName")?;
+    }
+    Ok(id)
+}
+
+/// `trove import-ssh [DIR]` — offer each private key in `DIR` (default
+/// `~/.ssh`) for import, and store the ones accepted in one go.
+fn cmd_import_ssh(
+    dir: Option<PathBuf>,
+    group: &str,
+    yes: bool,
+    dry_run: bool,
+    vault: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    let dir = match dir {
+        Some(d) => d,
+        None => home_dir()?.join(".ssh"),
+    };
+    let found = import_ssh::scan(&dir, |bytes, comment| {
+        use troved::ssh_agent::keys::{parse_private_key, ParseError};
+        if matches!(
+            parse_private_key(bytes, comment),
+            Err(ParseError::Encrypted)
+        ) {
+            return import_ssh::Verdict::Protected;
+        }
+        match validate_ssh_private_key(bytes, comment) {
+            Ok(()) => import_ssh::Verdict::Usable,
+            Err(e) => import_ssh::Verdict::Skip(e.to_string()),
+        }
+    })
+    .with_context(|| format!("reading {}", dir.display()))?;
+    if found.is_empty() {
+        println!("no SSH private keys in {}", dir.display());
+        return Ok(());
+    }
+
+    // Offline, the vault is opened once, up front: its entries decide what is
+    // skipped, and the same handle takes the import.
+    let mut offline = match vault {
+        Some(path) => Some(open_vault(path, pw_stdin)?),
+        None => None,
+    };
+    let existing = match &offline {
+        Some(v) => v.list_entries().iter().map(|e| e.display_path()).collect(),
+        None => daemon_entry_paths(dry_run)?,
+    };
+    let group = group.trim_matches('/');
+    let entry_path = |title: &str| {
+        if group.is_empty() {
+            title.to_string()
+        } else {
+            format!("{group}/{title}")
+        }
+    };
+
+    // Confirmation reads stdin, so it needs a terminal there, and one not
+    // already carrying the vault password.
+    let ask = !yes && !dry_run;
+    if ask && (pw_stdin || !std::io::stdin().is_terminal()) {
+        return Err(DaemonClassified {
+            message: "no terminal to ask on; pass --yes to import every usable key, \
+                      or --dry-run to see the list"
+                .to_string(),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+
+    let mut accepted = Vec::new();
+    for key in &found {
+        let path = entry_path(&key.title);
+        if let Some(reason) = &key.skip {
+            eprintln!("skip   {}: {reason}", key.path.display());
+            continue;
+        }
+        if existing.iter().any(|e| e.eq_ignore_ascii_case(&path)) {
+            eprintln!("skip   {}: entry {path} already exists", key.path.display());
+            continue;
+        }
+        if dry_run {
+            let note = if key.protected {
+                ", will ask for its passphrase"
+            } else {
+                ""
+            };
+            println!(
+                "would import {} as {path} ({}{note})",
+                key.path.display(),
+                key.comment
+            );
+            continue;
+        }
+        if ask {
+            eprint!(
+                "import {} as {path} ({})? [y/N] ",
+                key.path.display(),
+                key.comment
+            );
+            std::io::stderr().flush().ok();
+            let mut answer = String::new();
+            std::io::stdin().lock().read_line(&mut answer)?;
+            if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                continue;
+            }
+        }
+        // A protected key is decrypted now, on the terminal, and stored
+        // without its passphrase, as `add ssh` does.
+        let bytes = if key.protected {
+            match decrypt_ssh_key_for_vault(&key.bytes, &key.path) {
+                Ok(plain) => plain,
+                Err(e) => {
+                    eprintln!("skip   {}: {e}", key.path.display());
+                    continue;
+                }
+            }
+        } else {
+            zeroize::Zeroizing::new(key.bytes.clone())
+        };
+        accepted.push((path, key, bytes));
+    }
+    if dry_run || accepted.is_empty() {
+        if !dry_run {
+            println!("nothing imported");
+        }
+        return Ok(());
+    }
+
+    match offline.as_mut() {
+        Some(v) => {
+            for (path, key, bytes) in &accepted {
+                attach_ssh_key(v, path, bytes, &key.comment, None)?;
+            }
+            v.save().context("saving vault")?;
+        }
+        None => {
+            let code = require_session_code()?;
+            use base64::Engine;
+            for (path, key, bytes) in &accepted {
+                let req = daemon::Request::AddSsh {
+                    path: path.clone(),
+                    key: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    comment: Some(key.comment.clone()),
+                    user: None,
+                    code: code.clone(),
+                };
+                let resp = daemon::send(&req)?;
+                if let Some(msg) = daemon::response_error(&resp) {
+                    return Err(DaemonClassified {
+                        message: format!("importing {}: {msg}", key.path.display()),
+                        exit: EXIT_USER_ERROR,
+                    }
+                    .into());
+                }
+            }
+        }
+    }
+    for (path, key, _) in &accepted {
+        println!("imported {} as {path}", key.path.display());
+    }
+    println!(
+        "the key files are still in {}; delete them yourself once you rely on the vault",
+        dir.display()
+    );
+    Ok(())
+}
+
+/// Every entry path in the daemon's unlocked vaults, so an import never
+/// overwrites one. A dry run with no daemon running just checks nothing.
+fn daemon_entry_paths(dry_run: bool) -> Result<Vec<String>> {
+    let resp = match daemon::send(&daemon::Request::List) {
+        Ok(r) => r,
+        Err(e) if daemon::is_daemon_not_running(&e) && dry_run => return Ok(Vec::new()),
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: "no trove daemon is running; `trove unlock <VAULT>` first, \
+                          or pass --vault <PATH>"
+                    .to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into())
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let entries = resp
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(rows_from_json(&entries).iter().map(row_path).collect())
 }
 
 fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: bool) -> Result<()> {
@@ -3784,13 +4029,15 @@ fn decrypt_ssh_key_for_vault(bytes: &[u8], key_path: &Path) -> Result<zeroize::Z
         .into()
     };
     let passphrase = zeroize::Zeroizing::new(
-        rpassword::prompt_password(format!("Passphrase for {}: ", key_path.display()))
-            .map_err(|e| {
+        rpassword::prompt_password(format!("Passphrase for {}: ", key_path.display())).map_err(
+            |e| {
                 user_err(format!(
-                    "{} is passphrase-protected and its passphrase couldn't be read                      from a terminal ({e}); run this in one",
+                    "{} is passphrase-protected and its passphrase couldn't be read \
+                     from a terminal ({e}); run this in one",
                     key_path.display()
                 ))
-            })?,
+            },
+        )?,
     );
     match decrypt_to_openssh(bytes, passphrase.as_bytes()) {
         Ok(pem) => Ok(zeroize::Zeroizing::new(pem.as_bytes().to_vec())),
