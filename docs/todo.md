@@ -30,14 +30,6 @@ deleted; it was wrong.
 Worth remembering: gpg 2.5 issues **no `KEYINFO`** in the sign path and uses
 `HAVEKEY --list=1000` rather than per-grip `HAVEKEY`. Trove handles both.
 
-### 1c. Daemon e2e tests share the default socket path
-`TROVE_SOCK` defaults to `$TMPDIR/trove-0.sock`, so two `cargo test` runs on one
-machine fight over it through the singleton flock — a second run dies partway
-through `autospawn_e2e`. Hit for real when a parallel agent's worktree ran its
-suite concurrently. `scripts/acceptance.sh` already isolates all three socket
-paths into a temp dir; the cargo tests should do the same so concurrent runs
-(CI matrix, parallel agents, a developer with two checkouts) don't collide.
-
 ### 2. `README.md` claims we broker for Git for Windows
 Git for Windows bundles an MSYS2 ssh using Cygwin socket emulation, not native
 named pipes — the claim is probably false. Prove it on a real machine or reword.

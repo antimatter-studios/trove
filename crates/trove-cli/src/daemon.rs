@@ -502,10 +502,12 @@ mod tests {
     /// One-shot std (blocking) Unix listener that mimics the troved protocol
     /// for a single request. Useful as a stand-in: avoids spinning up the
     /// real tokio runtime + handler for a wire-shape test.
+    /// Binds before returning, so the socket is ready without polling for it
+    /// (a poll with a deadline flakes when the machine is busy).
     fn run_oneshot_listener(sock_path: PathBuf, reply: String) -> std::thread::JoinHandle<String> {
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).expect("bind");
         std::thread::spawn(move || {
-            let _ = std::fs::remove_file(&sock_path);
-            let listener = UnixListener::bind(&sock_path).expect("bind");
             let (stream, _) = listener.accept().expect("accept");
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
             let mut req_line = String::new();
@@ -537,16 +539,6 @@ mod tests {
         })
         .to_string();
         let server = run_oneshot_listener(sock.clone(), reply);
-
-        // Spin until the listener is actually bound. accept() takes a moment
-        // to be ready in a separate thread.
-        for _ in 0..50 {
-            if sock.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(sock.exists(), "listener socket never appeared");
 
         let resp = send(&Request::Status).expect("send");
         assert_eq!(resp["status"], "ok");
@@ -771,12 +763,6 @@ mod tests {
         let reply = serde_json::json!({"status": "err", "error": "invalid request: unknown cmd"})
             .to_string();
         let server = run_oneshot_listener(sock.clone(), reply);
-        for _ in 0..50 {
-            if sock.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
 
         let resp = send(&Request::GetVersion).expect("round-trip succeeds");
         server.join().ok();
