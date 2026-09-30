@@ -584,3 +584,176 @@ fn the_removed_entry_level_form_is_reported() {
         "the error should say what to rename it to: {msg}"
     );
 }
+
+impl Daemon {
+    async fn unlock(&self, vault: &Path) {
+        let resp = self
+            .handle(Request::Unlock {
+                path: vault.to_string_lossy().into_owned(),
+                password: PASSWORD.to_string(),
+                timeout: None,
+                keyfile: None,
+                filter: None,
+                session: None,
+            })
+            .await;
+        assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
+    }
+
+    async fn code(&self) -> String {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .expect("session")
+            .code
+            .clone()
+    }
+
+    async fn edit(&self, path: &str, sets: &[(&str, &str)], unsets: &[&str]) {
+        let resp = self
+            .handle(Request::EditEntry {
+                path: path.to_string(),
+                title: None,
+                sets: sets
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                unsets: unsets.iter().map(|s| s.to_string()).collect(),
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                clear_tags: false,
+                code: self.code().await,
+            })
+            .await;
+        assert!(matches!(resp, Response::Ok(_)), "edit failed: {resp:?}");
+    }
+}
+
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).expect("stat").ino()
+}
+
+#[tokio::test]
+async fn materialize_edits_while_unlocked_take_effect_at_once() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("v.kdbx");
+    let first = tmp.path().join("first.conf");
+    let second = tmp.path().join("second.conf");
+    {
+        let mut v = create_vault(&vault_path);
+        let id = v.add_entry("app").unwrap();
+        v.attach_binary(&id, "blob", b"app config\n").unwrap();
+        v.save().unwrap();
+    }
+    let d = Daemon::new();
+    d.unlock(&vault_path).await;
+    assert!(!first.exists());
+
+    // Opting in while unlocked writes the file straight away.
+    d.edit(
+        "app",
+        &[
+            ("Materialize.blob.Target", first.to_str().unwrap()),
+            ("Materialize.blob.AllowDiskBacked", "true"),
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(std::fs::read(&first).unwrap(), b"app config\n");
+
+    // Changing the target moves it: the old file is wiped, the new written.
+    d.edit(
+        "app",
+        &[("Materialize.blob.Target", second.to_str().unwrap())],
+        &[],
+    )
+    .await;
+    assert!(!first.exists(), "old target must be wiped");
+    assert_eq!(std::fs::read(&second).unwrap(), b"app config\n");
+
+    // Changing the mode rewrites it with the new mode.
+    d.edit("app", &[("Materialize.blob.Mode", "0400")], &[])
+        .await;
+    #[cfg(unix)]
+    assert_eq!(file_mode(&second), 0o400);
+
+    // Dropping the setting wipes it.
+    d.edit("app", &[], &["Materialize.blob.Target"]).await;
+    assert!(!second.exists(), "unset target must be wiped");
+
+    let resp = d.handle(Request::MaterializeStatus).await;
+    let body = serde_json::to_value(&resp).unwrap();
+    assert!(
+        body["materialized"].as_array().unwrap().is_empty(),
+        "{body}"
+    );
+    let _ = d.handle(Request::Lock { vault: None }).await;
+}
+
+#[tokio::test]
+async fn removing_a_materialized_entry_wipes_its_file() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("v.kdbx");
+    let target = tmp.path().join("gone.conf");
+    {
+        let mut v = create_vault(&vault_path);
+        add_materialize_entry(&mut v, "doomed", b"x\n", &target, None, None);
+        v.save().unwrap();
+    }
+    let d = Daemon::new();
+    d.unlock(&vault_path).await;
+    assert!(target.exists());
+    let resp = d
+        .handle(Request::RemoveEntry {
+            path: "doomed".to_string(),
+            permanent: true,
+            code: d.code().await,
+        })
+        .await;
+    assert!(matches!(resp, Response::Ok(_)), "remove failed: {resp:?}");
+    assert!(!target.exists(), "a removed entry's file must be wiped");
+    let _ = d.handle(Request::Lock { vault: None }).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unrelated_writes_leave_live_and_expired_files_alone() {
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("v.kdbx");
+    let live = tmp.path().join("live.conf");
+    let brief = tmp.path().join("brief.conf");
+    {
+        let mut v = create_vault(&vault_path);
+        add_materialize_entry(&mut v, "live", b"live\n", &live, None, None);
+        add_materialize_entry(&mut v, "brief", b"brief\n", &brief, None, Some(1));
+        let id = v.add_entry("other").unwrap();
+        v.set_field(&id, "Password", "p").unwrap();
+        v.save().unwrap();
+    }
+    let d = Daemon::new();
+    d.unlock(&vault_path).await;
+    let before = inode(&live);
+    // Let the TTL wipe `brief`.
+    for _ in 0..50 {
+        if !brief.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!brief.exists(), "TTL should have wiped brief");
+
+    d.edit("other", &[("Password", "q")], &[]).await;
+    assert_eq!(
+        inode(&live),
+        before,
+        "an unrelated edit must not rewrite live files"
+    );
+    assert!(
+        !brief.exists(),
+        "an unrelated edit must not bring back an expired file"
+    );
+    let _ = d.handle(Request::Lock { vault: None }).await;
+}

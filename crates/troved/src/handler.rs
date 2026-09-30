@@ -59,8 +59,187 @@ pub struct Handled {
     pub shutdown: bool,
 }
 
+/// Handle one control request. A request that changes a vault is bracketed by
+/// a look at the materialization plans before and after, so a file an edit
+/// adds, moves, changes or removes is written or wiped at once rather than at
+/// the next unlock.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle(
+    req: Request,
+    state: &SharedState,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
+    mat_store: &MaterializedStore,
+    session: &SessionStore,
+    idle: &Arc<IdleTracker>,
+    peer_uid: u32,
+) -> Handled {
+    let before = if changes_vault(&req) {
+        let live = materialize::claimed_targets(mat_store).await;
+        Some(plan_snapshot(&*state.lock().await, &live))
+    } else {
+        None
+    };
+    let handled = handle_request(
+        req,
+        state,
+        key_store,
+        gpg_store,
+        scoped_agents,
+        mat_store,
+        session,
+        idle,
+        peer_uid,
+    )
+    .await;
+    if let (Some(before), Response::Ok(_)) = (before, &handled.response) {
+        resync_materialized(state, mat_store, before).await;
+    }
+    handled
+}
+
+/// Requests that can change what a vault asks to have materialized.
+fn changes_vault(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::AddSsh { .. }
+            | Request::AddGpg { .. }
+            | Request::AddFile { .. }
+            | Request::AddPassword { .. }
+            | Request::AddTotp { .. }
+            | Request::EditEntry { .. }
+            | Request::RemoveEntry { .. }
+            | Request::MoveEntry { .. }
+            | Request::CopyEntry { .. }
+            | Request::MoveGroup { .. }
+            | Request::CopyGroup { .. }
+            | Request::Rmdir { .. }
+    )
+}
+
+/// One materialization plan in an open vault, with what makes it the same
+/// plan: the source, the target, the file's mode and TTL, and a digest of the
+/// bytes that would be written.
+struct LivePlan {
+    vault_key: PathBuf,
+    entry_id: String,
+    attachment: String,
+    target: PathBuf,
+    mode: u32,
+    ttl: Option<Duration>,
+    digest: [u8; 32],
+    plan: materialize::MaterializationPlan,
+}
+
+impl LivePlan {
+    fn same_as(&self, other: &LivePlan) -> bool {
+        self.vault_key == other.vault_key
+            && self.entry_id == other.entry_id
+            && self.attachment == other.attachment
+            && self.target == other.target
+            && self.mode == other.mode
+            && self.ttl == other.ttl
+            && self.digest == other.digest
+    }
+}
+
+/// Every valid materialization plan across the open vaults. `live` is what
+/// is on disk now, per vault, so a plan whose file is already written still
+/// counts as valid.
+fn plan_snapshot(set: &VaultSet, live: &[(PathBuf, PathBuf)]) -> Vec<LivePlan> {
+    use sha2::Digest as _;
+    let mut out = Vec::new();
+    for (vault, filter) in set.iter_with_filters() {
+        let vault_key = crate::vaults::canonical_key(vault.path());
+        let mine: Vec<PathBuf> = live
+            .iter()
+            .filter(|(_, owner)| *owner == vault_key)
+            .map(|(target, _)| target.clone())
+            .collect();
+        let (plans, _errors) = materialize::build_plans_with_live(vault, filter, &mine);
+        for plan in plans {
+            let bytes = vault
+                .read_binary(&plan.entry_id, &plan.source_attachment)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            out.push(LivePlan {
+                vault_key: vault_key.clone(),
+                entry_id: plan.entry_id.to_string(),
+                attachment: plan.source_attachment.clone(),
+                target: plan.resolved_target.clone(),
+                mode: plan.mode,
+                ttl: plan.ttl,
+                digest: sha2::Sha256::digest(&bytes).into(),
+                plan,
+            });
+        }
+    }
+    out
+}
+
+/// Apply what a write changed: wipe the files whose plan went away or
+/// changed, and write the plans that are new or changed. Plans the write left
+/// alone are not touched, so a live file isn't rewritten and one its TTL
+/// already wiped doesn't come back.
+async fn resync_materialized(
+    state: &SharedState,
+    mat_store: &MaterializedStore,
+    before: Vec<LivePlan>,
+) {
+    let guard = state.lock().await;
+    let live = materialize::claimed_targets(mat_store).await;
+    let after = plan_snapshot(&guard, &live);
+    for gone in before
+        .iter()
+        .filter(|b| !after.iter().any(|a| a.same_as(b)))
+    {
+        materialize::wipe_target(mat_store, &gone.vault_key, &gone.target).await;
+    }
+    let added: Vec<&LivePlan> = after
+        .iter()
+        .filter(|a| !before.iter().any(|b| b.same_as(a)))
+        .collect();
+    if added.is_empty() {
+        return;
+    }
+    for (vault, _) in guard.iter_with_filters() {
+        let vault_key = crate::vaults::canonical_key(vault.path());
+        for new in added.iter().filter(|p| p.vault_key == vault_key) {
+            // First-wins, as at unlock: never write over a file that is live.
+            let claimed = materialize::claimed_targets(mat_store).await;
+            if let Some((_, owner)) = claimed.iter().find(|(t, _)| *t == new.target) {
+                eprintln!(
+                    "materialize: entry '{}': target {} is already materialized by vault {}; skipped",
+                    new.plan.entry_title,
+                    new.target.display(),
+                    owner.display(),
+                );
+                continue;
+            }
+            match materialize::materialize_one(vault, &vault_key, &new.plan, mat_store.clone()) {
+                Ok(m) => {
+                    eprintln!(
+                        "materialize: '{}' -> {} (mode {:o}, ttl {:?})",
+                        new.plan.entry_title,
+                        new.target.display(),
+                        new.mode,
+                        new.ttl,
+                    );
+                    mat_store.write().await.push(m);
+                }
+                Err(e) => eprintln!(
+                    "materialize: failed for entry '{}': {e}",
+                    new.plan.entry_title
+                ),
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_request(
     req: Request,
     state: &SharedState,
     key_store: &KeyStore,
