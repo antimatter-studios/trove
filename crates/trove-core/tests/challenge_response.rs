@@ -1,5 +1,5 @@
 //! Challenge-response composite keys (`--features yubikey`), driven by the
-//! software `LocalChallenge` provider — the identical HMAC-SHA1 derivation a
+//! software provider ([`ChallengeResponse::software`]) — the identical HMAC-SHA1 derivation a
 //! real YubiKey performs, so every code path except the USB transport is
 //! exercised deterministically. The hardware path is covered by the
 //! `#[ignore]`d test at the bottom, runnable manually with a device present.
@@ -8,14 +8,14 @@
 #![cfg(feature = "yubikey")]
 
 use tempfile::TempDir;
-use trove_core::{ChallengeResponseKey, Error, Vault};
+use trove_core::{ChallengeResponse, Error, Vault};
 
 const PW: &str = "cr-test-pw";
 /// 20-byte HMAC-SHA1 secret, hex — what `ykman otp chalresp` programs.
 const SECRET_HEX: &str = "3132333435363738393031323334353637383930";
 
-fn local() -> ChallengeResponseKey {
-    ChallengeResponseKey::LocalChallenge(SECRET_HEX.to_string())
+fn local() -> ChallengeResponse {
+    ChallengeResponse::software(SECRET_HEX)
 }
 
 #[test]
@@ -41,9 +41,7 @@ fn challenge_response_roundtrip_and_failure_modes() {
     drop(v);
 
     // Wrong CR secret → BadPassword.
-    let wrong = ChallengeResponseKey::LocalChallenge(
-        "0000000000000000000000000000000000000000".to_string(),
-    );
+    let wrong = ChallengeResponse::software("0000000000000000000000000000000000000000");
     assert!(matches!(
         Vault::open_with_challenge_response(&path, PW, None, wrong),
         Err(Error::BadPassword)
@@ -56,6 +54,21 @@ fn challenge_response_roundtrip_and_failure_modes() {
     assert!(matches!(
         Vault::open_with_challenge_response(&path, "nope", None, local()),
         Err(Error::BadPassword)
+    ));
+}
+
+#[test]
+fn debug_output_never_shows_the_software_secret() {
+    let shown = format!("{:?}", local());
+    assert_eq!(shown, "ChallengeResponse::Software");
+    assert!(!shown.contains(SECRET_HEX));
+}
+
+#[test]
+fn a_yubikey_slot_other_than_1_or_2_is_refused() {
+    assert!(matches!(
+        ChallengeResponse::yubikey(3, None),
+        Err(Error::ChallengeResponse(_))
     ));
 }
 
@@ -108,9 +121,9 @@ fn reload_reuses_the_challenge_response_provider() {
 #[test]
 #[ignore = "requires a physical YubiKey with HMAC-SHA1 in slot 2"]
 fn yubikey_hardware_roundtrip() {
-    let yubikeys = ChallengeResponseKey::get_available_yubikeys().expect("enumerate yubikeys");
-    let yk = yubikeys.first().expect("no YubiKey connected").clone();
-    let cr = ChallengeResponseKey::YubikeyChallenge(yk, "2".to_string());
+    let serials = ChallengeResponse::yubikey_serials().expect("enumerate yubikeys");
+    let serial = *serials.first().expect("no YubiKey connected");
+    let cr = ChallengeResponse::yubikey(2, Some(serial)).expect("open YubiKey slot 2");
 
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("hw.kdbx");

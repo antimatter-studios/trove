@@ -332,11 +332,68 @@ pub struct Vault {
     pub(crate) inner: VaultInner,
 }
 
-/// Re-export of the keepass crate's challenge-response key: either a real
-/// YubiKey (serial + slot) or the software `LocalChallenge` provider using
-/// the identical HMAC-SHA1 derivation (KeePassXC's scheme).
+/// The challenge-response part of a composite key: a YubiKey HMAC-SHA1 slot,
+/// or a software provider holding the same HMAC secret. Both answer the way
+/// KeePassXC does, so a vault set up with one unlocks with the other.
 #[cfg(feature = "yubikey")]
-pub use keepass::ChallengeResponseKey;
+#[derive(Clone)]
+pub struct ChallengeResponse(keepass::ChallengeResponseKey);
+
+#[cfg(feature = "yubikey")]
+impl ChallengeResponse {
+    /// The YubiKey with serial number `serial`, or the only one plugged in
+    /// when `serial` is `None`, answering on `slot` (1 or 2).
+    pub fn yubikey(slot: u8, serial: Option<u32>) -> Result<Self> {
+        if !matches!(slot, 1 | 2) {
+            return Err(Error::ChallengeResponse(format!(
+                "YubiKey slot must be 1 or 2, got {slot}"
+            )));
+        }
+        let device = keepass::ChallengeResponseKey::get_yubikey(serial)
+            .map_err(|e| Error::ChallengeResponse(format!("locating YubiKey: {e}")))?;
+        Ok(Self(keepass::ChallengeResponseKey::YubikeyChallenge(
+            device,
+            slot.to_string(),
+        )))
+    }
+
+    /// Serial numbers of the YubiKeys plugged in.
+    pub fn yubikey_serials() -> Result<Vec<u32>> {
+        let devices = keepass::ChallengeResponseKey::get_available_yubikeys()
+            .map_err(|e| Error::ChallengeResponse(format!("listing YubiKeys: {e}")))?;
+        Ok(devices.iter().map(|d| d.serial_number).collect())
+    }
+
+    /// A software provider for the HMAC-SHA1 secret `secret_hex`, the hex
+    /// secret a YubiKey slot was programmed with.
+    pub fn software(secret_hex: impl Into<String>) -> Self {
+        Self(keepass::ChallengeResponseKey::LocalChallenge(
+            secret_hex.into(),
+        ))
+    }
+
+    pub(crate) fn key(&self) -> keepass::ChallengeResponseKey {
+        self.0.clone()
+    }
+}
+
+/// Names the provider, never the software secret.
+#[cfg(feature = "yubikey")]
+impl std::fmt::Debug for ChallengeResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            keepass::ChallengeResponseKey::YubikeyChallenge(device, slot) => f
+                .debug_struct("ChallengeResponse::Yubikey")
+                .field("serial", &device.serial_number)
+                .field("slot", slot)
+                .finish(),
+            keepass::ChallengeResponseKey::LocalChallenge(_) => {
+                f.write_str("ChallengeResponse::Software")
+            }
+            _ => f.write_str("ChallengeResponse"),
+        }
+    }
+}
 
 /// What a [`Vault::rename_attachment`] moved, so a caller can finish the job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,7 +420,7 @@ pub(crate) struct VaultInner {
     /// rotates the master seed per save, so the device/secret is consulted
     /// again on each write.
     #[cfg(feature = "yubikey")]
-    pub(crate) challenge_response: Option<ChallengeResponseKey>,
+    pub(crate) challenge_response: Option<ChallengeResponse>,
     /// What the file looked like when we last read or wrote it.
     ///
     /// A vault is a single file that several programs write — the CLI, the
@@ -737,7 +794,7 @@ impl Vault {
     }
 
     /// Create a new kdbx file additionally locked by a challenge-response
-    /// key (YubiKey HMAC-SHA1 or the software `LocalChallenge` provider),
+    /// key (a YubiKey HMAC-SHA1 slot or the software provider),
     /// composited with the password and optional keyfile — KeePassXC's
     /// scheme, so the same vault unlocks there with the same device.
     #[cfg(feature = "yubikey")]
@@ -745,7 +802,7 @@ impl Vault {
         path: &Path,
         password: &str,
         keyfile: Option<&[u8]>,
-        challenge_response: ChallengeResponseKey,
+        challenge_response: ChallengeResponse,
     ) -> Result<Self> {
         if path.exists() {
             return Err(Error::AlreadyExists(path.to_path_buf()));
@@ -777,7 +834,7 @@ impl Vault {
         path: &Path,
         password: &str,
         keyfile: Option<&[u8]>,
-        challenge_response: ChallengeResponseKey,
+        challenge_response: ChallengeResponse,
     ) -> Result<Self> {
         if !path.exists() {
             return Err(Error::NotFound(path.to_path_buf()));
@@ -786,8 +843,8 @@ impl Vault {
         // Stamp the handle before reading: another writer replacing the file
         // during the KDF must not lend its stamp to the contents read here.
         let stamp = Some(FileStamp::of(&file.metadata()?));
-        let key = database_key(password, keyfile)?
-            .with_challenge_response_key(challenge_response.clone());
+        let key =
+            database_key(password, keyfile)?.with_challenge_response_key(challenge_response.key());
         let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
         Ok(Vault {
             inner: VaultInner {
@@ -1076,7 +1133,7 @@ impl Vault {
         let mut key = database_key(&self.inner.password, self.inner.keyfile.as_deref())?;
         #[cfg(feature = "yubikey")]
         if let Some(cr) = &self.inner.challenge_response {
-            key = key.with_challenge_response_key(cr.clone());
+            key = key.with_challenge_response_key(cr.key());
         }
         Ok(key)
     }
@@ -2700,7 +2757,7 @@ impl Vault {
             let mut key = database_key(other_password, other_keyfile)?;
             #[cfg(feature = "yubikey")]
             if let Some(cr) = &challenge_response {
-                key = key.with_challenge_response_key(cr.clone());
+                key = key.with_challenge_response_key(cr.key());
             }
             Ok(key)
         };
