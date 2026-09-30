@@ -4,6 +4,48 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.25.0 — 2026-09-30
+
+**`trove sync`, a two-way sync with another copy of the vault.** `trove sync
+<OTHER>` merges another copy of `--vault` (in a synced folder, on a USB stick,
+on a network share) into it, saves, and atomically replaces the other copy with
+the result, so both end equal. A missing copy is created with `--vault`'s own
+credentials, and a copy that brings nothing new is left untouched. (#336)
+
+**Saves merge other writers' changes instead of refusing.** Saving a vault that
+changed on disk since it was opened used to fail with `StaleWrite`. Now `save()`
+merges the other file in (the newer change to an entry wins, the other goes into
+its history) and writes, checking again before and after the rename. Permanent
+deletes record `DeletedObjects`, so the other copy loses the entry instead of
+bringing it back. `StaleWrite` is left for files that cannot be merged. (#335)
+
+**Attachment fixes in the keepass-rs fork.** trove now builds keepass-rs 0.15.0
+from the antimatter-studios fork, pinned by commit, carrying fixes sent
+upstream. Removing an attachment no longer shifts every later attachment onto
+the wrong bytes on save; deleting an entry also drops attachments only its
+history used; changing or removing an attachment files a history version; and
+`trove merge` takes attachment changes from the source instead of silently
+reverting a rotated SSH key. (#331, #332, #333, #334)
+
+**ECDSA keys that failed to load now load.** About one ssh-keygen P-256 key in
+256 has a private scalar shorter than the curve size, which the SSH key parser
+rejected with "length invalid". (#343)
+
+**A clear error for an out-of-date daemon.** A new CLI talking to a `troved`
+still running from an older version now says which versions they are and how
+to restart, instead of printing a raw `unknown variant` error. (#337)
+
+**Toward 1.0.** `docs/stability.md` writes down what 1.0 will promise and the
+deprecation policy (#338). The `--json` output of all 16 commands that take it
+is documented and pinned by tests (#341). `trove-core` settles its public API:
+`Error` and every public struct are `#[non_exhaustive]`, `SearchQuery` and
+`SearchFieldFilter` gain builders, and `GROUP_POSITION_KEY` is private — a
+breaking change for callers of `trove-core` that build these with struct
+literals (#342).
+
+**Release pipeline.** The macOS DMG and the `trove`/`troved` binaries are
+notarized, not only signed (#340). The fuzz targets run nightly (#339).
+
 ## v0.24.0 — 2026-09-29
 
 **Drag and drop in the desktop sidebar.** Drag a folder to reorder it among its

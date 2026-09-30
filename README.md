@@ -437,6 +437,9 @@ Early but real — the headless-daemon path works end-to-end on Linux + macOS fo
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.25.0
+`trove sync <OTHER>` syncs the vault two ways with another copy of it, and saving no longer refuses when another writer changed the file: their changes are merged in. Attachment fixes: removing one no longer mixes up the others, and edits, deletes and `trove merge` handle them correctly. One ssh-keygen ECDSA key in 256 that failed to load now loads. The 1.0 stability promise is written down, `--json` shapes are pinned, `trove-core`'s API is settled for semver, and macOS release artifacts are notarized.
+
 ### v0.24.0
 Drag and drop in the desktop sidebar: reorder folders or move them into another, and drag entries from the list onto a folder. Dragging moves, Option (Ctrl on Windows/Linux) copies, and the carried card turns green or red for whether the drop is taken. Text is selectable only where it is worth copying, and right click no longer opens the webview's page menu. Edits made in trove now keep the replaced value as entry history, as KeePassXC does.
 
@@ -463,6 +466,3 @@ Read and status commands support `--json`; `trove describe` exposes safe metadat
 
 ### v0.17.4
 Desktop entry paths are relative to the folder you are in — typing `ssh` inside `Infra` creates `Infra/ssh`, a leading `/` escapes to the root, and the field previews where it will land. Saving keeps your place instead of jumping to All Entries, and only follows the entry when it has left the view. Folders list what is filed directly in them, file-browser style, with subfolders in the sidebar. Two bugs found by hand: New entry while editing kept the previous entry's values and would have saved a duplicate of it, and new entries no longer arrive with a generated password nobody asked for.
-
-### v0.17.3
-The desktop app can edit an entry's attributes, not just show and copy them — name/value rows in the edit form, with add and remove. Needed because a `git.token` attribute is how the credential helper is told to send a token rather than the web login, and there was no way to create one from the app that stores it. Reserved keys (`_Trove*`, `Materialize.*`) survive a save that never showed them, attributes cannot be named after the five standard fields, and names are stored exactly as typed.
