@@ -60,9 +60,10 @@ Parsing is already done, so this is the RSA unwrap plus wiring into the
 existing `PKDECRYPT` handler.
 
 ### 6. `troved::serve()` extraction → desktop hosts the daemon
-`main.rs` is ~530 lines of setup the desktop can't reuse. Extracting a `serve()`
-entry point lets trove-desktop bind the sockets in-process, which also makes the
-desktop the natural pinentry for item 4's confirm constraint.
+The extraction is done: `troved::server::serve(ServeOptions)` runs the daemon
+in-process and returns `Served::AlreadyRunning` when another daemon holds the
+sockets. What's left is the desktop side: host it, which also makes the desktop
+the natural pinentry for item 4's confirm constraint.
 
 Needs a fallback: if a standalone `troved` already holds the singleton lock, the
 desktop should degrade to being a *client* rather than refusing to start.

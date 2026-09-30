@@ -20,6 +20,8 @@ pub mod idle;
 pub mod ipc;
 pub mod materialize;
 pub mod protocol;
+/// The daemon itself, as a library: `troved` runs [`server::serve`].
+pub mod server;
 /// Single-instance daemon lock (Unix only; Windows uses named-pipe
 /// `first_pipe_instance`). See the module docs.
 #[cfg(unix)]
