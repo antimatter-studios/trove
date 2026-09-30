@@ -583,6 +583,22 @@ path>`; on a password entry → that variable carries the password). Without
 `Exec.Env`: `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE` (title
 uppercased, non-alphanumerics → `_`). Offline-only: requires `--vault`.
 
+An entry that needs several variables maps each with an `Exec.<VAR>` field
+naming its source: a field, standard or custom, or `@<attachment>` for the
+path of that attachment in the run directory. A database entry might carry:
+
+| field | value | exports |
+| --- | --- | --- |
+| `Exec.PGUSER` | `UserName` | `PGUSER=<UserName>` |
+| `Exec.PGPASSWORD` | `Password` | `PGPASSWORD=<Password>` |
+| `Exec.PGHOST` | `URL` | `PGHOST=<URL>` |
+| `Exec.PGSSLROOTCERT` | `@ca.pem` | `PGSSLROOTCERT=<temp path>/…-ca.pem` |
+
+An entry with mappings exports only those, plus `Exec.Env` if it has one; the
+`TROVE_<TITLE>_*` fallback is off. A mapping that names a field or attachment
+the entry doesn't have, or a variable name that isn't one, stops `exec` before
+the command runs.
+
 ## trove merge
 
 ```
