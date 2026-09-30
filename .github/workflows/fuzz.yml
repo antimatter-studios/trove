@@ -1,0 +1,140 @@
+# Scheduled fuzzing
+#
+# Runs every libfuzzer target in `crates/troved/fuzz` nightly (and on manual
+# dispatch), time-boxed per target. The fuzz crate is a standalone workspace on
+# nightly Rust, so CI never builds it otherwise.
+#
+# Jobs:
+#   - Fuzz (<target>): builds the harnesses and fuzzes one target for
+#                      FUZZ_SECONDS. A crash (or hang/OOM) fails the job and the
+#                      input that triggered it is uploaded as an artifact.
+#   - Report:          on a failed scheduled run, opens one issue (unless one is
+#                      already open) linking the run.
+#
+# Notes:
+#   * The corpus is cached per target (actions/cache), so each night starts
+#     from everything the previous nights found. The cache is saved even when
+#     the target crashes, so the corpus isn't lost with it.
+#   * Reproduce a crash locally: download the `fuzz-crash-<target>` artifact,
+#     then `cargo +nightly fuzz run <target> <crash-file>` from
+#     crates/troved/fuzz (see its README).
+
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Same crates.io HTTP/2 workaround as ci.yml.
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  FUZZ_SECONDS: "600"
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [assuan_line_parse, ssh_wire_parse, ssh_wire_round_trip]
+    defaults:
+      run:
+        working-directory: crates/troved/fuzz
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain (nightly)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: nightly
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3
+        with:
+          workspaces: crates/troved/fuzz -> target
+          shared-key: fuzz
+          # Keep the cargo-fuzz binary between runs.
+          cache-all-crates: true
+
+      - name: Install cargo-fuzz
+        run: |
+          if ! command -v cargo-fuzz >/dev/null 2>&1; then
+            cargo install --locked cargo-fuzz
+          fi
+
+      # cargo-fuzz has no --locked flag; fetching with --locked first fails the
+      # job if the fuzz crate's Cargo.lock is stale instead of silently
+      # re-resolving it.
+      - name: Fetch dependencies (locked)
+        run: cargo fetch --locked
+
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+
+      - name: Restore corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/troved/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz ${{ matrix.target }}
+        # -timeout: any single input taking longer than this counts as a hang
+        # (libfuzzer's default of 1200s is longer than the whole run).
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time="$FUZZ_SECONDS" -timeout=30
+
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/troved/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: crates/troved/fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+
+  report:
+    name: Report
+    needs: fuzz
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue (unless one is already open)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Scheduled fuzzing failed"
+          open=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            echo "Issue #$open is already open; not opening another."
+            gh issue comment "$open" --body "Failed again: $RUN_URL"
+            exit 0
+          fi
+          gh issue create --title "$title" --label bug --body "The nightly fuzz run failed: $RUN_URL
+
+          Crashing inputs are attached to the run as \`fuzz-crash-<target>\` artifacts. Reproduce with \`cargo +nightly fuzz run <target> <crash-file>\` from \`crates/troved/fuzz\`."

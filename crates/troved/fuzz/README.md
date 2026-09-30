@@ -80,8 +80,24 @@ The proptest tests in `crates/troved/tests/proptest_*.rs` are the
 libfuzzer harnesses provide deeper, longer-running coverage; the two are
 complementary.
 
+## Scheduled runs in CI
+
+`.github/workflows/fuzz.yml` fuzzes every target for 10 minutes each night
+(and on manual dispatch: `gh workflow run fuzz.yml`). A crash, hang or OOM
+fails the job, the crashing input is uploaded as the `fuzz-crash-<target>`
+artifact, and a scheduled failure opens a "Scheduled fuzzing failed" issue.
+Reproduce by downloading the artifact and running it as shown above.
+
+Add a new target to the workflow's `matrix.target` list as well as to
+`Cargo.toml`, or it won't be fuzzed in CI.
+
+`Cargo.lock` is committed; after changing dependencies here, run
+`cargo +nightly fuzz build` and commit the updated lock. The `keepass` patch
+in `Cargo.toml` must stay identical to the root workspace's.
+
 ## Corpus
 
-Initial corpora are not checked in. To seed `ssh_wire_parse`, you can dump
-real captured agent traffic into `corpus/ssh_wire_parse/`. `cargo +nightly
-fuzz run` will pick it up automatically.
+Initial corpora are not checked in. CI caches each target's corpus between
+runs, so nightly runs build on each other. To seed `ssh_wire_parse` locally,
+you can dump real captured agent traffic into `corpus/ssh_wire_parse/`.
+`cargo +nightly fuzz run` will pick it up automatically.
