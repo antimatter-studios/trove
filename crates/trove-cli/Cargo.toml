@@ -24,6 +24,7 @@ clap.workspace = true
 clap_complete = "4"
 anyhow.workspace = true
 rpassword.workspace = true
+zeroize.workspace = true
 thiserror.workspace = true
 # v0.0.5.0: `trove materialize` runs the materialize loop in-process. We reuse
 # the daemon's path-validation, tmpfs detection, and wipe code by depending on

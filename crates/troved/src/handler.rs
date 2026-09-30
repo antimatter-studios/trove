@@ -2407,7 +2407,22 @@ fn try_load_ssh_attachment(
     } else {
         format!("{display}:{attachment_name}")
     };
-    match ssh_keys::parse_private_key(&bytes, &comment) {
+    // KeePassXC decrypts a passphrase-protected key with the entry's Password,
+    // so a vault that works there keeps working here. Only read it when needed.
+    let parsed = match ssh_keys::parse_private_key(&bytes, &comment) {
+        Err(ssh_keys::ParseError::Encrypted) => match vault.get_field(&entry.id, "Password") {
+            Ok(Some(password)) if !password.is_empty() => {
+                ssh_keys::parse_private_key_with_passphrase(
+                    &bytes,
+                    &comment,
+                    Some(password.as_bytes()),
+                )
+            }
+            _ => Err(ssh_keys::ParseError::Encrypted),
+        },
+        other => other,
+    };
+    match parsed {
         Ok(mut loaded) => {
             // Which servers the entry says this key is for. Absent is the
             // normal case and means "anyone" — see `ssh_agent::hostkey`.
@@ -2436,7 +2451,14 @@ fn try_load_ssh_attachment(
             None
         }
         Err(ssh_keys::ParseError::Encrypted) => {
-            skip("passphrase-protected private keys are not supported".to_string());
+            skip(
+                "passphrase-protected, and the entry has no Password to decrypt it with"
+                    .to_string(),
+            );
+            None
+        }
+        Err(ssh_keys::ParseError::WrongPassphrase) => {
+            skip("passphrase-protected, and the entry's Password doesn't decrypt it".to_string());
             None
         }
         Err(e) => {
