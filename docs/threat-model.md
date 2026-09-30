@@ -39,7 +39,7 @@ Where could secrets leak from each delivery surface? One section per surface.
 ### Daemon process memory
 
 - **While unlocked.** Decrypted vault, parsed SSH keys, parsed GPG secret-key scalars, materialized-file bookkeeping. Process memory; we use `Zeroize`-on-drop where the underlying crate supports it (`secstr` for strings, `ZeroizeOnDrop` on `ssh_key::SigningKey`). Best-effort, not a guarantee.
-- **Crash dumps.** OS crash reporting could capture secret state. Out-of-process attack surface; we don't disable core dumps (that's a deployment-time choice). On Linux, `prctl(PR_SET_DUMPABLE, 0)` would help; not yet implemented.
+- **Crash dumps.** OS crash reporting could capture secret state. On Linux, troved sets `prctl(PR_SET_DUMPABLE, 0)` at startup, so it writes no core file and same-user processes can't `ptrace` it or read `/proc/<pid>/mem`. On macOS the hardened runtime of the signed release binaries covers `ptrace`; system crash reports are still possible. Windows has no equivalent set yet.
 - **Swap.** Linux swap and macOS swap can hit disk. We don't `mlock` decrypted regions today. Real concern; partially mitigated by tmpfs-only materialization defaults on Linux.
 - **Hibernation.** Same family as swap. Disable hibernation on machines that hold long-lived troved unlocks if you care.
 - **Other processes running as the user.** A process running as the same UID can `ptrace` us, read `/proc/self/mem`, or open our `0600` Unix sockets (we own them; same-UID can open them). On Windows the named-pipe DACL grants the pipe owner access, so another process running as that same user can connect there too. This is the irreducible "secrets in user space" assumption — every password manager has it.
@@ -86,7 +86,7 @@ Tabulated form.
 | Backup tool capturing materialized path | Default targets in `/tmp` (not backed up); refusal of system dirs | If the user picks `~/Documents/secret`, no protection |
 | Swap / hibernation capture | tmpfs-only defaults on Linux | macOS APFS has no tmpfs — soft-allowlist only |
 | Unattended unlocked laptop | Idle-lock (default 900s, configurable) | Doesn't help if you set the timeout to 0 (`TROVE_IDLE_TIMEOUT=0`) |
-| Crash-dumped daemon memory | Best-effort `Zeroize` on drop | No `prctl(PR_SET_DUMPABLE, 0)` yet |
+| Crash-dumped daemon memory | Best-effort `Zeroize` on drop; non-dumpable on Linux (`PR_SET_DUMPABLE` 0) | macOS and Windows crash reporters can still capture memory |
 | Kernel-level attacker / cold-boot | None | Out of scope |
 | Forwarded SSH agent abuse | Standard SSH agent protocol — user opts in | Same as any agent; not specific to trove |
 | Password manager UI phishing | N/A — no GUI yet | Future GUI must address this |

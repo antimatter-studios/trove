@@ -244,6 +244,11 @@ async fn main() -> Result<()> {
         std::process::id()
     );
 
+    // Before any vault is opened: keep decrypted secrets out of core dumps.
+    if let Err(e) = troved::hardening::disable_core_dumps() {
+        eprintln!("troved: warning: could not disable core dumps: {e}");
+    }
+
     let sock_path = resolve_socket_path();
 
     // Ensure parent dir exists (best-effort; XDG_RUNTIME_DIR usually does).
