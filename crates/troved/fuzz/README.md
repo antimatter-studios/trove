@@ -95,9 +95,23 @@ Add a new target to the workflow's `matrix.target` list as well as to
 `cargo +nightly fuzz build` and commit the updated lock. The `keepass` patch
 in `Cargo.toml` must stay identical to the root workspace's.
 
-## Corpus
+## Corpus and seeds
 
-Initial corpora are not checked in. CI caches each target's corpus between
-runs, so nightly runs build on each other. To seed `ssh_wire_parse` locally,
-you can dump real captured agent traffic into `corpus/ssh_wire_parse/`.
-`cargo +nightly fuzz run` will pick it up automatically.
+`seeds/<target>/` is committed: a minimized corpus for each raw-bytes target,
+plus every crash input that has been fixed. `crates/troved/tests/fuzz_corpus_replay.rs`
+replays the seeds through the same parsers on stable Rust, so they run in
+normal CI and a fixed crash can't come back unnoticed. The nightly workflow
+also reads them as a second corpus directory. (`ssh_wire_round_trip` decodes
+its input with `arbitrary`, so it has no seeds; proptest covers it.)
+
+`corpus/<target>/` is not committed. CI caches it between runs, so nightly
+runs build on each other, and new finds land there.
+
+When a crash is fixed, copy its input into `seeds/<target>/` with the fix.
+To add what a longer local run finds:
+
+```sh
+cargo +nightly fuzz run ssh_wire_parse corpus/ssh_wire_parse seeds/ssh_wire_parse -- -max_total_time=600
+cargo +nightly fuzz cmin ssh_wire_parse corpus/ssh_wire_parse
+cp corpus/ssh_wire_parse/* seeds/ssh_wire_parse/
+```

@@ -6,6 +6,7 @@
 #   - Clippy (ubuntu-latest):              cargo clippy ... -- -D warnings (--no-deps)
 #   - Fmt (ubuntu-latest):                 cargo fmt --all -- --check
 #   - Semver (ubuntu-latest):              cargo semver-checks on trove-core
+#   - Fuzz lockfile (ubuntu-latest):       crates/troved/fuzz/Cargo.lock resolves --locked
 #   - Audit (ubuntu-latest):               cargo audit (advisory check)
 #
 # Notes:
@@ -192,6 +193,23 @@ jobs:
         # Check-only; do not auto-format. If this fails, run the fmt-fix
         # workflow (manual dispatch) or `cargo fmt --all` locally.
         run: cargo fmt --all -- --check
+
+  fuzz-lock:
+    name: Fuzz lockfile
+    runs-on: ubuntu-latest
+    # crates/troved/fuzz is its own workspace with its own Cargo.lock, which
+    # nothing else builds on a PR. The nightly fuzz run fetches with --locked,
+    # so a version bump or a troved dependency change that skips this lock
+    # breaks fuzzing that night. Resolve it --locked here instead.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fuzz crate's Cargo.lock is current
+        run: |
+          cargo metadata --locked --format-version 1 \
+            --manifest-path crates/troved/fuzz/Cargo.toml > /dev/null \
+            || { echo "::error::crates/troved/fuzz/Cargo.lock is stale; run: cargo update --manifest-path crates/troved/fuzz/Cargo.toml --workspace, and commit it"; exit 1; }
 
   semver:
     name: Semver (trove-core)
