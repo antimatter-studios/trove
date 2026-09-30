@@ -132,8 +132,10 @@ pub enum ParseError {
     UnsupportedAlgorithm(String),
     #[error("DSA keys are not supported: OpenSSH removed DSA, so current servers reject them")]
     Dsa,
-    #[error("encrypted private keys are not supported")]
+    #[error("the private key is passphrase-protected")]
     Encrypted,
+    #[error("the passphrase doesn't decrypt the private key")]
+    WrongPassphrase,
     #[error("RSA key too short: {0} bits (minimum 2048)")]
     RsaTooSmall(usize),
     #[error("internal: failed to encode public-key blob: {0}")]
@@ -372,6 +374,47 @@ impl std::fmt::Debug for LoadedKey {
 /// supported algorithms. Returns the loaded key plus a pre-built SSH
 /// wire-format public-key blob.
 pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, ParseError> {
+    parse_private_key_with_passphrase(bytes, comment, None)
+}
+
+/// [`parse_private_key`], decrypting a passphrase-protected OpenSSH key with
+/// `passphrase`. Without one, a protected key is [`ParseError::Encrypted`].
+pub fn parse_private_key_with_passphrase(
+    bytes: &[u8],
+    comment: &str,
+    passphrase: Option<&[u8]>,
+) -> Result<LoadedKey, ParseError> {
+    let pk = decode_private_key(bytes)?;
+    let pk = if pk.is_encrypted() {
+        let passphrase = passphrase.ok_or(ParseError::Encrypted)?;
+        pk.decrypt(passphrase)
+            .map_err(|_| ParseError::WrongPassphrase)?
+    } else {
+        pk
+    };
+    loaded_key(pk, comment)
+}
+
+/// Decrypt a passphrase-protected OpenSSH private key and re-encode it without
+/// a passphrase, for storing inside the (encrypted) vault.
+pub fn decrypt_to_openssh(
+    bytes: &[u8],
+    passphrase: &[u8],
+) -> Result<Zeroizing<String>, ParseError> {
+    let pk = decode_private_key(bytes)?;
+    if !pk.is_encrypted() {
+        return Err(ParseError::NotOpenssh(
+            "the key isn't passphrase-protected".into(),
+        ));
+    }
+    let pk = pk
+        .decrypt(passphrase)
+        .map_err(|_| ParseError::WrongPassphrase)?;
+    pk.to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|e| ParseError::NotOpenssh(e.to_string()))
+}
+
+fn decode_private_key(bytes: &[u8]) -> Result<PrivateKey, ParseError> {
     // Accepted RSA wrappers:
     //   * `-----BEGIN OPENSSH PRIVATE KEY-----`  (new-format, ssh-keygen default since 2019)
     //   * `-----BEGIN RSA PRIVATE KEY-----`      (PKCS#1 PEM, the legacy ssh-keygen / openssl
@@ -389,11 +432,10 @@ pub fn parse_private_key(bytes: &[u8], comment: &str) -> Result<LoadedKey, Parse
                 .ok_or_else(|| ParseError::NotOpenssh(e.to_string()))
         })?,
     };
+    Ok(pk)
+}
 
-    if pk.is_encrypted() {
-        return Err(ParseError::Encrypted);
-    }
-
+fn loaded_key(pk: PrivateKey, comment: &str) -> Result<LoadedKey, ParseError> {
     // Algorithm gate — we accept ed25519, rsa, ecdsa(p256/p384/p521).
     match pk.algorithm() {
         Algorithm::Ed25519 => {}
@@ -712,6 +754,44 @@ mod tests {
         pk.to_openssh(ssh_key::LineEnding::LF)
             .expect("encode openssh")
             .to_string()
+    }
+
+    fn encrypted_pem_of(pk: &PrivateKey, passphrase: &str) -> String {
+        pem_of(
+            &pk.encrypt(&mut rand_core::OsRng, passphrase)
+                .expect("encrypt"),
+        )
+    }
+
+    #[test]
+    fn a_protected_key_needs_its_passphrase() {
+        let pk = random_key(Algorithm::Ed25519);
+        let pem = encrypted_pem_of(&pk, "correct horse");
+
+        assert!(matches!(
+            parse_private_key(pem.as_bytes(), "c"),
+            Err(ParseError::Encrypted)
+        ));
+        assert!(matches!(
+            parse_private_key_with_passphrase(pem.as_bytes(), "c", Some(b"wrong")),
+            Err(ParseError::WrongPassphrase)
+        ));
+        let loaded = parse_private_key_with_passphrase(pem.as_bytes(), "c", Some(b"correct horse"))
+            .expect("decrypts with the right passphrase");
+        assert_eq!(loaded.public_blob, pk.public_key().to_bytes().unwrap());
+    }
+
+    #[test]
+    fn decrypt_to_openssh_strips_the_passphrase() {
+        let pk = random_key(Algorithm::Ed25519);
+        let pem = encrypted_pem_of(&pk, "pw");
+        assert!(matches!(
+            decrypt_to_openssh(pem.as_bytes(), b"nope"),
+            Err(ParseError::WrongPassphrase)
+        ));
+        let plain = decrypt_to_openssh(pem.as_bytes(), b"pw").expect("decrypt");
+        let loaded = parse_private_key(plain.as_bytes(), "c").expect("loads without a passphrase");
+        assert_eq!(loaded.public_blob, pk.public_key().to_bytes().unwrap());
     }
 
     #[test]

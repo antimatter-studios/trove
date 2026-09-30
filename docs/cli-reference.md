@@ -345,7 +345,7 @@ trove [--vault <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE> <COMMENT>
 | Argument / flag | Description |
 | --- | --- |
 | `<ENTRY_PATH>` | Entry path, e.g. `"github.com"` or `"Work/SSH/github"`. Groups auto-created. |
-| `<KEY_FILE>` | Path to the SSH private key file (e.g. `~/.ssh/id_ed25519`). Validated before storing. |
+| `<KEY_FILE>` | Path to the SSH private key file (e.g. `~/.ssh/id_ed25519`). Validated before storing. A passphrase-protected key prompts for its passphrase on the terminal and is stored decrypted, so no plaintext copy has to be written to disk. |
 | `<COMMENT>` | Public-key comment, typically an email like `you@host`. Recorded in `id.pub` (and so in a server's authorized_keys). Required. |
 | `--user <USER>` | Optional `UserName` field. |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
@@ -985,7 +985,8 @@ With no daemon running it still succeeds: `daemon_running` is `false`,
 are `null`.
 
 `skipped_keys` lists every key in the unlocked vaults that troved found but
-couldn't load: a passphrase-protected key, an RSA key under 2048 bits, an
+couldn't load: a passphrase-protected key its entry's Password doesn't
+decrypt, an RSA key under 2048 bits, an
 unsupported algorithm, an OpenPGP export with no signing key. `unlock` warns
 about the same keys on stderr. The human `trove status` output lists them under
 "Skipped keys" when there are any.
@@ -1744,7 +1745,7 @@ Standard OpenSSH agent protocol on a separate socket. We implement:
 
 Anything else returns `SSH_AGENT_FAILURE` (5). Supported algorithms: ed25519, RSA >= 2048 bits (signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332 flag selection), ECDSA P-256, P-384 and P-521.
 
-`ssh-add` and friends will only see identities for entries whose `id` attachment parses as one of the supported algorithms. Encrypted, weak (RSA < 2048) or DSA keys (removed from current OpenSSH) are skipped at unlock time with a one-line warning to stderr.
+`ssh-add` and friends will only see identities for entries whose `id` attachment parses as one of the supported algorithms. A passphrase-protected OpenSSH key is decrypted with its entry's Password, as KeePassXC does. Weak (RSA < 2048), unsupported (DSA, Ed448), or protected keys the Password doesn't decrypt are skipped at unlock time with a one-line warning to stderr.
 
 ### GPG Assuan protocol
 

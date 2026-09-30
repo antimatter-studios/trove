@@ -1147,8 +1147,9 @@ enum AddResource {
     /// `<ENTRY_PATH>` is a `/`-separated path (`group/sub/title`); groups are
     /// created as needed and an existing entry has its `id` key replaced in
     /// place. `<KEY_FILE>` is the private key on disk — it is validated before
-    /// being stored, so a public key, an encrypted key, or an unsupported/weak
-    /// algorithm is rejected with a precise error. `<COMMENT>` is the public-key
+    /// being stored, so a public key or an unsupported/weak algorithm is
+    /// rejected with a precise error. A passphrase-protected key prompts for its
+    /// passphrase on the terminal and is stored decrypted. `<COMMENT>` is the public-key
     /// comment (usually an email) recorded in the derived `id.pub`.
     ///
     /// By default the key is added to the vault currently unlocked in the
@@ -3083,6 +3084,18 @@ fn cmd_add_ssh(
     let key_bytes = std::fs::read(key_path)
         .with_context(|| format!("reading ssh key from {}", key_path.display()))?;
 
+    // A passphrase-protected key is decrypted here, in memory, and stored
+    // without its passphrase: the vault is what protects it, and no decrypted
+    // copy has to be written to disk first.
+    let key_bytes = if matches!(
+        troved::ssh_agent::keys::parse_private_key(&key_bytes, comment),
+        Err(troved::ssh_agent::keys::ParseError::Encrypted)
+    ) {
+        decrypt_ssh_key_for_vault(&key_bytes, key_path)?
+    } else {
+        zeroize::Zeroizing::new(key_bytes)
+    };
+
     // Validate before storing: reject a public key, an encrypted key, or an
     // unsupported/weak algorithm with a precise, user-facing message.
     validate_ssh_private_key(&key_bytes, comment)?;
@@ -3537,6 +3550,36 @@ fn require_session_code() -> Result<String> {
         })
 }
 
+/// Ask on the terminal for a key file's passphrase and return the key without
+/// one. Reads the terminal even when stdin carries the vault password.
+fn decrypt_ssh_key_for_vault(bytes: &[u8], key_path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    use troved::ssh_agent::keys::{decrypt_to_openssh, ParseError};
+    let user_err = |message: String| -> anyhow::Error {
+        DaemonClassified {
+            message,
+            exit: EXIT_USER_ERROR,
+        }
+        .into()
+    };
+    let passphrase = zeroize::Zeroizing::new(
+        rpassword::prompt_password(format!("Passphrase for {}: ", key_path.display()))
+            .map_err(|e| {
+                user_err(format!(
+                    "{} is passphrase-protected and its passphrase couldn't be read                      from a terminal ({e}); run this in one",
+                    key_path.display()
+                ))
+            })?,
+    );
+    match decrypt_to_openssh(bytes, passphrase.as_bytes()) {
+        Ok(pem) => Ok(zeroize::Zeroizing::new(pem.as_bytes().to_vec())),
+        Err(ParseError::WrongPassphrase) => Err(user_err(format!(
+            "that passphrase doesn't decrypt {}",
+            key_path.display()
+        ))),
+        Err(e) => Err(user_err(format!("decrypting {}: {e}", key_path.display()))),
+    }
+}
+
 /// Parse `bytes` as an SSH private key purely to validate it, mapping each
 /// failure to a precise, user-facing message. `Ok(())` means it is storable.
 fn validate_ssh_private_key(bytes: &[u8], comment: &str) -> Result<()> {
@@ -3550,10 +3593,8 @@ fn validate_ssh_private_key(bytes: &[u8], comment: &str) -> Result<()> {
     };
     match parse_private_key(bytes, comment) {
         Ok(_) => Ok(()),
-        Err(ParseError::Encrypted) => Err(user_err(
-            "the key is passphrase-encrypted; decrypt a copy first \
-             (`ssh-keygen -p -f <file>`) and add that"
-                .to_string(),
+        Err(ParseError::Encrypted | ParseError::WrongPassphrase) => Err(user_err(
+            "the key is passphrase-protected and couldn't be decrypted".to_string(),
         )),
         Err(ParseError::RsaTooSmall(bits)) => Err(user_err(format!(
             "RSA key too small: {bits} bits (minimum 2048)"
