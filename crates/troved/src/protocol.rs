@@ -657,6 +657,19 @@ pub struct SshKeyDto {
     pub comment: String,
 }
 
+/// A key in an unlocked vault that the SSH or GPG agent could not load, for
+/// `status` and the unlock reply.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedKeyDto {
+    /// `ssh` or `gpg`.
+    pub agent: String,
+    pub vault: PathBuf,
+    /// The entry's full path (`Work/SSH/github`).
+    pub entry: String,
+    pub attachment: String,
+    pub reason: String,
+}
+
 /// One private agent socket and the keys it serves, for `ssh-agent sockets`.
 #[derive(Debug, Serialize)]
 pub struct ScopedSocketDto {
@@ -730,6 +743,10 @@ pub enum OkBody {
         ssh_keys: usize,
         gpg_keys: usize,
         materialized: usize,
+        /// Keys in the unlocked vaults that the agents could not load, and
+        /// why. Wire-optional: older daemons don't send it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skipped_keys: Vec<SkippedKeyDto>,
     },
     /// Response to `Unlock`: the one-time session code for this unlock. The CLI
     /// emits it as `export TROVE_SESSION=…`; subsequent `Get`s present it.
@@ -751,6 +768,11 @@ pub enum OkBody {
         /// the CLI can warn loudly — never a silent `ok` with a file missing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         materialize_warnings: Vec<String>,
+        /// Keys in the vault just unlocked that the agents could not load.
+        /// The unlock still succeeds; the CLI warns about each one, since an
+        /// auto-spawned daemon's own stderr goes nowhere anyone reads.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skipped_keys: Vec<SkippedKeyDto>,
         /// Per-key failures forwarding into the user's own ssh-agent. Same
         /// contract as `materialize_warnings`: forwarding is a convenience and
         /// never fails the unlock, but a key that didn't make it into the agent
@@ -891,6 +913,7 @@ impl Response {
         ssh_keys: usize,
         gpg_keys: usize,
         materialized: usize,
+        skipped_keys: Vec<SkippedKeyDto>,
     ) -> Self {
         Response::Ok(OkBody::Status {
             // Older clients read `vault_path` and know nothing of a set; give
@@ -903,11 +926,13 @@ impl Response {
             ssh_keys,
             gpg_keys,
             materialized,
+            skipped_keys,
         })
     }
     pub fn ok_unlocked(
         code: Option<String>,
         materialize_warnings: Vec<String>,
+        skipped_keys: Vec<SkippedKeyDto>,
         ssh_forward_warnings: Vec<String>,
         ssh_forward_notes: Vec<String>,
         ssh_forward_socket: Option<String>,
@@ -916,6 +941,7 @@ impl Response {
             code,
             daemon_version: env!("TROVE_BUILD_VERSION").to_string(),
             materialize_warnings,
+            skipped_keys,
             ssh_forward_warnings,
             ssh_forward_notes,
             ssh_forward_socket,

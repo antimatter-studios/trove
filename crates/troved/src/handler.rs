@@ -24,7 +24,9 @@ use trove_core::{EntrySummary, SearchFieldFilter, SearchHit, SearchQuery, Vault}
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::idle::{IdleState, IdleTracker};
 use crate::materialize::{self, MaterializedFile, MaterializedStore};
-use crate::protocol::{DescribeAttachmentDto, DescribeEntryDto, EntryDto, Request, Response};
+use crate::protocol::{
+    DescribeAttachmentDto, DescribeEntryDto, EntryDto, Request, Response, SkippedKeyDto,
+};
 use crate::ssh_agent::scoped::{self, ScopedAgents};
 use crate::ssh_agent::{self, hostkey, keeagent, keys as ssh_keys, KeyStore, LoadedKey};
 use crate::vaults::VaultSet;
@@ -151,6 +153,7 @@ pub async fn handle(
                     // still succeeds. The unlock RESPONSE goes out only after
                     // every materialize completes — so by the time the user
                     // sees `ok`, the files are on disk.
+                    let skipped_keys = skipped_keys_in(&vault, filter.as_deref());
                     let (materialized, materialize_warnings) = materialize_from_vault(
                         &vault,
                         &vault_key,
@@ -246,6 +249,7 @@ pub async fn handle(
                         response: Response::ok_unlocked(
                             code,
                             materialize_warnings,
+                            skipped_keys,
                             forward.warnings,
                             forward.notes,
                             forward.socket,
@@ -734,6 +738,15 @@ pub async fn handle(
             let ssh_keys = key_store.read().await.len();
             let gpg_keys = gpg_store.read().await.len();
             let materialized = mat_store.read().await.len();
+            // Re-parsed on demand rather than kept: a handful of attachments
+            // per vault, and it can't go stale after an edit.
+            let skipped_keys = {
+                let guard = state.lock().await;
+                guard
+                    .iter_with_filters()
+                    .flat_map(|(vault, filter)| skipped_keys_in(vault, filter))
+                    .collect()
+            };
             Handled {
                 response: Response::ok_status(
                     vault_paths,
@@ -742,6 +755,7 @@ pub async fn handle(
                     ssh_keys,
                     gpg_keys,
                     materialized,
+                    skipped_keys,
                 ),
                 shutdown: false,
             }
@@ -2231,6 +2245,19 @@ pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
 
 /// Filtered variant used by an unlock that selected a tag.
 pub fn load_gpg_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) -> Vec<LoadedGpgKey> {
+    let mut skipped = Vec::new();
+    let out = load_gpg_keys_reporting(vault, filter, &mut skipped);
+    log_skipped(&skipped);
+    out
+}
+
+/// [`load_gpg_keys_from_vault_filtered`], reporting what it skipped in
+/// `skipped` instead of logging it.
+fn load_gpg_keys_reporting(
+    vault: &Vault,
+    filter: Option<&str>,
+    skipped: &mut Vec<SkippedKeyDto>,
+) -> Vec<LoadedGpgKey> {
     const ATTACHMENT_NAME: &str = "gpg-priv";
     let mut out = Vec::new();
     let entries: Vec<EntrySummary> = vault.list_entries();
@@ -2241,14 +2268,14 @@ pub fn load_gpg_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) ->
         if !entry.attachment_names.iter().any(|a| a == ATTACHMENT_NAME) {
             continue;
         }
+        let mut skip = |reason: String| {
+            skipped.push(skipped_key("gpg", vault, &entry, ATTACHMENT_NAME, reason));
+        };
         let bytes = match vault.read_binary(&entry.id, ATTACHMENT_NAME) {
             Ok(Some(b)) => b,
             Ok(None) => continue,
             Err(e) => {
-                eprintln!(
-                    "gpg-agent: failed to read 'gpg-priv' attachment on entry '{}': {}",
-                    entry.title, e
-                );
+                skip(format!("failed to read the attachment: {e}"));
                 continue;
             }
         };
@@ -2259,22 +2286,12 @@ pub fn load_gpg_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) ->
                 }
             }
             Err(gpg_keys::ParseError::NoSigningKey) => {
-                eprintln!(
-                    "gpg-agent: skipping entry '{}': no signing key in this export \
-                     (supported: ed25519, RSA)",
-                    entry.title
-                );
+                skip("no signing key in this export (supported: ed25519, RSA)".to_string());
             }
             Err(gpg_keys::ParseError::Encrypted) => {
-                eprintln!(
-                    "gpg-agent: skipping entry '{}': encrypted secret keys not supported \
-                     in v0.0.3.0",
-                    entry.title
-                );
+                skip("passphrase-protected secret keys are not supported".to_string());
             }
-            Err(e) => {
-                eprintln!("gpg-agent: skipping entry '{}': {}", entry.title, e);
-            }
+            Err(e) => skip(e.to_string()),
         }
     }
     out
@@ -2299,6 +2316,19 @@ pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
 
 /// Filtered variant used by an unlock that selected a tag.
 pub fn load_ssh_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) -> Vec<LoadedKey> {
+    let mut skipped = Vec::new();
+    let out = load_ssh_keys_reporting(vault, filter, &mut skipped);
+    log_skipped(&skipped);
+    out
+}
+
+/// [`load_ssh_keys_from_vault_filtered`], reporting what it skipped in
+/// `skipped` instead of logging it.
+fn load_ssh_keys_reporting(
+    vault: &Vault,
+    filter: Option<&str>,
+    skipped: &mut Vec<SkippedKeyDto>,
+) -> Vec<LoadedKey> {
     let mut out = Vec::new();
     let entries: Vec<EntrySummary> = vault.list_entries();
     for entry in entries {
@@ -2315,10 +2345,13 @@ pub fn load_ssh_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) ->
                 Ok(Some(b)) => b,
                 Ok(None) => continue,
                 Err(e) => {
-                    eprintln!(
-                        "keeagent: failed to read KeeAgent.settings on '{}': {}",
-                        entry.title, e
-                    );
+                    skipped.push(skipped_key(
+                        "ssh",
+                        vault,
+                        &entry,
+                        keeagent::ATTACHMENT_NAME,
+                        format!("failed to read the attachment: {e}"),
+                    ));
                     continue;
                 }
             };
@@ -2328,7 +2361,9 @@ pub fn load_ssh_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) ->
                     attachment,
                     forward,
                 } => {
-                    if let Some(mut k) = try_load_ssh_attachment(vault, &entry, &attachment) {
+                    if let Some(mut k) =
+                        try_load_ssh_attachment(vault, &entry, &attachment, skipped)
+                    {
                         // The settings blob is also where the entry states what
                         // it wants done with the copy pushed into the user's own
                         // agent; carry that on the key itself so unlock/lock
@@ -2343,7 +2378,7 @@ pub fn load_ssh_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) ->
             // keep `ForwardPolicy::default()`: forwarded, removed at lock, no
             // per-entry constraints.
             for att_name in &entry.attachment_names {
-                if let Some(k) = try_load_ssh_attachment(vault, &entry, att_name) {
+                if let Some(k) = try_load_ssh_attachment(vault, &entry, att_name, skipped) {
                     out.push(k);
                 }
             }
@@ -2357,20 +2392,21 @@ fn entry_matches_filter(entry: &EntrySummary, filter: Option<&str>) -> bool {
 }
 
 /// Try to read and parse a single attachment as an SSH private key.
-/// Silent on non-key content; warns on PEM-shaped blobs that fail to parse.
+/// Silent on non-key content; reports PEM-shaped blobs that fail to parse.
 fn try_load_ssh_attachment(
     vault: &Vault,
     entry: &EntrySummary,
     attachment_name: &str,
+    skipped: &mut Vec<SkippedKeyDto>,
 ) -> Option<LoadedKey> {
+    let mut skip = |reason: String| {
+        skipped.push(skipped_key("ssh", vault, entry, attachment_name, reason));
+    };
     let bytes = match vault.read_binary(&entry.id, attachment_name) {
         Ok(Some(b)) => b,
         Ok(None) => return None,
         Err(e) => {
-            eprintln!(
-                "ssh-agent: failed to read '{}' on '{}': {}",
-                attachment_name, entry.title, e
-            );
+            skip(format!("failed to read the attachment: {e}"));
             return None;
         }
     };
@@ -2391,41 +2427,69 @@ fn try_load_ssh_attachment(
         }
         Err(ssh_keys::ParseError::NotOpenssh(detail)) => {
             if bytes.starts_with(b"-----BEGIN") {
-                eprintln!(
-                    "ssh-agent: skipping {}/{}: looks like a private key \
-                     but failed to parse ({detail})",
-                    display, attachment_name
-                );
+                skip(format!(
+                    "looks like a private key but failed to parse ({detail})"
+                ));
             }
             None
         }
         Err(ssh_keys::ParseError::UnsupportedAlgorithm(alg)) => {
-            eprintln!(
-                "ssh-agent: skipping {}/{}: unsupported key algorithm {} \
-                 (supported: ed25519, rsa>=2048, ecdsa-nistp256/384/521)",
-                display, attachment_name, alg
-            );
+            skip(format!(
+                "unsupported key algorithm {alg} \
+                 (supported: ed25519, rsa>=2048, ecdsa-nistp256/384/521)"
+            ));
             None
         }
         Err(ssh_keys::ParseError::RsaTooSmall(bits)) => {
-            eprintln!(
-                "ssh-agent: skipping {}/{}: RSA key too short ({} bits, minimum 2048)",
-                display, attachment_name, bits
-            );
+            skip(format!("RSA key too short ({bits} bits, minimum 2048)"));
             None
         }
         Err(ssh_keys::ParseError::Encrypted) => {
-            eprintln!(
-                "ssh-agent: skipping {}/{}: encrypted private keys not supported",
-                display, attachment_name
-            );
+            skip("passphrase-protected private keys are not supported".to_string());
             None
         }
         Err(e) => {
-            eprintln!("ssh-agent: skipping {}/{}: {}", display, attachment_name, e);
+            skip(e.to_string());
             None
         }
     }
+}
+
+/// One skipped key, located by vault, entry path and attachment.
+fn skipped_key(
+    agent: &str,
+    vault: &Vault,
+    entry: &EntrySummary,
+    attachment: &str,
+    reason: String,
+) -> SkippedKeyDto {
+    SkippedKeyDto {
+        agent: agent.to_string(),
+        vault: vault.path().to_path_buf(),
+        entry: entry.display_path(),
+        attachment: attachment.to_string(),
+        reason,
+    }
+}
+
+/// The daemon's stderr line for each skipped key, as before these were also
+/// reported to the CLI.
+fn log_skipped(skipped: &[SkippedKeyDto]) {
+    for k in skipped {
+        eprintln!(
+            "{}-agent: skipping {}/{}: {}",
+            k.agent, k.entry, k.attachment, k.reason
+        );
+    }
+}
+
+/// Every key in `vault` (under `filter`) that the SSH and GPG agents could
+/// not load, and why.
+fn skipped_keys_in(vault: &Vault, filter: Option<&str>) -> Vec<SkippedKeyDto> {
+    let mut skipped = Vec::new();
+    load_ssh_keys_reporting(vault, filter, &mut skipped);
+    load_gpg_keys_reporting(vault, filter, &mut skipped);
+    skipped
 }
 
 #[cfg(test)]

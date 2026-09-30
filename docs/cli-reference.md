@@ -967,12 +967,28 @@ not empty.
   "idle_remaining_seconds": integer | null, // null when no countdown is running
   "ssh_key_count": integer,
   "gpg_key_count": integer,
-  "materialized_file_count": integer
+  "materialized_file_count": integer,
+  "skipped_keys": [                          // keys the agents couldn't load
+    {
+      "agent": string,                       // "ssh" or "gpg"
+      "vault": string,
+      "entry": string,                       // full path, e.g. "Work/SSH/github"
+      "attachment": string,
+      "reason": string
+    }
+  ]
 }
 ```
 
 With no daemon running it still succeeds: `daemon_running` is `false`,
-`vault_paths` is empty, the counts are 0 and both timers are `null`.
+`vault_paths` and `skipped_keys` are empty, the counts are 0 and both timers
+are `null`.
+
+`skipped_keys` lists every key in the unlocked vaults that troved found but
+couldn't load: a passphrase-protected key, an RSA key under 2048 bits, an
+unsupported algorithm, an OpenPGP export with no signing key. `unlock` warns
+about the same keys on stderr. The human `trove status` output lists them under
+"Skipped keys" when there are any.
 
 ```json
 {
@@ -981,6 +997,7 @@ With no daemon running it still succeeds: `daemon_running` is `false`,
   "idle_remaining_seconds": 597,
   "idle_timeout_seconds": 600,
   "materialized_file_count": 1,
+  "skipped_keys": [],
   "ssh_key_count": 1,
   "vault_paths": ["/home/me/vaults/work.kdbx"]
 }
