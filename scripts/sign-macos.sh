@@ -10,9 +10,8 @@
 # the hardened runtime, and without the get-task-allow entitlement, puts troved
 # in the same class: debuggers are refused.
 #
-# This script signs CLI/daemon binaries; it does not notarize them. Release
-# signing is conditional on APPLE_CERTIFICATE being configured. Desktop bundle
-# notarization is handled separately by the desktop release workflow.
+# This script signs CLI/daemon binaries; scripts/notarize-macos.sh notarizes
+# them. Release signing is conditional on APPLE_CERTIFICATE being configured.
 #
 # Usage:
 #   scripts/sign-macos.sh <path> [path...]
@@ -76,7 +75,8 @@ for target in "$@"; do
   # Prove the property we actually care about: no get-task-allow, so a
   # same-uid debugger can't attach.
   if codesign -d --entitlements - "$target" 2>/dev/null | grep -q "get-task-allow"; then
-    echo "sign-macos: WARNING — $target carries get-task-allow; its memory is still readable" >&2
+    echo "sign-macos: $target carries get-task-allow; its memory is still readable" >&2
+    exit 1
   fi
   echo "sign-macos: signed $target"
 done

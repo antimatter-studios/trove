@@ -10,7 +10,14 @@
 # Homebrew is NOT published from here. The antimatter-studios/homebrew-tap repo
 # PULLS a tagged version (rendering its own formula from this Release's
 # artifacts + checksums) on its own trigger, so this repo never pushes to the
-# tap and needs no cross-repo token.
+# tap and needs no cross-repo token. Notarizing changes no asset names, so the
+# tap needs nothing new.
+#
+# macOS artifacts are signed with the hardened runtime and notarized when the
+# APPLE_* secrets are set, and built unsigned when they are not. A `dry_run`
+# dispatch builds, signs and notarizes the dispatched branch without publishing
+# anything, so the signing path can be tested without cutting a release:
+#   gh workflow run release.yml --ref <branch> -f tag=v0.0.0 -f dry_run=true
 #
 # Targets — all built on NATIVE runners, so there's no cross-compilation:
 #   * darwin-arm64    (macos-15)        aarch64-apple-darwin
@@ -38,6 +45,10 @@ on:
         description: "Only (re)publish trove-core to crates.io — skip the binary rebuild + GitHub Release (targeted retry)"
         type: boolean
         default: false
+      dry_run:
+        description: "Build, sign and notarize the dispatched ref (named as `tag`), but publish nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -45,6 +56,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # What to build: the dispatched commit on a dry run, else the tag.
+  SOURCE_REF: ${{ inputs.dry_run && github.sha || github.event.inputs.tag || github.ref }}
 
 jobs:
   # Gate the release on a green test run. Re-uses the same suite CI runs, so a
@@ -57,7 +70,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -124,7 +137,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -150,8 +163,12 @@ jobs:
       # unsigned binary can be attached to by any process running as the same
       # user (task_for_pid succeeds). The hardened runtime, with no
       # get-task-allow entitlement, refuses that — the same protection Apple's
-      # own ssh-agent gets from SIP. Skipped when the cert secret is absent, so
-      # forks and secretless runs still produce (unsigned) artifacts.
+      # own ssh-agent gets from SIP. The binaries are signed with no
+      # entitlements at all: troved only serves Unix sockets and runs
+      # /usr/bin/id and launchctl, none of which the hardened runtime restricts,
+      # and the YubiKey (USB HID) path is Linux-only and not built here.
+      # Skipped when the cert secret is absent, so forks and secretless runs
+      # still produce (unsigned) artifacts.
       - name: Import signing certificate (macOS)
         id: cli-signing
         if: runner.os == 'macOS'
@@ -159,8 +176,16 @@ jobs:
         env:
           CERT: ${{ secrets.APPLE_CERTIFICATE }}
           CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -eu
+          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            echo "have_notary=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notary=false" >> "$GITHUB_OUTPUT"
+          fi
           if [ -z "${CERT:-}" ]; then
             echo "have_cert=false" >> "$GITHUB_OUTPUT"
             echo "No APPLE_CERTIFICATE — unsigned CLI binaries."
@@ -189,6 +214,25 @@ jobs:
         run: |
           BIN="target/${{ matrix.target }}/release"
           scripts/sign-macos.sh "$BIN/trove" "$BIN/troved"
+
+      # Bare binaries can't carry a stapled ticket; Gatekeeper looks it up
+      # online on first run. Skipped (signed but unnotarized) when the notary
+      # credentials are missing, so a partial secret set doesn't fail the build.
+      - name: Notarize binaries (macOS)
+        if: runner.os == 'macOS' && steps.cli-signing.outputs.have_cert == 'true'
+        shell: bash
+        env:
+          HAVE_NOTARY: ${{ steps.cli-signing.outputs.have_notary }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "$HAVE_NOTARY" != "true" ]; then
+            echo "::warning::APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID not all set — CLI binaries are signed but not notarized."
+            exit 0
+          fi
+          BIN="target/${{ matrix.target }}/release"
+          scripts/notarize-macos.sh "$BIN/trove" "$BIN/troved"
 
       # Checksums are computed centrally on Ubuntu (the release job) where
       # `shasum` is reliable, so packaging here is archive-only.
@@ -260,7 +304,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -322,8 +366,16 @@ jobs:
         id: signing
         env:
           CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "have_notary=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notary=false" >> "$GITHUB_OUTPUT"
+          fi
           if [ -n "$CERT" ]; then
             echo "have_cert=true" >> "$GITHUB_OUTPUT"
             # Throwaway password for the temp keychain tauri-action creates on
@@ -351,6 +403,32 @@ jobs:
         with:
           projectPath: trove-desktop
           args: ${{ matrix.args }}
+
+      # tauri-action notarizes and staples Trove.app before it builds the DMG,
+      # but it only signs the DMG itself, so the download is still rejected as
+      # "Unnotarized Developer ID". Notarize and staple the DMG here.
+      - name: Notarize DMG (macOS)
+        if: matrix.label == 'macos-universal' && steps.signing.outputs.have_cert == 'true'
+        shell: bash
+        env:
+          HAVE_NOTARY: ${{ steps.signing.outputs.have_notary }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eu
+          if [ "$HAVE_NOTARY" != "true" ]; then
+            echo "::warning::APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID not all set — DMG is signed but not notarized."
+            exit 0
+          fi
+          shopt -s nullglob
+          dmgs=(src-tauri/target/*/release/bundle/dmg/*.dmg)
+          if [ ${#dmgs[@]} -eq 0 ]; then
+            echo "::error::no DMG found to notarize"
+            exit 1
+          fi
+          ../scripts/notarize-macos.sh "${dmgs[@]}"
+          xcrun stapler validate src-tauri/target/*/release/bundle/macos/*.app
 
       - name: Build desktop bundles — unsigned (Linux/Windows, or macOS w/o cert)
         if: matrix.label != 'macos-universal' || steps.signing.outputs.have_cert != 'true'
@@ -380,13 +458,13 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [build, build-desktop]
-    if: ${{ !inputs.crate_only }}
+    if: ${{ !inputs.crate_only && !inputs.dry_run }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (CHANGELOG.md + release-notes tooling)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -448,7 +526,7 @@ jobs:
     # on a `crate_only` dispatch (targeted re-publish without rebuilding or
     # overwriting the Release). Guarded so a failed/absent build never reaches
     # the publish step.
-    if: ${{ always() && !cancelled() && (inputs.crate_only || needs.release.result == 'success') }}
+    if: ${{ always() && !cancelled() && !inputs.dry_run && (inputs.crate_only || needs.release.result == 'success') }}
     runs-on: ubuntu-latest
     # The crates.io Trusted Publishing config requires this environment name —
     # the OIDC JWT must carry it, so the job must declare it.
@@ -460,7 +538,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
           fetch-depth: 0 # full history so the on-main ancestry check works
 
       # A tag can point at any commit; only publish tags contained in main.
