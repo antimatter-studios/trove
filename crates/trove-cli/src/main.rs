@@ -5657,6 +5657,14 @@ fn cmd_exec(
     let result = (|| -> Result<i32> {
         let injections = exec::resolve(&v, scope, &tmp)?;
         drop(v); // decrypted vault not needed while the child runs
+        let wrote_files = std::fs::read_dir(&tmp).is_ok_and(|mut d| d.next().is_some());
+        if cfg!(target_os = "linux") && wrote_files && exec::is_disk_backed(&tmp) {
+            eprintln!(
+                "trove: exec: {} is not memory-backed (no tmpfs $XDG_RUNTIME_DIR or /dev/shm), \
+                 so the attachments written there can reach the disk",
+                tmp.display()
+            );
+        }
 
         let (program, args) = command.split_first().expect("clap requires the command");
         let rt = tokio::runtime::Builder::new_current_thread()

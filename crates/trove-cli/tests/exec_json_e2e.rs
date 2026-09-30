@@ -166,6 +166,14 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         !std::path::Path::new(&kube_path).exists(),
         "materialized file must be wiped after exec: {kube_path}"
     );
+    // Linux has a memory-backed place for it almost everywhere; use it.
+    let tmpfs = troved::materialize::paths::is_tmpfs_backed;
+    if cfg!(target_os = "linux") && tmpfs(std::path::Path::new("/dev/shm")) {
+        assert!(
+            tmpfs(std::path::Path::new(&kube_path)),
+            "exec should materialize onto tmpfs when one is available: {kube_path}"
+        );
+    }
 
     // Child exit code propagates.
     let out = run_trove(

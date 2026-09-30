@@ -566,6 +566,13 @@ materialize into a private per-run directory (0700, files 0600) that is
 wiped — overwritten, then removed — the moment the command exits, including
 on Ctrl-C. The child's exit code becomes trove's.
 
+On Linux the directory goes on tmpfs: `$XDG_RUNTIME_DIR` if it is
+memory-backed, else `/dev/shm`. With neither, it falls back to the OS temp
+dir and `exec` warns that the files can reach the disk. macOS and Windows have
+no memory-backed filesystem to use, so there it is always the OS temp dir,
+which is on disk; a SIGKILL or power loss leaves the files there until they
+are deleted.
+
 If a name matches both an entry and a group, `exec` reports the ambiguity.
 Select the intended scope with `--entry PATH` or `--group PATH`, for example
 `trove --vault v.kdbx exec --group Infra -- env`.
