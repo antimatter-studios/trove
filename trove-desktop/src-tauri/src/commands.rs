@@ -952,7 +952,7 @@ fn agent_key_state(
             // that out of the blob either way. The policy comes back for both,
             // so the editor shows what is stored rather than a default.
             let named = keeagent_attachment_name(&bytes);
-            return match keeagent::parse(&bytes, "") {
+            return match keeagent::parse(&bytes) {
                 keeagent::Decision::Load {
                     attachment,
                     forward,
@@ -966,7 +966,10 @@ fn agent_key_state(
                         remove_at_close: forward.remove_at_close,
                     },
                 ),
-                keeagent::Decision::Skip => (
+                // Opted out, or opted in to a key trove can't load (an
+                // external key file): either way it isn't served, so the
+                // editor shows it off with the stored policy.
+                keeagent::Decision::Skip | keeagent::Decision::Unusable(_) => (
                     named.unwrap_or_default(),
                     false,
                     stored_policy(&bytes).unwrap_or_default(),

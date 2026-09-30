@@ -53,6 +53,10 @@ jobs:
             desktop:
               - 'trove-desktop/**'
               - '.github/workflows/desktop-ci.yml'
+              # The backend path-depends on these, so an API change there can
+              # break the desktop build without touching trove-desktop/.
+              - 'crates/trove-core/**'
+              - 'crates/troved/**'
 
   frontend:
     name: Frontend (vitest)
