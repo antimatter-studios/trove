@@ -90,7 +90,7 @@ sockets behave the same way, addressed by the pipe name it prints:
 The threat model's [three barriers](threat-model.md) are not all present here.
 
 - **No `SO_PEERCRED`.** Named pipes carry no peer credentials, so
-  `crates/troved/src/main.rs` uses a `u32::MAX` sentinel for `peer_uid`. An
+  `crates/troved/src/server.rs` uses a `u32::MAX` sentinel for `peer_uid`. An
   explicit owner-only DACL blocks other users, but troved cannot check that a
   connected client has the same user identity that unlocked the vault. A
   process running as the pipe owner can connect; the session code still gates

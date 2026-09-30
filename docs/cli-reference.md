@@ -1,6 +1,6 @@
 # CLI reference
 
-Every `trove` subcommand, every `troved` env var, every control RPC. Verified against the code in [crates/trove-cli/src/main.rs](../crates/trove-cli/src/main.rs), [crates/troved/src/main.rs](../crates/troved/src/main.rs), and [crates/troved/src/protocol.rs](../crates/troved/src/protocol.rs). Run `trove <command> --help` for clap's auto-generated copy.
+Every `trove` subcommand, every `troved` env var, every control RPC. Verified against the code in [crates/trove-cli/src/main.rs](../crates/trove-cli/src/main.rs), [crates/troved/src/server.rs](../crates/troved/src/server.rs), and [crates/troved/src/protocol.rs](../crates/troved/src/protocol.rs). Run `trove <command> --help` for clap's auto-generated copy.
 
 ## Global flags (trove)
 

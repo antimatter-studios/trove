@@ -29,9 +29,9 @@ Why split it three ways at all? The daemon is a security-critical surface — it
 
 ## Daemon model
 
-`troved` is the long-running process. The CLI is a thin client (mostly). On startup [crates/troved/src/main.rs](../crates/troved/src/main.rs):
+`troved` is the long-running process. The CLI is a thin client (mostly). The daemon is a library function, `troved::server::serve`, so another host can run it in-process; the `troved` binary only parses its flags and calls it. On startup [crates/troved/src/server.rs](../crates/troved/src/server.rs):
 
-1. Resolves three socket paths from env / `$XDG_RUNTIME_DIR` / `$TMPDIR` (see [crates/troved/src/main.rs](../crates/troved/src/main.rs), [crates/troved/src/ssh_agent/mod.rs](../crates/troved/src/ssh_agent/mod.rs), [crates/troved/src/gpg_agent/mod.rs](../crates/troved/src/gpg_agent/mod.rs)).
+1. Resolves three socket paths from env / `$XDG_RUNTIME_DIR` / `$TMPDIR` (see [crates/troved/src/server.rs](../crates/troved/src/server.rs), [crates/troved/src/ssh_agent/mod.rs](../crates/troved/src/ssh_agent/mod.rs), [crates/troved/src/gpg_agent/mod.rs](../crates/troved/src/gpg_agent/mod.rs)).
 2. Removes any stale socket files left over from a previous run.
 3. Binds all three; chmods them `0600`.
 4. Spawns the SSH and GPG listener tasks.
@@ -86,7 +86,7 @@ There are two states — **vault locked** and **vault unlocked**. They flip on a
 - `unlock` (control RPC): parse kdbx, populate stores, arm idle timer, return `ok`.
 - `lock` (control RPC): wipe materialized files, drop vault, clear key stores, cancel idle timer.
 - `shutdown` (control RPC): same as lock + tell main loop to exit.
-- Idle timer fires: same set of operations as `lock`, no response. See [crates/troved/src/main.rs](../crates/troved/src/main.rs) `build_lock_callback`.
+- Idle timer fires: same set of operations as `lock`, no response. See [crates/troved/src/server.rs](../crates/troved/src/server.rs) `build_lock_callback`.
 
 What's loaded into daemon memory on **unlock**:
 
