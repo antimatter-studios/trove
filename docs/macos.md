@@ -271,6 +271,11 @@ Today that's survivable because the symlink is a manual act you can undo. Any
 launchd service would make the displacement permanent, automatic, and invisible.
 **So do not ship a launchd gpg service before fixing the displacement.**
 
+The launchd agent trove does ship (`packaging/launchd/`, or `brew services start
+trove`) runs the daemon only. It binds trove's own gpg socket, as troved always
+does, but never creates the `S.gpg-agent` symlink, so the displacement stays a
+manual step you can undo.
+
 ### Two ways to fix it — only one survives contact
 
 **A. Route in front of it — investigated, and it does not work.** The idea was:

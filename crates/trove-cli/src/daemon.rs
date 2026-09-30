@@ -173,7 +173,8 @@ pub fn version_mismatch_warning(daemon_version: &str) -> Option<String> {
         "trove: warning: version drift — cli {cli} · daemon {daemon_version}. \
          The running troved is a different build than this CLI and may speak a \
          different protocol. Restart it to load the current binary: \
-         `trove lock` (or kill troved), then re-run."
+         `trove lock` (or kill troved; `brew services restart trove` if it runs \
+         as a service), then re-run."
     ))
 }
 
@@ -199,7 +200,8 @@ pub fn predates_version_reporting_warning() -> Option<String> {
     Some(
         "trove: warning: the running troved predates version reporting — it's an older build \
          than this CLI and running stale code, which may speak a different protocol. Restart it \
-         to load the current binary: `trove lock` (or kill troved), then re-run."
+         to load the current binary: `trove lock` (or kill troved; `brew services restart \
+         trove` if it runs as a service), then re-run."
             .to_string(),
     )
 }

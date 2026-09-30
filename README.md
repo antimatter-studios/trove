@@ -134,6 +134,20 @@ troved &
 #   idle-lock timeout: 900 seconds
 ```
 
+You rarely need to start it by hand: any `trove` command that needs the daemon
+starts one, and it exits once the last vault is locked. To have it running from
+login instead, so `ssh` and `git` find the agent sockets before you've run a
+`trove` command, install it as a service. It runs `troved --resident`, which stays
+up across locks, and is restarted if it dies:
+
+```sh
+brew services start trove    # Homebrew, macOS or Linux
+```
+
+Without Homebrew, use the launchd agent or systemd user unit in
+[`packaging/`](packaging/); each file says how to install it. Neither touches
+gpg's socket.
+
 The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock), `TROVE_SOCK` / `TROVE_SSH_SOCK` / `TROVE_GPG_SOCK` (override socket paths), and `TROVE_SSH_FORWARD=0` (see below).
 
 ### 3. Wire up the SSH agent

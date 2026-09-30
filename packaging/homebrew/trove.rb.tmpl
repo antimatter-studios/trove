@@ -39,11 +39,24 @@ class Trove < Formula
     bin.install "trove", "troved"
   end
 
+  # `brew services start trove` runs troved at login and restarts it if it
+  # dies. `--resident` keeps it up after a lock so the agent sockets stay
+  # available. It doesn't touch gpg's socket; that symlink stays manual.
+  service do
+    run [opt_bin/"troved", "--resident"]
+    keep_alive successful_exit: false, crashed: true
+    log_path var/"log/troved.log"
+    error_log_path var/"log/troved.log"
+  end
+
   def caveats
     <<~EOS
       Two binaries installed:
         trove   — CLI client
         troved  — long-running daemon (auto-spawned by trove on first use)
+
+      To run troved at login instead:
+        brew services start trove
 
       Quickstart:
         trove unlock ~/path/to/your.kdbx     # starts troved if needed

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent for troved. Starts it at login and restarts it if it
+  dies. A clean exit (`trove daemons kill`, a `shutdown` request) stays down.
+  Homebrew users don't need this file: `brew services start trove` generates
+  the same thing.
+
+  Edit the troved path below to match your install (`command -v troved`), then:
+
+    cp com.antimatterstudios.troved.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.antimatterstudios.troved.plist
+
+  Remove it with:
+
+    launchctl bootout gui/$(id -u)/com.antimatterstudios.troved
+    rm ~/Library/LaunchAgents/com.antimatterstudios.troved.plist
+
+  To keep troved's log, add a StandardErrorPath key with an absolute path,
+  such as /Users/<you>/Library/Logs/troved.log.
+
+  This only runs the daemon. It does not point gpg at trove's socket; that
+  symlink stays a manual step you can undo (see docs/macos.md).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.antimatterstudios.troved</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/troved</string>
+    <string>--resident</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+</dict>
+</plist>

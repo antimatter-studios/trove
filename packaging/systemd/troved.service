@@ -1,0 +1,27 @@
+# systemd user unit for troved. Starts it at login and restarts it if it
+# crashes. Homebrew users don't need this file: `brew services start trove`
+# generates the same thing.
+#
+# Edit ExecStart to match your install (`command -v troved`), then:
+#
+#   cp troved.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now troved
+#
+# Logs: `journalctl --user -u troved`.
+#
+# This only runs the daemon. It does not point gpg at trove's socket; that
+# symlink stays a manual step you can undo.
+
+[Unit]
+Description=trove secrets daemon (SSH and GPG agents for KeePass vaults)
+Documentation=https://github.com/antimatter-studios/trove
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/troved --resident
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
