@@ -1326,7 +1326,7 @@ async fn add_file(
 ) -> Handled {
     {
         let sess = session.lock().await;
-        let ok = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+        let ok = session_matches(&sess, peer_uid, code);
         if !ok {
             return Handled {
                 response: Response::err(
@@ -1481,8 +1481,12 @@ async fn materialize_from_vault(
 /// Check a session while its mutex remains held through the corresponding
 /// vault access. Protected requests and lock transitions acquire session before
 /// vault state, so authorization cannot change between check and use.
+///
+/// The code is compared in constant time: `==` stops at the first differing
+/// byte, which would let a local caller recover a code by timing refusals.
 fn session_matches(sess: &Option<Session>, peer_uid: u32, code: &str) -> bool {
-    matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid)
+    use subtle::ConstantTimeEq;
+    matches!(sess.as_ref(), Some(s) if bool::from(s.code.as_bytes().ct_eq(code.as_bytes())) && s.uid == peer_uid)
 }
 
 fn session_refused() -> Handled {
@@ -1640,7 +1644,7 @@ async fn git_credential(
     code: &str,
 ) -> Handled {
     let sess = session.lock().await;
-    let authorized = matches!(sess.as_ref(), Some(s) if s.code == code && s.uid == peer_uid);
+    let authorized = session_matches(&sess, peer_uid, code);
     if !authorized {
         return Handled {
             response: Response::err(
@@ -2421,5 +2425,25 @@ fn try_load_ssh_attachment(
             eprintln!("ssh-agent: skipping {}/{}: {}", display, attachment_name, e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_matches_needs_the_exact_code_and_uid() {
+        let sess = Some(Session {
+            code: "abc123".to_string(),
+            uid: 501,
+        });
+        assert!(session_matches(&sess, 501, "abc123"));
+        assert!(!session_matches(&sess, 502, "abc123"));
+        assert!(!session_matches(&sess, 501, "abc124"));
+        assert!(!session_matches(&sess, 501, "abc12"));
+        assert!(!session_matches(&sess, 501, "abc1234"));
+        assert!(!session_matches(&sess, 501, ""));
+        assert!(!session_matches(&None, 501, "abc123"));
     }
 }
