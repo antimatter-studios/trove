@@ -431,7 +431,7 @@ It's tempting to argue file materialization weakens the "encrypted at rest" guar
 
 ## Status
 
-Early but real — the headless-daemon path works end-to-end on Linux + macOS for SSH, GPG, and file materialization against a KeePassXC-compatible kdbx.
+Early but real — the headless-daemon path works end-to-end on Linux and macOS (Windows is experimental) for SSH, GPG, and file materialization against a KeePassXC-compatible kdbx. What trove deliberately doesn't take on is in [docs/scope.md](docs/scope.md).
 
 ## Changelog
 
