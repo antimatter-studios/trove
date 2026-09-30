@@ -2568,8 +2568,17 @@ fn load_ssh_keys_reporting(
                     continue;
                 }
             };
-            match keeagent::parse(&settings_bytes, &entry.title) {
+            match keeagent::parse(&settings_bytes) {
                 keeagent::Decision::Skip => {}
+                keeagent::Decision::Unusable(reason) => {
+                    skipped.push(skipped_key(
+                        "ssh",
+                        vault,
+                        &entry,
+                        keeagent::ATTACHMENT_NAME,
+                        reason,
+                    ));
+                }
                 keeagent::Decision::Load {
                     attachment,
                     forward,
@@ -2744,5 +2753,32 @@ mod tests {
         assert!(!session_matches(&sess, 501, "abc1234"));
         assert!(!session_matches(&sess, 501, ""));
         assert!(!session_matches(&None, 501, "abc123"));
+    }
+
+    #[test]
+    fn an_entry_pointing_at_an_external_key_file_is_reported() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut v = Vault::create(&dir.path().join("v.kdbx"), "pw").unwrap();
+        let id = v.add_entry("Infra/elsewhere").unwrap();
+        let settings = br#"<?xml version="1.0"?>
+<EntrySettings>
+  <AllowUseOfSshKey>true</AllowUseOfSshKey>
+  <AddAtDatabaseOpen>true</AddAtDatabaseOpen>
+  <Location>
+    <SelectedType>file</SelectedType>
+    <FileName>/home/user/.ssh/id_ed25519</FileName>
+  </Location>
+</EntrySettings>"#;
+        v.attach_binary(&id, keeagent::ATTACHMENT_NAME, settings)
+            .unwrap();
+
+        let skipped = skipped_keys_in(&v, None);
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert_eq!(skipped[0].entry, "Infra/elsewhere");
+        assert!(
+            skipped[0].reason.contains("/home/user/.ssh/id_ed25519"),
+            "{}",
+            skipped[0].reason
+        );
     }
 }

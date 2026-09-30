@@ -222,7 +222,7 @@ fn rewriting_the_key_name_keeps_the_rest_of_the_policy() {
     let rewritten = keeagent::rewrite_key_attachment(&original, "id_ed25519")
         .expect("settings that load a key can be repointed");
 
-    match keeagent::parse(&rewritten, "entry") {
+    match keeagent::parse(&rewritten) {
         Decision::Load {
             attachment,
             forward,
@@ -232,7 +232,9 @@ fn rewriting_the_key_name_keeps_the_rest_of_the_policy() {
             assert!(forward.confirm, "confirm survives");
             assert!(!forward.remove_at_close, "remove-at-close survives");
         }
-        Decision::Skip => panic!("rewritten settings should still load the key"),
+        Decision::Skip | Decision::Unusable(_) => {
+            panic!("rewritten settings should still load the key")
+        }
     }
 
     // KeePassXC writes UTF-16; a round trip through trove should not flip it.
