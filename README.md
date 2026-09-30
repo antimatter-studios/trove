@@ -96,11 +96,12 @@ trove --vault my-vault.kdbx add ssh github.com ~/.ssh/id_ed25519 you@example.com
 # …or mint one in-tool, no ssh-keygen needed:
 trove --vault my-vault.kdbx generate ssh github.com
 
-# Store a GPG secret-key export (binary, NOT armored).
-gpg --batch --pinentry-mode loopback --passphrase '' \
-    --export-secret-keys --output /tmp/sec.gpg <KEYID>
+# Store a GPG secret-key export (binary, NOT armored). A passphrase-protected
+# export stays protected on disk; trove asks for the passphrase and stores the
+# key decrypted inside the vault.
+gpg --export-secret-keys --output /tmp/sec.gpg <KEYID>
 trove --vault my-vault.kdbx add gpg git-signing --key /tmp/sec.gpg
-shred -u /tmp/sec.gpg
+rm /tmp/sec.gpg
 
 # Stash a config file and tag it for materialization on unlock. The default
 # AllowDiskBacked=false means troved will refuse to write to a non-tmpfs path

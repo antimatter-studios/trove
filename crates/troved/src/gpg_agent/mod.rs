@@ -31,6 +31,7 @@ use crate::ipc;
 pub mod assuan;
 pub mod keys;
 pub mod pkdecrypt;
+pub mod protect;
 
 pub use keys::LoadedGpgKey;
 

@@ -433,8 +433,12 @@ pub enum ParseError {
     Malformed(String),
     #[error("no signing key found in this export (need ed25519 or RSA)")]
     NoSigningKey,
-    #[error("encrypted secret keys are not supported")]
+    #[error("the secret key is passphrase-protected")]
     Encrypted,
+    #[error("the passphrase doesn't decrypt the secret key")]
+    WrongPassphrase,
+    #[error("unsupported secret-key protection: {0}")]
+    UnsupportedProtection(String),
     #[error("ed25519 public/private key inconsistency")]
     Inconsistent,
 }
@@ -508,7 +512,7 @@ pub fn parse_gpg_export(bytes: &[u8], comment: &str) -> Result<Vec<LoadedGpgKey>
 /// (RFC 4880 §4.2). Indeterminate-length and partial-body lengths are
 /// rejected — they don't appear in `gpg --export-secret-keys` output for
 /// normal keys.
-fn read_packet(bytes: &[u8], start: usize) -> Result<(u8, &[u8], usize), String> {
+pub(crate) fn read_packet(bytes: &[u8], start: usize) -> Result<(u8, &[u8], usize), String> {
     if start >= bytes.len() {
         return Err("EOF mid-stream".into());
     }
@@ -674,11 +678,9 @@ fn parse_rsa_secret_key_body(
     }
     let s2k_usage = body[p_after_e];
     if s2k_usage != 0 {
-        eprintln!(
-            "gpg: skipping passphrase-protected RSA key '{comment}' \
-             (S2K usage {s2k_usage}); export with an empty passphrase"
-        );
-        return Ok(None);
+        // Same as the ed25519 and cv25519 paths: the caller decides whether
+        // it has a passphrase to decrypt with (see `protect`).
+        return Err(ParseError::Encrypted);
     }
 
     let (d, p_after_d) = read_mpi(body, p_after_e + 1, "d")?;
@@ -1195,7 +1197,7 @@ pub fn public_key_export(secret_export: &[u8]) -> Result<Vec<u8>, ParseError> {
 
 /// How many leading bytes of a secret-key packet body are its public-key
 /// packet body.
-fn public_part_len(body: &[u8]) -> Result<usize, ParseError> {
+pub(crate) fn public_part_len(body: &[u8]) -> Result<usize, ParseError> {
     let short = || ParseError::Malformed("secret-key packet truncated".into());
     let version = *body.first().ok_or_else(short)?;
     match version {
@@ -1257,7 +1259,7 @@ fn public_part_len(body: &[u8]) -> Result<usize, ParseError> {
 }
 
 /// Append one packet with a new-format header (RFC 4880 §4.2.2).
-fn write_packet(out: &mut Vec<u8>, tag: u8, body: &[u8]) {
+pub(crate) fn write_packet(out: &mut Vec<u8>, tag: u8, body: &[u8]) {
     out.push(0xC0 | tag);
     let len = body.len();
     if len < 192 {

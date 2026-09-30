@@ -399,7 +399,11 @@ trove [--vault <PATH>] add gpg [OPTIONS] --key <KEY> <TITLE>
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
-The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produces (without `--armor`). Stored under the `gpg-priv` attachment. On vault unlock, troved parses each `gpg-priv` attachment and registers every ed25519 secret key it finds.
+The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produces (without `--armor`). Stored under the `gpg-priv` attachment. On vault unlock, troved parses each `gpg-priv` attachment and registers every ed25519 and RSA secret key it finds.
+
+A passphrase-protected export (gpg's default) is decrypted on the terminal: `add gpg` asks for the passphrase, three tries, and stores the key unprotected inside the vault, so no unprotected export has to touch the disk. With no terminal to ask on it refuses. Supported protection is what GnuPG writes by default: v4 keys, iterated and salted S2K over SHA-1 or SHA-2, AES-128/192/256. AEAD (OCB) protection and GnuPG stub keys are refused by name.
+
+A protected export already in a vault (added by another tool) is decrypted at unlock with the entry's Password, as KeePassXC does for protected SSH keys. Without a Password it is skipped with a warning.
 
 ### trove add file
 

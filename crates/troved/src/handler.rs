@@ -2564,7 +2564,7 @@ pub fn gpg_public_keys_from_vault(vault: &Vault, filter: Option<&str>) -> Vec<(S
         let Ok(Some(bytes)) = vault.read_binary(&entry.id, "gpg-priv") else {
             continue;
         };
-        if gpg_keys::parse_gpg_export(&bytes, &entry.title).is_err() {
+        if parse_gpg_entry(vault, &entry, &bytes).is_err() {
             continue;
         }
         if let Ok(export) = gpg_keys::public_key_export(&bytes) {
@@ -2572,6 +2572,30 @@ pub fn gpg_public_keys_from_vault(vault: &Vault, filter: Option<&str>) -> Vec<(S
         }
     }
     out
+}
+
+/// Parse an entry's `gpg-priv` export. A passphrase-protected one is
+/// decrypted with the entry's Password, the convention KeePassXC uses for
+/// protected SSH keys; without a Password it stays `Encrypted`.
+fn parse_gpg_entry(
+    vault: &Vault,
+    entry: &EntrySummary,
+    bytes: &[u8],
+) -> Result<Vec<LoadedGpgKey>, gpg_keys::ParseError> {
+    match gpg_keys::parse_gpg_export(bytes, &entry.title) {
+        Err(gpg_keys::ParseError::Encrypted) => {
+            let password = vault
+                .get_field(&entry.id, "Password")
+                .ok()
+                .flatten()
+                .filter(|p| !p.is_empty())
+                .map(zeroize::Zeroizing::new)
+                .ok_or(gpg_keys::ParseError::Encrypted)?;
+            let plain = crate::gpg_agent::protect::decrypt_export(bytes, password.as_bytes())?;
+            gpg_keys::parse_gpg_export(&plain, &entry.title)
+        }
+        other => other,
+    }
 }
 
 /// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to
@@ -2618,7 +2642,7 @@ fn load_gpg_keys_reporting(
                 continue;
             }
         };
-        match gpg_keys::parse_gpg_export(&bytes, &entry.title) {
+        match parse_gpg_entry(vault, &entry, &bytes) {
             Ok(loaded) => {
                 for k in loaded {
                     out.push(k);
@@ -2628,7 +2652,11 @@ fn load_gpg_keys_reporting(
                 skip("no signing key in this export (supported: ed25519, RSA)".to_string());
             }
             Err(gpg_keys::ParseError::Encrypted) => {
-                skip("passphrase-protected secret keys are not supported".to_string());
+                skip(
+                    "the secret key is passphrase-protected and the entry has no Password \
+                     to decrypt it with"
+                        .to_string(),
+                );
             }
             Err(e) => skip(e.to_string()),
         }

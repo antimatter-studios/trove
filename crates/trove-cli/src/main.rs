@@ -3697,6 +3697,14 @@ fn daemon_entry_paths(dry_run: bool) -> Result<Vec<String>> {
 fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: bool) -> Result<()> {
     let key_bytes = std::fs::read(key_path)
         .with_context(|| format!("reading gpg secret-key export from {}", key_path.display()))?;
+    // A passphrase-protected export is decrypted here, on the terminal, and
+    // stored unprotected: the vault is the encryption boundary, and no
+    // plaintext export ever has to touch the disk.
+    let key_bytes = if troved::gpg_agent::protect::is_protected(&key_bytes) {
+        decrypt_gpg_export(&key_bytes, key_path)?.to_vec()
+    } else {
+        key_bytes
+    };
 
     match vault {
         // Offline: open the kdbx file directly and write to it.
@@ -3750,6 +3758,39 @@ fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: boo
             Ok(())
         }
     }
+}
+
+/// Ask for a protected export's passphrase on the terminal (three tries) and
+/// return the export decrypted.
+fn decrypt_gpg_export(bytes: &[u8], key_path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    use troved::gpg_agent::keys::ParseError;
+    for attempt in 1..=3 {
+        let passphrase = rpassword::prompt_password(format!(
+            "Passphrase for the GPG key in {}: ",
+            key_path.display()
+        ))
+        .map(zeroize::Zeroizing::new)
+        .map_err(|_| DaemonClassified {
+            message: "the GPG export is passphrase-protected and there is no terminal to \
+                      ask for it on; run this on a terminal"
+                .to_string(),
+            exit: EXIT_USER_ERROR,
+        })?;
+        match troved::gpg_agent::protect::decrypt_export(bytes, passphrase.as_bytes()) {
+            Ok(plain) => return Ok(plain),
+            Err(ParseError::WrongPassphrase) if attempt < 3 => {
+                eprintln!("trove: that passphrase doesn't decrypt the key; try again");
+            }
+            Err(e) => {
+                return Err(DaemonClassified {
+                    message: format!("decrypting the GPG export: {e}"),
+                    exit: EXIT_USER_ERROR,
+                }
+                .into())
+            }
+        }
+    }
+    unreachable!("the last attempt returns")
 }
 
 /// Pull an attachment out of the *unlocked daemon*, gated by the session code.
