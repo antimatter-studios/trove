@@ -554,11 +554,9 @@ enum Command {
 
     /// Internal: the detached clipboard clearer (spawned by `clip`).
     #[command(hide = true, name = "__clear-clipboard")]
-    ClearClipboard {
-        secs: u64,
-        /// SHA-256 of the copied value — clears only on a match.
-        hash: String,
-    },
+    /// Reads the SHA-256 of the copied value from stdin and clears only on a
+    /// match.
+    ClearClipboard { secs: u64 },
 
     /// Estimate a password's strength with zxcvbn (the estimator KeePassXC's
     /// `estimate` is modeled on). Purely local — nothing leaves the machine.
@@ -1764,8 +1762,8 @@ fn run(cli: Cli) -> Result<()> {
             totp,
             timeout,
         } => cmd_clip(vault, &entry_path, attr.as_deref(), totp, timeout, pw_stdin),
-        Command::ClearClipboard { secs, hash } => {
-            clip::run_clearer(secs, &hash)?;
+        Command::ClearClipboard { secs } => {
+            clip::run_clearer_from_stdin(secs)?;
             Ok(())
         }
         Command::Estimate { password, json } => cmd_estimate(password.as_deref(), json),

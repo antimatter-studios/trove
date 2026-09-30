@@ -212,6 +212,33 @@ fn detached_clearer_wipes_after_timeout() {
     let mut cb = arboard::Clipboard::new().unwrap();
     assert_eq!(cb.get_text().unwrap_or_default(), unique);
 
+    // The waiting clearer gets the value's hash on stdin: `ps` shows argv to
+    // every user, and an unsalted hash of a weak password is crackable.
+    #[cfg(unix)]
+    {
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(unique.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let ps = Command::new("ps")
+            .args(["-A", "-o", "args="])
+            .output()
+            .unwrap();
+        let ps = String::from_utf8_lossy(&ps.stdout);
+        let clearers: Vec<_> = ps
+            .lines()
+            .filter(|l| l.contains("__clear-clipboard"))
+            .collect();
+        assert!(!clearers.is_empty(), "no clearer running:\n{ps}");
+        for line in clearers {
+            assert!(
+                !line.contains(&hash),
+                "clearer argv carries the hash: {line}"
+            );
+        }
+    }
+
     // Within the margin the detached child must have wiped it.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
     loop {

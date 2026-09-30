@@ -1,8 +1,9 @@
 //! Clipboard copy with auto-clear. The copy happens in the foreground
-//! process; a detached child (`trove __clear-clipboard <secs> <sha256>`)
-//! sleeps out the timeout and clears the clipboard ONLY if it still holds
-//! the value we put there — a hash comparison, because the child receives
-//! the SHA-256 on argv (world-readable in `ps`), never the secret itself.
+//! process; a detached child (`trove __clear-clipboard <secs>`) sleeps out
+//! the timeout and clears the clipboard ONLY if it still holds the value we
+//! put there — a hash comparison, so the child never holds the secret. The
+//! hash goes to the child on stdin, not argv: `ps` shows argv to every user
+//! on the machine, and an unsalted hash of a weak password is crackable.
 
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
@@ -26,15 +27,29 @@ pub fn copy(value: &str) -> Result<()> {
 /// Spawn the detached clearer: after `secs`, clear the clipboard if it still
 /// carries the value whose SHA-256 is `hash`. Survives this process exiting.
 pub fn spawn_clearer(secs: u64, hash: &str) -> Result<()> {
+    use std::io::Write;
     let exe = std::env::current_exe().context("resolving trove binary path")?;
-    std::process::Command::new(exe)
-        .args(["__clear-clipboard", &secs.to_string(), hash])
-        .stdin(std::process::Stdio::null())
+    let mut child = std::process::Command::new(exe)
+        .args(["__clear-clipboard", &secs.to_string()])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .context("spawning clipboard clearer")?;
+    // A 65-byte write fits the pipe buffer, so this never waits on the child.
+    // Dropping stdin closes the pipe; the child reads to EOF.
+    let mut stdin = child.stdin.take().context("clipboard clearer stdin")?;
+    writeln!(stdin, "{hash}").context("handing the clearer its hash")?;
     Ok(())
+}
+
+/// The clearer child's entry point: read the hash from stdin, then clear.
+pub fn run_clearer_from_stdin(secs: u64) -> Result<bool> {
+    let mut hash = String::new();
+    std::io::stdin()
+        .read_line(&mut hash)
+        .context("reading the clipboard hash")?;
+    run_clearer(secs, hash.trim())
 }
 
 /// The clearer child's body. Returns whether it actually cleared.
