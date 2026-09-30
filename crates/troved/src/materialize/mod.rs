@@ -170,6 +170,17 @@ pub fn build_plans_filtered(
     vault: &Vault,
     filter: Option<&str>,
 ) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
+    build_plans_with_live(vault, filter, &[])
+}
+
+/// [`build_plans_filtered`], except that a target in `live` may already
+/// exist: it is a file this daemon wrote and still tracks, not someone
+/// else's. Used to compare plans before and after a write while unlocked.
+pub fn build_plans_with_live(
+    vault: &Vault,
+    filter: Option<&str>,
+    live: &[PathBuf],
+) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
     let mut plans = Vec::new();
     let mut errors = Vec::new();
     for entry in vault.list_entries() {
@@ -178,7 +189,7 @@ pub fn build_plans_filtered(
                 continue;
             }
         }
-        match plans_for_entry(vault, &entry) {
+        match plans_for_entry_with_live(vault, &entry, live) {
             Ok(p) => plans.extend(p),
             Err(e) => errors.push((entry.title, e)),
         }
@@ -228,6 +239,14 @@ pub fn plans_for_entry(
     vault: &Vault,
     entry: &EntrySummary,
 ) -> Result<Vec<MaterializationPlan>, PlanError> {
+    plans_for_entry_with_live(vault, entry, &[])
+}
+
+fn plans_for_entry_with_live(
+    vault: &Vault,
+    entry: &EntrySummary,
+    live: &[PathBuf],
+) -> Result<Vec<MaterializationPlan>, PlanError> {
     let opted = vault.fields_with_prefix(&entry.id, MATERIALIZE_FIELD_PREFIX)?;
     if opted.is_empty() {
         return Ok(Vec::new());
@@ -270,7 +289,7 @@ pub fn plans_for_entry(
         let Some(target) = vault.get_field(&entry.id, &key)? else {
             continue;
         };
-        plans.push(build_plan(vault, entry, &attachment, &target)?);
+        plans.push(build_plan(vault, entry, &attachment, &target, live)?);
     }
 
     Ok(plans)
@@ -282,6 +301,7 @@ fn build_plan(
     entry: &EntrySummary,
     source: &str,
     target: &str,
+    live: &[PathBuf],
 ) -> Result<MaterializationPlan, PlanError> {
     if !entry.attachment_names.iter().any(|n| n == source) {
         return Err(PlanError::AttachmentMissing(source.to_string()));
@@ -302,7 +322,10 @@ fn build_plan(
         None => false,
     };
 
-    let resolved = paths::resolve_and_validate_target(target)?;
+    let resolved = match paths::resolve_and_validate_target(target) {
+        Err(paths::PathError::AlreadyExists(p)) if live.contains(&p) => p,
+        other => other?,
+    };
     check_ephemeral(&resolved, allow_disk_backed)?;
 
     Ok(MaterializationPlan {
@@ -579,6 +602,24 @@ pub async fn wipe_for_vault(store: &MaterializedStore, vault: &std::path::Path) 
             .into_iter()
             .partition(|m| m.vault == vault);
         *guard = theirs;
+        mine
+    };
+    wipe_each(taken);
+}
+
+/// Wipe the one file `vault` materialized at `target`, if it is still live.
+/// Used when a write while unlocked removes or changes the plan behind it.
+pub async fn wipe_target(
+    store: &MaterializedStore,
+    vault: &std::path::Path,
+    target: &std::path::Path,
+) {
+    let taken: Vec<MaterializedFile> = {
+        let mut guard = store.write().await;
+        let (mine, rest) = std::mem::take(&mut *guard)
+            .into_iter()
+            .partition(|m| m.vault == vault && m.target == target);
+        *guard = rest;
         mine
     };
     wipe_each(taken);

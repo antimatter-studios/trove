@@ -1854,6 +1854,14 @@ The materialize feature is wholly expressed as kdbx custom string fields, so the
 
 Renaming an attachment moves these with it — see `trove rename-attachment`.
 
+Changes made through the daemon while the vault is unlocked take effect at
+once: a new or changed plan is written, and the file behind a removed or
+changed plan (entry deleted, target, mode, TTL or content changed) is wiped.
+Plans a write doesn't change are left alone, so a live file isn't rewritten and
+one its TTL already wiped doesn't come back. Changes KeePassXC makes to the file
+on disk aren't seen until the next unlock. Problems go to the daemon's log
+rather than the write's reply.
+
 The entry-level `Materialize.Source` / `Materialize.Target` form was removed:
 materialization describes a file, and an entry holds several. An entry still
 carrying those fields is reported as an error on unlock rather than ignored,
