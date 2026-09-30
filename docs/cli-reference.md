@@ -1228,7 +1228,7 @@ OpenSSH needs in `SSH_AUTH_SOCK`: `$env:SSH_AUTH_SOCK = trove ssh-agent socket`.
 ### trove ssh-agent empty
 
 ```
-trove ssh-agent empty
+trove ssh-agent empty [--add <PATTERN>] [--tag <TAG>]
 ```
 
 Print the path to a **new, private** agent socket that serves no keys.
@@ -1280,16 +1280,32 @@ Requires a daemon that is already running — it does not autospawn one. A daemo
 with no vault unlocked holds no keys, so a socket it handed out could never be
 filled.
 
+`--add <PATTERN>` and `--tag <TAG>` create the socket and fill it in one step,
+with the same matching as [`trove ssh-agent add`](#trove-ssh-agent-add):
+
+```sh
+sock=$(trove ssh-agent empty --tag gitlab) || exit 1
+export SSH_AUTH_SOCK="$sock"
+```
+
+If nothing matches, `empty` fails, prints nothing, and closes the socket it made.
+
 ### trove ssh-agent add
 
 ```
 trove ssh-agent add <ENTRY>
+trove ssh-agent add [<PATTERN>] [--tag <TAG>]
 ```
 
-Add one entry's SSH key to the agent named by `$SSH_AUTH_SOCK`.
+Add entries' SSH keys to the agent named by `$SSH_AUTH_SOCK`.
 
 `<ENTRY>` is the entry path (`Infra/s1`), or `Infra/s1:deploy` when the entry
-holds more than one key. Naming the entry rather than a fingerprint is the
+holds more than one key. A glob adds every key whose entry path matches: `*`
+matches any run of characters, `/` included, and `?` exactly one, so `Infra/*`
+takes everything under `Infra`. Quote it so the shell doesn't expand it.
+`--tag <TAG>` adds every key whose entry carries the tag, directly or through its
+group. With a pattern and a tag, a key must match both. Nothing matching is an
+error. Naming the entry rather than a fingerprint is the
 point: whoever created it already knew which server it was for, so there is no
 discovery step — and there could not be one, because nothing in the SSH protocol
 enumerates the keys a server will accept.

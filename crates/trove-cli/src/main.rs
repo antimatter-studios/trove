@@ -946,18 +946,40 @@ enum SshAgentOp {
     ///
     /// Requires a daemon that is already running: a socket served by a daemon
     /// with no vault unlocked could never be filled.
-    Empty,
+    ///
+    /// `--add` and `--tag` create the socket and fill it in one step, as
+    /// `trove ssh-agent add` would:
+    ///
+    ///     sock=$(trove ssh-agent empty --tag gitlab) || exit 1
+    Empty {
+        /// Fill the new socket with the keys whose entry path matches this
+        /// glob (`Infra/*`).
+        #[arg(long, value_name = "PATTERN")]
+        add: Option<String>,
+        /// Fill the new socket with the keys whose entry carries this tag.
+        #[arg(long)]
+        tag: Option<String>,
+    },
 
-    /// Add one vault entry's SSH key to the agent named by `$SSH_AUTH_SOCK`.
+    /// Add vault entries' SSH keys to the agent named by `$SSH_AUTH_SOCK`.
     ///
     /// The socket must be one `trove ssh-agent empty` handed out; any other is
     /// refused, because filling it would mean handing the key to an agent trove
     /// doesn't run. Adding the same key twice refreshes it rather than
     /// duplicating it, so re-running a script doesn't double its offers.
+    ///
+    /// `ENTRY` may be a glob (`Infra/*`: `*` matches any run of characters,
+    /// `/` included, `?` exactly one), and `--tag` adds the keys whose entry
+    /// carries the tag. With both, a key must match both.
     Add {
         /// Entry path (`Infra/s1`), or `Infra/s1:deploy` when the entry holds
-        /// more than one key.
-        entry: String,
+        /// more than one key. A glob adds every match.
+        #[arg(required_unless_present = "tag")]
+        entry: Option<String>,
+        /// Add the keys whose entry carries this tag, directly or through its
+        /// group.
+        #[arg(long)]
+        tag: Option<String>,
     },
 
     /// Close a private agent socket that `trove ssh-agent empty` handed out.
@@ -1729,11 +1751,11 @@ fn run(cli: Cli) -> Result<()> {
             op: SshAgentOp::List { json },
         } => cmd_ssh_agent_list(json),
         Command::SshAgent {
-            op: SshAgentOp::Empty,
-        } => cmd_ssh_agent_empty(),
+            op: SshAgentOp::Empty { add, tag },
+        } => cmd_ssh_agent_empty(add.as_deref(), tag.as_deref()),
         Command::SshAgent {
-            op: SshAgentOp::Add { entry },
-        } => cmd_ssh_agent_add(&entry),
+            op: SshAgentOp::Add { entry, tag },
+        } => cmd_ssh_agent_add(entry.as_deref(), tag.as_deref()),
         Command::SshAgent {
             op: SshAgentOp::Close { socket },
         } => cmd_ssh_agent_close(socket),
@@ -2426,7 +2448,7 @@ fn cmd_ssh_agent_list(json: bool) -> Result<()> {
 /// has no idle timer running, so it and its sockets would sit there until
 /// something else came along. Requiring one that is already up makes the
 /// failure immediate and legible instead.
-fn cmd_ssh_agent_empty() -> Result<()> {
+fn cmd_ssh_agent_empty(add: Option<&str>, tag: Option<&str>) -> Result<()> {
     let resp = match daemon::send(&daemon::Request::SshAgentEmpty) {
         Ok(r) => r,
         Err(e) if daemon::is_daemon_not_running(&e) => {
@@ -2451,6 +2473,17 @@ fn cmd_ssh_agent_empty() -> Result<()> {
         .get("ssh_socket")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("daemon returned ok but no socket path"))?;
+    if add.is_some() || tag.is_some() {
+        // Print nothing unless the fill worked: a caller doing
+        // `sock=$(trove ssh-agent empty --tag x) || exit 1` must not be handed
+        // a socket that serves nothing. Hand the socket back on failure too.
+        if let Err(e) = ssh_agent_add_matching(socket, add, tag) {
+            let _ = daemon::send(&daemon::Request::SshAgentClose {
+                socket: socket.to_string(),
+            });
+            return Err(e);
+        }
+    }
     println!("{socket}");
     Ok(())
 }
@@ -2463,7 +2496,7 @@ fn cmd_ssh_agent_empty() -> Result<()> {
 /// Deliberately does NOT autospawn: a daemon that wasn't running holds no
 /// unlocked vault and no scoped socket, so spawning one would only turn a clear
 /// problem into a confusing one.
-fn cmd_ssh_agent_add(entry: &str) -> Result<()> {
+fn cmd_ssh_agent_add(entry: Option<&str>, tag: Option<&str>) -> Result<()> {
     let socket = std::env::var("SSH_AUTH_SOCK").unwrap_or_default();
     if socket.is_empty() {
         return Err(DaemonClassified {
@@ -2475,6 +2508,10 @@ fn cmd_ssh_agent_add(entry: &str) -> Result<()> {
         }
         .into());
     }
+    let entry = match entry {
+        Some(e) if tag.is_none() && !e.contains(['*', '?']) => e,
+        _ => return ssh_agent_add_matching(&socket, entry, tag),
+    };
     let req = daemon::Request::SshAgentAdd {
         socket: socket.clone(),
         entry: entry.to_string(),
@@ -2517,6 +2554,55 @@ fn cmd_ssh_agent_add(entry: &str) -> Result<()> {
     // stdout stays empty so `add` composes in a script; the confirmation is a
     // note, not output.
     eprintln!("ssh-agent: {verb} {comment} ({served} served on {socket})");
+    if let Some(warnings) = resp.get("ssh_warnings").and_then(Value::as_array) {
+        for w in warnings.iter().filter_map(Value::as_str) {
+            eprintln!("trove: warning: {w}");
+        }
+    }
+    Ok(())
+}
+
+/// Add every key matching `pattern` and/or `tag` to the private agent at
+/// `socket`, reporting each on stderr. Shared by `ssh-agent add` with a glob or
+/// `--tag`, and `ssh-agent empty --add/--tag`.
+fn ssh_agent_add_matching(socket: &str, pattern: Option<&str>, tag: Option<&str>) -> Result<()> {
+    let req = daemon::Request::SshAgentAddMatching {
+        socket: socket.to_string(),
+        pattern: pattern.map(str::to_string),
+        tag: tag.map(str::to_string),
+    };
+    let resp = match daemon::send(&req) {
+        Ok(r) => r,
+        Err(e) if daemon::is_daemon_not_running(&e) => {
+            return Err(DaemonClassified {
+                message: "no trove daemon is running, so nothing is unlocked and \
+                          there is no agent to add to"
+                    .to_string(),
+                exit: EXIT_USER_ERROR,
+            }
+            .into())
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(msg) = daemon::response_error(&resp) {
+        return Err(DaemonClassified {
+            message: msg,
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    let served = resp.get("ssh_served").and_then(Value::as_u64).unwrap_or(0);
+    for key in resp
+        .get("ssh_added_keys")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(comment) = key.get("comment").and_then(Value::as_str) {
+            eprintln!("ssh-agent: added {comment}");
+        }
+    }
+    eprintln!("ssh-agent: {served} served on {socket}");
     if let Some(warnings) = resp.get("ssh_warnings").and_then(Value::as_array) {
         for w in warnings.iter().filter_map(Value::as_str) {
             eprintln!("trove: warning: {w}");

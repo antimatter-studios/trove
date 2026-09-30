@@ -606,6 +606,29 @@ mod daemon {
         let spec = json!([{"socket": "string", "keys": [ssh_key_spec()]}]);
         assert_shape("ssh-agent sockets", &sockets, &spec);
 
+        // A glob adds every match; `empty --add` creates and fills in one step,
+        // and a fill that matches nothing prints no socket and hands it back.
+        let out = run(&trove, &with_agent, &["ssh-agent", "add", "Infra/*"], "");
+        assert!(out.status.success(), "ssh-agent add <glob>: {out:?}");
+        let out = daemon(&["ssh-agent", "empty", "--add", "Infra/*"]);
+        assert!(out.status.success(), "ssh-agent empty --add: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("added Infra/s1"),
+            "{out:?}"
+        );
+        let filled = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let out = daemon(&["ssh-agent", "empty", "--tag", "no-such-tag"]);
+        assert!(!out.status.success(), "{out:?}");
+        assert!(out.stdout.is_empty(), "{out:?}");
+        let sockets = json_out(
+            &daemon(&["ssh-agent", "sockets", "--json"]),
+            "ssh-agent sockets",
+            true,
+        );
+        assert_eq!(sockets.as_array().map(Vec::len), Some(2), "{sockets}");
+        let out = daemon(&["ssh-agent", "close", &filled]);
+        assert!(out.status.success(), "ssh-agent close: {out:?}");
+
         let gpg = json_out(
             &daemon(&["gpg-agent", "list", "--json"]),
             "gpg-agent list",

@@ -18,6 +18,8 @@
 //!   7. `lock` tears the sockets down — the daemon owns the lifetime.
 //!   8. `close` tears down one socket, leaves the rest, and frees its slot
 //!      under the cap; `sockets` lists what is left.
+//!   9. `add-matching` fills a socket from a glob over entry paths, a tag, or
+//!      both, in one call.
 //!
 //! Listing is driven through the real `ssh-add` where it proves something, so
 //! what's asserted is what an ssh client actually sees.
@@ -193,6 +195,29 @@ impl Harness {
         })
         .await
     }
+}
+
+impl Harness {
+    async fn add_matching(&self, socket: &Path, pattern: Option<&str>, tag: Option<&str>) -> Value {
+        self.send(Request::SshAgentAddMatching {
+            socket: socket.to_string_lossy().into_owned(),
+            pattern: pattern.map(str::to_string),
+            tag: tag.map(str::to_string),
+        })
+        .await
+    }
+}
+
+/// The comments of the keys an `add-matching` response says went in, sorted.
+fn added_comments(resp: &Value) -> Vec<String> {
+    let mut names: Vec<String> = resp["ssh_added_keys"]
+        .as_array()
+        .expect("ssh_added_keys")
+        .iter()
+        .map(|k| k["comment"].as_str().expect("comment").to_string())
+        .collect();
+    names.sort();
+    names
 }
 
 /// A Unix socket exists on disk from `bind()`, which is before `listen()`, so a
@@ -591,4 +616,111 @@ async fn closing_a_socket_frees_its_place_under_the_cap() {
         resp["status"], "ok",
         "a closed socket must free a slot: {resp}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_matching_fills_a_socket_from_a_glob() {
+    if !have("ssh-keygen") || !have("ssh-add") {
+        eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = make_vault(tmp.path(), &["Infra/s1", "Infra/db/s2", "Web/site"]);
+    let h = Harness::new();
+    h.unlock(&vault).await;
+    let socket = h.empty().await;
+
+    let resp = h.add_matching(&socket, Some("Infra/*"), None).await;
+    assert_eq!(resp["status"], "ok", "add-matching failed: {resp}");
+    assert_eq!(added_comments(&resp), ["Infra/db/s2", "Infra/s1"]);
+    assert_eq!(resp["ssh_served"], 2);
+
+    let listing = ssh_add_list(&socket);
+    assert!(
+        listing.contains("Infra/s1") && listing.contains("Infra/db/s2"),
+        "{listing}"
+    );
+    assert!(
+        !listing.contains("Web/site"),
+        "must not be served: {listing}"
+    );
+
+    // Running it again refreshes rather than duplicates.
+    let resp = h.add_matching(&socket, Some("Infra/*"), None).await;
+    assert_eq!(resp["ssh_served"], 2, "{resp}");
+
+    // `?` matches one character.
+    let other = h.empty().await;
+    let resp = h.add_matching(&other, Some("Infra/s?"), None).await;
+    assert_eq!(added_comments(&resp), ["Infra/s1"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_matching_fills_a_socket_from_a_tag() {
+    if !have("ssh-keygen") || !have("ssh-add") {
+        eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let vault_path = tmp.path().join("tagged.kdbx");
+    {
+        let mut v = Vault::create(&vault_path, PASSWORD).expect("create vault");
+        for (i, (title, tagged)) in [("Infra/s1", true), ("Infra/s2", false), ("Web/site", true)]
+            .into_iter()
+            .enumerate()
+        {
+            let key = generate_key(tmp.path(), &format!("t{i}"));
+            let id = v.add_entry(title).expect("add entry");
+            v.attach_binary(&id, "id", &key).expect("attach id");
+            if tagged {
+                v.set_tags(&id, &["gitlab".to_string()]).expect("tag");
+            }
+        }
+        v.save().expect("save vault");
+    }
+    let h = Harness::new();
+    h.unlock(&vault_path).await;
+
+    let socket = h.empty().await;
+    let resp = h.add_matching(&socket, None, Some("gitlab")).await;
+    assert_eq!(resp["status"], "ok", "add-matching failed: {resp}");
+    assert_eq!(added_comments(&resp), ["Infra/s1", "Web/site"]);
+
+    // Tag and glob together narrow to both.
+    let other = h.empty().await;
+    let resp = h
+        .add_matching(&other, Some("Infra/*"), Some("gitlab"))
+        .await;
+    assert_eq!(added_comments(&resp), ["Infra/s1"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_matching_refuses_nothing_to_match_and_foreign_sockets() {
+    if !have("ssh-keygen") {
+        eprintln!("SKIP: ssh-keygen not on $PATH");
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let vault = make_vault(tmp.path(), &["Infra/s1"]);
+    let h = Harness::new();
+    h.unlock(&vault).await;
+    let socket = h.empty().await;
+
+    let resp = h.add_matching(&socket, Some("Nope/*"), None).await;
+    assert_eq!(resp["status"], "err", "{resp}");
+    assert!(
+        resp["error"].as_str().unwrap().contains("Nope/*"),
+        "the error should name the pattern: {resp}"
+    );
+
+    let resp = h.add_matching(&socket, None, None).await;
+    assert_eq!(
+        resp["status"], "err",
+        "a pattern or a tag is required: {resp}"
+    );
+
+    let foreign = tmp.path().join("not-ours.sock");
+    let resp = h.add_matching(&foreign, Some("Infra/*"), None).await;
+    assert_eq!(resp["status"], "err", "{resp}");
+    assert_eq!(h.key_store.read().await.len(), 1, "main agent untouched");
 }
