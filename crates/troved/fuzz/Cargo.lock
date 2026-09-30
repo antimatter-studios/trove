@@ -1781,6 +1781,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "hmac 0.12.1",
  "rand",
  "rand_core",
  "rsa",
