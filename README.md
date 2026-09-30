@@ -150,6 +150,9 @@ gpg's socket.
 
 The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock), `TROVE_SOCK` / `TROVE_SSH_SOCK` / `TROVE_GPG_SOCK` (override socket paths), and `TROVE_SSH_FORWARD=0` (see below).
 
+If something doesn't work, `trove doctor` checks the daemon, where
+`SSH_AUTH_SOCK` and gpg point, and the vault file, and says what to fix.
+
 ### 3. Wire up the SSH agent
 
 ```sh

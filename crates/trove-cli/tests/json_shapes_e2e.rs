@@ -668,5 +668,31 @@ mod daemon {
             let v = json_out(&run(&trove, &env, &args, ""), &what, true);
             assert_shape(&what, &v, &json!([]));
         }
+
+        // `doctor` still prints its JSON when a check fails, and exits 1: here
+        // SSH_AUTH_SOCK names a socket nobody listens on.
+        let stale = tmp.path().join("stale-agent.sock");
+        let doctor_env = [
+            ("TROVE_SOCK", sock.to_str().unwrap()),
+            ("SSH_AUTH_SOCK", stale.to_str().unwrap()),
+        ];
+        let out = run(&trove, &doctor_env, &["doctor", "--json"], "");
+        assert_eq!(out.status.code(), Some(1), "doctor: {out:?}");
+        let doctor = json_out(&out, "doctor", false);
+        assert_eq!(doctor["ok"], false);
+        let spec = json!({"ok": "bool", "checks": [{
+            "name": "string",
+            "status": "string",
+            "detail": "string",
+            "hint": "string|null",
+        }]});
+        assert_shape("doctor", &doctor, &spec);
+        let ssh = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "ssh-agent")
+            .expect("an ssh-agent check");
+        assert_eq!(ssh["status"], "fail", "{ssh}");
     }
 }
