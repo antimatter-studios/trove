@@ -46,6 +46,15 @@ use crate::idle::IdleTracker;
 /// accidentally swapped at a call site.
 pub type GpgKeyStore = Arc<RwLock<Vec<LoadedGpgKey>>>;
 
+/// What `GETINFO version` reports: the gpg-agent release whose Assuan
+/// surface this module implements. gpg uses the answer only to warn when
+/// the agent is older than itself (gpg 2.5 logs `server 'gpg-agent' is
+/// older than us`); command options are negotiated separately through
+/// `GETINFO cmd_has_option`. Claiming a newer release would silence that
+/// warning by advertising commands trove does not implement, so bump this
+/// only when the surface catches up with that release.
+pub const EMULATED_AGENT_VERSION: &str = "2.4.5";
+
 /// Decide where the GPG agent socket should live. Order:
 ///   1. `TROVE_GPG_SOCK` env var.
 ///   2. `$XDG_RUNTIME_DIR/trove-gpg.sock`.
@@ -180,6 +189,20 @@ async fn handle_command(
             return CommandOutcome::Disconnect;
         }
 
+        // `gpgconf --kill gpg-agent` sends KILLAGENT. A real gpg-agent exits;
+        // troved also serves the vault and the SSH agent, so it only closes
+        // this connection. `trove lock` is what drops the keys.
+        "KILLAGENT" => {
+            let _ = write_ok_with(w, "closing connection").await;
+            return CommandOutcome::Disconnect;
+        }
+
+        // `gpgconf --reload gpg-agent` sends RELOADAGENT. There is no
+        // gpg-agent.conf or passphrase cache to re-read.
+        "RELOADAGENT" => {
+            send!(write_ok(w));
+        }
+
         "RESET" => {
             *session = Session::default();
             send!(write_ok(w));
@@ -202,7 +225,7 @@ async fn handle_command(
             let what = cmd.rest.trim();
             match what {
                 "version" => {
-                    send!(write_data(w, b"2.4.5"));
+                    send!(write_data(w, EMULATED_AGENT_VERSION.as_bytes()));
                     send!(write_ok(w));
                 }
                 "pid" => {

@@ -158,11 +158,11 @@ async fn assuan_basic_handshake() {
     let lines = read_until_terminator(&mut reader).await;
     assert_eq!(lines, vec!["OK"]);
 
-    // GETINFO version → D 2.4.5\nOK
+    // GETINFO version → D <emulated version>\nOK
     wh.write_all(b"GETINFO version\n").await.unwrap();
     let lines = read_until_terminator(&mut reader).await;
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0], "D 2.4.5");
+    assert_eq!(lines[0], format!("D {}", gpg_agent::EMULATED_AGENT_VERSION));
     assert_eq!(lines[1], "OK");
 
     // GETINFO socket_name → D <path>\nOK
@@ -334,6 +334,36 @@ async fn unknown_command_returns_err() {
         "got: {}",
         lines[0]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn killagent_closes_the_connection_but_keeps_serving() {
+    let tmp = TempDir::new().expect("tempdir");
+    let sock = tmp.path().join("gpg.sock");
+    let _agent = spawn_agent_with_keys(&sock, vec![]).await;
+
+    let stream = connect_retry(&sock).await;
+    let (rh, mut wh) = stream.into_split();
+    let mut reader = BufReader::new(rh).lines();
+    expect_greeting(&mut reader).await;
+
+    // RELOADAGENT has nothing to re-read and just succeeds.
+    wh.write_all(b"RELOADAGENT\n").await.unwrap();
+    let lines = read_until_terminator(&mut reader).await;
+    assert_eq!(lines, vec!["OK"]);
+
+    // KILLAGENT (what `gpgconf --kill gpg-agent` sends) gets OK, then EOF.
+    wh.write_all(b"KILLAGENT\n").await.unwrap();
+    let lines = read_until_terminator(&mut reader).await;
+    assert!(lines[0].starts_with("OK"), "got: {lines:?}");
+    let eof = reader.next_line().await.expect("read after KILLAGENT");
+    assert_eq!(eof, None, "connection should close after KILLAGENT");
+
+    // The agent itself keeps accepting connections.
+    let stream = connect_retry(&sock).await;
+    let (rh, _wh) = stream.into_split();
+    let mut reader = BufReader::new(rh).lines();
+    expect_greeting(&mut reader).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

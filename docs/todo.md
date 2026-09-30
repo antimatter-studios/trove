@@ -29,14 +29,6 @@ deleted; it was wrong.
 Worth remembering: gpg 2.5 issues **no `KEYINFO`** in the sign path and uses
 `HAVEKEY --list=1000` rather than per-grip `HAVEKEY`. Trove handles both.
 
-### 1b. Two small agent gaps found along the way
-- **No `KILLAGENT`** — `gpgconf --kill gpg-agent` gets `ERR Unknown_IPC_Command`
-  from trove, so the tests' defensive kill of a stray real agent is a silent
-  no-op. Implement it (reply `OK`, shut the connection) or document it.
-- **`GETINFO version` returns a hard-coded `2.4.5`**, so gpg 2.5 logs
-  `WARNING: server 'gpg-agent' is older than us`. Harmless today, but a
-  version-gating footgun if gpg ever conditions behaviour on it.
-
 ### 1c. Daemon e2e tests share the default socket path
 `TROVE_SOCK` defaults to `$TMPDIR/trove-0.sock`, so two `cargo test` runs on one
 machine fight over it through the singleton flock — a second run dies partway
