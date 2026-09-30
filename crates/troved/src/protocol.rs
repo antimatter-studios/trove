@@ -655,6 +655,24 @@ pub struct SshKeyDto {
     pub algo: String,
     pub blob_b64: String,
     pub comment: String,
+    /// Seconds until the entry's lifetime runs out and the key stops being
+    /// served. Absent when the key has no lifetime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
+}
+
+impl SshKeyDto {
+    pub fn of(key: &crate::ssh_agent::LoadedKey, now: std::time::Instant) -> Self {
+        use base64::Engine as _;
+        Self {
+            algo: key.algorithm_name().to_string(),
+            blob_b64: base64::engine::general_purpose::STANDARD.encode(&key.public_blob),
+            comment: key.comment.clone(),
+            expires_in_secs: key
+                .expires_at
+                .map(|at| at.saturating_duration_since(now).as_secs()),
+        }
+    }
 }
 
 /// A key in an unlocked vault that the SSH or GPG agent could not load, for
