@@ -1172,6 +1172,10 @@ enum AddResource {
         /// HMAC algorithm: SHA1 (default, near-universal), SHA256 or SHA512.
         #[arg(long, default_value = "SHA1")]
         algorithm: String,
+        /// Steam Guard codes (five characters), stored as KeePassXC stores
+        /// them. `--secret` is the base32 shared secret.
+        #[arg(long, requires = "secret")]
+        steam: bool,
     },
 
     /// Store an SSH private key on the unlocked vault, addressed by entry path.
@@ -2022,12 +2026,14 @@ fn run(cli: Cli) -> Result<()> {
                     digits,
                     period,
                     algorithm,
+                    steam,
                 },
         } => cmd_add_totp(
             vault,
             &entry_path,
             uri.as_deref(),
             secret.as_deref(),
+            steam,
             digits,
             period,
             &algorithm,
@@ -5599,6 +5605,7 @@ fn cmd_add_totp(
     entry_path: &str,
     uri: Option<&str>,
     secret: Option<&str>,
+    steam: bool,
     digits: u32,
     period: u32,
     algorithm: &str,
@@ -5606,6 +5613,18 @@ fn cmd_add_totp(
 ) -> Result<()> {
     let uri = match (uri, secret) {
         (Some(u), _) => u.to_string(),
+        (None, Some(s)) if steam => {
+            let s: String = s
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_uppercase();
+            let label = entry_path.rsplit('/').next().unwrap_or(entry_path);
+            // KeePassXC's form: 5 characters, 30 s, the Steam encoder.
+            format!(
+                "otpauth://totp/Steam:{label}?secret={s}&period=30&digits=5&issuer=Steam&encoder=steam"
+            )
+        }
         (None, Some(s)) => {
             let algo = algorithm.to_uppercase();
             if !["SHA1", "SHA256", "SHA512"].contains(&algo.as_str()) {

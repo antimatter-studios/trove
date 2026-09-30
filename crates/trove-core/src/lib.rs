@@ -327,6 +327,58 @@ pub struct TotpCode {
     pub period_secs: u64,
 }
 
+/// HOTP is counter-based: every code is a write. Reading an `otpauth://hotp`
+/// URI as TOTP would print a plausible, wrong code, so it is refused.
+fn refuse_hotp(uri: &str) -> Result<()> {
+    if uri
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("otpauth://hotp")
+    {
+        return Err(Error::Totp(
+            "HOTP (counter-based) one-time codes are not supported yet".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// One query parameter of an `otpauth://` URI, undecoded.
+fn otp_param<'a>(uri: &'a str, name: &str) -> Option<&'a str> {
+    let (_, query) = uri.split_once('?')?;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v)
+}
+
+/// A Steam Guard code: RFC 6238 with HMAC-SHA1, but the truncated value is
+/// written as five characters from Steam's 26-letter alphabet rather than as
+/// decimal digits. Matches KeePassXC's `encoder=steam`.
+fn steam_code(secret_b32: &str, period: u64, unix_secs: u64) -> Result<String> {
+    use hmac::{Hmac, Mac};
+    const ALPHABET: &[u8; 26] = b"23456789BCDFGHJKMNPQRTVWXY";
+    let secret = base32::decode(base32::Alphabet::Rfc4648 { padding: true }, secret_b32)
+        .ok_or_else(|| Error::Totp("TOTP secret is not base32".to_string()))?;
+    let secret = zeroize::Zeroizing::new(secret);
+    let mut mac =
+        Hmac::<sha1::Sha1>::new_from_slice(&secret).map_err(|e| Error::Totp(e.to_string()))?;
+    mac.update(&(unix_secs / period.max(1)).to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = usize::from(digest[19] & 0x0f);
+    let mut value = u32::from_be_bytes(
+        digest[offset..offset + 4]
+            .try_into()
+            .expect("offset + 4 <= 20"),
+    ) & 0x7fff_ffff;
+    let mut code = String::with_capacity(5);
+    for _ in 0..5 {
+        code.push(char::from(ALPHABET[(value % 26) as usize]));
+        value /= 26;
+    }
+    Ok(code)
+}
+
 /// An open, in-memory vault.
 ///
 /// Dropping the value drops the underlying decrypted material. Best-effort
@@ -2671,13 +2723,20 @@ impl Vault {
             .db
             .entry(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        if entry.get("otp").is_none() {
+        let Some(uri) = entry.get("otp") else {
             return Err(Error::NoTotp(id.0.clone()));
-        }
+        };
+        refuse_hotp(uri)?;
+        let steam = otp_param(uri, "encoder").is_some_and(|e| e.eq_ignore_ascii_case("steam"));
         let totp = entry.get_otp().map_err(|e| Error::Totp(e.to_string()))?;
         let code = totp.value_at(unix_secs);
+        let code_text = if steam {
+            steam_code(&totp.get_secret(), totp.period, unix_secs)?
+        } else {
+            code.code
+        };
         Ok(TotpCode {
-            code: code.code,
+            code: code_text,
             valid_for_secs: code.valid_for.as_secs(),
             period_secs: code.period.as_secs(),
         })
@@ -2687,6 +2746,7 @@ impl Vault {
     /// parses as a TOTP spec first so garbage never lands in the vault. The
     /// field is stored Protected (KeePassXC's own treatment).
     pub fn set_totp_uri(&mut self, id: &EntryId, uri: &str) -> Result<()> {
+        refuse_hotp(uri)?;
         uri.parse::<keepass::db::TOTP>()
             .map_err(|e| Error::Totp(format!("invalid otpauth URI: {e}")))?;
         self.set_field(id, "otp", uri)
