@@ -302,10 +302,11 @@ enum Command {
     /// whatever its name; `known_hosts`, `config`, `authorized_keys` and
     /// `*.pub` never are. The title is the file name, the comment comes from
     /// the matching `.pub`. A passphrase-protected key is decrypted on the
-    /// terminal and stored without its passphrase. Keys trove can't serve
-    /// (DSA, RSA under 2048 bits, PuTTY `.ppk`) are listed with the reason and
-    /// left out, and so is a key whose entry already exists. The files themselves
-    /// are never changed or removed.
+    /// terminal and stored without its passphrase, and a PuTTY `.ppk` is stored
+    /// as OpenSSH. Keys trove can't serve (DSA, RSA under 2048 bits, a `.ppk`
+    /// with a passphrase) are listed with the reason and left out, and so is a
+    /// key whose entry already exists. The files themselves are never changed
+    /// or removed.
     ///
     /// Targets the vault unlocked in the running daemon by default; pass the
     /// global `--vault <path>` to write a kdbx file directly.
@@ -3662,6 +3663,15 @@ fn cmd_import_ssh(
         let bytes = if key.protected {
             match decrypt_ssh_key_for_vault(&key.bytes, &key.path) {
                 Ok(plain) => plain,
+                Err(e) => {
+                    eprintln!("skip   {}: {e}", key.path.display());
+                    continue;
+                }
+            }
+        } else if troved::ssh_agent::ppk::is_ppk(&key.bytes) {
+            // Stored as OpenSSH, like `add ssh` does with a .ppk.
+            match troved::ssh_agent::keys::ppk_to_openssh(&key.bytes, &key.comment) {
+                Ok(pem) => zeroize::Zeroizing::new(pem.as_bytes().to_vec()),
                 Err(e) => {
                     eprintln!("skip   {}: {e}", key.path.display());
                     continue;
