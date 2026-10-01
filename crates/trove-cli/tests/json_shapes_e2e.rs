@@ -629,6 +629,31 @@ mod daemon {
         let out = daemon(&["ssh-agent", "close", &filled]);
         assert!(out.status.success(), "ssh-agent close: {out:?}");
 
+        // `exec` reads the unlocked vault through the daemon: no --vault, no
+        // password, the session code is enough.
+        let out = daemon(&[
+            "edit",
+            "Web/github",
+            "--set",
+            "Exec.GH_USER=UserName",
+            "--set",
+            "Exec.GH_TOKEN=Password",
+            "--set",
+            "Exec.GH_CODES=@recovery.txt",
+        ]);
+        assert!(out.status.success(), "edit: {out:?}");
+        let out = daemon(&[
+            "exec",
+            "--entry",
+            "Web/github",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s %s ' \"$GH_USER\" \"$GH_TOKEN\"; cat \"$GH_CODES\"",
+        ]);
+        assert!(out.status.success(), "exec via daemon: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "octo hunter2 codes");
+
         let gpg = json_out(
             &daemon(&["gpg-agent", "list", "--json"]),
             "gpg-agent list",

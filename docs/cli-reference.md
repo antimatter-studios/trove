@@ -593,7 +593,7 @@ trove://Infra/prod/postgres)`. Offline-only.
 ## trove exec
 
 ```
-trove --vault <PATH> exec <SCOPE> -- <cmd> [args…]
+trove [--vault <PATH>] exec <SCOPE> -- <cmd> [args…]
 ```
 
 Run `<cmd>` with secrets injected for exactly its lifetime (the `op run` of
@@ -618,7 +618,11 @@ Variable naming: an entry's `Exec.Env` custom field names the variable
 exactly (`Exec.Env=KUBECONFIG` on an attachment entry → `KUBECONFIG=<temp
 path>`; on a password entry → that variable carries the password). Without
 `Exec.Env`: `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE` (title
-uppercased, non-alphanumerics → `_`). Offline-only: requires `--vault`.
+uppercased, non-alphanumerics → `_`).
+
+With `--vault` it opens that file, asking for its password. Without it, it reads
+the vaults unlocked in the daemon through the session-gated reads, so it needs
+the `TROVE_SESSION` code from `trove unlock` and no password.
 
 An entry that needs several variables maps each with an `Exec.<VAR>` field
 naming its source: a field, standard or custom, or `@<attachment>` for the
