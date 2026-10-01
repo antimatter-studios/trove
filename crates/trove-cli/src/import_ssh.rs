@@ -73,12 +73,8 @@ pub fn scan(dir: &Path, validate: impl Fn(&[u8], &str) -> Verdict) -> std::io::R
         };
         let comment = pub_comment(&path).unwrap_or_else(|| name.clone());
         let verdict = match kind {
-            KeyKind::Putty => Verdict::Skip(
-                "PuTTY .ppk keys aren't supported; convert it with \
-                 `puttygen <file> -O private-openssh -o <out>` and import that"
-                    .to_string(),
-            ),
-            KeyKind::Pem => validate(&bytes, &comment),
+            // trove reads unencrypted PuTTY keys and stores them as OpenSSH.
+            KeyKind::Putty | KeyKind::Pem => validate(&bytes, &comment),
         };
         let (skip, protected) = match verdict {
             Verdict::Usable => (None, false),
@@ -171,7 +167,7 @@ mod tests {
         assert_eq!(found[0].skip.as_deref(), Some("too weak"));
         assert_eq!(found[1].comment, "me@laptop work");
         assert!(found[1].skip.is_none());
-        assert!(found[2].skip.as_deref().unwrap().contains("PuTTY"));
+        assert!(found[2].skip.is_none(), "a .ppk is offered like any key");
     }
 
     #[test]

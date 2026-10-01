@@ -98,6 +98,15 @@ fn import_ssh_stores_usable_keys_and_reports_the_rest() {
         &["-t", "rsa", "-b", "1024", "-N", "", "-C", "weak"],
     );
     std::fs::write(keys.join("known_hosts"), "github.com ssh-ed25519 AAAA\n").unwrap();
+    // A PuTTY key (made by puttygen; see troved's ppk fixtures).
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../troved/tests/fixtures/ppk/ed25519-v3.ppk"
+        ),
+        keys.join("putty.ppk"),
+    )
+    .unwrap();
     let before = std::fs::read(keys.join("id_ed25519")).unwrap();
 
     let vault = tmp.path().join("v.kdbx");
@@ -158,12 +167,19 @@ fn import_ssh_stores_usable_keys_and_reports_the_rest() {
     assert!(text(&out).contains("imported"), "{}", text(&out));
 
     let opened = Vault::open(&vault, PASSWORD).unwrap();
-    let paths: Vec<String> = opened
+    let mut paths: Vec<String> = opened
         .list_entries()
         .iter()
         .map(|e| e.display_path())
         .collect();
-    assert_eq!(paths, ["ssh/id_ed25519"]);
+    paths.sort();
+    assert_eq!(paths, ["ssh/id_ed25519", "ssh/putty.ppk"]);
+    let ppk = opened.find_by_title("ssh/putty.ppk").unwrap();
+    let stored = opened.read_binary(&ppk, "id").unwrap().unwrap();
+    assert!(
+        stored.starts_with(b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+        "a .ppk is stored as OpenSSH"
+    );
     let id = opened.find_by_title("ssh/id_ed25519").unwrap();
     let pub_line = opened.read_binary(&id, "id.pub").unwrap().unwrap();
     assert!(

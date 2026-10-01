@@ -382,10 +382,10 @@ key becomes `<GROUP>/<file name>`, stored as `add ssh` stores it, with the
 comment from the matching `.pub` (or the file name when there is none).
 
 A passphrase-protected key is decrypted on the terminal, as `add ssh` does, and
-stored without its passphrase; with no terminal it is skipped. Keys trove can't
-serve are listed on stderr with the reason and left out: DSA, RSA under 2048
-bits and PuTTY `.ppk`. So is a key whose entry already exists; importing never
-overwrites. Without `--yes` it asks
+stored without its passphrase; with no terminal it is skipped. A PuTTY `.ppk`
+is stored converted to OpenSSH. Keys trove can't serve are listed on stderr with
+the reason and left out: DSA, RSA under 2048 bits and a `.ppk` with a
+passphrase. So is a key whose entry already exists; importing never overwrites. Without `--yes` it asks
 about each key on the terminal, and refuses to run when there is none to ask on
 (including with `--password-stdin`). The key files are never changed or removed.
 
