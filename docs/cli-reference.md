@@ -761,7 +761,8 @@ password itself is never included.
 ## trove analyze
 
 ```
-trove --vault <PATH> analyze [--hibp <FILE>] [--reuse] [--weak [--min-score N]] [--age DAYS] [--json]
+trove --vault <PATH> analyze [--hibp <FILE>] [--reuse] [--weak [--min-score N]] [--age DAYS] [--expired] [--json]
+trove --vault <PATH> health [--hibp <FILE>] [--json]
 ```
 
 Audit the vault's passwords; at least one check is required, and any finding
@@ -773,6 +774,10 @@ exits 1. Only entry paths are printed, never a password.
 | `--reuse` | groups of entries sharing a password, compared by SHA-256 in memory |
 | `--weak` | entries whose zxcvbn score is below `--min-score` (0-4, default 3) |
 | `--age DAYS` | entries unchanged for more than DAYS days, by the entry's last modification time (any edit counts, not just the password) |
+| `--expired` | entries whose expiry date (`edit --expires`) has passed, with or without a password |
+
+`trove health` is `analyze --reuse --weak --age 365 --expired`, plus `--hibp`
+when given a dump: one report for the whole vault.
 
 Offline Have-I-Been-Pwned audit: every vault password is SHA-1-hashed and
 binary-searched in the sorted `pwned-passwords` dump at `<FILE>` (the multi-GB
@@ -1027,7 +1032,8 @@ present only when its check ran, and each non-empty list also exits 1:
 {
   "reused"?: [{"entry_paths": [string]}],             // --reuse, largest group first
   "weak"?: [{"entry_path": string, "score": integer}], // --weak, weakest first
-  "stale"?: [{"entry_path": string, "age_days": integer}] // --age, oldest first
+  "stale"?: [{"entry_path": string, "age_days": integer}], // --age, oldest first
+  "expired"?: [{"entry_path": string, "expired_at": string}] // --expired, oldest first
 }
 ```
 
