@@ -1112,7 +1112,7 @@ is two more keys:
 {
   "ok": bool,          // false when any check failed
   "checks": [{
-    "name": string,    // daemon, version, keys, daemons, ssh-agent, gpg-agent, vault, env-file
+    "name": string,    // daemon, version, keys, gpg-keyring, materialize, daemons, ssh-agent, gpg-agent, vault, env-file
     "status": string,  // ok, info, warn or fail
     "detail": string,
     "hint": string | null
@@ -1122,7 +1122,8 @@ is two more keys:
 
 Printed whether or not a check failed; a failure also makes the command exit 1.
 Which checks appear depends on the machine: `version` and `keys` only with a
-daemon running, `daemons` only on Unix, `env-file` once per `.env.trove` found.
+daemon running, `gpg-keyring` only when it serves GPG keys, `materialize` only
+when files are materialized, `daemons` only on Unix, `env-file` once per `.env.trove` found.
 
 ### `trove idle get --json`
 
@@ -1696,6 +1697,8 @@ a daemon.
 | `daemon` | whether troved is running on the control socket this CLI uses |
 | `version` | the running daemon is the same build as the CLI |
 | `keys` | keys in the unlocked vaults the agents couldn't load, and why |
+| `gpg-keyring` | gpg's keyring has the public key of every GPG key the agent serves (`trove gpg-agent import` adds them) |
+| `materialize` | materialized files on a disk-backed filesystem, where the wipe on lock is best effort |
 | `daemons` | live daemons on other sockets, and files left by dead ones (Unix) |
 | `ssh-agent` | `SSH_AUTH_SOCK`: unset, trove's agent, a private one from `ssh-agent empty`, another live agent, or nothing listening |
 | `gpg-agent` | whether gpg's agent socket (`gpgconf --list-dirs agent-socket`) is a symlink to trove's |
