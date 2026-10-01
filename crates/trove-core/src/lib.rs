@@ -108,6 +108,9 @@ pub struct EntrySummary {
     /// `ExpiryTime`, present only while `Expires` is on. `None` means it
     /// never expires.
     pub expires: Option<String>,
+    /// The entry's built-in KeePass icon (0-68), if it uses one. A custom
+    /// icon or none at all is `None`.
+    pub icon: Option<usize>,
 }
 
 /// Exact field constraint for a vault search. Names compare without case;
@@ -382,6 +385,9 @@ fn steam_code(secret_b32: &str, period: u64, unix_secs: u64) -> Result<String> {
     }
     Ok(code)
 }
+
+/// The highest built-in KeePass icon index (KeePass and KeePassXC ship 69).
+pub const MAX_BUILTIN_ICON: usize = 68;
 
 /// An open, in-memory vault.
 ///
@@ -1701,6 +1707,35 @@ impl Vault {
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
         if entry.tags != tags {
             entry.tags = tags;
+            touch_modified(&mut entry);
+        }
+        Ok(())
+    }
+
+    /// Set an entry's built-in KeePass icon (0-68), or `None` to clear it so
+    /// apps show their default. Replaces a custom icon.
+    pub fn set_entry_icon(&mut self, id: &EntryId, icon: Option<usize>) -> Result<()> {
+        if let Some(n) = icon {
+            if n > MAX_BUILTIN_ICON {
+                return Err(Error::InvalidIcon(n));
+            }
+        }
+        let entry_id = self.lookup_entry_id(id)?;
+        self.remember_before_edit(entry_id);
+        let mut entry = self
+            .inner
+            .db
+            .entry_mut(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        let current = match entry.icon() {
+            Some(keepass::db::Icon::BuiltIn(n)) => Some(*n),
+            _ => None,
+        };
+        if current != icon || matches!(entry.icon(), Some(keepass::db::Icon::Custom(_))) {
+            match icon {
+                Some(n) => entry.set_icon_builtin(n),
+                None => entry.set_icon_none(),
+            }
             touch_modified(&mut entry);
         }
         Ok(())
@@ -3128,6 +3163,10 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
             e.times.expiry.map(|dt| dt.and_utc().to_rfc3339())
         } else {
             None
+        },
+        icon: match e.icon() {
+            Some(keepass::db::Icon::BuiltIn(id)) => Some(*id),
+            _ => None,
         },
     }
 }

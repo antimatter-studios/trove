@@ -214,6 +214,7 @@ fn show_spec(field_values: &str) -> Value {
         "tags": ["string"],
         "inherited_tags": ["string"],
         "expires": "string|null",
+        "icon": "integer|null",
     })
 }
 

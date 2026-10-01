@@ -175,6 +175,8 @@ Field-level edits on an existing entry. At least one change flag is required.
 | `--clear-tags` | Remove all KeePass-native entry tags before applying `--tag`. |
 | `--expires <WHEN>` | Set when the entry expires: a date (`2030-06-15`, midnight UTC) or a UTC time (`2030-06-15T08:30:00Z`). |
 | `--no-expiry` | Make the entry never expire. |
+| `--icon <N>` | Set the entry's built-in KeePass icon (0-68), the one KeePassXC shows. |
+| `--no-icon` | Clear the icon, so apps show their default. |
 
 Expiry is KeePass's own `Expires`/`ExpiryTime`, so KeePassXC shows the same
 date. It is advisory, as in KeePassXC: `show` marks an expired entry, nothing
@@ -874,7 +876,8 @@ One object:
   "attachments": [string],
   "tags": [string],
   "inherited_tags": [string],
-  "expires": string | null      // RFC 3339 UTC; null if it never expires
+  "expires": string | null,     // RFC 3339 UTC; null if it never expires
+  "icon": integer | null        // built-in KeePass icon 0-68; null for none or a custom one
 }
 ```
 
@@ -895,7 +898,8 @@ given.
   "title": "forge",
   "url": "https://forge.example",
   "username": "octo",
-  "expires": null
+  "expires": null,
+  "icon": null
 }
 ```
 
