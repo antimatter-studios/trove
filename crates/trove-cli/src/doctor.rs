@@ -80,6 +80,12 @@ pub fn run_checks(vault: Option<&Path>) -> Vec<Check> {
     if let Ok(resp) = &status {
         checks.push(version_check());
         checks.push(skipped_keys_check(resp));
+        if let Some(c) = gpg_keyring_check() {
+            checks.push(c);
+        }
+        if let Some(c) = materialized_check() {
+            checks.push(c);
+        }
     }
     #[cfg(unix)]
     checks.push(daemons_check());
@@ -158,6 +164,114 @@ fn skipped_keys_check(status: &Value) -> Check {
         ),
     )
     .hint("`trove status` lists them too")
+}
+
+/// Whether gpg's keyring has the public half of every GPG key the agent
+/// serves: gpg won't ask an agent to sign with a key it doesn't know. `None`
+/// when the agent serves no GPG keys or gpg isn't installed.
+fn gpg_keyring_check() -> Option<Check> {
+    let resp = daemon::send(&daemon::Request::GpgAgentList).ok()?;
+    let served: Vec<(String, String)> = resp
+        .get("gpg_keys")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|k| {
+            Some((
+                k.get("keygrip")?.as_str()?.to_ascii_lowercase(),
+                k.get("comment")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            ))
+        })
+        .collect();
+    if served.is_empty() {
+        return None;
+    }
+    let out = std::process::Command::new("gpg")
+        .args(["--batch", "--with-colons", "--with-keygrip", "--list-keys"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let listing = String::from_utf8_lossy(&out.stdout);
+    Some(classify_keyring(&served, &keyring_grips(&listing)))
+}
+
+/// Keygrips from `gpg --with-colons --with-keygrip` output (`grp` records).
+fn keyring_grips(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter(|l| l.starts_with("grp:"))
+        .filter_map(|l| l.split(':').nth(9))
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn classify_keyring(served: &[(String, String)], keyring: &[String]) -> Check {
+    let mut missing: Vec<&str> = served
+        .iter()
+        .filter(|(grip, _)| !keyring.contains(grip))
+        .map(|(_, comment)| comment.as_str())
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    if missing.is_empty() {
+        return Check::new(
+            "gpg-keyring",
+            Level::Ok,
+            "gpg's keyring has the public key of every vault GPG key",
+        );
+    }
+    Check::new(
+        "gpg-keyring",
+        Level::Warn,
+        format!(
+            "gpg's keyring lacks the public key for {}, so gpg won't sign with it",
+            missing.join(", ")
+        ),
+    )
+    .hint("trove gpg-agent import")
+}
+
+/// Materialized files that sit on a disk-backed filesystem. `None` when
+/// nothing is materialized.
+fn materialized_check() -> Option<Check> {
+    let resp = daemon::send(&daemon::Request::MaterializeStatus).ok()?;
+    let files = resp.get("materialized").and_then(Value::as_array)?;
+    if files.is_empty() {
+        return None;
+    }
+    let on_disk: Vec<String> = files
+        .iter()
+        .filter(|f| {
+            !f.get("memory_backed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|f| {
+            f.get("target_path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    Some(if on_disk.is_empty() {
+        Check::new(
+            "materialize",
+            Level::Ok,
+            format!("{} materialized file(s), all on tmpfs", files.len()),
+        )
+    } else {
+        Check::new(
+            "materialize",
+            Level::Info,
+            format!(
+                "{} materialized file(s) on a disk-backed filesystem, so the wipe on lock is \
+                 best effort: {}",
+                on_disk.len(),
+                on_disk.join(", ")
+            ),
+        )
+    })
 }
 
 fn version_check() -> Check {
@@ -626,6 +740,28 @@ mod tests {
             "{}",
             c.detail
         );
+    }
+
+    #[test]
+    fn keyring_check_finds_missing_public_keys() {
+        let listing = "pub:u:255:22:ABCD:1:::::::scSC:::::ed25519:::0:\n\
+                       grp:::::::::AAAA1111:\n\
+                       sub:u:255:18:EF01:1::::::e:::::cv25519::\n\
+                       grp:::::::::BBBB2222:\n";
+        let grips = keyring_grips(listing);
+        assert_eq!(grips, ["aaaa1111", "bbbb2222"]);
+        let served = vec![
+            ("aaaa1111".to_string(), "Sign/work".to_string()),
+            ("cccc3333".to_string(), "Sign/home".to_string()),
+        ];
+        let c = classify_keyring(&served, &grips);
+        assert_eq!(c.status, Level::Warn);
+        assert!(
+            c.detail.contains("Sign/home") && !c.detail.contains("Sign/work"),
+            "{}",
+            c.detail
+        );
+        assert_eq!(classify_keyring(&served[..1], &grips).status, Level::Ok);
     }
 
     #[test]
