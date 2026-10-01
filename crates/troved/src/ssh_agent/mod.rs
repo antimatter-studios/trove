@@ -32,6 +32,7 @@ pub mod forward;
 pub mod hostkey;
 pub mod keeagent;
 pub mod keys;
+pub mod ppk;
 pub mod scoped;
 pub mod wire;
 

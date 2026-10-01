@@ -2817,7 +2817,7 @@ fn try_load_ssh_attachment(
             Some(loaded)
         }
         Err(ssh_keys::ParseError::NotOpenssh(detail)) => {
-            if bytes.starts_with(b"-----BEGIN") {
+            if bytes.starts_with(b"-----BEGIN") || crate::ssh_agent::ppk::is_ppk(&bytes) {
                 skip(format!(
                     "looks like a private key but failed to parse ({detail})"
                 ));

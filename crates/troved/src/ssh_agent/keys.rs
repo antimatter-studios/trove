@@ -136,6 +136,11 @@ pub enum ParseError {
     Encrypted,
     #[error("the passphrase doesn't decrypt the private key")]
     WrongPassphrase,
+    #[error(
+        "passphrase-protected PuTTY keys are not supported; remove the passphrase in \
+         PuTTYgen, or convert the key to OpenSSH format"
+    )]
+    PpkEncrypted,
     #[error("RSA key too short: {0} bits (minimum 2048)")]
     RsaTooSmall(usize),
     #[error("internal: failed to encode public-key blob: {0}")]
@@ -425,6 +430,7 @@ fn decode_private_key(bytes: &[u8]) -> Result<PrivateKey, ParseError> {
     // Try PEM first (covers all three); fall through to binary OpenSSH if
     // the bytes aren't valid UTF-8.
     let pk = match std::str::from_utf8(bytes) {
+        Ok(_) if super::ppk::is_ppk(bytes) => ppk_private_key(bytes)?,
         Ok(s) => parse_pem_private_key(s)?,
         Err(_) => PrivateKey::from_bytes(bytes).or_else(|e| {
             pad_short_ecdsa_scalar(bytes)
@@ -588,6 +594,34 @@ fn parse_pem_private_key(s: &str) -> Result<PrivateKey, ParseError> {
         return Ok(PrivateKey::from(kp));
     }
     Err(ParseError::NotOpenssh(openssh_err.to_string()))
+}
+
+/// Read a PuTTY `.ppk` key as an OpenSSH one.
+fn ppk_private_key(bytes: &[u8]) -> Result<PrivateKey, ParseError> {
+    use super::ppk::{to_openssh_blob, PpkError};
+    let blob = to_openssh_blob(bytes).map_err(|e| match e {
+        PpkError::Encrypted => ParseError::PpkEncrypted,
+        PpkError::Unsupported(what) => ParseError::UnsupportedAlgorithm(what),
+        PpkError::BadMac => ParseError::NotOpenssh(
+            "PuTTY key: the MAC doesn't match, so the file is damaged".into(),
+        ),
+        PpkError::Malformed(m) => ParseError::NotOpenssh(format!("PuTTY key: {m}")),
+    })?;
+    PrivateKey::from_bytes(&blob).or_else(|e| {
+        pad_short_ecdsa_scalar(&blob)
+            .and_then(|b| PrivateKey::from_bytes(&b).ok())
+            .ok_or_else(|| ParseError::NotOpenssh(format!("PuTTY key: {e}")))
+    })
+}
+
+/// Convert a PuTTY `.ppk` key to OpenSSH PEM, so `trove add ssh` stores the
+/// format every other tool reads. The key must also pass [`parse_private_key`].
+pub fn ppk_to_openssh(bytes: &[u8], comment: &str) -> Result<Zeroizing<String>, ParseError> {
+    parse_private_key(bytes, comment)?;
+    let mut pk = ppk_private_key(bytes)?;
+    pk.set_comment(comment);
+    pk.to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|e| ParseError::NotOpenssh(e.to_string()))
 }
 
 /// The binary body of an `-----BEGIN OPENSSH PRIVATE KEY-----` armor.

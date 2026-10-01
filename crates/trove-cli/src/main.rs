@@ -3356,6 +3356,18 @@ fn cmd_add_ssh(
     // Validate before storing: reject a public key, an encrypted key, or an
     // unsupported/weak algorithm with a precise, user-facing message.
     validate_ssh_private_key(&key_bytes, comment)?;
+    // A PuTTY key is stored as OpenSSH PEM, the format ssh, KeePassXC and
+    // every other tool reads.
+    let key_bytes = if troved::ssh_agent::ppk::is_ppk(&key_bytes) {
+        zeroize::Zeroizing::new(
+            troved::ssh_agent::keys::ppk_to_openssh(&key_bytes, comment)
+                .map_err(|e| anyhow!("converting the PuTTY key: {e}"))?
+                .as_bytes()
+                .to_vec(),
+        )
+    } else {
+        key_bytes
+    };
 
     store_ssh_key(
         "stored", entry_path, &key_bytes, comment, vault, user, pw_stdin,
@@ -4113,7 +4125,7 @@ fn validate_ssh_private_key(bytes: &[u8], comment: &str) -> Result<()> {
             "unsupported key algorithm: {alg} \
              (supported: ed25519, rsa>=2048, ecdsa-nistp256/384/521)"
         ))),
-        Err(e @ ParseError::Dsa) => Err(user_err(e.to_string())),
+        Err(e @ (ParseError::Dsa | ParseError::PpkEncrypted)) => Err(user_err(e.to_string())),
         Err(ParseError::NotOpenssh(detail)) => {
             if looks_like_public_key(bytes) {
                 Err(user_err(
