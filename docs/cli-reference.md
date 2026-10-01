@@ -1078,6 +1078,21 @@ export with no signing key. `unlock` warns
 about the same keys on stderr. The human `trove status` output lists them under
 "Skipped keys" when there are any.
 
+`--verbose` (`-v`) adds what each unlocked vault is serving. With `--json` that
+is two more keys:
+
+```
+{
+  "vaults": [{
+    "path": string,
+    "ssh_keys": [string],                              // entry paths
+    "materialized": [{"title": string, "target_path": string}],
+    "skipped_keys": [string]                           // one line per key, with the reason
+  }],
+  "gpg_keys": [string]                                 // all vaults: the agent doesn't track which
+}
+```
+
 ```json
 {
   "daemon_running": true,

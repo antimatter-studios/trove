@@ -560,6 +560,40 @@ mod daemon {
         assert_has("status", &status["skipped_keys"], "entry", "Infra/broken");
         assert_shape("status", &status, &status_spec());
 
+        // --verbose groups what is served per vault.
+        let verbose = json_out(
+            &daemon(&["status", "--verbose", "--json"]),
+            "status --verbose",
+            true,
+        );
+        let mut spec = status_spec();
+        spec["vaults"] = json!([{
+            "path": "string",
+            "ssh_keys": ["string"],
+            "materialized": [{"title": "string", "target_path": "string"}],
+            "skipped_keys": ["string"],
+        }]);
+        spec["gpg_keys"] = json!(["string"]);
+        assert_shape("status --verbose", &verbose, &spec);
+        let v0 = &verbose["vaults"][0];
+        assert!(
+            v0["ssh_keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| k == "Infra/s1"),
+            "{verbose}"
+        );
+        assert_eq!(v0["materialized"][0]["title"], "kube", "{verbose}");
+        assert!(
+            v0["skipped_keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| k.as_str().unwrap().contains("Infra/broken")),
+            "{verbose}"
+        );
+
         let idle = json_out(&daemon(&["idle", "get", "--json"]), "idle get", true);
         let spec = json!({"timeout_seconds": "integer", "remaining_seconds": "integer|null"});
         assert_shape("idle get", &idle, &spec);
