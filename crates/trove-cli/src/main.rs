@@ -633,8 +633,9 @@ enum Command {
     /// Nothing is sent anywhere; the multi-GB file is binary-searched on
     /// disk, never loaded. `--reuse` lists entries sharing a password,
     /// `--weak` those zxcvbn scores below `--min-score`, and `--age DAYS`
-    /// those unchanged for longer than DAYS. Offline-only: requires `--vault`.
-    #[command(group(clap::ArgGroup::new("checks").required(true).multiple(true).args(["hibp", "reuse", "weak", "age"])))]
+    /// those unchanged for longer than DAYS, and `--expired` those whose
+    /// expiry date has passed. Offline-only: requires `--vault`.
+    #[command(group(clap::ArgGroup::new("checks").required(true).multiple(true).args(["hibp", "reuse", "weak", "age", "expired"])))]
     Analyze {
         /// Path to the sorted pwned-passwords dump.
         #[arg(long, value_name = "FILE")]
@@ -651,6 +652,23 @@ enum Command {
         /// List entries that haven't changed in more than DAYS days.
         #[arg(long, value_name = "DAYS")]
         age: Option<u64>,
+        /// List entries whose expiry date has passed.
+        #[arg(long)]
+        expired: bool,
+        /// Print the results as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run every vault health check at once: reused, weak (zxcvbn below 3)
+    /// and expired passwords, passwords unchanged for over a year, and,
+    /// with `--hibp`, breached ones. The same report as `trove analyze` with
+    /// all its checks on; exits 1 on any finding. Offline-only: requires
+    /// `--vault`.
+    Health {
+        /// Also check against this sorted pwned-passwords dump.
+        #[arg(long, value_name = "FILE")]
+        hibp: Option<PathBuf>,
         /// Print the results as JSON.
         #[arg(long)]
         json: bool,
@@ -1510,6 +1528,7 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
         | Command::Materialize
         | Command::Group { .. }
         | Command::Analyze { .. }
+        | Command::Health { .. }
         | Command::GitCredential { .. }
         | Command::Resolve { .. }
         | Command::Merge { .. }
@@ -1907,6 +1926,7 @@ fn run(cli: Cli) -> Result<()> {
             weak,
             min_score,
             age,
+            expired,
             json,
         } => cmd_analyze(
             require_vault(vault)?,
@@ -1915,6 +1935,19 @@ fn run(cli: Cli) -> Result<()> {
                 reuse,
                 weak: weak.then_some(min_score),
                 age,
+                expired,
+            },
+            pw_stdin,
+            json,
+        ),
+        Command::Health { hibp, json } => cmd_analyze(
+            require_vault(vault)?,
+            AnalyzeChecks {
+                hibp,
+                reuse: true,
+                weak: Some(3),
+                age: Some(365),
+                expired: true,
             },
             pw_stdin,
             json,
@@ -6709,6 +6742,7 @@ struct AnalyzeChecks {
     weak: Option<u8>,
     /// The age in days past which an entry is stale, when `--age` is on.
     age: Option<u64>,
+    expired: bool,
 }
 
 fn cmd_analyze(vault_path: &Path, checks: AnalyzeChecks, pw_stdin: bool, json: bool) -> Result<()> {
@@ -6825,6 +6859,32 @@ fn cmd_analyze(vault_path: &Path, checks: AnalyzeChecks, pw_stdin: bool, json: b
             .map(|(path, days)| serde_json::json!({"entry_path": path, "age_days": days}))
             .collect();
         out.insert("stale".into(), stale.into());
+    }
+
+    if checks.expired {
+        // Every entry, not only those with a password: a certificate or key
+        // entry expires too.
+        let mut expired: Vec<(String, String)> = entries
+            .iter()
+            .filter_map(|e| {
+                let when = e.expires.as_deref()?;
+                is_expired(when).then(|| (e.display_path(), when.to_string()))
+            })
+            .collect();
+        expired.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if !json {
+            for (path, when) in &expired {
+                println!("{path}  expired {when}");
+            }
+        }
+        if !expired.is_empty() {
+            problems.push(format!("{} expired", expired.len()));
+        }
+        let expired: Vec<Value> = expired
+            .into_iter()
+            .map(|(path, when)| serde_json::json!({"entry_path": path, "expired_at": when}))
+            .collect();
+        out.insert("expired".into(), expired.into());
     }
 
     if json {

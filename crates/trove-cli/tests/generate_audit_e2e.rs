@@ -472,3 +472,50 @@ fn analyze_reports_reuse_weakness_and_age_without_secrets() {
     );
     assert!(!out.status.success());
 }
+
+#[test]
+fn health_runs_every_check_and_reports_expired_entries() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("h.kdbx");
+    {
+        let mut v = trove_core::Vault::create(&path, PASSWORD).unwrap();
+        let old = v.add_entry("Certs/old").unwrap();
+        v.set_entry_expiry(&old, Some("2001-01-01")).unwrap();
+        let fine = v.add_entry("Web/fine").unwrap();
+        v.set_field(&fine, "Password", "Unique-and-long-7$Qx!pL0")
+            .unwrap();
+        v.set_entry_expiry(&fine, Some("2999-01-01")).unwrap();
+        v.save().unwrap();
+    }
+    let vault = path.to_str().unwrap();
+    let pw = format!("{PASSWORD}\n");
+
+    let out = run_trove(
+        &trove,
+        &["--vault", vault, "--password-stdin", "health", "--json"],
+        &pw,
+    );
+    assert_eq!(out.status.code(), Some(1), "an expired entry fails health");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("health JSON");
+    assert_eq!(value["expired"][0]["entry_path"], "Certs/old");
+    assert_eq!(value["expired"].as_array().unwrap().len(), 1);
+    for key in ["reused", "weak", "stale"] {
+        assert!(value[key].is_array(), "health runs --{key}: {value}");
+    }
+    assert!(
+        value.get("checked_passwords").is_none(),
+        "no HIBP without --hibp"
+    );
+
+    let out = run_trove(
+        &trove,
+        &["--vault", vault, "--password-stdin", "analyze", "--expired"],
+        &pw,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Certs/old  expired 2001-01-01"));
+}
