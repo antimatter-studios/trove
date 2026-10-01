@@ -58,4 +58,7 @@ pub enum Error {
 
     #[error("challenge-response key: {0}")]
     ChallengeResponse(String),
+
+    #[error("invalid expiry {0:?}: use a date (2030-06-15) or a UTC time (2030-06-15T08:30:00Z)")]
+    InvalidExpiry(String),
 }

@@ -104,6 +104,10 @@ pub struct EntrySummary {
     /// Entry last-modification time as an RFC3339 UTC string, from the kdbx
     /// entry's `LastModificationTime`. `None` when unavailable.
     pub modified: Option<String>,
+    /// When the entry expires, as an RFC3339 UTC string: KeePass's
+    /// `ExpiryTime`, present only while `Expires` is on. `None` means it
+    /// never expires.
+    pub expires: Option<String>,
 }
 
 /// Exact field constraint for a vault search. Names compare without case;
@@ -1702,6 +1706,47 @@ impl Vault {
         Ok(())
     }
 
+    /// Set when an entry expires, or `None` for never. `when` is a date
+    /// (`2030-06-15`, midnight UTC) or a UTC time (`2030-06-15T08:30:00Z`).
+    /// Expiry is advisory, as in KeePassXC: nothing stops an expired entry
+    /// being used.
+    pub fn set_entry_expiry(&mut self, id: &EntryId, when: Option<&str>) -> Result<()> {
+        let entry_id = self.lookup_entry_id(id)?;
+        // Parsed into the datetime type of the field itself (chrono's,
+        // through keepass), so trove-core names no chrono type.
+        let expiry = match when {
+            Some(raw) => {
+                let text = raw.trim();
+                let text = text.strip_suffix('Z').unwrap_or(text);
+                let text = if text.len() == 10 {
+                    format!("{text}T00:00:00")
+                } else {
+                    text.to_string()
+                };
+                Some(
+                    text.parse()
+                        .map_err(|_| Error::InvalidExpiry(raw.to_string()))?,
+                )
+            }
+            None => None,
+        };
+        self.remember_before_edit(entry_id);
+        let mut entry = self
+            .inner
+            .db
+            .entry_mut(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        let expires = expiry.is_some();
+        if entry.times.expires != Some(expires) || (expires && entry.times.expiry != expiry) {
+            entry.times.expires = Some(expires);
+            if expires {
+                entry.times.expiry = expiry;
+            }
+            touch_modified(&mut entry);
+        }
+        Ok(())
+    }
+
     /// Look up an entry by title or path.
     ///
     /// * Plain title with no `/`: returns the first entry whose leaf title
@@ -3079,6 +3124,11 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
             .times
             .last_modification
             .map(|dt| dt.and_utc().to_rfc3339()),
+        expires: if e.times.expires == Some(true) {
+            e.times.expiry.map(|dt| dt.and_utc().to_rfc3339())
+        } else {
+            None
+        },
     }
 }
 

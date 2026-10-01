@@ -1272,6 +1272,12 @@ async fn handle_request(
         Request::AddTotp { path, uri, code } => {
             add_totp(state, session, peer_uid, &path, &uri, &code).await
         }
+
+        Request::SetExpiry {
+            path,
+            expires,
+            code,
+        } => set_expiry(state, session, peer_uid, &path, expires.as_deref(), &code).await,
     }
 }
 
@@ -1788,6 +1794,7 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
         group_path: summary.group_path,
         tags: summary.tags,
         inherited_tags: summary.inherited_tags,
+        expires: summary.expires,
     }))
 }
 
@@ -2596,6 +2603,34 @@ fn parse_gpg_entry(
         }
         other => other,
     }
+}
+
+/// Code-gated write: set or clear one entry's expiry.
+async fn set_expiry(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    expires: Option<&str>,
+    code: &str,
+) -> Handled {
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
+    }
+    let mut guard = state.lock().await;
+    let (vault, id) = match guard.find_entry_mut(path) {
+        Ok(found) => found,
+        Err(e) => return err_handled(e.to_string()),
+    };
+    if let Err(e) = vault.set_entry_expiry(&id, expires) {
+        return err_handled(e.to_string());
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    ok_handled(Response::ok_empty())
 }
 
 /// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to

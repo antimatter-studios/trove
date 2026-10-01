@@ -371,6 +371,15 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
+    /// Code-gated write: set when the entry at `path` expires (a date or a UTC
+    /// time), or clear its expiry when `expires` is absent.
+    SetExpiry {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires: Option<String>,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -610,6 +619,12 @@ impl std::fmt::Debug for Request {
                 .field("uri", &"<redacted>")
                 .field("code", &"<redacted>")
                 .finish(),
+            Request::SetExpiry { path, expires, .. } => f
+                .debug_struct("SetExpiry")
+                .field("path", path)
+                .field("expires", expires)
+                .field("code", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -676,6 +691,8 @@ pub struct ShowDto {
     pub tags: Vec<String>,
     #[serde(default)]
     pub inherited_tags: Vec<String>,
+    /// When the entry expires (RFC3339 UTC), or null if it never does.
+    pub expires: Option<String>,
 }
 
 /// One SSH key served by the agent, for `ssh-agent list`. Rendered by the CLI
