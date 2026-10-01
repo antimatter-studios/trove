@@ -331,6 +331,10 @@ enum Command {
         /// Print the status as a JSON object.
         #[arg(long)]
         json: bool,
+        /// Also list, per unlocked vault, the SSH keys served, the files
+        /// materialized and the keys skipped, plus the GPG keys served.
+        #[arg(long, short = 'v')]
+        verbose: bool,
     },
 
     /// List every trove daemon on the system — not just the one on the expected
@@ -1575,7 +1579,10 @@ mod challenge_response_routing_tests {
             None
         ));
         assert!(!challenge_response_uses_offline_vault(
-            &Command::Status { json: false },
+            &Command::Status {
+                json: false,
+                verbose: false,
+            },
             Some(vault)
         ));
         assert!(!challenge_response_uses_offline_vault(
@@ -1869,7 +1876,7 @@ fn run(cli: Cli) -> Result<()> {
             detach,
         } => cmd_unlock(&vault, timeout, filter, export, shell, detach, pw_stdin),
         Command::Lock { vault } => cmd_lock(vault.as_deref()),
-        Command::Status { json } => cmd_status(json),
+        Command::Status { json, verbose } => cmd_status(json, verbose),
         Command::Doctor { json } => cmd_doctor(vault, json),
         #[cfg(unix)]
         Command::Daemons { op } => match op.unwrap_or(DaemonsOp::List { json: false }) {
@@ -7278,7 +7285,7 @@ fn cmd_doctor(vault: Option<&Path>, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status(json: bool) -> Result<()> {
+fn cmd_status(json: bool, verbose: bool) -> Result<()> {
     // `status` never autospawns. The daemon runs only while a vault is unlocked
     // (or materialized files still need cleanup), so "no daemon" is itself the
     // answer: nothing is unlocked. A live daemon gives the real state; otherwise
@@ -7292,14 +7299,24 @@ fn cmd_status(json: bool) -> Result<()> {
                 }
                 .into());
             }
+            let detail = if verbose {
+                Some(status_detail(&resp)?)
+            } else {
+                None
+            };
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&status_json(&resp, true))?
-                );
+                let mut out = status_json(&resp, true);
+                if let (Some(d), Some(obj)) = (&detail, out.as_object_mut()) {
+                    obj.insert("vaults".into(), d.vaults_json());
+                    obj.insert("gpg_keys".into(), Value::from(d.gpg_keys.clone()));
+                }
+                println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 println!("Daemon:          running");
                 print_status(&resp);
+                if let Some(d) = &detail {
+                    d.print();
+                }
             }
             // Diagnostic command — a natural place to surface CLI↔daemon drift
             // (a stale sibling troved speaking a slightly different protocol).
@@ -7322,6 +7339,148 @@ fn cmd_status(json: bool) -> Result<()> {
         Err(e) => return Err(e),
     }
     Ok(())
+}
+
+/// What `status --verbose` adds: per unlocked vault, the SSH keys served,
+/// the live materialized files and the skipped keys; and the GPG keys served,
+/// which the agent doesn't tie to a vault.
+struct StatusDetail {
+    vaults: Vec<VaultDetail>,
+    gpg_keys: Vec<String>,
+}
+
+struct VaultDetail {
+    path: String,
+    ssh_keys: Vec<String>,
+    /// (entry title, target path).
+    materialized: Vec<(String, String)>,
+    skipped: Vec<String>,
+}
+
+fn status_detail(status: &Value) -> Result<StatusDetail> {
+    let strings_of = |v: &Value, list: &str, field: &str| -> Vec<String> {
+        v.get(list)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.get(field).and_then(Value::as_str).map(str::to_string))
+            .collect()
+    };
+    let ssh = daemon::send(&daemon::Request::SshAgentList)?;
+    let gpg = daemon::send(&daemon::Request::GpgAgentList)?;
+    let mat = daemon::send(&daemon::Request::MaterializeStatus)?;
+    let ssh_comments = strings_of(&ssh, "ssh_keys", "comment");
+    let paths: Vec<String> = status
+        .get("vault_paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::to_string))
+        .collect();
+    let stem = |path: &str| {
+        Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("vault")
+            .to_string()
+    };
+    let mut vaults: Vec<VaultDetail> = paths
+        .iter()
+        .map(|path| VaultDetail {
+            path: path.clone(),
+            ssh_keys: Vec::new(),
+            materialized: Vec::new(),
+            skipped: Vec::new(),
+        })
+        .collect();
+    // The agent labels each key `<vault file stem>:<entry path>`.
+    for comment in ssh_comments {
+        let (label, entry) = comment.split_once(':').unwrap_or(("", comment.as_str()));
+        if let Some(v) = vaults.iter_mut().find(|v| stem(&v.path) == label) {
+            v.ssh_keys.push(entry.to_string());
+        }
+    }
+    for m in mat
+        .get("materialized")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let field = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        if let Some(v) = vaults.iter_mut().find(|v| v.path == field("vault")) {
+            v.materialized.push((field("title"), field("target_path")));
+        }
+    }
+    for k in status
+        .get("skipped_keys")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let field = |n: &str| k.get(n).and_then(Value::as_str).unwrap_or("?");
+        if let Some(v) = vaults.iter_mut().find(|v| v.path == field("vault")) {
+            v.skipped.push(format!(
+                "{} {} ({}): {}",
+                field("agent"),
+                field("entry"),
+                field("attachment"),
+                field("reason")
+            ));
+        }
+    }
+    Ok(StatusDetail {
+        vaults,
+        gpg_keys: strings_of(&gpg, "gpg_keys", "comment"),
+    })
+}
+
+impl StatusDetail {
+    fn print(&self) {
+        for v in &self.vaults {
+            println!();
+            println!("{}", v.path);
+            let list = |label: &str, items: &[String]| {
+                if items.is_empty() {
+                    println!("  {label:<14} none");
+                } else {
+                    for (i, item) in items.iter().enumerate() {
+                        let head = if i == 0 { label } else { "" };
+                        println!("  {head:<14} {item}");
+                    }
+                }
+            };
+            list("SSH keys:", &v.ssh_keys);
+            let files: Vec<String> = v
+                .materialized
+                .iter()
+                .map(|(title, target)| format!("{title} -> {target}"))
+                .collect();
+            list("Materialized:", &files);
+            if !v.skipped.is_empty() {
+                list("Skipped:", &v.skipped);
+            }
+        }
+        if !self.gpg_keys.is_empty() {
+            println!();
+            println!("GPG keys (all vaults): {}", self.gpg_keys.join(", "));
+        }
+    }
+
+    fn vaults_json(&self) -> Value {
+        Value::from(
+            self.vaults
+                .iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "path": v.path,
+                        "ssh_keys": v.ssh_keys,
+                        "materialized": v.materialized.iter().map(|(t, p)| serde_json::json!({"title": t, "target_path": p})).collect::<Vec<_>>(),
+                        "skipped_keys": v.skipped,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
 }
 
 /// The daemon's `skipped_keys`, one readable line each:
