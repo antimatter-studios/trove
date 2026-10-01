@@ -1116,3 +1116,102 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
         "edit --expires soon",
     );
 }
+
+#[test]
+fn edit_sets_and_clears_the_icon() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("icon.kdbx");
+    let v = vault.to_str().unwrap();
+    let pw = format!("{PASSWORD}\n");
+    let mut vault_obj = Vault::create(&vault, PASSWORD).unwrap();
+    vault_obj.add_entry("Web/site").unwrap();
+    vault_obj.save().unwrap();
+    drop(vault_obj);
+
+    let fresh = stdout_str(&run_trove(
+        &trove,
+        &["--vault", v, "--password-stdin", "show", "Web/site"],
+        &pw,
+    ));
+    assert!(!fresh.contains("Icon:"), "a new entry has no icon: {fresh}");
+
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                v,
+                "--password-stdin",
+                "edit",
+                "Web/site",
+                "--icon",
+                "12",
+            ],
+            &pw,
+        ),
+        "edit --icon",
+    );
+    let shown = stdout_str(&run_trove(
+        &trove,
+        &["--vault", v, "--password-stdin", "show", "Web/site"],
+        &pw,
+    ));
+    assert!(shown.contains("Icon: 12"), "{shown}");
+    let json = stdout_str(&run_trove(
+        &trove,
+        &[
+            "--vault",
+            v,
+            "--password-stdin",
+            "show",
+            "Web/site",
+            "--json",
+        ],
+        &pw,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["icon"], 12);
+
+    assert_ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                v,
+                "--password-stdin",
+                "edit",
+                "Web/site",
+                "--no-icon",
+            ],
+            &pw,
+        ),
+        "edit --no-icon",
+    );
+    let cleared = stdout_str(&run_trove(
+        &trove,
+        &["--vault", v, "--password-stdin", "show", "Web/site"],
+        &pw,
+    ));
+    assert!(!cleared.contains("Icon:"), "{cleared}");
+
+    assert_fails(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                v,
+                "--password-stdin",
+                "edit",
+                "Web/site",
+                "--icon",
+                "69",
+            ],
+            &pw,
+        ),
+        "edit --icon 69",
+    );
+}

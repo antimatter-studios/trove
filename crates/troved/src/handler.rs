@@ -1278,6 +1278,10 @@ async fn handle_request(
             expires,
             code,
         } => set_expiry(state, session, peer_uid, &path, expires.as_deref(), &code).await,
+
+        Request::SetIcon { path, icon, code } => {
+            set_icon(state, session, peer_uid, &path, icon, &code).await
+        }
     }
 }
 
@@ -1795,6 +1799,7 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
         tags: summary.tags,
         inherited_tags: summary.inherited_tags,
         expires: summary.expires,
+        icon: summary.icon,
     }))
 }
 
@@ -2603,6 +2608,34 @@ fn parse_gpg_entry(
         }
         other => other,
     }
+}
+
+/// Code-gated write: set or clear one entry's built-in icon.
+async fn set_icon(
+    state: &SharedState,
+    session: &SessionStore,
+    peer_uid: u32,
+    path: &str,
+    icon: Option<usize>,
+    code: &str,
+) -> Handled {
+    // Hold authorization stable through vault access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
+    }
+    let mut guard = state.lock().await;
+    let (vault, id) = match guard.find_entry_mut(path) {
+        Ok(found) => found,
+        Err(e) => return err_handled(e.to_string()),
+    };
+    if let Err(e) = vault.set_entry_icon(&id, icon) {
+        return err_handled(e.to_string());
+    }
+    if let Err(e) = vault.save() {
+        return err_handled(format!("saving vault: {e}"));
+    }
+    ok_handled(Response::ok_empty())
 }
 
 /// Code-gated write: set or clear one entry's expiry.

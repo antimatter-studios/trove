@@ -484,6 +484,12 @@ enum Command {
         /// Make the entry never expire.
         #[arg(long)]
         no_expiry: bool,
+        /// Set the entry's built-in KeePass icon (0-68), as KeePassXC shows it.
+        #[arg(long, value_name = "N", conflicts_with = "no_icon", value_parser = clap::value_parser!(u8).range(0..=68))]
+        icon: Option<u8>,
+        /// Clear the entry's icon, so apps show their default.
+        #[arg(long)]
+        no_icon: bool,
     },
 
     /// Remove an entry. Default is the KeePassXC behavior: move it to the
@@ -2096,6 +2102,8 @@ fn run(cli: Cli) -> Result<()> {
             clear_tags,
             expires,
             no_expiry,
+            icon,
+            no_icon,
         } => cmd_edit(
             vault,
             &entry_path,
@@ -2112,6 +2120,12 @@ fn run(cli: Cli) -> Result<()> {
             // Some(Some(when)) sets an expiry, Some(None) clears it.
             match (expires, no_expiry) {
                 (Some(when), _) => Some(Some(when)),
+                (None, true) => Some(None),
+                (None, false) => None,
+            },
+            // Some(Some(n)) sets an icon, Some(None) clears it.
+            match (icon, no_icon) {
+                (Some(n), _) => Some(Some(usize::from(n))),
                 (None, true) => Some(None),
                 (None, false) => None,
             },
@@ -5012,6 +5026,7 @@ fn print_show_summary(
     tags: &[String],
     inherited_tags: &[String],
     expires: Option<&str>,
+    icon: Option<usize>,
 ) {
     println!("Path: {display_path}");
     println!("Title: {title}");
@@ -5033,6 +5048,9 @@ fn print_show_summary(
     }
     if !inherited_tags.is_empty() {
         println!("Inherited tags: {}", inherited_tags.join(", "));
+    }
+    if let Some(n) = icon {
+        println!("Icon: {n}");
     }
     if let Some(when) = expires {
         let expired = is_expired(when);
@@ -5098,6 +5116,7 @@ struct ShowJson<'a> {
     tags: &'a [String],
     inherited_tags: &'a [String],
     expires: Option<&'a str>,
+    icon: Option<usize>,
 }
 
 fn entry_show_json(e: ShowJson<'_>) -> Value {
@@ -5121,6 +5140,7 @@ fn entry_show_json(e: ShowJson<'_>) -> Value {
         Value::from(e.inherited_tags.to_vec()),
     );
     out.insert("expires".into(), e.expires.map_or(Value::Null, Value::from));
+    out.insert("icon".into(), e.icon.map_or(Value::Null, Value::from));
     Value::Object(out)
 }
 
@@ -5310,6 +5330,7 @@ fn cmd_show(
                         tags: &summary.tags,
                         inherited_tags: &summary.inherited_tags,
                         expires: summary.expires.as_deref(),
+                        icon: summary.icon,
                     }))?
                 );
                 return Ok(());
@@ -5326,6 +5347,7 @@ fn cmd_show(
                 &summary.tags,
                 &summary.inherited_tags,
                 summary.expires.as_deref(),
+                summary.icon,
             );
         }
         None => {
@@ -5418,6 +5440,10 @@ fn cmd_show(
                         tags: &list("tags"),
                         inherited_tags: &list("inherited_tags"),
                         expires: s("expires").as_deref(),
+                        icon: entry
+                            .get("icon")
+                            .and_then(Value::as_u64)
+                            .and_then(|n| usize::try_from(n).ok()),
                     }))?
                 );
                 return Ok(());
@@ -5434,6 +5460,10 @@ fn cmd_show(
                 &list("tags"),
                 &list("inherited_tags"),
                 s("expires").as_deref(),
+                entry
+                    .get("icon")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok()),
             );
         }
     }
@@ -5638,6 +5668,7 @@ fn cmd_edit(
     untags: &[String],
     clear_tags: bool,
     expiry: Option<Option<String>>,
+    icon: Option<Option<usize>>,
     pw_stdin: bool,
 ) -> Result<()> {
     let mut sets = std::collections::BTreeMap::new();
@@ -5662,11 +5693,11 @@ fn cmd_edit(
         && tags.is_empty()
         && untags.is_empty()
         && !clear_tags);
-    if !other_changes && expiry.is_none() {
+    if !other_changes && expiry.is_none() && icon.is_none() {
         return Err(anyhow!(
             "nothing to change: pass --title/--username/--url/--notes, \
              --password-prompt, --set/--unset, --tag/--untag, --clear-tags, \
-             --expires or --no-expiry"
+             --expires/--no-expiry or --icon/--no-icon"
         ));
     }
     match vault {
@@ -5710,6 +5741,9 @@ fn cmd_edit(
             if let Some(when) = &expiry {
                 v.set_entry_expiry(&id, when.as_deref())?;
             }
+            if let Some(icon) = icon {
+                v.set_entry_icon(&id, icon)?;
+            }
             v.save().context("saving vault")?;
         }
         None => {
@@ -5720,6 +5754,13 @@ fn cmd_edit(
                 daemon_call(&daemon::Request::SetExpiry {
                     path: entry_path.to_string(),
                     expires: when,
+                    code: code.clone(),
+                })?;
+            }
+            if let Some(icon) = icon {
+                daemon_call(&daemon::Request::SetIcon {
+                    path: entry_path.to_string(),
+                    icon,
                     code: code.clone(),
                 })?;
             }

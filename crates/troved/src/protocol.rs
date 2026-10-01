@@ -380,6 +380,15 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
+    /// Code-gated write: set the entry's built-in icon (0-68), or clear it
+    /// when `icon` is absent.
+    SetIcon {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        icon: Option<usize>,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
 }
 
 // Custom Debug to make password leakage impossible by accident.
@@ -625,6 +634,12 @@ impl std::fmt::Debug for Request {
                 .field("expires", expires)
                 .field("code", &"<redacted>")
                 .finish(),
+            Request::SetIcon { path, icon, .. } => f
+                .debug_struct("SetIcon")
+                .field("path", path)
+                .field("icon", icon)
+                .field("code", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -693,6 +708,8 @@ pub struct ShowDto {
     pub inherited_tags: Vec<String>,
     /// When the entry expires (RFC3339 UTC), or null if it never does.
     pub expires: Option<String>,
+    /// The entry's built-in icon (0-68), or null.
+    pub icon: Option<usize>,
 }
 
 /// One SSH key served by the agent, for `ssh-agent list`. Rendered by the CLI
