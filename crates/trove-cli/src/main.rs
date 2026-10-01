@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod analyze;
 mod clip;
 mod daemon;
 mod doctor;
@@ -612,15 +613,33 @@ enum Command {
         json: bool,
     },
 
-    /// Check every password in the vault against an OFFLINE Have-I-Been-Pwned
+    /// Audit the vault's passwords. Only entry paths are printed, never a
+    /// password. Exits 1 when any check finds something, so CI can gate on it.
+    ///
+    /// `--hibp` checks every password against an OFFLINE Have-I-Been-Pwned
     /// dump (the sorted `pwned-passwords` file: `SHA1:count` per line).
     /// Nothing is sent anywhere; the multi-GB file is binary-searched on
-    /// disk, never loaded. Offline-only: requires `--vault`.
+    /// disk, never loaded. `--reuse` lists entries sharing a password,
+    /// `--weak` those zxcvbn scores below `--min-score`, and `--age DAYS`
+    /// those unchanged for longer than DAYS. Offline-only: requires `--vault`.
+    #[command(group(clap::ArgGroup::new("checks").required(true).multiple(true).args(["hibp", "reuse", "weak", "age"])))]
     Analyze {
         /// Path to the sorted pwned-passwords dump.
-        #[arg(long, value_name = "FILE", required = true)]
-        hibp: PathBuf,
-        /// Print checked and breached entry counts as JSON.
+        #[arg(long, value_name = "FILE")]
+        hibp: Option<PathBuf>,
+        /// List groups of entries that share a password.
+        #[arg(long)]
+        reuse: bool,
+        /// List entries whose zxcvbn score is below --min-score.
+        #[arg(long)]
+        weak: bool,
+        /// The lowest zxcvbn score (0-4) that isn't weak.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=4), requires = "weak")]
+        min_score: u8,
+        /// List entries that haven't changed in more than DAYS days.
+        #[arg(long, value_name = "DAYS")]
+        age: Option<u64>,
+        /// Print the results as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1867,9 +1886,24 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Estimate { password, json } => cmd_estimate(password.as_deref(), json),
-        Command::Analyze { hibp, json } => {
-            cmd_analyze(require_vault(vault)?, &hibp, pw_stdin, json)
-        }
+        Command::Analyze {
+            hibp,
+            reuse,
+            weak,
+            min_score,
+            age,
+            json,
+        } => cmd_analyze(
+            require_vault(vault)?,
+            AnalyzeChecks {
+                hibp,
+                reuse,
+                weak: weak.then_some(min_score),
+                age,
+            },
+            pw_stdin,
+            json,
+        ),
         Command::Exec {
             scope,
             entry,
@@ -6573,70 +6607,153 @@ fn cmd_estimate(password: Option<&str>, json: bool) -> Result<()> {
 /// the vault. Prints one line per breached entry (path + count); exits 0 with
 /// "no breached passwords" when clean. Exit 1 when breaches were found, so
 /// scripts and CI can gate on it.
-fn cmd_analyze(vault_path: &Path, hibp_file: &Path, pw_stdin: bool, json: bool) -> Result<()> {
-    if !hibp_file.exists() {
-        return Err(anyhow!("HIBP file not found: {}", hibp_file.display()));
+/// Which `trove analyze` checks to run.
+struct AnalyzeChecks {
+    hibp: Option<PathBuf>,
+    reuse: bool,
+    /// The minimum zxcvbn score, when `--weak` is on.
+    weak: Option<u8>,
+    /// The age in days past which an entry is stale, when `--age` is on.
+    age: Option<u64>,
+}
+
+fn cmd_analyze(vault_path: &Path, checks: AnalyzeChecks, pw_stdin: bool, json: bool) -> Result<()> {
+    if let Some(file) = &checks.hibp {
+        if !file.exists() {
+            return Err(anyhow!("HIBP file not found: {}", file.display()));
+        }
     }
     let v = open_vault(vault_path, pw_stdin)?;
-    let mut breached = 0usize;
-    let mut checked = 0usize;
-    let mut empty = 0usize;
-    let mut findings = Vec::new();
-    for entry in v.list_entries() {
+    let entries = v.list_entries();
+    let mut passwords = Vec::new();
+    let mut empty_paths = Vec::new();
+    for entry in &entries {
         let pw = v
             .get_field(&entry.id, "Password")
             .with_context(|| format!("reading Password for {}", entry.display_path()))?;
-        let Some(pw) = pw.filter(|pw| !pw.is_empty()) else {
-            empty += 1;
-            if json {
-                findings.push(serde_json::json!({
-                    "entry_path": entry.display_path(),
-                    "finding": "empty_password",
-                }));
-            } else {
-                println!("{}  empty password", entry.display_path());
-            }
-            continue;
-        };
-        checked += 1;
-        let hash = hibp::sha1_hex_upper(&pw);
-        if let Some(count) = hibp::lookup(hibp_file, &hash)? {
-            breached += 1;
-            findings.push(serde_json::json!({
-                "entry_path": entry.display_path(),
-                "breach_count": count,
-            }));
-            if !json {
-                println!("{}  seen {count} times in breaches", entry.display_path());
-            }
+        match pw.filter(|pw| !pw.is_empty()) {
+            Some(pw) => passwords.push((entry, zeroize_string(pw))),
+            None => empty_paths.push(entry.display_path()),
         }
     }
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "checked_passwords": checked,
-                "breached_passwords": breached,
-                "empty_passwords": empty,
-                "findings": findings,
-            }))?
-        );
-    } else {
-        eprintln!("checked {checked} passwords, {breached} breached, {empty} empty");
+    let items: Vec<analyze::Item> = passwords
+        .iter()
+        .map(|(entry, pw)| analyze::Item {
+            path: entry.display_path(),
+            password: pw.as_str(),
+            modified: entry.modified.as_deref(),
+        })
+        .collect();
+
+    let mut out = serde_json::Map::new();
+    let mut problems = Vec::new();
+
+    if let Some(file) = &checks.hibp {
+        let mut findings = Vec::new();
+        for path in &empty_paths {
+            findings.push(serde_json::json!({"entry_path": path, "finding": "empty_password"}));
+            if !json {
+                println!("{path}  empty password");
+            }
+        }
+        let mut breached = 0usize;
+        for item in &items {
+            if let Some(count) = hibp::lookup(file, &hibp::sha1_hex_upper(item.password))? {
+                breached += 1;
+                findings.push(serde_json::json!({"entry_path": item.path, "breach_count": count}));
+                if !json {
+                    println!("{}  seen {count} times in breaches", item.path);
+                }
+            }
+        }
+        let (checked, empty) = (items.len(), empty_paths.len());
+        if !json {
+            eprintln!("checked {checked} passwords, {breached} breached, {empty} empty");
+        }
+        if breached > 0 || empty > 0 {
+            problems.push(format!("{breached} breached and {empty} empty password(s)"));
+        }
+        out.insert("checked_passwords".into(), checked.into());
+        out.insert("breached_passwords".into(), breached.into());
+        out.insert("empty_passwords".into(), empty.into());
+        out.insert("findings".into(), findings.into());
     }
-    if breached > 0 || empty > 0 {
+
+    if checks.reuse {
+        let groups = analyze::reused(&items);
+        if !json {
+            for g in &groups {
+                println!("reused by {}: {}", g.len(), g.join(", "));
+            }
+        }
+        if !groups.is_empty() {
+            problems.push(format!("{} reused password(s)", groups.len()));
+        }
+        let groups: Vec<Value> = groups
+            .into_iter()
+            .map(|g| serde_json::json!({"entry_paths": g}))
+            .collect();
+        out.insert("reused".into(), groups.into());
+    }
+
+    if let Some(min_score) = checks.weak {
+        let weak = analyze::weak(&items, min_score);
+        if !json {
+            for (path, score) in &weak {
+                println!("{path}  weak (score {score} of 4)");
+            }
+        }
+        if !weak.is_empty() {
+            problems.push(format!("{} weak password(s)", weak.len()));
+        }
+        let weak: Vec<Value> = weak
+            .into_iter()
+            .map(|(path, score)| serde_json::json!({"entry_path": path, "score": score}))
+            .collect();
+        out.insert("weak".into(), weak.into());
+    }
+
+    if let Some(max_days) = checks.age {
+        let stale = analyze::stale(&items, analyze::today(), max_days);
+        if !json {
+            for (path, days) in &stale {
+                println!("{path}  unchanged for {days} days");
+            }
+        }
+        if !stale.is_empty() {
+            problems.push(format!(
+                "{} password(s) older than {max_days} days",
+                stale.len()
+            ));
+        }
+        let stale: Vec<Value> = stale
+            .into_iter()
+            .map(|(path, days)| serde_json::json!({"entry_path": path, "age_days": days}))
+            .collect();
+        out.insert("stale".into(), stale.into());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&Value::Object(out))?);
+    }
+    if !problems.is_empty() {
         // Same DaemonClassified channel the daemon paths use: user-level
         // failure, exit 1 — CI can gate on `trove analyze`.
         return Err(DaemonClassified {
-            message: format!("{breached} breached and {empty} empty password(s) found"),
+            message: format!("found {}", problems.join(", ")),
             exit: EXIT_USER_ERROR,
         }
         .into());
     }
     if !json {
-        println!("no breached passwords");
+        println!("nothing found");
     }
     Ok(())
+}
+
+/// Hold a password in memory that is wiped on drop.
+fn zeroize_string(s: String) -> zeroize::Zeroizing<String> {
+    zeroize::Zeroizing::new(s)
 }
 
 /// `trove materialize` — open vault, run the materialize plan in-process,

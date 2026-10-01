@@ -375,3 +375,100 @@ fn analyze_flags_breached_and_gates_exit_code() {
     );
     assert!(!out.status.success());
 }
+
+#[test]
+fn analyze_reports_reuse_weakness_and_age_without_secrets() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("v.kdbx");
+    let vault = vault.to_str().unwrap();
+    let pw = format!("{PASSWORD}\n");
+    ok(
+        &run_trove(&trove, &["--vault", vault, "--password-stdin", "init"], &pw),
+        "init",
+    );
+    let shared = "Shared-secret-9f!Kq2#zz";
+    for (entry, secret) in [
+        ("Web/a", shared),
+        ("Web/b", shared),
+        ("Web/weak", "password1"),
+        ("Web/solo", "Unique-and-long-7$Qx!pL0"),
+    ] {
+        ok(
+            &run_trove(
+                &trove,
+                &[
+                    "--vault",
+                    vault,
+                    "--password-stdin",
+                    "add",
+                    "password",
+                    entry,
+                    "--secret-stdin",
+                ],
+                &format!("{PASSWORD}\n{secret}\n"),
+            ),
+            entry,
+        );
+    }
+
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "analyze",
+            "--reuse",
+            "--weak",
+            "--json",
+        ],
+        &pw,
+    );
+    assert_eq!(out.status.code(), Some(1), "findings gate the exit code");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains(shared) && !stdout.contains("password1"),
+        "{stdout}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("analyze JSON");
+    assert_eq!(
+        value["reused"][0]["entry_paths"],
+        serde_json::json!(["Web/a", "Web/b"])
+    );
+    assert_eq!(value["reused"].as_array().unwrap().len(), 1);
+    assert_eq!(value["weak"][0]["entry_path"], "Web/weak");
+    assert!(
+        value.get("checked_passwords").is_none(),
+        "no HIBP keys without --hibp"
+    );
+
+    // Everything was written just now, so nothing is older than a year.
+    let out = run_trove(
+        &trove,
+        &[
+            "--vault",
+            vault,
+            "--password-stdin",
+            "analyze",
+            "--age",
+            "365",
+            "--json",
+        ],
+        &pw,
+    );
+    assert!(out.status.success(), "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["stale"], serde_json::json!([]));
+
+    // At least one check is required.
+    let out = run_trove(
+        &trove,
+        &["--vault", vault, "--password-stdin", "analyze"],
+        &pw,
+    );
+    assert!(!out.status.success());
+}
