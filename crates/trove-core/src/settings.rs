@@ -458,7 +458,15 @@ impl Document {
                 Event::Text(t) if !AsRef::<str>::as_ref(t).trim().is_empty() => {
                     return Err(invalid(capability, "has text outside any attribute"));
                 }
-                Event::Eof => break,
+                Event::Eof => {
+                    if depth > 0 {
+                        return Err(invalid(
+                            capability,
+                            "is not well-formed XML: an element is never closed",
+                        ));
+                    }
+                    break;
+                }
                 _ => continue,
             };
             let start = start.expect("start or empty");
