@@ -427,23 +427,15 @@ trove [--vault <PATH>] add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
 | `--name <NAME>` | Override attachment name. Default: basename of `--src`. |
 | `--mode <MODE>` | File mode (octal, 3 or 4 digits). Default `0600`. |
 | `--ttl <TTL>` | Materialization lifetime in seconds. Default: lifetime of the vault unlock. |
-| `--allow-disk-backed` | Allow non-tmpfs target. Off by default. Sets `Materialize.AllowDiskBacked=true`. |
+| `--allow-disk-backed` | Allow non-tmpfs target. Off by default. Sets `allowDiskBacked="true"` on its `<File>`. |
 | `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
-Stores file bytes as a real KDBX `<Binary>` attachment and sets the following entry custom fields (read by troved's [materialize](../crates/troved/src/materialize/mod.rs) module):
-
-Each field is keyed by the attachment it describes, so one entry can materialize
-several files — an SSH key and its `.pub`, a certificate and the key that
-matches it:
-
-- `Materialize.<attachment>.Target` — `<TARGET>` (literal string; the daemon expands `~`, `$HOME`, `$XDG_RUNTIME_DIR`).
-- `Materialize.<attachment>.Mode` — `<MODE>`.
-- `Materialize.<attachment>.TTL` — seconds, only set if `--ttl` is given.
-- `Materialize.<attachment>.AllowDiskBacked` — `"true"` or `"false"`.
-
-There is no `Source` field: the attachment name in the key is the source. An
-attachment with no `Target` is simply not materialized.
+Stores the file bytes as a real KDBX `<Binary>` attachment and names it in the
+entry's `Materialize.settings`, one `<File>` per attachment, so one entry can
+materialize several files — an SSH key and its `.pub`, a certificate and the
+key that matches it. It is `trove materialize add` with the attachment upload
+in front; see [Capability settings documents](#capability-settings-documents).
 
 ## trove rename-attachment
 
@@ -1594,6 +1586,20 @@ git clone git@work-github:acme/backend.git       # offers id_work
 git clone git@github.com:me/dotfiles.git         # offers id_personal
 ```
 
+### trove ssh-agent enable / disable
+
+```
+trove [--vault <PATH>] ssh-agent enable <ENTRY> [--key ATT] [--confirm | --no-confirm] [--lifetime S]
+trove [--vault <PATH>] ssh-agent disable <ENTRY>
+```
+
+Writes the entry's `KeeAgent.settings`, the file KeePassXC's SSH Agent tab
+writes, keeping its encoding and the settings the command doesn't change.
+`enable` loads the key on unlock; `--key` names the attachment when the entry's
+settings don't yet. `disable` writes `AllowUseOfSshKey=false` rather than
+deleting the file, because an entry without one has every key-shaped attachment
+probed and loaded.
+
 ## trove gpg-agent
 
 ```
@@ -1644,15 +1650,90 @@ it is a deliberate step.
 | `--print` | Write the public keys (binary OpenPGP) to stdout instead of importing them. Refuses a terminal. |
 | `--vault <PATH>` | Global. Present → read that vault file; absent → the vaults unlocked in the daemon. |
 
+### trove gpg-agent enable / disable / defaults
+
+```
+trove [--vault <PATH>] gpg-agent enable <ENTRY> [--key ATT] [--keygrip G]... [--uses sign|decrypt|both] [--confirm | --no-confirm] [--lifetime S]
+trove [--vault <PATH>] gpg-agent disable <ENTRY> [--key ATT]
+trove [--vault <PATH>] gpg-agent defaults (<GROUP> | --database) [--uses U] [--confirm | --no-confirm] [--lifetime S] [--clear ATTR]...
+```
+
+The agent serves only keys an entry's `GpgAgent.settings` names. `enable` adds
+a `<Key>` for `--key` (default `gpg-priv`), optionally narrowed to some keygrips
+of the export and to signing or decrypting. `trove add gpg` does this for the
+key it stores. `disable` without `--key` stops all of the entry's keys; an entry
+whose `gpg-priv` would otherwise still count is given an empty document.
+
 ## trove materialize
 
 ```
 trove --vault <PATH> materialize
+trove [--vault <PATH>] materialize add <ENTRY> <ATTACHMENT> [--target PATH | --dir DIR] [--mode M] [--ttl S] [--allow-disk-backed]
+trove [--vault <PATH>] materialize remove <ENTRY> <ATTACHMENT>
+trove [--vault <PATH>] materialize disable <ENTRY>
+trove [--vault <PATH>] materialize defaults (<GROUP> | --database) [--dir DIR] [--mode M] [--ttl S] [--allow-disk-backed | --no-allow-disk-backed] [--clear ATTR]...
 ```
 
-Open the vault, run every entry's materialize plan **in-process** (not via the daemon), hold open until SIGINT / SIGTERM, then wipe everything and exit. Useful for testing and disconnected workflows. Does **not** touch the daemon's `MaterializedStore`; if `troved` is also running, drive it via the `unlock` RPC instead so SSH and GPG agents come up at the same time.
+Without a subcommand: open the vault, run every entry's materialize plan **in-process** (not via the daemon), hold open until SIGINT / SIGTERM, then wipe everything and exit. Useful for testing and disconnected workflows. Does **not** touch the daemon's `MaterializedStore`; if `troved` is also running, drive it via the `unlock` RPC instead so SSH and GPG agents come up at the same time. Per-entry materialize errors are logged but don't abort the others.
 
-Per-entry materialize errors are logged but don't abort the others.
+With one, it edits the entry's `Materialize.settings` (`add`, `remove`,
+`disable`) or a group's defaults (`defaults`), through the vault file with
+`--vault` or through the daemon with `TROVE_SESSION`. A `<File>` without a
+`--target` is written into the inherited `dir` under its attachment's name, so
+a group can say where its entries' files go:
+
+```
+trove materialize defaults Apple/Apps/rest-mail --dir ~/projects/rest-mail/secrets
+trove materialize add Apple/Apps/rest-mail/apns AuthKey_XXXXXXXXXX.p8
+```
+
+## trove env-agent
+
+```
+trove [--vault <PATH>] env-agent add <ENTRY> <NAME> (--field F | --attachment A) [--export none|shell] [--confirm | --no-confirm] [--lifetime S]
+trove [--vault <PATH>] env-agent remove <ENTRY> <NAME>
+trove [--vault <PATH>] env-agent disable <ENTRY>
+trove [--vault <PATH>] env-agent defaults (<GROUP> | --database) [--export none|shell] [--confirm | --no-confirm] [--lifetime S] [--clear ATTR]...
+```
+
+Edits the entry's `EnvAgent.settings`, which says what `trove exec` exports
+from it. `add` creates the document on first use, which is what turns exec on;
+`disable` deletes it. An entry that still has `Exec.*` fields has them converted
+into the document, and removed, the first time it is edited.
+
+```
+trove env-agent add antimatter-studios/gitea GITEA_TOKEN --field gitea-token
+trove exec --entry antimatter-studios/gitea -- tea pr list
+```
+
+## trove settings
+
+```
+trove [--vault <PATH>] settings show [<PATH>] [<CAPABILITY>] [--group | --database] [--effective] [--json]
+trove [--vault <PATH>] settings edit [<PATH>] <CAPABILITY> [--group | --database]
+trove [--vault <PATH>] settings validate [<SCOPE>]
+trove [--vault <PATH>] settings migrate [<SCOPE>] [--dry-run]
+```
+
+`<CAPABILITY>` is `env-agent`, `materialize`, `gpg-agent` or, for `show` on an
+entry, `ssh-agent` (its `KeeAgent.settings`). Without one, `show` prints every
+document the entry or group has.
+
+- `show --effective` prints each item with every value resolved through
+  inheritance and where it came from (`item`, `entry`, `group <path>`,
+  `database`). `--json` prints the same as an array, one object per capability:
+  `capability`, `path`, `group`, `document` (the XML, or `null` when the
+  capability is off), `legacy` (converted from legacy fields), and for an entry
+  `effective`: `[{key, attributes: {name: {value, origin, group?}}}]`.
+- `edit` opens the document's XML in `$VISUAL` / `$EDITOR` and saves it only if
+  it parses; at a terminal it offers to edit again.
+- `validate` parses every document on every entry and group, and exits 1 naming
+  each one that doesn't.
+- `migrate` converts every entry's `Exec.*` and `Materialize.*` fields into
+  documents and removes the fields.
+
+Showing settings through the daemon needs no session code, like `show`:
+documents hold rules and names, never values. Writing them does.
 
 ## trove completions
 
@@ -1969,38 +2050,84 @@ Anything else returns `SSH_AGENT_FAILURE` (5). Supported algorithms: ed25519, RS
 
 Standard Assuan ASCII protocol on a separate socket. The implemented commands are documented in [crates/troved/src/gpg_agent/](../crates/troved/src/gpg_agent/). It covers `git commit -S` signing and `gpg --decrypt` with ed25519/cv25519 and RSA OpenPGP keys. Unknown commands return `ERR <code> <message>` so clients fail cleanly rather than hang.
 
-## Per-entry custom-field schema
+## Capability settings documents
 
-The materialize feature is wholly expressed as kdbx custom string fields, so the vault stays openable and round-trippable in KeePassXC.
+An entry says which agent or capability uses its secrets, and under what rules,
+in one XML document per capability. The secret stays where KeePass keeps it, an
+attachment, the Password or a custom field; a document holds only rules and the
+names of what they refer to, never a value.
 
-| Field | Required | Type | Effect |
+| capability | on an entry (attachment) | on a group or the database (`CustomData`) | read by |
 | --- | --- | --- | --- |
-| `Materialize.<attachment>.Target` | yes | string | Path to materialize that attachment to. `~`, `$HOME`, `$XDG_RUNTIME_DIR` are expanded against the daemon's environment. The attachment must exist on the entry. |
-| `Materialize.<attachment>.Mode` | no | octal string (3 or 4 digits) | File mode. Default `0600`. |
-| `Materialize.<attachment>.TTL` | no | positive integer seconds | Wipe the file after N seconds even if the vault stays unlocked. |
-| `Materialize.<attachment>.AllowDiskBacked` | no | `"true"` / `"false"` (case-insensitive; `"yes"` / `"1"` also accepted) | Allow a non-tmpfs target. Default `false`. |
+| environment | `EnvAgent.settings` | `Trove.EnvAgent.settings` | `trove exec` |
+| files | `Materialize.settings` | `Trove.Materialize.settings` | `troved` on unlock, `trove materialize` |
+| GPG keys | `GpgAgent.settings` | `Trove.GpgAgent.settings` | the GPG agent |
+| SSH keys | `KeeAgent.settings` | — | the SSH agent (KeePassXC's own format) |
 
-`<attachment>` is the attachment's name, dots and all:
-`Materialize.id_ed25519.pub.Target` describes the attachment `id_ed25519.pub`.
+```xml
+<EnvAgentSettings version="1">
+  <Defaults lifetime="3600"/>
+  <Variable name="GITEA_TOKEN" field="gitea-token" confirm="true"/>
+  <Variable name="KUBECONFIG" attachment="kubeconfig"/>
+</EnvAgentSettings>
 
-Renaming an attachment moves these with it — see `trove rename-attachment`.
+<MaterializeSettings version="1">
+  <Defaults dir="~/projects/rest-mail/secrets" mode="0600"/>
+  <File attachment="AuthKey_XXXXXXXXXX.p8"/>
+  <File attachment="restmail.mobileprovision" mode="0644"/>
+  <File attachment="id_ed25519" target="~/.ssh/id_ed25519" ttl="3600"/>
+</MaterializeSettings>
+
+<GpgAgentSettings version="1">
+  <Key attachment="gpg-priv" uses="sign"/>
+</GpgAgentSettings>
+```
+
+| attribute | in | meaning |
+| --- | --- | --- |
+| `name` | `<Variable>` | the environment variable; identifies the item |
+| `field` / `attachment` | `<Variable>` | exactly one: the field whose value, or the attachment whose temp-file path, is exported |
+| `export` | `<Variable>`, defaults | `none` (the default) or `shell` |
+| `attachment` | `<File>`, `<Key>` | the attachment written or served; identifies the item |
+| `target` | `<File>` | where to write it; `~`, `$HOME`, `$XDG_RUNTIME_DIR` are expanded by the daemon |
+| `dir` | `<File>`, defaults | where to write it, under its attachment's name, when there is no `target` |
+| `mode` | `<File>`, defaults | 3 or 4 octal digits; default `0600` |
+| `ttl` | `<File>`, defaults | seconds before the file is wiped while unlocked; `0` is no limit |
+| `allowDiskBacked` | `<File>`, defaults | `true` allows a target that is not memory-backed |
+| `keygrips` | `<Key>` | serve only these space-separated keygrips from the export |
+| `uses` | `<Key>`, defaults | `sign`, `decrypt` or `both` (the default); an RSA key must be `both` |
+| `confirm` | items, defaults | `true` requires Touch ID approval for each use |
+| `lifetime` | items, defaults | seconds a use stays valid; `0` is no limit |
+
+The rules:
+
+- **No document, no capability.** An entry without `EnvAgent.settings` exports
+  nothing from `trove exec`; one without `Materialize.settings` writes no file.
+  A document that doesn't parse is an error wherever it is read, never treated
+  as absent. Parsing is strict: an unknown element or attribute, a bad value,
+  a duplicate item or a missing `version` is refused.
+- **A group never grants.** A group's or the database's document may hold only
+  `<Defaults>`; trove refuses one with items. To use a secret, its entry needs
+  its own document.
+- **Inheritance.** A value resolves from the item, then the entry's
+  `<Defaults>`, then each enclosing group from the nearest, then the database.
+  The nearest wins, except for constraints, which only tighten: `confirm` is on
+  if any level turns it on, and `lifetime` and `ttl` take the shortest positive
+  value.
+- **Renaming an attachment** rewrites every item that names it.
+- **KeePassXC** keeps the documents through an open and save, but has no editor
+  for trove's three; use `trove settings edit` or the commands above.
+
+During the transition, the fields these documents replace still count as one,
+so existing vaults keep working: `Materialize.<attachment>.Target` / `.Mode` /
+`.TTL` / `.AllowDiskBacked` as a `<File>`, `Exec.<VAR>` and `Exec.Env` as
+`<Variable>`s (see [trove exec](#trove-exec)), and a `gpg-priv` attachment as a
+`<Key>`. A document, once written, replaces them, and the commands remove the
+fields when they write it; `trove settings migrate` converts a whole vault. The
+entry-level `Materialize.Source` / `Materialize.Target` form was removed
+earlier and is still reported as an error.
 
 Changes made through the daemon while the vault is unlocked take effect at
-once: a new or changed plan is written, and the file behind a removed or
-changed plan (entry deleted, target, mode, TTL or content changed) is wiped.
-Plans a write doesn't change are left alone, so a live file isn't rewritten and
-one its TTL already wiped doesn't come back. Changes KeePassXC makes to the file
-on disk aren't seen until the next unlock. Problems go to the daemon's log
-rather than the write's reply.
-
-The entry-level `Materialize.Source` / `Materialize.Target` form was removed:
-materialization describes a file, and an entry holds several. An entry still
-carrying those fields is reported as an error on unlock rather than ignored,
-naming what to rename them to.
-
-Plus the implicit attachment slots used by SSH and GPG:
-
-| Attachment slot | Used by | Format |
-| --- | --- | --- |
-| `id` | SSH agent | OpenSSH private key (PEM-armored or raw, unencrypted). |
-| `gpg-priv` | GPG agent | OpenPGP secret-key packets (binary, NOT armored). |
+once: a new or changed file is written, and the file behind a removed or
+changed one is wiped. Changes KeePassXC makes to the file on disk aren't seen
+until the next unlock.

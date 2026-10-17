@@ -16,6 +16,7 @@ mod import_ssh;
 mod ipc;
 mod keychain;
 mod pwgen;
+mod settings_cmd;
 mod xml_export;
 
 use std::ffi::OsString;
@@ -213,10 +214,32 @@ enum Command {
         op: GpgAgentOp,
     },
 
-    /// Materialize all opted-in entries in the vault to disk in-process,
-    /// without going through the daemon. Useful for testing and for
-    /// disconnected workflows. Wipes everything on Ctrl-C / SIGINT.
-    Materialize,
+    /// Without a subcommand: materialize all opted-in entries in the vault to
+    /// disk in-process, without going through the daemon. Useful for testing
+    /// and for disconnected workflows. Wipes everything on Ctrl-C / SIGINT.
+    ///
+    /// With one: say which of an entry's attachments are written where, in its
+    /// Materialize.settings (`add`, `remove`, `disable`), or set a group's
+    /// defaults (`defaults`).
+    Materialize {
+        #[command(subcommand)]
+        op: Option<settings_cmd::MaterializeOp>,
+    },
+
+    /// Say which variables `trove exec` exports from an entry, in its
+    /// EnvAgent.settings. An entry without one exports nothing.
+    EnvAgent {
+        #[command(subcommand)]
+        op: settings_cmd::EnvAgentOp,
+    },
+
+    /// Show, edit, check or migrate capability settings documents
+    /// (EnvAgent.settings, Materialize.settings, GpgAgent.settings,
+    /// KeeAgent.settings), on entries, groups and the database.
+    Settings {
+        #[command(subcommand)]
+        op: settings_cmd::SettingsOp,
+    },
 
     /// Unlock a vault and start a session. The keys + materialize plan land in
     /// daemon memory; the SSH and GPG agents serve them.
@@ -981,6 +1004,41 @@ enum GpgAgentOp {
         #[arg(long)]
         print: bool,
     },
+
+    /// Serve a key attachment of an entry, naming it in GpgAgent.settings.
+    Enable {
+        entry: String,
+        /// The attachment holding the secret-key export.
+        #[arg(long, default_value = "gpg-priv")]
+        key: String,
+        /// Serve only these keygrips from the export (repeatable).
+        #[arg(long = "keygrip", value_name = "KEYGRIP")]
+        keygrips: Vec<String>,
+        /// What the key may do.
+        #[arg(long, value_parser = ["sign", "decrypt", "both"])]
+        uses: Option<String>,
+        #[command(flatten)]
+        constraints: settings_cmd::ConstraintArgs,
+    },
+
+    /// Stop serving one key attachment, or with no --key all of the entry's.
+    Disable {
+        entry: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
+
+    /// Set the defaults a group (or the database) gives its entries' keys.
+    Defaults {
+        #[command(flatten)]
+        at: settings_cmd::GroupArg,
+        #[arg(long, value_parser = ["sign", "decrypt", "both"])]
+        uses: Option<String>,
+        #[command(flatten)]
+        constraints: settings_cmd::ConstraintArgs,
+        #[arg(long, value_name = "ATTRIBUTE")]
+        clear: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1116,6 +1174,22 @@ enum SshAgentOp {
         /// itself contribute to a lockout.
         target: String,
     },
+
+    /// Load an entry's key on unlock: write its KeeAgent.settings, the
+    /// format KeePassXC's SSH Agent tab writes.
+    Enable {
+        entry: String,
+        /// The key attachment, when the entry's settings don't name one yet.
+        #[arg(long)]
+        key: Option<String>,
+        #[command(flatten)]
+        constraints: settings_cmd::ConstraintArgs,
+    },
+
+    /// Keep an entry's key out of the agent: AllowUseOfSshKey=false in its
+    /// KeeAgent.settings. (Deleting the file would not do it: an entry without
+    /// one has every key-shaped attachment probed and loaded.)
+    Disable { entry: String },
 }
 
 /// SSH key algorithm for `trove generate ssh`.
@@ -1531,7 +1605,7 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
     match command {
         // These commands always open a local vault directly.
         Command::Init
-        | Command::Materialize
+        | Command::Materialize { op: None }
         | Command::Group { .. }
         | Command::Analyze { .. }
         | Command::Health { .. }
@@ -1556,6 +1630,9 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
         | Command::Mkdir { .. }
         | Command::Rmdir { .. }
         | Command::RenameAttachment { .. }
+        | Command::Materialize { op: Some(_) }
+        | Command::EnvAgent { .. }
+        | Command::Settings { .. }
         | Command::Exec { .. } => vault.is_some(),
         Command::Generate {
             resource: GenerateResource::Ssh { .. },
@@ -1577,7 +1654,7 @@ mod challenge_response_routing_tests {
             Some(vault)
         ));
         assert!(challenge_response_uses_offline_vault(
-            &Command::Materialize,
+            &Command::Materialize { op: None },
             Some(vault)
         ));
         assert!(challenge_response_uses_offline_vault(
@@ -1888,7 +1965,74 @@ fn run(cli: Cli) -> Result<()> {
         Command::GpgAgent {
             op: GpgAgentOp::Import { print },
         } => cmd_gpg_agent_import(vault, pw_stdin, print),
-        Command::Materialize => cmd_materialize(require_vault(vault)?, pw_stdin),
+        Command::Materialize { op: None } => cmd_materialize(require_vault(vault)?, pw_stdin),
+        Command::Materialize { op: Some(op) } => {
+            settings_cmd::cmd_materialize_op(op, vault, pw_stdin)
+        }
+        Command::EnvAgent { op } => settings_cmd::cmd_env_agent(op, vault, pw_stdin),
+        Command::Settings { op } => settings_cmd::cmd_settings(op, vault, pw_stdin),
+        Command::SshAgent {
+            op:
+                SshAgentOp::Enable {
+                    entry,
+                    key,
+                    constraints,
+                },
+        } => settings_cmd::cmd_ssh_agent_toggle(
+            &entry,
+            true,
+            key.as_deref(),
+            &constraints,
+            vault,
+            pw_stdin,
+        ),
+        Command::SshAgent {
+            op: SshAgentOp::Disable { entry },
+        } => settings_cmd::cmd_ssh_agent_toggle(
+            &entry,
+            false,
+            None,
+            &settings_cmd::ConstraintArgs::default(),
+            vault,
+            pw_stdin,
+        ),
+        Command::GpgAgent {
+            op:
+                GpgAgentOp::Enable {
+                    entry,
+                    key,
+                    keygrips,
+                    uses,
+                    constraints,
+                },
+        } => settings_cmd::cmd_gpg_agent_enable(
+            &entry,
+            &key,
+            &keygrips,
+            uses.as_deref(),
+            &constraints,
+            vault,
+            pw_stdin,
+        ),
+        Command::GpgAgent {
+            op: GpgAgentOp::Disable { entry, key },
+        } => settings_cmd::cmd_gpg_agent_disable(&entry, key.as_deref(), vault, pw_stdin),
+        Command::GpgAgent {
+            op:
+                GpgAgentOp::Defaults {
+                    at,
+                    uses,
+                    constraints,
+                    clear,
+                },
+        } => settings_cmd::cmd_gpg_agent_defaults(
+            &at,
+            uses.as_deref(),
+            &constraints,
+            &clear,
+            vault,
+            pw_stdin,
+        ),
         Command::Group {
             op: GroupOp::List { json },
         } => cmd_group_list(require_vault(vault)?, pw_stdin, json),
@@ -3589,6 +3733,26 @@ fn store_ssh_key(
     }
 }
 
+/// The `<File>` item `trove add file` writes for one attachment.
+fn materialize_item(
+    attachment: &str,
+    target: &str,
+    mode: &str,
+    ttl: Option<u64>,
+    allow_disk_backed: bool,
+) -> trove_core::settings::Attributes {
+    let mut attrs = vec![
+        ("attachment".to_string(), attachment.to_string()),
+        ("target".to_string(), target.to_string()),
+        ("mode".to_string(), mode.to_string()),
+    ];
+    if let Some(ttl) = ttl {
+        attrs.push(("ttl".to_string(), ttl.to_string()));
+    }
+    attrs.push(("allowDiskBacked".to_string(), allow_disk_backed.to_string()));
+    attrs
+}
+
 /// Put an SSH private key on an entry of an open vault, creating the entry if
 /// needed: the key, `KeeAgent.settings` and the derived `id.pub`. The caller
 /// saves.
@@ -4861,32 +5025,19 @@ fn cmd_add_file(
             vault
                 .attach_binary(&id, &attachment_name, &bytes)
                 .context("attaching file bytes")?;
-            // Keyed by attachment name, so one entry can materialize several
-            // files — an SSH key and its `.pub`, a certificate and its key.
-            // There is no separate `Source` field: the name in the key IS the
-            // attachment this describes.
+            // One `<File>` in the entry's Materialize.settings per attachment,
+            // so one entry can materialize several files — an SSH key and its
+            // `.pub`, a certificate and its key.
             let target_str = target
                 .to_str()
                 .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
-            let field = |setting: &str| format!("Materialize.{attachment_name}.{setting}");
             vault
-                .set_field(&id, &field("Target"), target_str)
-                .context("setting the materialize target")?;
-            vault
-                .set_field(&id, &field("Mode"), mode)
-                .context("setting the materialize mode")?;
-            if let Some(ttl) = ttl {
-                vault
-                    .set_field(&id, &field("TTL"), &ttl.to_string())
-                    .context("setting the materialize TTL")?;
-            }
-            vault
-                .set_field(
+                .upsert_settings_item(
                     &id,
-                    &field("AllowDiskBacked"),
-                    if allow_disk_backed { "true" } else { "false" },
+                    trove_core::settings::Capability::Materialize,
+                    materialize_item(&attachment_name, target_str, mode, ttl, allow_disk_backed),
                 )
-                .context("setting the materialize disk-backed flag")?;
+                .context("writing Materialize.settings")?;
 
             vault.save().context("saving vault")?;
             println!(

@@ -923,6 +923,43 @@ impl Vault {
         Ok(true)
     }
 
+    /// Store an entry's document for `capability` as the one source of its
+    /// settings: the legacy fields it replaces are removed, so they cannot
+    /// come back if the document is later deleted. With `None` the capability
+    /// is turned off — and if a legacy source would still turn it on (a
+    /// `gpg-priv` attachment), an empty document is stored to keep it off.
+    pub fn store_settings(
+        &mut self,
+        id: &EntryId,
+        capability: Capability,
+        doc: Option<&Document>,
+    ) -> Result<()> {
+        for field in self.legacy_settings_fields(id, capability)? {
+            self.remove_field(id, &field)?;
+        }
+        self.set_settings_document(id, capability, doc)?;
+        if doc.is_none() && self.legacy_settings(id, capability)?.is_some() {
+            self.set_settings_document(id, capability, Some(&Document::new(capability)))?;
+        }
+        Ok(())
+    }
+
+    /// Add or replace one item in an entry's document for `capability`,
+    /// starting from what the entry has — its document, or one converted from
+    /// its legacy fields — and storing the result as the one source.
+    pub fn upsert_settings_item(
+        &mut self,
+        id: &EntryId,
+        capability: Capability,
+        attrs: Attributes,
+    ) -> Result<()> {
+        let mut doc = self
+            .entry_settings(id, capability)?
+            .unwrap_or_else(|| Document::new(capability));
+        doc.upsert_item(attrs)?;
+        self.store_settings(id, capability, Some(&doc))
+    }
+
     /// A group's settings document, or with `path` empty the database's.
     pub fn group_settings(&self, path: &str, capability: Capability) -> Result<Option<Document>> {
         let key = capability.custom_data_key();
@@ -1911,6 +1948,48 @@ mod tests {
             attr_get(doc.item("gpg-priv").unwrap(), "uses"),
             Some("sign")
         );
+    }
+
+    #[test]
+    fn storing_a_document_drops_the_legacy_fields_it_replaces() {
+        let (_dir, mut v) = vault();
+        let id = entry_in(&mut v, "", "db");
+        v.set_field(&id, "Exec.PGUSER", "UserName").unwrap();
+        let mut doc = v
+            .entry_settings(&id, Capability::EnvAgent)
+            .unwrap()
+            .unwrap();
+        doc.upsert_item(vec![
+            ("name".into(), "PGPASS".into()),
+            ("field".into(), "Password".into()),
+        ])
+        .unwrap();
+        v.store_settings(&id, Capability::EnvAgent, Some(&doc))
+            .unwrap();
+        assert!(v
+            .legacy_settings_fields(&id, Capability::EnvAgent)
+            .unwrap()
+            .is_empty());
+        let got = v
+            .entry_settings(&id, Capability::EnvAgent)
+            .unwrap()
+            .unwrap();
+        assert!(got.item("PGUSER").is_some() && got.item("PGPASS").is_some());
+        v.store_settings(&id, Capability::EnvAgent, None).unwrap();
+        assert_eq!(v.entry_settings(&id, Capability::EnvAgent).unwrap(), None);
+    }
+
+    #[test]
+    fn turning_off_a_legacy_gpg_entry_stores_an_empty_document() {
+        let (_dir, mut v) = vault();
+        let id = entry_in(&mut v, "", "signing");
+        v.attach_binary(&id, "gpg-priv", b"x").unwrap();
+        v.store_settings(&id, Capability::GpgAgent, None).unwrap();
+        let doc = v
+            .entry_settings(&id, Capability::GpgAgent)
+            .unwrap()
+            .unwrap();
+        assert!(doc.items().is_empty(), "present but empty: serves nothing");
     }
 
     #[test]

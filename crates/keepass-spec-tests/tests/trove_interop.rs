@@ -89,8 +89,7 @@ fn sample_adds() -> Vec<TroveAdd> {
 
 /// 1. trove writes a valid KDBX that the keepass crate reads, carrying both of
 ///    trove's extension-field families: the SSH entry's `id` + `KeeAgent.settings`
-///    attachments, and the file entry's attachment + its `Materialize.*`
-///    custom fields.
+///    attachments, and the file entry's attachment + its `Materialize.settings`.
 #[test]
 fn trove_output_is_readable_by_keepass_crate() {
     let trove = require_trove();
@@ -127,30 +126,37 @@ fn trove_output_is_readable_by_keepass_crate() {
         "file entry should carry the `kubeconfig` attachment; got {:?}",
         file.attachments.keys().collect::<Vec<_>>()
     );
-    // Settings are keyed by the attachment they describe, so one entry can
-    // materialize several files. There is no `Source` field: the attachment
-    // name in the key is the source.
-    assert_eq!(
-        file.custom_fields
-            .get("Materialize.Source")
-            .map(String::as_str),
-        None,
-        "the entry-level Source field is no longer written"
+    // `add file` names the attachment in the entry's Materialize.settings,
+    // one `<File>` per attachment, rather than writing Materialize.* fields.
+    assert!(
+        !file
+            .custom_fields
+            .keys()
+            .any(|k| k.starts_with("Materialize.")),
+        "no Materialize.* fields are written any more; got {:?}",
+        file.custom_fields.keys().collect::<Vec<_>>()
     );
-    assert_eq!(
-        file.custom_fields
-            .get("Materialize.kubeconfig.Target")
-            .map(String::as_str),
-        Some("/tmp/kubeconfig"),
-        "Materialize.<attachment>.Target"
-    );
-    assert_eq!(
-        file.custom_fields
-            .get("Materialize.kubeconfig.Mode")
-            .map(String::as_str),
-        Some("0600"),
-        "Materialize.<attachment>.Mode"
-    );
+    let settings = file
+        .attachments
+        .get("Materialize.settings")
+        .map(|h| String::from_utf8(hex::decode(h).expect("hex")).expect("utf-8"))
+        .unwrap_or_else(|| {
+            panic!(
+                "file entry should carry Materialize.settings; got {:?}",
+                file.attachments.keys().collect::<Vec<_>>()
+            )
+        });
+    for wanted in [
+        "<MaterializeSettings version=\"1\">",
+        "attachment=\"kubeconfig\"",
+        "target=\"/tmp/kubeconfig\"",
+        "mode=\"0600\"",
+    ] {
+        assert!(
+            settings.contains(wanted),
+            "{wanted} missing from:\n{settings}"
+        );
+    }
 }
 
 /// 2. trove can OPEN a keepass-crate-produced vault and enumerate the right
@@ -235,6 +241,100 @@ fn trove_output_is_readable_by_keepassxc_and_survives_open_and_save() {
         assert_eq!(
             before, after,
             "keepassxc@{} must preserve trove's Materialize.*/KeeAgent.settings/attachments across open+save",
+            oracle.version
+        );
+    }
+}
+
+/// trove keeps a group's and the database's capability settings in KDBX
+/// `CustomData` (`Trove.<Name>.settings`), which KeePassXC has no editor for.
+/// The design rests on KeePassXC keeping them anyway: an open and save must
+/// return both documents exactly as trove wrote them.
+#[test]
+fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
+    let trove = require_trove();
+    let oracles = keepassxc_party::discover();
+    assert!(
+        !oracles.is_empty(),
+        "no keepassxc-cli found — this oracle test must not be skipped"
+    );
+    let bytes =
+        trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a vault");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path().join("v.kdbx");
+    std::fs::write(&vault, &bytes).expect("write vault");
+
+    let t = |args: &[&str]| -> String {
+        use std::io::Write;
+        let mut child = std::process::Command::new(&trove.path)
+            .arg("--vault")
+            .arg(&vault)
+            .arg("--password-stdin")
+            .args(args)
+            .env("TROVE_NO_AUTOSPAWN", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn trove");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(format!("{PW}\n").as_bytes())
+            .expect("write stdin");
+        let out = child.wait_with_output().expect("wait trove");
+        assert!(
+            out.status.success(),
+            "trove {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    t(&["mkdir", "Apple/Apps/rest-mail"]);
+    t(&[
+        "materialize",
+        "defaults",
+        "Apple/Apps/rest-mail",
+        "--dir",
+        "/tmp/rest-mail",
+        "--mode",
+        "0640",
+    ]);
+    t(&[
+        "env-agent",
+        "defaults",
+        "--database",
+        "--confirm",
+        "--lifetime",
+        "600",
+    ]);
+    let show = || {
+        (
+            t(&[
+                "settings",
+                "show",
+                "Apple/Apps/rest-mail",
+                "--group",
+                "--json",
+            ]),
+            t(&["settings", "show", "--database", "--json"]),
+        )
+    };
+    let before = show();
+    assert!(before.0.contains("/tmp/rest-mail"), "{}", before.0);
+    assert!(before.1.contains("lifetime"), "{}", before.1);
+
+    for oracle in &oracles {
+        let current = std::fs::read(&vault).expect("read vault");
+        let resaved = keepassxc_party::resave(oracle, &current, &pw_spec())
+            .unwrap_or_else(|e| panic!("keepassxc@{} open+save failed: {e}", oracle.version));
+        std::fs::write(&vault, &resaved).expect("write resaved vault");
+        assert_eq!(
+            show(),
+            before,
+            "keepassxc@{} must keep trove's group and database settings",
             oracle.version
         );
     }

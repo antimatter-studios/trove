@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use trove_core::settings::{Capability, EffectiveItem};
+use trove_core::settings::{Capability, Document, EffectiveItem};
 use trove_core::{EntrySummary, SearchFieldFilter, SearchHit, SearchQuery, Vault};
 
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
@@ -116,6 +116,7 @@ fn changes_vault(req: &Request) -> bool {
             | Request::MoveGroup { .. }
             | Request::CopyGroup { .. }
             | Request::Rmdir { .. }
+            | Request::SetSettings { .. }
     )
 }
 
@@ -1044,6 +1045,32 @@ async fn handle_request(
             capability,
             group,
         } => show_settings(state, &path, &capability, group).await,
+        Request::SetSettings {
+            path,
+            capability,
+            group,
+            document,
+            utf16,
+            code,
+        } => {
+            set_settings(
+                state,
+                session,
+                key_store,
+                gpg_store,
+                scoped_agents,
+                peer_uid,
+                SettingsWrite {
+                    path: &path,
+                    capability: &capability,
+                    group,
+                    document: document.as_deref(),
+                    utf16,
+                },
+                &code,
+            )
+            .await
+        }
 
         Request::Describe { path } => {
             let mut guard = state.lock().await;
@@ -1563,8 +1590,8 @@ async fn add_gpg(
 /// unlocked + code matches + same uid as the unlocker), decodes the base64
 /// source bytes, then stores them on the entry at `title` as the `name`
 /// attachment — creating the entry mkdir-p if absent, or replacing in place if
-/// it exists — sets the `Materialize.*` fields (Source/Target/Mode, optional
-/// TTL, AllowDiskBacked) exactly as the offline `add file` CLI does, and
+/// it exists — names it in the entry's `Materialize.settings` (target, mode,
+/// optional TTL, AllowDiskBacked) exactly as the offline `add file` CLI does, and
 /// persists with `save()`. Unlike `add_gpg` this only persists: the file is
 /// NOT materialized into the live session here — it materializes on the next
 /// unlock.
@@ -1637,27 +1664,22 @@ async fn add_file(
                 shutdown: false,
             };
         }
-        // Keyed by attachment name, so an entry with several attachments can
-        // describe a destination for each. No `Source` field: the name in the
-        // key is the attachment this describes.
-        let mut settings = vec![
-            (format!("Materialize.{name}.Target"), target.to_string()),
-            (format!("Materialize.{name}.Mode"), mode.to_string()),
-            (
-                format!("Materialize.{name}.AllowDiskBacked"),
-                if allow_disk_backed { "true" } else { "false" }.to_string(),
-            ),
+        // One `<File>` per attachment in the entry's Materialize.settings, so
+        // an entry with several attachments can describe a destination for each.
+        let mut item = vec![
+            ("attachment".to_string(), name.to_string()),
+            ("target".to_string(), target.to_string()),
+            ("mode".to_string(), mode.to_string()),
         ];
         if let Some(ttl) = ttl {
-            settings.push((format!("Materialize.{name}.TTL"), ttl.to_string()));
+            item.push(("ttl".to_string(), ttl.to_string()));
         }
-        for (field, value) in settings {
-            if let Err(e) = vault.set_field(&id, &field, &value) {
-                return Handled {
-                    response: Response::err(format!("setting {field}: {e}")),
-                    shutdown: false,
-                };
-            }
+        item.push(("allowDiskBacked".to_string(), allow_disk_backed.to_string()));
+        if let Err(e) = vault.upsert_settings_item(&id, Capability::Materialize, item) {
+            return Handled {
+                response: Response::err(format!("writing Materialize.settings: {e}")),
+                shutdown: false,
+            };
         }
         if let Err(e) = vault.save() {
             return Handled {
@@ -1820,6 +1842,17 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
 /// Ungated (like `ShowEntry`): settings documents hold rules and the names of
 /// fields and attachments, never their values.
 async fn show_settings(state: &SharedState, path: &str, capability: &str, group: bool) -> Handled {
+    if capability == "ssh-agent" && !group {
+        let guard = state.lock().await;
+        let (vault, id) = match guard.find_entry(path) {
+            Ok(found) => found,
+            Err(e) => return err_handled(e.to_string()),
+        };
+        return match crate::protocol::SettingsDto::for_keeagent(vault, &id, path) {
+            Ok(dto) => ok_handled(Response::ok_settings(dto)),
+            Err(e) => err_handled(e.to_string()),
+        };
+    }
     let Some(cap) = Capability::from_name(capability) else {
         return err_handled(format!(
             "unknown capability {capability:?}: expected env-agent, materialize or gpg-agent"
@@ -1857,6 +1890,123 @@ async fn show_settings(state: &SharedState, path: &str, capability: &str, group:
         Ok(dto) => ok_handled(Response::ok_settings(dto)),
         Err(e) => err_handled(e.to_string()),
     }
+}
+
+/// What a `SetSettings` request asks to write.
+struct SettingsWrite<'a> {
+    path: &'a str,
+    capability: &'a str,
+    group: bool,
+    document: Option<&'a str>,
+    utf16: bool,
+}
+
+/// Code-gated: a settings document decides what the agents serve and which
+/// files are written, so changing one is a write like any other.
+#[allow(clippy::too_many_arguments)]
+async fn set_settings(
+    state: &SharedState,
+    session: &SessionStore,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
+    peer_uid: u32,
+    w: SettingsWrite<'_>,
+    code: &str,
+) -> Handled {
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
+    }
+    let mut guard = state.lock().await;
+    let result = if w.capability == "ssh-agent" {
+        if w.group {
+            return err_handled("KeeAgent.settings belongs to an entry; groups have none");
+        }
+        match guard.find_entry_mut(w.path) {
+            Ok((vault, id)) => write_keeagent(vault, &id, w.document, w.utf16)
+                .and_then(|()| vault.save().map_err(|e| format!("saving vault: {e}"))),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        let Some(cap) = Capability::from_name(w.capability) else {
+            return err_handled(format!(
+                "unknown capability {:?}: expected env-agent, materialize, gpg-agent or ssh-agent",
+                w.capability
+            ));
+        };
+        let doc = match w
+            .document
+            .map(|x| Document::parse(cap, x.as_bytes()))
+            .transpose()
+        {
+            Ok(d) => d,
+            Err(e) => return err_handled(e.to_string()),
+        };
+        if w.group {
+            let mut holders: Vec<&mut Vault> = guard
+                .iter_mut()
+                .filter(|v| w.path.is_empty() || v.group_exists(w.path))
+                .collect();
+            if holders.len() != 1 {
+                return err_handled(if holders.is_empty() {
+                    format!("no unlocked vault has a group {:?}", w.path)
+                } else {
+                    format!("{:?} is in several unlocked vaults; use --vault", w.path)
+                });
+            }
+            let vault = holders.remove(0);
+            vault
+                .set_group_settings(w.path, cap, doc.as_ref())
+                .map_err(|e| e.to_string())
+                .and_then(|()| vault.save().map_err(|e| format!("saving vault: {e}")))
+        } else {
+            match guard.find_entry_mut(w.path) {
+                Ok((vault, id)) => vault
+                    .store_settings(&id, cap, doc.as_ref())
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| vault.save().map_err(|e| format!("saving vault: {e}"))),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    };
+    if let Err(e) = result {
+        return err_handled(e);
+    }
+    rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
+    ok_handled(Response::ok_empty())
+}
+
+/// Store (or with `None` remove) an entry's `KeeAgent.settings`, refusing a
+/// document that names a key the entry doesn't have.
+fn write_keeagent(
+    vault: &mut Vault,
+    id: &trove_core::EntryId,
+    document: Option<&str>,
+    utf16: bool,
+) -> Result<(), String> {
+    let Some(xml) = document else {
+        return vault
+            .remove_binary(id, "KeeAgent.settings")
+            .map_err(|e| e.to_string());
+    };
+    let bytes = if utf16 {
+        let mut out = vec![0xFF, 0xFE];
+        for unit in xml.encode_utf16() {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out
+    } else {
+        xml.as_bytes().to_vec()
+    };
+    if let crate::ssh_agent::keeagent::Decision::Unusable(why) =
+        crate::ssh_agent::keeagent::parse(&bytes)
+    {
+        return Err(format!("KeeAgent.settings: {why}"));
+    }
+    vault
+        .attach_binary(id, "KeeAgent.settings", &bytes)
+        .map_err(|e| e.to_string())
 }
 
 /// Ungated (like `List`): substring search over non-secret surfaces.

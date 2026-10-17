@@ -191,6 +191,11 @@ impl<V: VaultLike> VaultSet<V> {
         self.open.iter().map(|o| &o.vault)
     }
 
+    /// Every open vault, in unlock order, for writing.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.open.iter_mut().map(|o| &mut o.vault)
+    }
+
     /// Every open vault with the tag filter selected at unlock time.
     pub fn iter_with_filters(&self) -> impl Iterator<Item = (&V, Option<&str>)> {
         self.open.iter().map(|o| (&o.vault, o.filter.as_deref()))

@@ -158,36 +158,28 @@ async fn add_file_writes_attachment_and_materialize_fields_then_round_trips() {
         "stored attachment bytes must match the blob"
     );
 
-    // The Materialize.* plan fields are written exactly as the offline CLI
-    // does: keyed by attachment name, with no separate Source field — the name
-    // in the key is the source.
-    assert_eq!(
+    // The plan is written exactly as the offline CLI writes it: a `<File>` in
+    // the entry's Materialize.settings, keyed by the attachment it describes,
+    // and no Materialize.* fields at all.
+    assert!(
         reopened
-            .get_field(&id, "Materialize.Source")
-            .expect("read the removed entry-level field"),
-        None,
-        "the entry-level Source field must not be written any more"
+            .fields_with_prefix(&id, "Materialize.")
+            .expect("list fields")
+            .is_empty(),
+        "no Materialize.* fields are written any more"
     );
+    let doc = reopened
+        .settings_document(&id, trove_core::settings::Capability::Materialize)
+        .expect("read Materialize.settings")
+        .expect("add file writes Materialize.settings");
+    let item = doc.item(NAME).expect("a <File> for the attachment");
+    let attr = |k: &str| item.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(attr("target"), Some(TARGET.to_string()), "the target");
+    assert_eq!(attr("mode"), Some(MODE.to_string()), "the requested mode");
     assert_eq!(
-        reopened
-            .get_field(&id, &format!("Materialize.{NAME}.Target"))
-            .expect("read the target"),
-        Some(TARGET.to_string()),
-        "the target must be keyed by the attachment it describes"
-    );
-    assert_eq!(
-        reopened
-            .get_field(&id, &format!("Materialize.{NAME}.Mode"))
-            .expect("read the Mode field"),
-        Some(MODE.to_string()),
-        "the Mode field must be the requested mode"
-    );
-    assert_eq!(
-        reopened
-            .get_field(&id, &format!("Materialize.{NAME}.AllowDiskBacked"))
-            .expect("read the AllowDiskBacked field"),
+        attr("allowDiskBacked"),
         Some("false".to_string()),
-        "Materialize.AllowDiskBacked must reflect allow_disk_backed=false"
+        "allowDiskBacked must reflect allow_disk_backed=false"
     );
 
     // Round-trip the file bytes back out through the gated Get RPC.
