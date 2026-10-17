@@ -922,3 +922,20 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height: 
 .att-mat .att-check { gap: 8px; }
 .att-mat .att-check > span { width: auto; font-size: 12px; }
 .att-mat .att-check input { accent-color: var(--accent-strong); }
+
+/* ---- capability settings sections ---- */
+.cap-head { display: flex; align-items: center; justify-content: space-between; }
+.cap-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.cap-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cap-key { font-family: var(--font-mono); font-size: 12.5px; min-width: 9em; color: var(--text); }
+.cap-cell { display: inline-flex; align-items: center; gap: 6px; }
+.cap-cell .inp { height: 28px; }
+.cap-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-dim); }
+.cap-inherit { font-size: 11px; color: var(--text-faint); font-style: italic; }
+.cap-add { display: flex; gap: 8px; align-items: center; }
+.cap-add .inp { flex: 1; min-width: 0; height: 28px; }
+.cap-addcap { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.folder-defaults { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.fd-row { display: flex; align-items: center; gap: 10px; }
+.fd-label { flex: 1; font-size: 12.5px; color: var(--text-dim); }
+.fd-row .inp { width: 14em; height: 28px; }

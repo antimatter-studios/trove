@@ -503,7 +503,71 @@ function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
   );
 }
 
-function EditFolderModal({ group, entries, onClose, onSave, onDelete }) {
+/// What a folder (or, at Root, the whole vault) gives the entries under it:
+/// defaults only. A folder never turns a capability on for its entries — each
+/// entry still needs its own — so these fill in what an entry leaves out, and a
+/// constraint set here (Touch ID, a lifetime) cannot be loosened below it.
+const FOLDER_DEFAULTS = [
+  ["materialize", "dir", "Write files into", "text", "~/projects/app/secrets"],
+  ["materialize", "mode", "File mode", "text", "0600"],
+  ["env-agent", "export", "Export variables", "select", ["", "none", "shell"]],
+  ["env-agent", "confirm", "Touch ID for variables", "bool"],
+  ["env-agent", "lifetime", "Variable lifetime (sec)", "text", "no limit"],
+  ["gpg-agent", "uses", "GPG keys may", "select", ["", "sign", "decrypt", "both"]],
+  ["gpg-agent", "confirm", "Touch ID for GPG keys", "bool"],
+];
+
+function FolderDefaults({ vaultId, path }) {
+  const [caps, setCaps] = React.useState(null);
+  const [draft, setDraft] = React.useState({});
+  const [err, setErr] = React.useState("");
+  React.useEffect(() => {
+    if (!vaultId) return;
+    (async () => {
+      try { setCaps((await api.groupCapabilities(vaultId, path)) || []); }
+      catch (e) { setErr(String(e)); }
+    })();
+  }, [vaultId, path]);
+  if (!vaultId) return null;
+  const value = (cap, name) => {
+    const k = cap + "." + name;
+    if (k in draft) return draft[k];
+    return caps?.find((c) => c.capability === cap)?.defaults?.[name] ?? "";
+  };
+  const write = async (cap, name, v) => {
+    try {
+      setCaps((await api.setGroupDefault(vaultId, path, cap, name, v)) || []);
+      setErr("");
+      setDraft((d) => { const n = { ...d }; delete n[cap + "." + name]; return n; });
+    } catch (e) { setErr(String(e)); }
+  };
+  return (
+    <div className="fld">
+      <label>{path ? "Defaults for entries in this folder" : "Defaults for the whole vault"}</label>
+      <div className="folder-defaults">
+        {FOLDER_DEFAULTS.map(([cap, name, label, kind, extra]) => (
+          <div className="fd-row" key={cap + name}>
+            <span className="fd-label">{label}</span>
+            {kind === "bool" ? (
+              <Switch checked={value(cap, name) === "true"} onChange={(on) => write(cap, name, on ? "true" : "")} />
+            ) : kind === "select" ? (
+              <select className="inp" value={value(cap, name)} onChange={(e) => write(cap, name, e.target.value)}>
+                {extra.map((o) => <option key={o} value={o}>{o || "inherit"}</option>)}
+              </select>
+            ) : (
+              <input className="inp mono" value={value(cap, name)} placeholder={extra} spellCheck="false"
+                     onChange={(e) => setDraft((d) => ({ ...d, [cap + "." + name]: e.target.value }))}
+                     onBlur={(e) => write(cap, name, e.target.value)} />
+            )}
+          </div>
+        ))}
+      </div>
+      {err && <div className="att-err">{err}</div>}
+    </div>
+  );
+}
+
+function EditFolderModal({ group, entries, onClose, onSave, onDelete, vaultId }) {
   const [tags, setTags] = React.useState(group.tags || []);
   const [busy, setBusy] = React.useState(false);
   const [confirming, setConfirming] = React.useState(false);
@@ -553,6 +617,7 @@ function EditFolderModal({ group, entries, onClose, onSave, onDelete }) {
               <TagEditor tags={tags} onChange={setTags} placeholder="Add a folder tag" />
             </div>
             {group.inheritedTags?.length > 0 && <div className="tag-inherited"><span>Inherited</span> {group.inheritedTags.join(", ")}</div>}
+            {!inBin && <FolderDefaults vaultId={vaultId} path={path} />}
           </div>
         )}
         {confirming ? (
@@ -945,4 +1010,4 @@ function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
   );
 }
 
-export { Unlock, CommandPalette, EntryForm, EditFolderModal, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };
+export { Unlock, CommandPalette, EntryForm, EditFolderModal, FolderDefaults, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };

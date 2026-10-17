@@ -26,6 +26,7 @@ use base64::Engine as _;
 use crate::biometric;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, Manager, State};
+use trove_core::settings::{self, Attributes, Capability, Document, Origin};
 use trove_core::{EntryId, Vault};
 use troved::materialize::{self, MaterializedFile, MaterializedStore};
 use troved::ssh_agent::{self, keeagent, ForwardedKey, LoadedKey};
@@ -1735,12 +1736,71 @@ pub struct AttachmentDto {
     /// Whether the UI can render these bytes as a picture rather than describe
     /// them. Decided by the magic number, never by the file name.
     pub is_image: bool,
-    /// `Materialize.<name>.Target`, or empty when this attachment does not ask
-    /// to be written anywhere.
+    /// Where the attachment is written on unlock, after inheritance: its
+    /// `<File>`'s own target, or its name inside an inherited `dir`. Empty when
+    /// it is not written anywhere.
     pub target: String,
     pub mode: String,
     pub ttl: String,
     pub allow_disk_backed: bool,
+    /// Whether the entry's Materialize.settings has a `<File>` for it.
+    pub materialized: bool,
+    /// Where `target` came from when it is not the item's own: `group <path>`
+    /// or `database`. Empty when the item set it, or nothing did.
+    pub target_from: String,
+}
+
+/// How a resolved value's origin reads in the UI: empty for the item's own.
+fn origin_label(origin: &Origin) -> String {
+    match origin {
+        Origin::Item => String::new(),
+        Origin::Entry => "entry defaults".to_string(),
+        Origin::Group(g) => format!("group {g}"),
+        Origin::Database => "database".to_string(),
+    }
+}
+
+/// One attachment's resolved `<File>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachmentPlan {
+    target: String,
+    target_from: String,
+    mode: String,
+    ttl: String,
+    allow_disk_backed: bool,
+}
+
+/// What each attachment's `<File>` resolves to, by attachment name.
+fn materialize_views(v: &Vault, eid: &EntryId) -> Result<BTreeMap<String, AttachmentPlan>, String> {
+    let mut out = BTreeMap::new();
+    let Some(items) = v
+        .effective_settings(eid, Capability::Materialize)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(out);
+    };
+    for item in items {
+        let (target, target_from) =
+            match (item.attributes.get("target"), item.attributes.get("dir")) {
+                (Some(t), _) => (t.value.clone(), String::new()),
+                (None, Some(d)) => (
+                    format!("{}/{}", d.value.trim_end_matches('/'), item.key),
+                    origin_label(&d.origin),
+                ),
+                (None, None) => (String::new(), String::new()),
+            };
+        out.insert(
+            item.key.clone(),
+            AttachmentPlan {
+                target,
+                target_from,
+                mode: item.get("mode").unwrap_or_default().to_string(),
+                ttl: item.get("ttl").unwrap_or_default().to_string(),
+                allow_disk_backed: item.flag("allowDiskBacked"),
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// Is this text a person can edit, or bytes we should not pretend to render?
@@ -1891,18 +1951,19 @@ pub async fn list_attachments(
         let summary = v
             .get_entry(&eid)
             .ok_or_else(|| "entry not found".to_string())?;
+        let plans = materialize_views(v, &eid)?;
         let mut out = Vec::new();
-        for name in &summary.attachment_names {
+        // Settings documents are edited in their own sections, not as files.
+        for name in summary
+            .attachment_names
+            .iter()
+            .filter(|n| !settings::is_settings_attachment(n))
+        {
             let bytes = v
                 .read_binary(&eid, name)
                 .map_err(|e| e.to_string())?
                 .unwrap_or_default();
-            let field = |setting: &str| {
-                v.get_field(&eid, &attachment_field(name, setting))
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-            };
+            let plan = plans.get(name);
             let is_text = looks_like_text(&bytes);
             let (mime, kind, is_image) = describe(&bytes, is_text);
             out.push(AttachmentDto {
@@ -1912,16 +1973,12 @@ pub async fn list_attachments(
                 mime,
                 kind,
                 is_image,
-                target: field("Target"),
-                mode: field("Mode"),
-                ttl: field("TTL"),
-                allow_disk_backed: matches!(
-                    field("AllowDiskBacked")
-                        .trim()
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "true" | "yes" | "1" | "on"
-                ),
+                target: plan.map(|p| p.target.clone()).unwrap_or_default(),
+                mode: plan.map(|p| p.mode.clone()).unwrap_or_default(),
+                ttl: plan.map(|p| p.ttl.clone()).unwrap_or_default(),
+                allow_disk_backed: plan.is_some_and(|p| p.allow_disk_backed),
+                materialized: plan.is_some(),
+                target_from: plan.map(|p| p.target_from.clone()).unwrap_or_default(),
             });
         }
         Ok(out)
@@ -2065,8 +2122,8 @@ pub async fn attach_file(
 }
 
 /// Remove an attachment and the settings that describe it — leaving
-/// `Materialize.<name>.*` behind would ask the daemon to write a file that no
-/// longer exists.
+/// `Materialize.<name>.*` or a settings item behind would ask the daemon to
+/// write, or exec to export, a file that no longer exists.
 #[tauri::command]
 pub async fn delete_attachment(
     app: AppHandle,
@@ -2082,6 +2139,8 @@ pub async fn delete_attachment(
         for setting in ["Target", "Mode", "TTL", "AllowDiskBacked"] {
             let _ = v.remove_field(&eid, &attachment_field(&name, setting));
         }
+        v.forget_attachment_settings(&eid, &name)
+            .map_err(|e| e.to_string())?;
         Ok(())
     })
     .await?;
@@ -2130,6 +2189,47 @@ pub struct MaterializeInput {
     pub mode: String,
     pub ttl: String,
     pub allow_disk_backed: bool,
+    /// Write it on unlock into the directory a group (or the entry's defaults)
+    /// gives, rather than to a target of its own.
+    #[serde(default)]
+    pub use_dir: bool,
+}
+
+/// Apply one attachment's materialize settings to its `<File>` in the entry's
+/// Materialize.settings: written, or with no target and no inherited
+/// directory, removed. The document goes when its last file does.
+fn apply_materialize(
+    v: &mut Vault,
+    eid: &EntryId,
+    name: &str,
+    input: &MaterializeInput,
+) -> Result<(), String> {
+    let target = input.target.trim();
+    let mut doc = v
+        .entry_settings(eid, Capability::Materialize)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| Document::new(Capability::Materialize));
+    if target.is_empty() && !input.use_dir {
+        doc.remove_item(name);
+    } else {
+        let mut attrs: Attributes = vec![("attachment".to_string(), name.to_string())];
+        if !target.is_empty() {
+            attrs.push(("target".to_string(), target.to_string()));
+        }
+        if !input.mode.trim().is_empty() {
+            attrs.push(("mode".to_string(), input.mode.trim().to_string()));
+        }
+        if !input.ttl.trim().is_empty() {
+            attrs.push(("ttl".to_string(), input.ttl.trim().to_string()));
+        }
+        if input.allow_disk_backed {
+            attrs.push(("allowDiskBacked".to_string(), "true".to_string()));
+        }
+        doc.upsert_item(attrs).map_err(|e| e.to_string())?;
+    }
+    let keep = !doc.items().is_empty() || !doc.defaults().is_empty();
+    v.store_settings(eid, Capability::Materialize, keep.then_some(&doc))
+        .map_err(|e| e.to_string())
 }
 
 /// Set (or clear) where an attachment materializes.
@@ -2149,46 +2249,328 @@ pub async fn set_attachment_materialize(
         mode,
         ttl,
         allow_disk_backed,
+        use_dir,
     } = settings;
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
     let app2 = app.clone();
     let id2 = id.clone();
-    on_vault_write(app, id, move |v| {
-        let field = |setting: &str| attachment_field(&name, setting);
-        if target.trim().is_empty() {
-            for setting in ["Target", "Mode", "TTL", "AllowDiskBacked"] {
-                let _ = v.remove_field(&eid, &field(setting));
-            }
-            return Ok(());
+    let input = MaterializeInput {
+        target,
+        mode,
+        ttl,
+        allow_disk_backed,
+        use_dir,
+    };
+    on_vault_write(app, id, move |v| apply_materialize(v, &eid, &name, &input)).await?;
+    list_attachments(app2, id2, entry_id).await
+}
+
+// --- capability settings -----------------------------------------------------
+
+/// One resolved attribute of an item, and where it came from.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedAttr {
+    pub value: String,
+    /// Empty for the item's own value; else `entry defaults`, `group <path>`
+    /// or `database` — what the panel shows greyed out beside an inherited one.
+    pub from: String,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityItemDto {
+    pub key: String,
+    /// The attributes the item itself sets, which is what the panel edits.
+    pub own: BTreeMap<String, String>,
+    /// Every attribute after inheritance.
+    pub effective: BTreeMap<String, ResolvedAttr>,
+}
+
+/// One capability's document on an entry.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityDto {
+    /// `env-agent`, `materialize` or `gpg-agent`.
+    pub capability: String,
+    /// Whether the entry has the document (or legacy fields standing in for
+    /// it) — whether the capability is on.
+    pub on: bool,
+    /// The document is converted from legacy fields not yet written as one.
+    pub legacy: bool,
+    pub items: Vec<CapabilityItemDto>,
+    /// What the panel can name as a source: the entry's fields (standard and
+    /// custom) and its attachments, settings documents excluded.
+    pub fields: Vec<String>,
+    pub attachments: Vec<String>,
+}
+
+/// A group's (or the database's) defaults for one capability.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupCapabilityDto {
+    pub capability: String,
+    pub defaults: BTreeMap<String, String>,
+    /// The attributes a group may set for this capability.
+    pub allowed: Vec<String>,
+}
+
+fn capability(name: &str) -> Result<Capability, String> {
+    Capability::from_name(name).ok_or_else(|| format!("unknown capability {name:?}"))
+}
+
+fn capability_dtos(v: &Vault, eid: &EntryId) -> Result<Vec<CapabilityDto>, String> {
+    let summary = v
+        .get_entry(eid)
+        .ok_or_else(|| "entry not found".to_string())?;
+    let mut fields: Vec<String> = ["Password", "UserName", "URL", "Notes"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    fields.extend(v.custom_field_names(eid).map_err(|e| e.to_string())?);
+    let attachments: Vec<String> = summary
+        .attachment_names
+        .iter()
+        .filter(|n| !settings::is_settings_attachment(n))
+        .cloned()
+        .collect();
+    let mut out = Vec::new();
+    for cap in Capability::ALL {
+        let stored = v.settings_document(eid, cap).map_err(|e| e.to_string())?;
+        let legacy = stored.is_none();
+        let doc = match stored {
+            Some(d) => Some(d),
+            None => v.legacy_settings(eid, cap).map_err(|e| e.to_string())?,
+        };
+        let effective = v
+            .effective_settings(eid, cap)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let items = doc
+            .as_ref()
+            .map(|d| {
+                d.items()
+                    .iter()
+                    .zip(effective.iter())
+                    .map(|(own, eff)| CapabilityItemDto {
+                        key: eff.key.clone(),
+                        own: own.iter().cloned().collect(),
+                        effective: eff
+                            .attributes
+                            .iter()
+                            .map(|(k, r)| {
+                                (
+                                    k.clone(),
+                                    ResolvedAttr {
+                                        value: r.value.clone(),
+                                        from: origin_label(&r.origin),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(CapabilityDto {
+            capability: cap.cli_name().to_string(),
+            on: doc.is_some(),
+            legacy: legacy && doc.is_some(),
+            items,
+            fields: fields.clone(),
+            attachments: attachments.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// Add or replace one item. Empty values are dropped, so a cleared box
+/// inherits rather than storing an empty string.
+fn apply_capability_item(
+    v: &mut Vault,
+    eid: &EntryId,
+    cap: Capability,
+    attrs: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let key_attr = cap.key_attribute();
+    let mut ordered: Attributes = Vec::new();
+    if let Some(k) = attrs.get(key_attr) {
+        ordered.push((key_attr.to_string(), k.trim().to_string()));
+    }
+    for (k, val) in attrs {
+        if k != key_attr && !val.trim().is_empty() {
+            ordered.push((k.clone(), val.trim().to_string()));
         }
-        v.set_field(&eid, &field("Target"), target.trim())
-            .map_err(|e| e.to_string())?;
-        v.set_field(
-            &eid,
-            &field("Mode"),
-            if mode.trim().is_empty() {
-                "0600"
-            } else {
-                mode.trim()
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        if ttl.trim().is_empty() {
-            let _ = v.remove_field(&eid, &field("TTL"));
-        } else {
-            v.set_field(&eid, &field("TTL"), ttl.trim())
+    }
+    v.upsert_settings_item(eid, cap, ordered)
+        .map_err(|e| e.to_string())
+}
+
+fn drop_capability_item(
+    v: &mut Vault,
+    eid: &EntryId,
+    cap: Capability,
+    key: &str,
+) -> Result<(), String> {
+    let mut doc = v
+        .entry_settings(eid, cap)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("the entry has no {}", cap.attachment_name()))?;
+    if !doc.remove_item(key) {
+        return Err(format!("{} has no item {key:?}", cap.attachment_name()));
+    }
+    v.store_settings(eid, cap, Some(&doc))
+        .map_err(|e| e.to_string())
+}
+
+/// Turn a capability on (an empty document) or off (no document).
+fn toggle_capability(
+    v: &mut Vault,
+    eid: &EntryId,
+    cap: Capability,
+    on: bool,
+) -> Result<(), String> {
+    if on {
+        if v.entry_settings(eid, cap)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            v.store_settings(eid, cap, Some(&Document::new(cap)))
                 .map_err(|e| e.to_string())?;
         }
-        v.set_field(
-            &eid,
-            &field("AllowDiskBacked"),
-            if allow_disk_backed { "true" } else { "false" },
-        )
-        .map_err(|e| e.to_string())?;
         Ok(())
+    } else {
+        v.store_settings(eid, cap, None).map_err(|e| e.to_string())
+    }
+}
+
+fn group_capability_dtos(v: &Vault, group: &str) -> Result<Vec<GroupCapabilityDto>, String> {
+    let mut out = Vec::new();
+    for cap in Capability::ALL {
+        let doc = v.group_settings(group, cap).map_err(|e| e.to_string())?;
+        out.push(GroupCapabilityDto {
+            capability: cap.cli_name().to_string(),
+            defaults: doc
+                .map(|d| d.defaults().iter().cloned().collect())
+                .unwrap_or_default(),
+            allowed: cap
+                .default_attributes()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// Set (or with an empty value clear) one default on a group or, with an empty
+/// path, the database. A document left with no defaults is removed.
+fn apply_group_default(
+    v: &mut Vault,
+    group: &str,
+    cap: Capability,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    let mut doc = v
+        .group_settings(group, cap)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| Document::new(cap));
+    let value = value.trim();
+    doc.set_default(name, (!value.is_empty()).then_some(value))
+        .map_err(|e| e.to_string())?;
+    let keep = !doc.defaults().is_empty();
+    v.set_group_settings(group, cap, keep.then_some(&doc))
+        .map_err(|e| e.to_string())
+}
+
+/// Every capability document on an entry, for its settings sections.
+#[tauri::command]
+pub async fn entry_capabilities(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+) -> Result<Vec<CapabilityDto>, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault(app, id, move |v| capability_dtos(v, &eid)).await
+}
+
+#[tauri::command]
+pub async fn set_capability_item(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    capability: String,
+    attrs: BTreeMap<String, String>,
+) -> Result<Vec<CapabilityDto>, String> {
+    let cap = self::capability(&capability)?;
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault_write(app, id, move |v| {
+        apply_capability_item(v, &eid, cap, &attrs)?;
+        capability_dtos(v, &eid)
     })
-    .await?;
-    list_attachments(app2, id2, entry_id).await
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_capability_item(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    capability: String,
+    key: String,
+) -> Result<Vec<CapabilityDto>, String> {
+    let cap = self::capability(&capability)?;
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault_write(app, id, move |v| {
+        drop_capability_item(v, &eid, cap, &key)?;
+        capability_dtos(v, &eid)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_capability_on(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    capability: String,
+    on: bool,
+) -> Result<Vec<CapabilityDto>, String> {
+    let cap = self::capability(&capability)?;
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_vault_write(app, id, move |v| {
+        toggle_capability(v, &eid, cap, on)?;
+        capability_dtos(v, &eid)
+    })
+    .await
+}
+
+/// A group's (empty `group`: the database's) defaults, per capability.
+#[tauri::command]
+pub async fn group_capabilities(
+    app: AppHandle,
+    id: String,
+    group: String,
+) -> Result<Vec<GroupCapabilityDto>, String> {
+    on_vault(app, id, move |v| group_capability_dtos(v, &group)).await
+}
+
+#[tauri::command]
+pub async fn set_group_default(
+    app: AppHandle,
+    id: String,
+    group: String,
+    capability: String,
+    name: String,
+    value: String,
+) -> Result<Vec<GroupCapabilityDto>, String> {
+    let cap = self::capability(&capability)?;
+    on_vault_write(app, id, move |v| {
+        apply_group_default(v, &group, cap, &name, &value)?;
+        group_capability_dtos(v, &group)
+    })
+    .await
 }
 
 // --- commands: mutations ----------------------------------------------------
@@ -2868,6 +3250,117 @@ mod tests {
         assert_eq!(
             ensure_no_id_collision(&state, &free, Path::new("/vaults/c.kdbx")),
             Ok(false)
+        );
+    }
+
+    fn settings_vault() -> (Vault, EntryId) {
+        let (mut v, _path) = temp_vault();
+        v.add_group("Apps").unwrap();
+        let id = v.add_entry("api").unwrap();
+        v.move_entry(&id, "Apps").unwrap();
+        v.set_field(&id, "token", "t").unwrap();
+        v.attach_binary(&id, "cert.pem", b"PEM").unwrap();
+        v.attach_binary(&id, "KeeAgent.settings", b"<x/>").unwrap();
+        (v, id)
+    }
+
+    #[test]
+    fn a_capability_item_round_trips_with_its_sources_and_origins() {
+        let (mut v, id) = settings_vault();
+        let dtos = capability_dtos(&v, &id).unwrap();
+        assert!(
+            dtos.iter().all(|d| !d.on),
+            "nothing is on until a document exists"
+        );
+        assert!(dtos[0].fields.contains(&"token".to_string()));
+        assert_eq!(
+            dtos[0].attachments,
+            vec!["cert.pem"],
+            "settings files are not sources"
+        );
+
+        let attrs: BTreeMap<String, String> = [
+            ("name".to_string(), "API_TOKEN".to_string()),
+            ("field".to_string(), "token".to_string()),
+            ("lifetime".to_string(), "  ".to_string()),
+        ]
+        .into();
+        apply_capability_item(&mut v, &id, Capability::EnvAgent, &attrs).unwrap();
+        apply_group_default(&mut v, "Apps", Capability::EnvAgent, "lifetime", "600").unwrap();
+        let env = &capability_dtos(&v, &id).unwrap()[0];
+        assert!(env.on && !env.legacy);
+        assert_eq!(env.items[0].key, "API_TOKEN");
+        assert!(
+            !env.items[0].own.contains_key("lifetime"),
+            "a blank box is not stored"
+        );
+        assert_eq!(env.items[0].effective["lifetime"].value, "600");
+        assert_eq!(env.items[0].effective["lifetime"].from, "group Apps");
+        assert_eq!(env.items[0].effective["field"].from, "");
+
+        drop_capability_item(&mut v, &id, Capability::EnvAgent, "API_TOKEN").unwrap();
+        assert!(drop_capability_item(&mut v, &id, Capability::EnvAgent, "API_TOKEN").is_err());
+        toggle_capability(&mut v, &id, Capability::EnvAgent, false).unwrap();
+        assert!(!capability_dtos(&v, &id).unwrap()[0].on);
+    }
+
+    #[test]
+    fn group_defaults_are_set_cleared_and_never_grant() {
+        let (mut v, _id) = settings_vault();
+        apply_group_default(&mut v, "Apps", Capability::Materialize, "dir", "/tmp/apps").unwrap();
+        let dtos = group_capability_dtos(&v, "Apps").unwrap();
+        let mat = dtos.iter().find(|d| d.capability == "materialize").unwrap();
+        assert_eq!(
+            mat.defaults.get("dir").map(String::as_str),
+            Some("/tmp/apps")
+        );
+        assert!(
+            !mat.allowed.contains(&"attachment".to_string()),
+            "a group sets no items"
+        );
+        assert!(
+            apply_group_default(&mut v, "Apps", Capability::Materialize, "target", "/x").is_err()
+        );
+        apply_group_default(&mut v, "Apps", Capability::Materialize, "dir", "").unwrap();
+        assert_eq!(
+            v.group_settings("Apps", Capability::Materialize).unwrap(),
+            None
+        );
+        apply_group_default(&mut v, "", Capability::GpgAgent, "uses", "sign").unwrap();
+        assert!(v
+            .group_settings("", Capability::GpgAgent)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn materialize_follows_the_document_and_inherits_a_directory() {
+        let (mut v, id) = settings_vault();
+        let input = |target: &str, use_dir: bool| MaterializeInput {
+            target: target.to_string(),
+            mode: "0640".to_string(),
+            ttl: String::new(),
+            allow_disk_backed: false,
+            use_dir,
+        };
+        apply_materialize(&mut v, &id, "cert.pem", &input("/tmp/cert.pem", false)).unwrap();
+        let plans = materialize_views(&v, &id).unwrap();
+        assert_eq!(plans["cert.pem"].target, "/tmp/cert.pem");
+        assert_eq!(plans["cert.pem"].target_from, "");
+        assert_eq!(plans["cert.pem"].mode, "0640");
+
+        apply_group_default(&mut v, "Apps", Capability::Materialize, "dir", "/srv/apps").unwrap();
+        apply_materialize(&mut v, &id, "cert.pem", &input("", true)).unwrap();
+        let plans = materialize_views(&v, &id).unwrap();
+        assert_eq!(plans["cert.pem"].target, "/srv/apps/cert.pem");
+        assert_eq!(plans["cert.pem"].target_from, "group Apps");
+
+        apply_materialize(&mut v, &id, "cert.pem", &input("", false)).unwrap();
+        assert!(materialize_views(&v, &id).unwrap().is_empty());
+        assert_eq!(
+            v.settings_document(&id, Capability::Materialize).unwrap(),
+            None,
+            "the document goes with its last file"
         );
     }
 

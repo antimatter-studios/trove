@@ -777,7 +777,7 @@ function App() {
         {/* overlays */}
         {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => patch({ selId: id, group: "__all" })} />}
         {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onDelete={(e) => { setForm(null); setDel(e); }} />}
-        {groupEditor && <EditFolderModal group={groupEditor} entries={entries} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} onDelete={deleteFolder} />}
+        {groupEditor && <EditFolderModal group={groupEditor} entries={entries} vaultId={vault?.id} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} onDelete={deleteFolder} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}
         {help && <HelpModal onClose={() => setHelp(false)} />}
         {settingsOpen && settings && <SettingsModal settings={settings} onChange={saveSettings} onClose={() => setSettingsOpen(false)} />}
