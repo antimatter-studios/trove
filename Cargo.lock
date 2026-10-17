@@ -2672,6 +2672,7 @@ dependencies = [
  "base32",
  "hmac 0.12.1",
  "keepass",
+ "quick-xml",
  "rand 0.8.7",
  "sha1 0.10.7",
  "tempfile",

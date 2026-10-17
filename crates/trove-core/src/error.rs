@@ -64,4 +64,9 @@ pub enum Error {
 
     #[error("invalid icon {0}: built-in icons are 0 to 68")]
     InvalidIcon(usize),
+
+    /// A capability settings document that cannot be used. A broken document
+    /// is never treated as absent: that would silently turn a capability off.
+    #[error("{document} {reason}")]
+    InvalidSettings { document: String, reason: String },
 }

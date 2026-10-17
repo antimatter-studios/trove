@@ -21,6 +21,9 @@ yubikey = ["keepass/challenge_response"]
 # Database::merge, the KDBX-standard merge behind `trove merge`.
 keepass = { workspace = true, features = ["save_kdbx4", "totp", "_merge"] }
 zeroize.workspace = true
+# Capability settings documents (`settings`). Already in the tree through
+# keepass, which parses KDBX's XML with it.
+quick-xml = "0.42"
 thiserror.workspace = true
 # Steam Guard codes (`encoder=steam`), which keepass's TOTP renders as decimal
 # digits. All three are already in the tree through keepass's `totp` feature.

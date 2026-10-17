@@ -29,6 +29,7 @@ use zeroize::Zeroize;
 
 mod error;
 pub use error::Error;
+pub mod settings;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -470,6 +471,9 @@ pub struct RenamedAttachment {
     /// inside XML this crate does not parse. A caller that understands SSH
     /// should rewrite it; one that does not can ignore this.
     pub has_keeagent_settings: bool,
+    /// The settings documents whose items named the attachment and now name
+    /// it by its new name.
+    pub rewritten_settings: Vec<settings::Capability>,
 }
 
 pub(crate) struct VaultInner {
@@ -1913,6 +1917,7 @@ impl Vault {
             return Ok(RenamedAttachment {
                 moved_fields: Vec::new(),
                 has_keeagent_settings: false,
+                rewritten_settings: Vec::new(),
             });
         }
         let bytes = self
@@ -1953,10 +1958,23 @@ impl Vault {
             self.remove_field(id, old_key)?;
         }
 
+        // Settings documents name attachments inside their items; point those
+        // at the new name, or the capability would describe a missing file.
+        let mut rewritten_settings = Vec::new();
+        for capability in settings::Capability::ALL {
+            if let Some(mut doc) = self.settings_document(id, capability)? {
+                if doc.rename_attachment(old_name, new_name) {
+                    self.set_settings_document(id, capability, Some(&doc))?;
+                    rewritten_settings.push(capability);
+                }
+            }
+        }
+
         let has_keeagent_settings = self.read_binary(id, "KeeAgent.settings")?.is_some();
         Ok(RenamedAttachment {
             moved_fields: moved_fields.into_iter().map(|(_, k, _)| k).collect(),
             has_keeagent_settings,
+            rewritten_settings,
         })
     }
 

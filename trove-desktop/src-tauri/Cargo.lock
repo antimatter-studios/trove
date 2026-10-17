@@ -4711,6 +4711,7 @@ dependencies = [
  "base32",
  "hmac 0.12.1",
  "keepass",
+ "quick-xml 0.42.0",
  "sha1",
  "thiserror 1.0.69",
  "zeroize",
