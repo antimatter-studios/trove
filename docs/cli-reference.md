@@ -1822,9 +1822,9 @@ Either section may be left out, but a file needs at least one.
 
 - **`databases:`** maps a vault's filename, including `.kdbx`, to its password.
   `trove unlock work.kdbx --env` uses the work password, wherever `work.kdbx` is.
-  A name is a filename, never a path. A password must be a quoted string: YAML
-  reads an unquoted `0123` as the number 123, and trove refuses that rather than
-  try a password that silently lost a digit.
+  A name is a filename, never a path. A password must be a string, so quote it:
+  YAML reads an unquoted `1e3`, `0x10` or `true` as a number or boolean, and
+  trove refuses that rather than guess what text was meant.
 - **`environment:`** sets variables before trove runs: `TROVE_VAULT`,
   `TROVE_IDLE_TIMEOUT`, the socket paths. Numbers and booleans are taken as their
   text. Passwords are refused here — `TROVE_VAULT_PASSWORD` and the old

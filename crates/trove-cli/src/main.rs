@@ -4656,8 +4656,10 @@ fn parse_databases(
                 path.display()
             ));
         }
-        // Not converted from a number: YAML reads `0123` as 123, and a
-        // password that silently lost a digit fails as "wrong password".
+        // Not converted from another type: YAML reads an unquoted `1e3`,
+        // `0x10` or `true` as a number or boolean, and turning that back into
+        // text need not give what was typed. A wrong guess fails as "wrong
+        // password", which points everywhere but here.
         let password = password.as_str().ok_or_else(|| {
             anyhow!(
                 "{}: the password for {name:?} must be a string — put it in quotes",
@@ -8698,7 +8700,13 @@ mod env_file_tests {
 
     #[test]
     fn a_database_password_must_be_a_non_empty_string() {
-        assert!(err("databases:\n  a.kdbx: 0123\n").contains("put it in quotes"));
+        // The cases the reference names, so the docs cannot drift from YAML.
+        for unquoted in ["1234", "1e3", "0x10", "true"] {
+            assert!(
+                err(&format!("databases:\n  a.kdbx: {unquoted}\n")).contains("put it in quotes"),
+                "{unquoted}"
+            );
+        }
         assert!(err("databases:\n  a.kdbx: \"\"\n").contains("is empty"));
         assert!(err("databases:\n  a.kdbx:\n").contains("put it in quotes"));
     }
