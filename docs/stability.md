@@ -18,8 +18,9 @@ and are released together.
 - **Environment variables.** The `TROVE_*` variables documented in
   [cli-reference.md](cli-reference.md). Undocumented ones (build stamps, debug
   tracing, test hooks) are not covered.
-- **Config files.** The `.env.trove` format and the desktop app's settings
-  file. A newer version reads what an older one wrote.
+- **Config files.** The `.env.trove.yaml` format and the desktop app's settings
+  file. A newer version reads what an older one wrote. The dotenv `.env.trove`
+  it replaced is the exception: it is refused, with directions to convert it.
 - **The `trove-core` API.** Its public Rust API, as published on crates.io.
   Structs and enums that may grow are marked `#[non_exhaustive]`.
 - **Vault safety.** trove never damages a KeePassXC-compatible vault: what it

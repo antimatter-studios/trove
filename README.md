@@ -273,7 +273,7 @@ The [CHANGELOG](CHANGELOG.md) has the detail; in short:
   long as one process tree (the `op run` of kdbx).
 - **Headless daemon.** `troved` auto-spawns and serves the CLI, the agents and
   the desktop app. Several vaults can be unlocked at once, filtered by tag, with
-  passwords from `.env.trove` or the macOS keychain.
+  passwords from `.env.trove.yaml` or the macOS keychain.
 - **Sync.** `trove sync` does a two-way sync with another copy of the vault,
   and saves merge other writers' changes instead of overwriting them.
 - **Scripting.** `--json` on read and status commands, `describe` for agents,

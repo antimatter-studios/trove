@@ -1133,7 +1133,7 @@ is two more keys:
 Printed whether or not a check failed; a failure also makes the command exit 1.
 Which checks appear depends on the machine: `version` and `keys` only with a
 daemon running, `gpg-keyring` only when it serves GPG keys, `materialize` only
-when files are materialized, `daemons` only on Unix, `env-file` once per `.env.trove` found.
+when files are materialized, `daemons` only on Unix, `env-file` once per `.env.trove.yaml` found, or per retired `.env.trove` where one belongs.
 
 ### `trove idle get --json`
 
@@ -1713,7 +1713,7 @@ a daemon.
 | `ssh-agent` | `SSH_AUTH_SOCK`: unset, trove's agent, a private one from `ssh-agent empty`, another live agent, or nothing listening |
 | `gpg-agent` | whether gpg's agent socket (`gpgconf --list-dirs agent-socket`) is a symlink to trove's |
 | `vault` | the vault from `--vault` or `TROVE_VAULT` opens and is KDBX 4 (KDBX 3.1 is a warning) |
-| `env-file` | each `.env.trove` a bare `--env` would find is readable only by its owner |
+| `env-file` | each `.env.trove.yaml` a bare `--env` would find is readable only by its owner; a retired `.env.trove` where one belongs fails |
 
 Each line is `ok`, `info`, `warn` or `FAIL`, with a suggested fix under it where
 there is one. Exits 1 if any check fails. See
@@ -1762,18 +1762,22 @@ Without `--resident`, it also exits once the last vault is locked (by `trove loc
 
 Permission model: every socket is bound by the daemon, then `chmod 0600` so only the same UID can connect.
 
-## The `.env.trove` file
+## The `.env.trove.yaml` file
 
-A dotenv `KEY=VALUE` file or YAML password map, loaded only when `--env` is
+A YAML file of vault passwords and trove settings, loaded only when `--env` is
 passed. Nothing is read without that flag: an exported password must never
 silently open a vault for a command that didn't ask for one.
+
+The name keeps the `.env.` prefix on purpose. Gitignore templates, secret
+scanners and coding agents already treat `.env.*` files as secret, and this one
+holds vault passwords. Keep it out of version control all the same.
 
 ### Where it is found
 
 | form | reads |
 | --- | --- |
-| `--env` | `./.env.trove`, then `<vault dir>/.env.trove` |
-| `--env=<dir>` | `<dir>/.env.trove` |
+| `--env` | `./.env.trove.yaml`, then `<vault dir>/.env.trove.yaml` |
+| `--env=<dir>` | `<dir>/.env.trove.yaml` |
 | `--env=<file>` | exactly that file |
 
 **A path must be attached with `=`.** `--env=<PATH>`, never `--env <PATH>`. An
@@ -1791,7 +1795,7 @@ a `-`-prefixed token is not taken as an optional value.
 Bare `--env` tries the working directory first, so a project checkout can override,
 then the directory holding the vault being opened — which is where the file belongs
 when a vault and its settings are kept together (`~/vaults/work.kdbx` beside
-`~/vaults/.env.trove`). When neither exists, the error names both places it looked.
+`~/vaults/.env.trove.yaml`). When neither exists, the error names both places it looked.
 
 `--env=<file>` naming a file that does not exist is a **hard error**, never a silent
 fallback: you named that path, so a typo must not be papered over by prompting or by
@@ -1802,53 +1806,51 @@ dotfile repositories, and this file holds a vault password.
 
 ### Syntax
 
-For one shared password, the dotenv format remains available:
-
-```sh
-# comments and blank lines are ignored
-TROVE_VAULT_PASSWORD=correct horse battery staple
-export TROVE_VAULT=/Users/me/vaults/work.kdbx   # an `export ` prefix is allowed
-TROVE_IDLE_TIMEOUT="900"                        # quotes are optional
-```
-
-For several databases, dotenv profiles pair a `_FILE` value with a `_PASSWORD`
-value. The file must match the exact vault filename, including `.kdbx`:
-
-```dotenv
-TROVE_VAULT_WORK_FILE=work.kdbx
-TROVE_VAULT_WORK_PASSWORD="work vault password"
-TROVE_VAULT_PERSONAL_FILE=personal.kdbx
-TROVE_VAULT_PERSONAL_PASSWORD="personal vault password"
-```
-
-The profile name (`WORK` or `PERSONAL` here) links each pair of variables; it
-does not need to resemble the filename. Dotenv profiles can share a file with
-other settings such as `TROVE_IDLE_TIMEOUT`.
-
-Alternatively, `.env.trove` can be a YAML mapping from the exact vault filename
-to its password:
-
 ```yaml
-work.kdbx: "work vault password"
-personal.kdbx: "personal vault password"
+# vault passwords, keyed by the exact vault filename
+databases:
+  work.kdbx: "work vault password"
+  personal.kdbx: "personal vault password"
+
+# any other variables to set
+environment:
+  TROVE_VAULT: /Users/me/vaults/work.kdbx
+  TROVE_IDLE_TIMEOUT: 900
 ```
 
-With either format, `trove unlock work.kdbx --env` uses the work password, while
-unlocking `personal.kdbx` uses the personal password. The YAML form is a
-credentials map; dotenv settings such as `TROVE_IDLE_TIMEOUT` cannot be mixed
-into that same file. `TROVE_VAULT_PASSWORD`, when set, takes precedence over a
-matching profile or YAML entry.
+Either section may be left out, but a file needs at least one.
 
-In dotenv form there is no interpolation or multi-line values — this holds
-configuration and a password, not a shell script. A variable **already set in the
-environment wins**, so the file supplies defaults rather than overriding its caller.
+- **`databases:`** maps a vault's filename, including `.kdbx`, to its password.
+  `trove unlock work.kdbx --env` uses the work password, wherever `work.kdbx` is.
+  A name is a filename, never a path. A password must be a string, so quote it:
+  YAML reads an unquoted `1e3`, `0x10` or `true` as a number or boolean, and
+  trove refuses that rather than guess what text was meant.
+- **`environment:`** sets variables before trove runs: `TROVE_VAULT`,
+  `TROVE_IDLE_TIMEOUT`, the socket paths. Numbers and booleans are taken as their
+  text. Passwords are refused here — `TROVE_VAULT_PASSWORD` and the old
+  `TROVE_VAULT_<NAME>_FILE`/`_PASSWORD` profiles — so there is one place a
+  password can be. `TROVE_VAULT` selects the default offline vault for commands
+  that accept `--vault`; `--vault <PATH>` overrides it.
 
-Every trove variable can live in dotenv form, not just the password:
-`TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, and the socket paths. `TROVE_VAULT` selects
-the default offline vault for commands that accept `--vault`; `--vault <PATH>`
-overrides it. For bare `--env`, trove searches the working directory first and
-then beside an explicit `--vault` (or the positional vault for `unlock`). The
-YAML form is for the per-vault password map.
+A variable **already set in the environment wins**, so the file supplies defaults
+rather than overriding its caller. In the same way an exported `TROVE_VAULT_PASSWORD`
+wins over `databases:`.
+
+Unknown top-level keys are errors, not ignored, so a typo cannot quietly disable a
+section.
+
+### The retired `.env.trove`
+
+The dotenv `.env.trove` (`KEY=VALUE` lines, `TROVE_VAULT_<NAME>_FILE` profiles)
+and the bare `work.kdbx: password` map are no longer read. trove refuses them, and
+says how to convert, whenever it meets one:
+
+- a `.env.trove` where `--env` looks and no `.env.trove.yaml` beside it — the search
+  stops there rather than carrying on to another file or a prompt;
+- dotenv lines or a bare map in whichever file `--env` reads.
+
+Converting is mechanical: passwords move under `databases:`, keyed by vault filename,
+and every other variable moves under `environment:`. Then delete the old file.
 
 ### Permissions
 
@@ -1856,8 +1858,8 @@ The file holds a vault password, so trove warns when it is readable by more than
 owner:
 
 ```
-trove: warning: .env.trove is mode 0644 — readable by more than its owner,
-and it holds a vault password. Fix with: chmod 600 .env.trove
+trove: warning: .env.trove.yaml is mode 0644 — readable by more than its owner,
+and it holds a vault password. Fix with: chmod 600 .env.trove.yaml
 ```
 
 `TROVE_ENV_STRICT=1` turns that warning into a refusal, which is what `ssh` does with a
@@ -1895,7 +1897,7 @@ higher-priority source, trove says which one won rather than leaving it ambiguou
 
 All env vars are read at process start.
 
-`--env` loads them from a file first — see [The `.env.trove` file](#the-envtrove-file).
+`--env` loads them from a file first — see [The `.env.trove.yaml` file](#the-envtroveyaml-file).
 
 | Env var | Default | Effect |
 | --- | --- | --- |
@@ -1907,8 +1909,7 @@ All env vars are read at process start.
 | `TROVE_SSH_FORWARD` | (on) | Set to `0` / `false` / `no` / `off` to stop pushing unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`. Read on every unlock, not just at start. Forwarding is already inert when `$SSH_AUTH_SOCK` is unset or points at trove's own socket. |
 | `TROVE_SSH_OPENSSH_PIPE` | (on) | Windows only. Set to `0` to stop troved also serving `\\.\pipe\openssh-ssh-agent`, the pipe Windows OpenSSH uses when `SSH_AUTH_SOCK` is unset. It is only taken when free. |
 | `TROVE_SSH_STRICT_HOSTKEYS` | (off) | Set to `1` / `true` / `yes` to answer a server that no key's `SshAgent.HostKeys` declares with an empty identity list, instead of falling back to offering everything. Read once when the agent socket is bound. Turns a stale declaration from a missed optimisation into a refused connection — which is the point, and why it is off by default. |
-| `TROVE_VAULT_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above). Prefer keeping it in a `0600` `.env.trove` that is never exported — an exported variable is inherited by every child process. |
-| `TROVE_VAULT_<NAME>_FILE` / `TROVE_VAULT_<NAME>_PASSWORD` | (unset) | Named password profile, used **only** with `--env`. `_FILE` matches the exact vault filename; `_PASSWORD` supplies its password. |
+| `TROVE_VAULT_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above), and winning over the file's `databases:`. Prefer the `databases:` section of a `0600` `.env.trove.yaml` — an exported variable is inherited by every child process. It cannot be set from the file's `environment:`. |
 | `TROVE_ENV_STRICT` | (off) | Set to `1` / `true` / `yes` / `on` to make `--env` **refuse** a file readable by more than its owner, instead of warning. macOS/Unix only. |
 | `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
