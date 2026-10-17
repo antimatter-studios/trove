@@ -62,19 +62,19 @@ struct Cli {
     #[arg(long = "password-stdin", global = true)]
     password_stdin: bool,
 
-    /// Load environment variables from a `.env.trove` file before running.
+    /// Load vault passwords and settings from a `.env.trove.yaml` file before running.
     ///
-    /// Bare `--env` looks for `.env.trove` in the working directory and then
-    /// beside the vault being opened; pass a path to read a specific file.
-    /// Dotenv files accept `KEY=VALUE` lines, comments, an optional `export `
-    /// prefix and optional quotes. Pair `TROVE_VAULT_<NAME>_FILE` with
-    /// `TROVE_VAULT_<NAME>_PASSWORD` to select a password by exact filename.
-    /// Alternatively, use a YAML map from vault filenames to passwords. An
-    /// existing environment variable wins over the file.
+    /// Bare `--env` looks for `.env.trove.yaml` in the working directory and
+    /// then beside the vault being opened; pass a path to read a specific file.
+    /// The file is YAML: `databases:` maps each vault's filename (`work.kdbx`)
+    /// to its password, and `environment:` sets variables such as
+    /// `TROVE_IDLE_TIMEOUT`. An existing environment variable wins over the
+    /// file, and an exported `TROVE_VAULT_PASSWORD` wins over `databases:`.
     ///
-    /// `TROVE_VAULT_PASSWORD` remains available for one password shared by all
-    /// vaults. Nothing is read unless this flag is given — trove never picks up
-    /// credentials just because a file happens to exist next to a vault.
+    /// The old dotenv `.env.trove` is no longer read: finding one is an error
+    /// that says how to convert it. Nothing is read unless this flag is given —
+    /// trove never picks up credentials just because a file happens to exist
+    /// next to a vault.
     #[arg(
         long = "env",
         global = true,
@@ -286,7 +286,7 @@ enum Command {
 
     /// Check the setup around trove: the daemon and its version, stray
     /// daemons, where `SSH_AUTH_SOCK` and gpg's agent socket point, the vault
-    /// file (`--vault` or `TROVE_VAULT`) and `.env.trove` permissions.
+    /// file (`--vault` or `TROVE_VAULT`) and `.env.trove.yaml` permissions.
     ///
     /// Read-only, and never starts a daemon. Exits 1 if any check fails.
     Doctor {
@@ -1688,29 +1688,47 @@ fn run(cli: Cli) -> Result<()> {
     }
     if let Some(given) = cli.env_file.clone() {
         let path = match given {
-            Some(p) => resolve_env_file(&p),
+            Some(p) => {
+                let path = resolve_env_file(&p);
+                if let Some(legacy) = legacy_env_file(&path) {
+                    return Err(anyhow!(legacy_env_file_advice(&legacy)));
+                }
+                path
+            }
             None => {
                 let env_vault = vault_for_env_lookup(&cli);
                 let candidates = env_file_candidates(env_vault.as_deref());
-                candidates
-                    .iter()
-                    .find(|p| p.is_file())
-                    .cloned()
-                    .ok_or_else(|| {
-                        // Name every place looked in: "no such file" about a
-                        // path the user never typed is a riddle.
-                        let looked: Vec<String> =
-                            candidates.iter().map(|p| p.display().to_string()).collect();
-                        anyhow!(
-                            "no {DEFAULT_ENV_FILE} found — looked in: {}. \
-                             Pass `--env=<PATH>` to name one.",
-                            looked.join(", ")
-                        )
-                    })?
+                let mut found = None;
+                for candidate in &candidates {
+                    if candidate.is_file() {
+                        found = Some(candidate.clone());
+                        break;
+                    }
+                    // A retired file where the new one belongs stops the
+                    // search: carrying on would quietly use a file further
+                    // down, or end at a prompt, and either hides the cause.
+                    if let Some(legacy) = legacy_env_file(candidate) {
+                        return Err(anyhow!(legacy_env_file_advice(&legacy)));
+                    }
+                }
+                found.ok_or_else(|| {
+                    // Name every place looked in: "no such file" about a
+                    // path the user never typed is a riddle.
+                    let looked: Vec<String> =
+                        candidates.iter().map(|p| p.display().to_string()).collect();
+                    anyhow!(
+                        "no {DEFAULT_ENV_FILE} found — looked in: {}. \
+                         Pass `--env=<PATH>` to name one.",
+                        looked.join(", ")
+                    )
+                })?
             }
         };
-        let n = load_env_file(&path)?;
-        eprintln!("trove: loaded {n} variable(s) from {}", path.display());
+        let (databases, variables) = load_env_file(&path)?;
+        eprintln!(
+            "trove: loaded {databases} database password(s) and {variables} variable(s) from {}",
+            path.display()
+        );
     }
     let pw_stdin = cli.password_stdin;
     // Fail fast on an unreadable keyfile, before any password prompt.
@@ -4348,18 +4366,25 @@ fn prompt_new_password() -> Result<String> {
 
 /// Filename `--env` falls back to: used bare, and appended when the path given
 /// is a directory.
-const DEFAULT_ENV_FILE: &str = ".env.trove";
-/// The variable that supplies the vault password. Everything else in the file
-/// is loaded too — `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT`, the socket paths — so
-/// one file can carry a whole trove configuration, not just a secret.
+///
+/// The `.env.` prefix is load-bearing: gitignore templates, secret scanners and
+/// coding agents already treat `.env.*` as secret, and this file holds vault
+/// passwords. `.yaml` gets it highlighted as what it is.
+const DEFAULT_ENV_FILE: &str = ".env.trove.yaml";
+/// The retired dotenv file. Never read: finding one where `--env` looks is an
+/// error that says how to convert it, so an upgrade cannot silently fall back
+/// to a password prompt or to some other file.
+const LEGACY_ENV_FILE: &str = ".env.trove";
+/// A vault password taken from the real environment. Never from the file:
+/// passwords there go under `databases:`.
 const PASSWORD_VAR: &str = "TROVE_VAULT_PASSWORD";
 const VAULT_VAR: &str = "TROVE_VAULT";
 
 fn env_vault_path() -> Option<PathBuf> {
     std::env::var_os(VAULT_VAR).map(PathBuf::from)
 }
-/// Per-vault credentials loaded from a YAML `.env.trove`, keyed by exact
-/// filename (for example, `work.kdbx`).
+/// Per-vault credentials loaded from the `databases:` map of `.env.trove.yaml`,
+/// keyed by exact filename (for example, `work.kdbx`).
 static VAULT_PASSWORDS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
     std::sync::OnceLock::new();
 
@@ -4395,7 +4420,7 @@ fn password_from_keychain(vault: Option<&Path>) -> Result<Option<String>> {
 }
 
 /// Resolve what `--env` was given to an actual file: a directory gets
-/// `.env.trove` appended, a file is taken as-is.
+/// `.env.trove.yaml` appended, a file is taken as-is.
 fn resolve_env_file(given: &Path) -> PathBuf {
     if given.is_dir() {
         given.join(DEFAULT_ENV_FILE)
@@ -4409,7 +4434,7 @@ fn resolve_env_file(given: &Path) -> PathBuf {
 ///
 /// Beside the vault matters because that is where the file belongs when you
 /// keep a vault and its settings together — `~/vaults/work.kdbx` and
-/// `~/vaults/.env.trove` — and running `trove unlock ~/vaults/work.kdbx` from
+/// `~/vaults/.env.trove.yaml` — and running `trove unlock ~/vaults/work.kdbx` from
 /// somewhere else should still find it. The working directory comes first so a
 /// project checkout can override with its own.
 ///
@@ -4426,6 +4451,29 @@ fn env_file_candidates(vault: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
+/// The retired `.env.trove` sitting where `candidate` (a `.env.trove.yaml`
+/// path) is missing, if there is one.
+fn legacy_env_file(candidate: &Path) -> Option<PathBuf> {
+    if candidate.file_name()? != DEFAULT_ENV_FILE || candidate.is_file() {
+        return None;
+    }
+    let legacy = candidate.with_file_name(LEGACY_ENV_FILE);
+    legacy.is_file().then_some(legacy)
+}
+
+/// What to do about a file in a retired format: convert it. Shared by the
+/// loader and `doctor`, so both say the same thing.
+fn legacy_env_file_advice(path: &Path) -> String {
+    format!(
+        "{} uses a format trove no longer reads. Put vault passwords under \
+         `databases:` and other variables under `environment:` in {DEFAULT_ENV_FILE}, \
+         then delete the old file:\n\n\
+         databases:\n  work.kdbx: \"<password>\"\n\
+         environment:\n  TROVE_IDLE_TIMEOUT: \"900\"\n",
+        path.display()
+    )
+}
+
 /// The vault a bare `--env` should look next to: the global `--vault` when it
 /// is offline mode, or the one `unlock` was pointed at.
 fn vault_for_env_lookup(cli: &Cli) -> Option<PathBuf> {
@@ -4438,13 +4486,6 @@ fn vault_for_env_lookup(cli: &Cli) -> Option<PathBuf> {
     }
 }
 
-/// Read `KEY=VALUE` lines from a dotenv-style file into the process
-/// environment. A variable already set wins, so the file supplies defaults and
-/// never overrides an explicit caller.
-///
-/// Deliberately minimal: `#` comments, blank lines, an optional `export `
-/// prefix, and optionally quoted values. No interpolation and no multi-line
-/// values — this holds configuration and a password, not a shell script.
 /// Refuse a group/world-readable env file instead of warning about it:
 /// `TROVE_ENV_STRICT=1` (also `true`/`yes`/`on`).
 ///
@@ -4504,7 +4545,182 @@ fn check_env_file_perms(_path: &Path, _file: &std::fs::File) -> Result<()> {
     Ok(())
 }
 
-fn load_env_file(path: &Path) -> Result<usize> {
+/// The contents of a `.env.trove.yaml`, validated.
+#[derive(Debug, Default, PartialEq)]
+struct EnvFile {
+    /// Vault filename → password.
+    databases: std::collections::HashMap<String, String>,
+    /// Variables to set, in file order.
+    environment: Vec<(String, String)>,
+}
+
+fn is_env_var_name(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `key` is one of the retired ways of putting a password in the
+/// environment: the shared password or a `TROVE_VAULT_<NAME>_FILE`/`_PASSWORD`
+/// profile. In the file, passwords belong under `databases:`.
+fn is_password_var(key: &str) -> bool {
+    key == PASSWORD_VAR
+        || key
+            .strip_prefix("TROVE_VAULT_")
+            .is_some_and(|rest| rest.ends_with("_PASSWORD") || rest.ends_with("_FILE"))
+}
+
+/// Parse and validate a `.env.trove.yaml`:
+///
+/// ```yaml
+/// databases:
+///   work.kdbx: "work vault password"
+/// environment:
+///   TROVE_IDLE_TIMEOUT: "900"
+/// ```
+///
+/// Strict on purpose. The retired formats — dotenv lines and a bare filename to
+/// password map — are refused with directions, never guessed at: a file that
+/// half-loads unlocks nothing and leaves the user at a prompt wondering why.
+fn parse_env_file(path: &Path, text: &str) -> Result<EnvFile> {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'));
+    let dotenv = first.is_some_and(|line| {
+        let eq = line.find('=');
+        let colon = line.find(':');
+        eq.is_some() && (colon.is_none() || eq < colon)
+    });
+    if dotenv {
+        return Err(anyhow!(legacy_env_file_advice(path)));
+    }
+    let value: serde_yaml::Value = serde_yaml::from_str(text)
+        .with_context(|| format!("parsing YAML in {}", path.display()))?;
+    let root = value.as_mapping().ok_or_else(|| {
+        anyhow!(
+            "{}: expected a YAML mapping with `databases:` and/or `environment:`",
+            path.display()
+        )
+    })?;
+    let mut out = EnvFile::default();
+    let mut sections = 0;
+    for (key, section) in root {
+        let key = key
+            .as_str()
+            .ok_or_else(|| anyhow!("{}: top-level keys must be strings", path.display()))?;
+        match key {
+            "databases" => {
+                sections += 1;
+                out.databases = parse_databases(path, section)?;
+            }
+            "environment" => {
+                sections += 1;
+                out.environment = parse_environment(path, section)?;
+            }
+            _ if section.is_string() => return Err(anyhow!(legacy_env_file_advice(path))),
+            other => {
+                return Err(anyhow!(
+                    "{}: unknown top-level key {other:?}: expected `databases` or `environment`",
+                    path.display()
+                ))
+            }
+        }
+    }
+    if sections == 0 {
+        return Err(anyhow!(
+            "{}: expected a YAML mapping with `databases:` and/or `environment:`",
+            path.display()
+        ));
+    }
+    Ok(out)
+}
+
+fn parse_databases(
+    path: &Path,
+    section: &serde_yaml::Value,
+) -> Result<std::collections::HashMap<String, String>> {
+    let map = section.as_mapping().ok_or_else(|| {
+        anyhow!(
+            "{}: `databases` must map vault filenames to passwords",
+            path.display()
+        )
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for (name, password) in map {
+        let name = name
+            .as_str()
+            .ok_or_else(|| anyhow!("{}: vault names must be strings", path.display()))?;
+        if name.is_empty() || name.contains(['/', '\\']) {
+            return Err(anyhow!(
+                "{}: {name:?} must be a vault filename such as work.kdbx, not a path — \
+                 the password is matched against the filename of the vault being opened",
+                path.display()
+            ));
+        }
+        // Not converted from a number: YAML reads `0123` as 123, and a
+        // password that silently lost a digit fails as "wrong password".
+        let password = password.as_str().ok_or_else(|| {
+            anyhow!(
+                "{}: the password for {name:?} must be a string — put it in quotes",
+                path.display()
+            )
+        })?;
+        if password.is_empty() {
+            return Err(anyhow!(
+                "{}: the password for {name:?} is empty",
+                path.display()
+            ));
+        }
+        out.insert(name.to_owned(), password.to_owned());
+    }
+    Ok(out)
+}
+
+fn parse_environment(path: &Path, section: &serde_yaml::Value) -> Result<Vec<(String, String)>> {
+    let map = section.as_mapping().ok_or_else(|| {
+        anyhow!(
+            "{}: `environment` must map variable names to values",
+            path.display()
+        )
+    })?;
+    let mut out = Vec::new();
+    for (key, value) in map {
+        let key = key
+            .as_str()
+            .ok_or_else(|| anyhow!("{}: variable names must be strings", path.display()))?;
+        if !is_env_var_name(key) {
+            return Err(anyhow!(
+                "{}: {key:?} is not a valid variable name",
+                path.display()
+            ));
+        }
+        if is_password_var(key) {
+            return Err(anyhow!(
+                "{}: {key} is not allowed under `environment:` — vault passwords go \
+                 under `databases:`, keyed by vault filename",
+                path.display()
+            ));
+        }
+        let value = match value {
+            serde_yaml::Value::String(s) => s.clone(),
+            serde_yaml::Value::Number(n) => n.to_string(),
+            serde_yaml::Value::Bool(b) => b.to_string(),
+            _ => {
+                return Err(anyhow!(
+                    "{}: the value of {key} must be a string, number or boolean",
+                    path.display()
+                ))
+            }
+        };
+        out.push((key.to_owned(), value));
+    }
+    Ok(out)
+}
+
+/// Load `.env.trove.yaml`: remember its vault passwords and set its
+/// environment variables. A variable already set wins, so the file supplies
+/// defaults and never overrides an explicit caller. Returns how many passwords
+/// and how many variables it supplied.
+fn load_env_file(path: &Path) -> Result<(usize, usize)> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -4521,76 +4737,19 @@ fn load_env_file(path: &Path) -> Result<usize> {
     let mut text = String::new();
     file.read_to_string(&mut text)
         .with_context(|| format!("reading env file {}", path.display()))?;
-    let first = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'));
-    let yaml = first.is_some_and(|line| {
-        let eq = line.find('=');
-        let colon = line.find(':');
-        colon.is_some() && (eq.is_none() || colon < eq)
-    });
-    if yaml {
-        let values: serde_yaml::Value = serde_yaml::from_str(&text)
-            .with_context(|| format!("parsing YAML credentials in {}", path.display()))?;
-        let mapping = values.as_mapping().ok_or_else(|| {
-            anyhow!(
-                "{}: YAML credentials must map vault filenames to passwords",
-                path.display()
-            )
-        })?;
-        let mut passwords = std::collections::HashMap::new();
-        for (key, value) in mapping {
-            let name = key
-                .as_str()
-                .ok_or_else(|| anyhow!("{}: YAML vault names must be strings", path.display()))?;
-            let password = value.as_str().ok_or_else(|| {
-                anyhow!("{}: password for {name:?} must be a string", path.display())
-            })?;
-            if name.is_empty() || password.is_empty() {
-                return Err(anyhow!(
-                    "{}: vault names and passwords must not be empty",
-                    path.display()
-                ));
-            }
-            passwords.insert(name.to_owned(), password.to_owned());
-        }
-        let n = passwords.len();
-        VAULT_PASSWORDS
-            .set(passwords)
-            .map_err(|_| anyhow!("a YAML .env.trove file was already loaded"))?;
-        return Ok(n);
-    }
-    let mut set = 0usize;
-    for (i, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(anyhow!("{}:{}: expected KEY=VALUE", path.display(), i + 1));
-        };
-        let key = key.trim();
-        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(anyhow!(
-                "{}:{}: invalid variable name",
-                path.display(),
-                i + 1
-            ));
-        }
-        let v = value.trim();
-        let unquoted = v
-            .strip_prefix('"')
-            .and_then(|x| x.strip_suffix('"'))
-            .or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
-            .unwrap_or(v);
-        if std::env::var_os(key).is_none() {
-            std::env::set_var(key, unquoted);
-            set += 1;
+    let parsed = parse_env_file(path, &text)?;
+    let databases = parsed.databases.len();
+    VAULT_PASSWORDS
+        .set(parsed.databases)
+        .map_err(|_| anyhow!("{DEFAULT_ENV_FILE} was already loaded"))?;
+    let mut variables = 0usize;
+    for (key, value) in parsed.environment {
+        if std::env::var_os(&key).is_none() {
+            std::env::set_var(key, value);
+            variables += 1;
         }
     }
-    Ok(set)
+    Ok((databases, variables))
 }
 
 /// The vault password from the environment, if `--env` opted in and the
@@ -4605,37 +4764,15 @@ fn password_from_env() -> Option<String> {
     }
 }
 
-/// Resolve the opt-in password source for a particular vault. The legacy
-/// single-password variable takes precedence over named dotenv profiles and
-/// the YAML map.
+/// Resolve the opt-in password source for a particular vault: an exported
+/// `TROVE_VAULT_PASSWORD` first, so an explicit caller wins over the file, then
+/// the file's `databases:` entry for the vault's filename.
 fn password_for_vault(vault: &Path) -> Option<String> {
     password_from_env().or_else(|| {
         if !ENV_OPT_IN.get().copied().unwrap_or(false) {
             return None;
         }
         let name = vault.file_name()?.to_str()?;
-        // A profile names the vault explicitly, so filenames need no conversion
-        // into environment-variable-safe identifiers. Sort for stable behavior
-        // if more than one profile names the same vault.
-        let mut profiles: Vec<_> = std::env::vars_os()
-            .filter_map(|(key, file)| {
-                let key = key.into_string().ok()?;
-                let profile = key.strip_prefix("TROVE_VAULT_")?.strip_suffix("_FILE")?;
-                if profile.is_empty() || file != name {
-                    return None;
-                }
-                Some(profile.to_owned())
-            })
-            .collect();
-        profiles.sort();
-        for profile in profiles {
-            let key = format!("TROVE_VAULT_{profile}_PASSWORD");
-            if let Ok(password) = std::env::var(key) {
-                if !password.is_empty() {
-                    return Some(password);
-                }
-            }
-        }
         VAULT_PASSWORDS.get().and_then(|map| map.get(name).cloned())
     })
 }
@@ -8479,5 +8616,156 @@ mod kdf_memory_conversion_tests {
     fn mib_to_kib_checks_overflow() {
         assert_eq!(mib_to_kib(64).unwrap(), 64 * 1024);
         assert!(mib_to_kib(u64::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod env_file_tests {
+    use super::*;
+
+    fn parse(text: &str) -> Result<EnvFile> {
+        parse_env_file(Path::new(".env.trove.yaml"), text)
+    }
+
+    fn err(text: &str) -> String {
+        format!("{:#}", parse(text).expect_err("should be refused"))
+    }
+
+    #[test]
+    fn both_sections_parse() {
+        let got = parse(
+            "# comment\ndatabases:\n  work.kdbx: \"w pw\"\nenvironment:\n  TROVE_IDLE_TIMEOUT: \"900\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            got.databases.get("work.kdbx").map(String::as_str),
+            Some("w pw")
+        );
+        assert_eq!(
+            got.environment,
+            vec![("TROVE_IDLE_TIMEOUT".to_owned(), "900".to_owned())]
+        );
+    }
+
+    #[test]
+    fn either_section_alone_is_enough() {
+        assert_eq!(
+            parse("databases:\n  a.kdbx: x\n").unwrap().databases.len(),
+            1
+        );
+        assert_eq!(
+            parse("environment:\n  A: x\n").unwrap().environment.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn environment_numbers_and_booleans_become_their_text() {
+        let got = parse("environment:\n  A: 900\n  B: true\n").unwrap();
+        assert_eq!(
+            got.environment,
+            vec![
+                ("A".to_owned(), "900".to_owned()),
+                ("B".to_owned(), "true".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn dotenv_lines_get_the_conversion_advice() {
+        assert!(err("TROVE_VAULT_PASSWORD=x\n").contains("databases:"));
+        assert!(err("export A=\"b: c\"\n").contains("databases:"));
+    }
+
+    #[test]
+    fn a_bare_filename_map_gets_the_conversion_advice() {
+        assert!(err("work.kdbx: \"pw\"\n").contains("databases:"));
+    }
+
+    #[test]
+    fn an_unknown_section_is_named() {
+        let e = err("databases:\n  a.kdbx: x\nsettings:\n  b: c\n");
+        assert!(e.contains("\"settings\""), "{e}");
+    }
+
+    #[test]
+    fn an_empty_or_sectionless_file_is_refused() {
+        assert!(err("").contains("expected a YAML mapping"));
+        assert!(err("# only a comment\n").contains("expected a YAML mapping"));
+        assert!(err("{}\n").contains("expected a YAML mapping"));
+        assert!(err("- a\n- b\n").contains("expected a YAML mapping"));
+    }
+
+    #[test]
+    fn a_database_password_must_be_a_non_empty_string() {
+        assert!(err("databases:\n  a.kdbx: 0123\n").contains("put it in quotes"));
+        assert!(err("databases:\n  a.kdbx: \"\"\n").contains("is empty"));
+        assert!(err("databases:\n  a.kdbx:\n").contains("put it in quotes"));
+    }
+
+    #[test]
+    fn a_database_name_is_a_filename_not_a_path() {
+        assert!(err("databases:\n  /v/a.kdbx: x\n").contains("not a path"));
+        assert!(err("databases:\n  v\\\\a.kdbx: x\n").contains("not a path"));
+    }
+
+    #[test]
+    fn sections_must_be_mappings() {
+        assert!(err("databases: x\n").contains("`databases` must map"));
+        assert!(err("environment:\n  - A\n").contains("`environment` must map"));
+    }
+
+    #[test]
+    fn environment_refuses_bad_names_values_and_passwords() {
+        assert!(err("environment:\n  A-B: x\n").contains("not a valid variable name"));
+        assert!(err("environment:\n  A:\n    b: c\n").contains("string, number or boolean"));
+        for key in [
+            "TROVE_VAULT_PASSWORD",
+            "TROVE_VAULT_WORK_PASSWORD",
+            "TROVE_VAULT_WORK_FILE",
+        ] {
+            assert!(
+                err(&format!("environment:\n  {key}: x\n")).contains("go under `databases:`"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn password_vars_are_recognised() {
+        assert!(is_password_var("TROVE_VAULT_PASSWORD"));
+        assert!(is_password_var("TROVE_VAULT_X_PASSWORD"));
+        assert!(is_password_var("TROVE_VAULT_X_FILE"));
+        assert!(!is_password_var("TROVE_VAULT"));
+        assert!(!is_password_var("TROVE_IDLE_TIMEOUT"));
+    }
+
+    #[test]
+    fn env_var_names_are_checked() {
+        assert!(is_env_var_name("TROVE_IDLE_TIMEOUT"));
+        assert!(is_env_var_name("a1_b"));
+        assert!(!is_env_var_name(""));
+        assert!(!is_env_var_name("A-B"));
+        assert!(!is_env_var_name("A B"));
+    }
+
+    #[test]
+    fn a_retired_file_is_found_only_where_the_new_one_is_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let new = tmp.path().join(DEFAULT_ENV_FILE);
+        assert_eq!(legacy_env_file(&new), None, "neither file");
+        std::fs::write(tmp.path().join(LEGACY_ENV_FILE), "A=b\n").unwrap();
+        assert_eq!(
+            legacy_env_file(&new),
+            Some(tmp.path().join(LEGACY_ENV_FILE)),
+            "only the retired one"
+        );
+        std::fs::write(&new, "environment:\n  A: b\n").unwrap();
+        assert_eq!(legacy_env_file(&new), None, "the new one wins");
+        assert_eq!(
+            legacy_env_file(&tmp.path().join("other.yaml")),
+            None,
+            "a file named on the command line is never second-guessed"
+        );
     }
 }

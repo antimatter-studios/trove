@@ -603,12 +603,25 @@ fn classify_vault_header(path: &Path, head: &[u8]) -> Check {
     }
 }
 
-/// Every `.env.trove` a bare `--env` would find, checked for permissions.
+/// Every `.env.trove.yaml` a bare `--env` would find, checked for permissions,
+/// and every retired `.env.trove` where one belongs, which `--env` refuses.
 fn env_file_checks(vault: Option<&Path>) -> Vec<Check> {
     crate::env_file_candidates(vault)
         .into_iter()
-        .filter(|p| p.is_file())
-        .map(|p| env_file_check(&p))
+        .filter_map(|p| {
+            if p.is_file() {
+                return Some(env_file_check(&p));
+            }
+            let legacy = crate::legacy_env_file(&p)?;
+            Some(
+                Check::new(
+                    "env-file",
+                    Level::Fail,
+                    format!("{} is no longer read; --env refuses it", legacy.display()),
+                )
+                .hint(format!("convert it to {}", p.display())),
+            )
+        })
         .collect()
 }
 
