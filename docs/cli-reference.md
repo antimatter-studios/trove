@@ -1710,7 +1710,7 @@ trove exec --entry antimatter-studios/gitea -- tea pr list
 
 ```
 trove [--vault <PATH>] settings show [<PATH>] [<CAPABILITY>] [--group | --database] [--effective] [--json]
-trove [--vault <PATH>] settings edit [<PATH>] <CAPABILITY> [--group | --database]
+trove [--vault <PATH>] settings edit <CAPABILITY> [<PATH>] [--group | --database]
 trove [--vault <PATH>] settings validate [<SCOPE>]
 trove [--vault <PATH>] settings migrate [<SCOPE>] [--dry-run]
 ```

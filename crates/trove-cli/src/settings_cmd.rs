@@ -193,8 +193,10 @@ pub enum SettingsOp {
     },
     /// Edit a document's XML in $EDITOR; it is validated before it is saved.
     Edit {
-        path: Option<String>,
+        /// env-agent, materialize or gpg-agent.
         capability: String,
+        /// Entry path, or with --group a group path; none with --database.
+        path: Option<String>,
         #[arg(long, conflicts_with = "database")]
         group: bool,
         #[arg(long)]

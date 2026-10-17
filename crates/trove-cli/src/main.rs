@@ -8518,6 +8518,20 @@ mod format_tests {
 }
 
 #[cfg(test)]
+mod cli_definition_tests {
+    use super::*;
+
+    /// clap checks a command's definition only when that command is parsed,
+    /// so a bad one (a required positional after an optional one) passes the
+    /// build and fails the first person to type it. This checks them all.
+    #[test]
+    fn every_command_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+}
+
+#[cfg(test)]
 mod completions_tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
