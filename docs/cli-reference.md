@@ -622,31 +622,42 @@ If a name matches both an entry and a group, `exec` reports the ambiguity.
 Select the intended scope with `--entry PATH` or `--group PATH`, for example
 `trove --vault v.kdbx exec --group Infra -- env`.
 
-Variable naming: an entry's `Exec.Env` custom field names the variable
-exactly (`Exec.Env=KUBECONFIG` on an attachment entry → `KUBECONFIG=<temp
-path>`; on a password entry → that variable carries the password). Without
-`Exec.Env`: `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE` (title
-uppercased, non-alphanumerics → `_`).
+What an entry exports is its `EnvAgent.settings` document: one environment
+variable per `<Variable>`, naming the field or attachment it comes from. A field
+is exported as its value; an attachment is written into the run directory and
+its path exported.
 
-With `--vault` it opens that file, asking for its password. Without it, it reads
-the vaults unlocked in the daemon through the session-gated reads, so it needs
-the `TROVE_SESSION` code from `trove unlock` and no password.
+```xml
+<EnvAgentSettings version="1">
+  <Variable name="GITEA_TOKEN" field="gitea-token"/>
+  <Variable name="PGPASSWORD" field="Password"/>
+  <Variable name="KUBECONFIG" attachment="kubeconfig"/>
+</EnvAgentSettings>
+```
 
-An entry that needs several variables maps each with an `Exec.<VAR>` field
-naming its source: a field, standard or custom, or `@<attachment>` for the
-path of that attachment in the run directory. A database entry might carry:
+**An entry without the document exports nothing.** To turn `exec` on for an
+entry, create its document with `trove env-agent add`. A scope in which no
+entry has one is an error that says so, rather than a command run with nothing
+injected. A variable whose item sets `confirm="true"` is refused, because
+`exec` cannot ask for the approval it needs.
+
+During the transition, the fields the document replaces still count as one, so
+existing vaults keep working:
 
 | field | value | exports |
 | --- | --- | --- |
 | `Exec.PGUSER` | `UserName` | `PGUSER=<UserName>` |
-| `Exec.PGPASSWORD` | `Password` | `PGPASSWORD=<Password>` |
-| `Exec.PGHOST` | `URL` | `PGHOST=<URL>` |
 | `Exec.PGSSLROOTCERT` | `@ca.pem` | `PGSSLROOTCERT=<temp path>/…-ca.pem` |
+| `Exec.Env` | `KUBECONFIG` | the entry's only attachment's path, else its Password |
 
-An entry with mappings exports only those, plus `Exec.Env` if it has one; the
-`TROVE_<TITLE>_*` fallback is off. A mapping that names a field or attachment
-the entry doesn't have, or a variable name that isn't one, stops `exec` before
-the command runs.
+The `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE` names an unconfigured entry
+used to get are gone. A variable that names a field or attachment the entry
+doesn't have, or a name that isn't a valid variable, stops `exec` before the
+command runs.
+
+With `--vault` it opens that file, asking for its password. Without it, it reads
+the vaults unlocked in the daemon through the session-gated reads, so it needs
+the `TROVE_SESSION` code from `trove unlock` and no password.
 
 ## trove merge
 

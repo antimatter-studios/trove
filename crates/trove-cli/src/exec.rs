@@ -3,24 +3,21 @@
 //! attachments materialized into a private per-run temp directory that is
 //! wiped the moment the child exits. Nothing outlives the process tree.
 //!
-//! Naming: an entry with an `Exec.Env` custom field exports its Password
-//! under exactly that name (`Exec.Env=STRIPE_KEY` → `STRIPE_KEY=...`). An
-//! entry with an attachment and `Exec.Env` exports the attachment's
-//! materialized PATH under that name (`Exec.Env=KUBECONFIG` →
-//! `KUBECONFIG=/private/tmp/.../kubeconfig`). Without `Exec.Env` the
-//! fallback is `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`, title
-//! uppercased with non-alphanumerics collapsed to `_`.
+//! What an entry exports is its `EnvAgent.settings`: one `<Variable>` per
+//! variable, naming a field (`field="gitea-token"`, `field="Password"`) or an
+//! attachment, whose materialized PATH is exported
+//! (`attachment="kubeconfig"` → `KUBECONFIG=/private/tmp/.../kubeconfig`).
+//! An entry without the document exports nothing: to turn exec on for an
+//! entry, create its document (`trove env-agent add`).
 //!
-//! An entry that needs more than one variable maps each explicitly with
-//! `Exec.<VAR>` fields naming the source: another field
-//! (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`, `Exec.PGHOST=URL`,
-//! or any custom field) or, with a leading `@`, an attachment whose
-//! materialized path is exported (`Exec.PGSSLROOTCERT=@ca.pem`). Such an
-//! entry exports only its mappings, plus `Exec.Env` if it also has one.
+//! During the transition, the fields the document replaces still count as
+//! one: `Exec.<VAR>=<field>` or `Exec.<VAR>=@<attachment>` maps a variable,
+//! and `Exec.Env=<VAR>` exports the entry's sole attachment or its Password.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use trove_core::settings::{Capability, EffectiveItem};
 use trove_core::{EntryId, Vault};
 
 /// One resolved injection: an env var carrying either a secret value or the
@@ -65,9 +62,10 @@ pub trait Source {
     /// The id of the entry at `path` (a title alone finds the first match).
     fn find(&self, path: &str) -> Result<Option<String>>;
     fn field(&self, e: &Entry, name: &str) -> Result<Option<String>>;
-    /// The names of the entry's fields starting with `prefix`.
-    fn field_names(&self, e: &Entry, prefix: &str) -> Result<Vec<String>>;
     fn attachment(&self, e: &Entry, name: &str) -> Result<Option<Vec<u8>>>;
+    /// The entry's `EnvAgent.settings` items, resolved through inheritance;
+    /// `None` when exec is off for the entry.
+    fn settings(&self, e: &Entry) -> Result<Option<Vec<EffectiveItem>>>;
 }
 
 /// A vault file opened by `exec` itself.
@@ -113,11 +111,13 @@ impl Source for VaultSource<'_> {
     fn field(&self, e: &Entry, name: &str) -> Result<Option<String>> {
         Ok(self.vault.get_field(self.id(e)?, name)?)
     }
-    fn field_names(&self, e: &Entry, prefix: &str) -> Result<Vec<String>> {
-        Ok(self.vault.fields_with_prefix(self.id(e)?, prefix)?)
-    }
     fn attachment(&self, e: &Entry, name: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.vault.read_binary(self.id(e)?, name)?)
+    }
+    fn settings(&self, e: &Entry) -> Result<Option<Vec<EffectiveItem>>> {
+        Ok(self
+            .vault
+            .effective_settings(self.id(e)?, Capability::EnvAgent)?)
     }
 }
 
@@ -241,13 +241,6 @@ impl Source for DaemonSource {
             Err(e) => Err(e),
         }
     }
-    fn field_names(&self, e: &Entry, prefix: &str) -> Result<Vec<String>> {
-        Ok(self
-            .custom_fields(e)?
-            .into_iter()
-            .filter(|n| n.starts_with(prefix))
-            .collect())
-    }
     fn attachment(&self, e: &Entry, name: &str) -> Result<Option<Vec<u8>>> {
         use base64::Engine as _;
         if !e.attachment_names.iter().any(|a| a == name) {
@@ -265,6 +258,20 @@ impl Source for DaemonSource {
         Ok(Some(
             base64::engine::general_purpose::STANDARD.decode(data)?,
         ))
+    }
+    fn settings(&self, e: &Entry) -> Result<Option<Vec<EffectiveItem>>> {
+        let resp = crate::daemon_call(&crate::daemon::Request::Settings {
+            path: e.display_path(),
+            capability: Capability::EnvAgent.cli_name().to_string(),
+            group: false,
+        })?;
+        let dto: troved::protocol::SettingsDto = serde_json::from_value(
+            resp.get("settings")
+                .cloned()
+                .ok_or_else(|| anyhow!("malformed daemon response: missing 'settings'"))?,
+        )
+        .context("reading the daemon's settings response")?;
+        Ok(dto.effective_items())
     }
 }
 
@@ -324,94 +331,68 @@ pub fn resolve(v: &dyn Source, scope: Scope, tmp: &Path) -> Result<Vec<Injection
     };
 
     let mut out = Vec::new();
+    let mut unconfigured: Vec<&Entry> = Vec::new();
     for e in matches {
-        let exec_env = v.field(e, "Exec.Env")?;
-        let fallback = env_name_from_title(&e.title);
-
-        let mappings = mapped_injections(v, e, tmp)?;
-        if !mappings.is_empty() {
-            out.extend(mappings);
-            if exec_env.is_none() {
-                continue;
-            }
-        }
-
-        // Attachment-bearing entries inject a FILE path. Prefer the
-        // materialization source when declared, else a sole attachment.
-        let att = match v.field(e, "Materialize.Source")? {
-            Some(src) if e.attachment_names.contains(&src) => Some(src),
-            _ if e.attachment_names.len() == 1 => Some(e.attachment_names[0].clone()),
-            _ => None,
+        let Some(items) = v.settings(e)? else {
+            unconfigured.push(e);
+            continue;
         };
-        if let Some(att_name) = att {
-            if let Some(bytes) = v.attachment(e, &att_name)? {
-                let file = materialize(tmp, e, &att_name, &bytes)?;
-                out.push(Injection {
-                    name: exec_env
-                        .clone()
-                        .unwrap_or_else(|| format!("TROVE_{fallback}_FILE")),
-                    value: file.to_string_lossy().into_owned(),
-                });
-                continue;
-            }
-        }
-
-        // String secret: the Password field.
-        if let Some(pw) = v.field(e, "Password")? {
-            if !pw.is_empty() {
-                out.push(Injection {
-                    name: exec_env.unwrap_or_else(|| format!("TROVE_{fallback}_PASSWORD")),
-                    value: pw,
-                });
-            }
-        }
+        out.extend(injections(v, e, &items, tmp)?);
     }
     if out.is_empty() {
+        let hint = match unconfigured.first() {
+            Some(e) => format!(
+                "; turn exec on for an entry with `trove env-agent add '{}' TROVE_{}_PASSWORD \
+                 --field Password`, naming the variable and field it should export",
+                e.display_path(),
+                env_name_from_title(&e.title)
+            ),
+            None => String::new(),
+        };
         return Err(anyhow!(
-            "'{name}' matched entries but none carry a password or attachment to inject"
+            "'{name}' matched entries, but none has EnvAgent.settings saying what to export{hint}"
         ));
     }
     Ok(out)
 }
 
-/// The `Exec.<VAR>` mappings on one entry (every `Exec.*` field but
-/// `Exec.Env`), resolved and sorted by variable name. A mapping that names a
-/// field or attachment the entry doesn't have is an error rather than a
-/// silently missing variable.
-fn mapped_injections(v: &dyn Source, e: &Entry, tmp: &Path) -> Result<Vec<Injection>> {
-    let mut names = v.field_names(e, "Exec.")?;
-    names.retain(|n| n != "Exec.Env");
-    names.sort();
+/// One entry's variables, from its effective `EnvAgent.settings` items. A
+/// variable that names a field or attachment the entry doesn't have is an
+/// error rather than a silently missing variable.
+fn injections(
+    v: &dyn Source,
+    e: &Entry,
+    items: &[EffectiveItem],
+    tmp: &Path,
+) -> Result<Vec<Injection>> {
     let path = e.display_path();
-    let mut out = Vec::with_capacity(names.len());
-    for field in names {
-        let var = &field["Exec.".len()..];
-        if !is_env_name(var) {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let var = &item.key;
+        if item.flag("confirm") {
             return Err(anyhow!(
-                "{path}: '{field}' doesn't name a valid environment variable \
-                 (letters, digits and _, not starting with a digit)"
+                "{path}: {var} needs Touch ID approval (confirm=\"true\"), which trove exec \
+                 cannot ask for yet"
             ));
         }
-        let source = v.field(e, &field)?.unwrap_or_default();
-        let source = source.trim();
-        let value = if let Some(att) = source.strip_prefix('@') {
+        let value = if let Some(att) = item.get("attachment") {
             let bytes = v.attachment(e, att)?.ok_or_else(|| {
-                anyhow!("{path}: {field} names attachment '{att}', which it doesn't have")
+                anyhow!("{path}: {var} names attachment '{att}', which the entry doesn't have")
             })?;
-            let file = materialize(tmp, e, att, &bytes)?;
-            file.to_string_lossy().into_owned()
-        } else {
-            if source.is_empty() {
-                return Err(anyhow!(
-                    "{path}: {field} is empty; set it to a field name or @attachment"
-                ));
-            }
-            v.field(e, source)?.ok_or_else(|| {
-                anyhow!("{path}: {field} names field '{source}', which it doesn't have")
+            materialize(tmp, e, att, &bytes)?
+                .to_string_lossy()
+                .into_owned()
+        } else if let Some(field) = item.get("field") {
+            v.field(e, field)?.ok_or_else(|| {
+                anyhow!("{path}: {var} names field '{field}', which the entry doesn't have")
             })?
+        } else {
+            return Err(anyhow!(
+                "{path}: {var} names neither a field nor an attachment"
+            ));
         };
         out.push(Injection {
-            name: var.to_string(),
+            name: var.clone(),
             value,
         });
     }
@@ -427,13 +408,6 @@ fn materialize(tmp: &Path, e: &Entry, att: &str, bytes: &[u8]) -> Result<PathBuf
         write_private(&file, bytes)?;
     }
     Ok(file)
-}
-
-/// A POSIX-portable environment variable name.
-fn is_env_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn group_matches<'a>(all: &'a [Entry], scope: &str) -> Vec<&'a Entry> {
@@ -622,7 +596,7 @@ mod tests {
         let id = v.add_entry("Infra/stripe").unwrap();
         v.set_field(&id, "Password", "sk_live_123").unwrap();
         v.set_field(&id, "Exec.Env", "STRIPE_KEY").unwrap();
-        // String secret with fallback name.
+        // No EnvAgent.settings and no Exec.* field: exec is off for it.
         let id = v.add_entry("Infra/db-main").unwrap();
         v.set_field(&id, "Password", "pg-pass").unwrap();
         // File attachment with explicit env name.
@@ -646,11 +620,12 @@ mod tests {
         let mut inj = resolve(&VaultSource::new(&v), Scope::Auto("Infra".into()), &tmp).unwrap();
         inj.sort_by(|a, b| a.name.cmp(&b.name));
         let names: Vec<&str> = inj.iter().map(|i| i.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["KUBECONFIG", "STRIPE_KEY", "TROVE_DB_MAIN_PASSWORD"]
-        );
+        assert_eq!(names, vec!["KUBECONFIG", "STRIPE_KEY"]);
         assert!(!inj.iter().any(|i| i.value == "not-injected"));
+        assert!(
+            !inj.iter().any(|i| i.value == "pg-pass"),
+            "an entry without EnvAgent.settings exports nothing"
+        );
 
         let kube = inj.iter().find(|i| i.name == "KUBECONFIG").unwrap();
         assert!(
@@ -730,6 +705,118 @@ mod tests {
                 .err()
                 .expect(field);
             assert!(err.to_string().contains(wanted), "{field}: {err}");
+        }
+    }
+
+    fn doc_vault(dir: &TempDir, xml: &str) -> Vault {
+        let mut v = Vault::create(&dir.path().join("d.kdbx"), "pw").unwrap();
+        let id = v.add_entry("antimatter-studios/gitea").unwrap();
+        v.set_field(&id, "UserName", "chris").unwrap();
+        v.set_field(&id, "gitea-token", "tok-123").unwrap();
+        v.attach_binary(&id, "gitea_ed25519", b"KEY").unwrap();
+        v.attach_binary(&id, "EnvAgent.settings", xml.as_bytes())
+            .unwrap();
+        v
+    }
+
+    #[test]
+    fn env_agent_settings_say_what_to_export() {
+        let dir = TempDir::new().unwrap();
+        let v = doc_vault(
+            &dir,
+            r#"<EnvAgentSettings version="1">
+                 <Variable name="GITEA_TOKEN" field="gitea-token"/>
+                 <Variable name="GITEA_USER" field="UserName"/>
+               </EnvAgentSettings>"#,
+        );
+        let tmp = dir.path().join("run");
+        std::fs::create_dir(&tmp).unwrap();
+        let inj = resolve(
+            &VaultSource::new(&v),
+            Scope::Entry("antimatter-studios/gitea".into()),
+            &tmp,
+        )
+        .unwrap();
+        let got: Vec<(&str, &str)> = inj
+            .iter()
+            .map(|i| (i.name.as_str(), i.value.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("GITEA_TOKEN", "tok-123"), ("GITEA_USER", "chris")]
+        );
+        assert!(
+            std::fs::read_dir(&tmp).unwrap().next().is_none(),
+            "an attachment the document doesn't name is never written"
+        );
+        wipe_dir(&tmp);
+    }
+
+    #[test]
+    fn a_scope_with_nothing_configured_says_how_to_turn_exec_on() {
+        let dir = TempDir::new().unwrap();
+        let mut v = Vault::create(&dir.path().join("n.kdbx"), "pw").unwrap();
+        let id = v.add_entry("Infra/db-main").unwrap();
+        v.set_field(&id, "Password", "pg-pass").unwrap();
+        let tmp = dir.path().join("run");
+        std::fs::create_dir(&tmp).unwrap();
+        let err = resolve(&VaultSource::new(&v), Scope::Auto("Infra".into()), &tmp)
+            .err()
+            .expect("nothing to export");
+        let msg = err.to_string();
+        assert!(msg.contains("EnvAgent.settings"), "{msg}");
+        assert!(
+            msg.contains("trove env-agent add 'Infra/db-main' TROVE_DB_MAIN_PASSWORD"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_confirm_flagged_variable_is_refused_until_approval_exists() {
+        let dir = TempDir::new().unwrap();
+        let v = doc_vault(
+            &dir,
+            r#"<EnvAgentSettings version="1">
+                 <Variable name="GITEA_TOKEN" field="gitea-token" confirm="true"/>
+               </EnvAgentSettings>"#,
+        );
+        let tmp = dir.path().join("run");
+        std::fs::create_dir(&tmp).unwrap();
+        let err = resolve(
+            &VaultSource::new(&v),
+            Scope::Entry("antimatter-studios/gitea".into()),
+            &tmp,
+        )
+        .err()
+        .expect("refused");
+        assert!(err.to_string().contains("Touch ID"), "{err}");
+    }
+
+    #[test]
+    fn a_variable_naming_a_missing_source_fails() {
+        let dir = TempDir::new().unwrap();
+        for (xml, wanted) in [
+            (
+                r#"<EnvAgentSettings version="1"><Variable name="A" field="nope"/></EnvAgentSettings>"#,
+                "field 'nope'",
+            ),
+            (
+                r#"<EnvAgentSettings version="1"><Variable name="A" attachment="nope.pem"/></EnvAgentSettings>"#,
+                "attachment 'nope.pem'",
+            ),
+        ] {
+            let sub = TempDir::new().unwrap();
+            let v = doc_vault(&sub, xml);
+            let tmp = dir.path().join(format!("run-{}", wanted.len()));
+            std::fs::create_dir(&tmp).unwrap();
+            let err = resolve(
+                &VaultSource::new(&v),
+                Scope::Entry("antimatter-studios/gitea".into()),
+                &tmp,
+            )
+            .err()
+            .expect(wanted);
+            assert!(err.to_string().contains(wanted), "{err}");
         }
     }
 
