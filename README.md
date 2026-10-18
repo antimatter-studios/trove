@@ -426,6 +426,9 @@ Early but real — the headless-daemon path works end-to-end on Linux and macOS 
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.26.0
+Capability settings documents: `EnvAgent.settings`, `Materialize.settings` and `GpgAgent.settings` say what `trove exec` exports, which files are written and which GPG keys are served, with folder defaults that never grant; no document means off. New `trove env-agent`, `trove materialize add`, `trove gpg-agent enable`, `trove settings`, desktop panels for all of it, Touch ID approval for items marked `confirm`, and `export="shell"` variables set by `trove unlock --export`. `--env` reads `.env.trove.yaml` (passwords under `databases:`, settings under `environment:`); the old `.env.trove` formats are refused with directions to convert. `trove exec` maps several variables per entry and runs against the unlocked daemon. SSH keys load passphrase-protected, from PuTTY `.ppk` and as P-521, and `import-ssh` bootstraps a vault from `~/.ssh`. New `trove doctor`, `trove health` and `analyze --reuse/--weak/--age/--expired`; `troved --resident` with service units; entry expiry and icons.
+
 ### v0.25.0
 `trove sync <OTHER>` syncs the vault two ways with another copy of it, and saving no longer refuses when another writer changed the file: their changes are merged in. Attachment fixes: removing one no longer mixes up the others, and edits, deletes and `trove merge` handle them correctly. One ssh-keygen ECDSA key in 256 that failed to load now loads. The 1.0 stability promise is written down, `--json` shapes are pinned, `trove-core`'s API is settled for semver, and macOS release artifacts are notarized.
 
@@ -452,6 +455,3 @@ Read and status commands support `--json`; `trove describe` exposes safe metadat
 
 ### v0.18.0
 `trove unlock --detach` unlocks the vault and hands your prompt straight back — no subshell, nothing to `eval`, and no session code. Both agents serve the vault's keys and `Materialize.*` entries are written as always, so `ssh`, `git` and `gpg` work; what is refused in that shell is extraction (`get`, `materialize`), because no code was minted. Not minted and withheld — not minted: a code nobody holds is still a live extraction capability sitting in daemon memory. Detaching one vault leaves an earlier session working, since unlock is additive. **`--no-shell` is removed**; it aliased `--export` and read like a statement about your terminal when it was really about `eval`, which made it the obvious wrong flag to reach for. `--export` is the replacement. The socket path `--export` prints is now shell-quoted.
-
-### v0.17.4
-Desktop entry paths are relative to the folder you are in — typing `ssh` inside `Infra` creates `Infra/ssh`, a leading `/` escapes to the root, and the field previews where it will land. Saving keeps your place instead of jumping to All Entries, and only follows the entry when it has left the view. Folders list what is filed directly in them, file-browser style, with subfolders in the sidebar. Two bugs found by hand: New entry while editing kept the previous entry's values and would have saved a duplicate of it, and new entries no longer arrive with a generated password nobody asked for.

@@ -4,6 +4,109 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.26.0 — 2026-10-18
+
+**Capability settings documents.** An entry now says which capability uses
+its secrets, and under what rules, in one XML document per capability:
+`EnvAgent.settings` (what `trove exec` exports), `Materialize.settings` (which
+attachments are written where on unlock) and `GpgAgent.settings` (which GPG
+keys the agent serves), beside KeePassXC's `KeeAgent.settings`. A document
+holds rules and the names of fields and attachments, never a value. No
+document means the capability is off: `trove exec` exports nothing from an
+entry without `EnvAgent.settings`, and the `TROVE_<TITLE>_*` fallback names
+are gone. A group or the database can hold the same documents in `CustomData`,
+with defaults only, so a folder never grants; an entry's items inherit from
+its folders, the nearest value winning, and constraints only tighten. During
+the transition `Exec.*` and `Materialize.*` fields and a `gpg-priv` attachment
+still count as a document; `trove settings migrate` converts a vault, and
+`trove add file` writes the document. A KeePassXC open-and-save keeps every
+document, measured by an oracle test. (#397, #399, #400)
+
+**Commands for them.** `trove env-agent add|remove|disable|defaults`,
+`trove materialize add|remove|disable|defaults`, `trove gpg-agent
+enable|disable|defaults` and `trove ssh-agent enable|disable` edit the
+documents on the vault file or through the daemon; `trove settings show
+[--effective] [--json]`, `edit`, `validate` and `migrate` inspect and edit any
+of them. `trove env-agent add antimatter-studios/gitea GITEA_TOKEN --field
+gitea-token` is all it takes to hand an agent a token through `trove exec`.
+The desktop app gains Environment and GPG agent sections, a materialize editor
+that shows a folder's directory as inherited, and folder defaults in Edit
+Folder. (#401, #402)
+
+**Touch ID approval.** An item with `confirm="true"` hands its secret over
+only after a fingerprint: the daemon asks before `GetField` or `Get` returns
+it, and the GPG agent before signing or decrypting with such a key. Where no
+approval can be asked, the secret is refused rather than released on the
+strength of the unlock. One approval covers the item for its `lifetime`.
+(#403)
+
+**Shell exports.** A variable whose settings say `export="shell"` is also
+exported by `trove unlock --export` and set in the session subshell. (#404)
+
+**`.env.trove.yaml` replaces `.env.trove`.** `--env` reads one YAML file:
+vault passwords under `databases:`, keyed by vault filename, and other
+variables under `environment:`. The dotenv `.env.trove`, its
+`TROVE_VAULT_<NAME>_FILE` profiles and the bare filename-to-password map are
+retired outright and refused with directions to convert, and `trove doctor`
+reports a leftover `.env.trove` as a failure. This deliberately breaks the
+config-file promise in `docs/stability.md`, which now says so. Convert by
+moving each password under `databases:` and every other variable under
+`environment:`, then delete the old file. (#396)
+
+**`trove exec` grows up.** Before settings documents, an entry could already
+map several variables, each to any field or, with `@<attachment>`, to an
+attachment's path (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`); those
+fields now count as an `EnvAgent.settings` during the transition (#374). Without `--vault`, exec reads the vaults
+unlocked in troved with `TROVE_SESSION` and no password (#382). On Linux its
+files go to a memory-backed directory rather than disk-backed `/tmp` (#363).
+
+**SSH keys load in more forms.** Passphrase-protected OpenSSH keys are
+decrypted with the entry's Password, as KeePassXC's agent does (#365); PuTTY
+`.ppk` keys are read (#373) and imported (#384); ECDSA P-521 keys load, and DSA
+says why it is skipped (#357). `trove import-ssh` bootstraps a vault from
+`~/.ssh` (#371), and `trove ssh-agent add` takes a glob or `--tag` to fill a
+private agent in one go (#369). A KeeAgent lifetime now applies on trove's own
+agent, not only the forwarded copy (#361). Entries pointing at an external key
+file are reported rather than silently ignored (#366), and every skipped key is
+listed with its reason in `unlock` and `status` (#358).
+
+**GPG.** Passphrase-protected `gpg --export-secret-keys` exports are accepted
+(#381). `trove gpg-agent import` puts a vault key's public half into gpg's
+keyring, without which gpg never asks the agent to sign (#372). `gpgconf
+--kill` and `--reload` get answers instead of `Unknown_IPC_Command` (#345).
+
+**Checks and reports.** `trove doctor` checks the setup around trove and says
+what to fix (#370), including gpg's keyring and where materialized files live
+(#386). `trove analyze` gains `--reuse`, `--weak`, `--age` (#378) and
+`--expired`, and `trove health` runs them all as one report (#387). `trove
+status --verbose` lists what each vault serves (#385), and `materialize-status`
+says whether each file is in memory or on disk (#376).
+
+**Entries.** Expiry dates (#379) and built-in icons (#388) can be set and
+shown, as KeePassXC stores them. Steam Guard codes match KeePassXC's, and HOTP
+entries are refused instead of misread as TOTP (#377).
+
+**Daemon.** `troved --resident` stays up after the last lock, with launchd,
+systemd and `brew services` units in `packaging/` (#368). Materialize changes
+made while unlocked take effect at once (#375). On Windows, troved hands out
+agent pipe names, retries busy pipes (#364) and serves the OpenSSH agent pipe
+when it is free (#367). The server moves into `troved::server::serve` (#380).
+
+**Security.** Session codes are compared in constant time (#348), the daemon
+is non-dumpable on Linux (#349), and `trove clip` no longer puts the
+clipboard's hash on argv, where `ps` showed it (#354).
+
+**Compatibility.** Every attachment in a KeePassXC-written KDBX 3.1 vault is
+read, fixing two keepass-rs reader bugs (#360), and trove's save path is
+tested through every cipher, KDF and compression (#359). `trove-core` owns its
+challenge-response key type instead of re-exporting keepass-rs's, a breaking
+change for its YubiKey API (#355).
+
+**Project.** cargo-deny checks licences, bans and sources (#350); fuzz seeds
+are committed and replayed on stable (#352); scope decisions move to
+`docs/scope.md` (#346) and the README lists what shipped (#351). Test and
+lockfile fixes: #347, #362, #383.
+
 ## v0.25.0 — 2026-09-30
 
 **`trove sync`, a two-way sync with another copy of the vault.** `trove sync
