@@ -14,7 +14,7 @@
 //!   fingerprint covers that item for ten minutes; without one, every use asks.
 //! * **Prompts happen outside the daemon's locks.** A prompt can wait for a
 //!   minute, and holding the vault lock through it would stall every other
-//!   request.
+//!   request. A prompt waits up to a minute for a finger.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,9 +23,6 @@ use std::time::{Duration, Instant};
 
 use trove_core::settings::{Capability, EffectiveItem};
 use trove_core::{EntryId, Vault};
-
-/// How long a prompt waits for a finger before counting as a refusal.
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One settings item that needs approval before its secret is used.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -205,8 +202,12 @@ fn no_approver() -> String {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod platform {
-    use super::PROMPT_TIMEOUT;
     use objc2_foundation::{NSError, NSString};
+    use std::time::Duration;
+
+    /// How long a prompt waits for a finger before counting as a refusal.
+    const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+
     use objc2_local_authentication::{LAContext, LAPolicy};
 
     pub fn approve(reason: &str) -> Result<bool, String> {
