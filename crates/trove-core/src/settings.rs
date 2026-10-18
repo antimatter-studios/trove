@@ -960,6 +960,32 @@ impl Vault {
         self.store_settings(id, capability, Some(&doc))
     }
 
+    /// Drop every settings item that names attachment `name`, for when the
+    /// attachment itself is deleted: an item left behind would describe a
+    /// file that no longer exists. Returns the documents changed.
+    pub fn forget_attachment_settings(
+        &mut self,
+        id: &EntryId,
+        name: &str,
+    ) -> Result<Vec<Capability>> {
+        let mut changed = Vec::new();
+        for capability in Capability::ALL {
+            let Some(mut doc) = self.settings_document(id, capability)? else {
+                continue;
+            };
+            let k = capability.key_attribute();
+            let before = doc.items.len();
+            doc.items.retain(|i| {
+                attr_get(i, k) != Some(name) && attr_get(i, "attachment") != Some(name)
+            });
+            if doc.items.len() != before {
+                self.set_settings_document(id, capability, Some(&doc))?;
+                changed.push(capability);
+            }
+        }
+        Ok(changed)
+    }
+
     /// A group's settings document, or with `path` empty the database's.
     pub fn group_settings(&self, path: &str, capability: Capability) -> Result<Option<Document>> {
         let key = capability.custom_data_key();
@@ -1990,6 +2016,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(doc.items().is_empty(), "present but empty: serves nothing");
+    }
+
+    #[test]
+    fn forgetting_an_attachment_drops_the_items_that_name_it() {
+        let (_dir, mut v) = vault();
+        let id = entry_in(&mut v, "", "kube");
+        let doc = parse(Capability::EnvAgent, ENV).unwrap();
+        v.set_settings_document(&id, Capability::EnvAgent, Some(&doc))
+            .unwrap();
+        let changed = v.forget_attachment_settings(&id, "kubeconfig").unwrap();
+        assert_eq!(changed, vec![Capability::EnvAgent]);
+        let got = v
+            .settings_document(&id, Capability::EnvAgent)
+            .unwrap()
+            .unwrap();
+        assert!(got.item("KUBECONFIG").is_none());
+        assert!(
+            got.item("GITEA_TOKEN").is_some(),
+            "items naming a field stay"
+        );
     }
 
     #[test]

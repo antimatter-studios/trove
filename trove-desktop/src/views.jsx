@@ -394,6 +394,211 @@ function AgentSection({ entry, onChange }) {
   );
 }
 
+/// A value the item inherits: shown greyed, with where it comes from.
+function Inherited({ attr }) {
+  if (!attr || !attr.from) return null;
+  return <span className="cap-inherit" title={"Inherited from " + attr.from}>{attr.value} · {attr.from}</span>;
+}
+
+/// `field:Password` / `attachment:cert.pem`, so one dropdown picks either.
+function sourceOf(own) {
+  if (own.field) return "field:" + own.field;
+  if (own.attachment) return "attachment:" + own.attachment;
+  return "";
+}
+function sourceAttrs(value) {
+  const i = value.indexOf(":");
+  if (i < 0) return {};
+  return { [value.slice(0, i)]: value.slice(i + 1) };
+}
+
+/// One capability's items as editable rows. Every change writes the item at
+/// once and redraws from what the backend returns, so the panel never shows a
+/// state the vault does not hold.
+function CapabilityRows({ cap, columns, onSave, onRemove }) {
+  return (
+    <div className="cap-rows">
+      {cap.items.map((item) => (
+        <div className="cap-row" key={item.key}>
+          <span className="cap-key">{item.key}</span>
+          {columns.map((c) => (
+            <span className="cap-cell" key={c.name}>{c.render(item, (patch) => onSave({ ...item.own, ...patch }))}</span>
+          ))}
+          <button className="icon-btn" title="Remove" onClick={() => onRemove(item.key)}>
+            <Icon name="trash" size={14} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/// What `trove exec` exports from this entry: its EnvAgent.settings. No
+/// document means exec exports nothing, so the section only exists once the
+/// capability is added.
+function EnvSection({ cap, onSave, onRemove, onOff }) {
+  const [name, setName] = React.useState("");
+  const [source, setSource] = React.useState("");
+  const sources = [
+    ...cap.fields.map((f) => ["field:" + f, f]),
+    ...cap.attachments.map((a) => ["attachment:" + a, a + " (file path)"]),
+  ];
+  const add = () => {
+    const n = name.trim();
+    if (!n || !source) return;
+    onSave({ name: n, ...sourceAttrs(source) });
+    setName(""); setSource("");
+  };
+  const columns = [
+    {
+      name: "source",
+      render: (item, save) => (
+        <select className="inp" value={sourceOf(item.own)}
+                onChange={(e) => { const { field, attachment, ...rest } = item.own; save({ ...rest, field: undefined, attachment: undefined, ...sourceAttrs(e.target.value) }); }}>
+          {sources.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
+      ),
+    },
+    {
+      name: "export",
+      render: (item, save) => (
+        <select className="inp" value={item.own.export || ""} title="Also export into the shell at unlock"
+                onChange={(e) => save({ export: e.target.value })}>
+          <option value="">{item.effective.export ? "inherit (" + item.effective.export.value + ")" : "exec only"}</option>
+          <option value="none">exec only</option>
+          <option value="shell">exec + shell</option>
+        </select>
+      ),
+    },
+    {
+      name: "confirm",
+      render: (item, save) => (
+        <label className="cap-check" title="Require Touch ID for each use">
+          <input type="checkbox" checked={item.effective.confirm?.value === "true"}
+                 disabled={item.effective.confirm?.value === "true" && !!item.effective.confirm?.from}
+                 onChange={(e) => save({ confirm: e.target.checked ? "true" : "" })} />
+          <span>Touch ID</span>
+          <Inherited attr={item.effective.confirm} />
+        </label>
+      ),
+    },
+  ];
+  return (
+    <div className="dt-section">
+      <div className="dt-sec-label cap-head">
+        <span>Environment · {cap.items.length}{cap.legacy ? " · from Exec.* fields" : ""}</span>
+        <button className="att-blank" onClick={onOff} title="Delete EnvAgent.settings: trove exec exports nothing from this entry">turn off</button>
+      </div>
+      <CapabilityRows cap={cap} columns={columns} onSave={onSave} onRemove={onRemove} />
+      <div className="cap-add">
+        <input className="inp mono" placeholder="VARIABLE_NAME" value={name} spellCheck="false"
+               onChange={(e) => setName(e.target.value.toUpperCase())}
+               onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
+        <select className="inp" value={source} onChange={(e) => setSource(e.target.value)}>
+          <option value="">choose a source…</option>
+          {sources.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
+        <button className="btn-accent" onClick={add} disabled={!name.trim() || !source}>Add</button>
+      </div>
+    </div>
+  );
+}
+
+/// The GPG keys the agent serves from this entry: its GpgAgent.settings.
+function GpgSection({ cap, onSave, onRemove, onOff }) {
+  const [key, setKey] = React.useState("");
+  const columns = [
+    {
+      name: "uses",
+      render: (item, save) => (
+        <select className="inp" value={item.own.uses || ""} onChange={(e) => save({ uses: e.target.value })}>
+          <option value="">{item.effective.uses ? "inherit (" + item.effective.uses.value + ")" : "sign and decrypt"}</option>
+          <option value="sign">sign</option>
+          <option value="decrypt">decrypt</option>
+          <option value="both">sign and decrypt</option>
+        </select>
+      ),
+    },
+    {
+      name: "confirm",
+      render: (item, save) => (
+        <label className="cap-check" title="Require Touch ID for each use">
+          <input type="checkbox" checked={item.effective.confirm?.value === "true"}
+                 onChange={(e) => save({ confirm: e.target.checked ? "true" : "" })} />
+          <span>Touch ID</span>
+          <Inherited attr={item.effective.confirm} />
+        </label>
+      ),
+    },
+  ];
+  const unused = cap.attachments.filter((a) => !cap.items.some((i) => i.key === a));
+  return (
+    <div className="dt-section">
+      <div className="dt-sec-label cap-head">
+        <span>GPG agent · {cap.items.length}{cap.legacy ? " · from gpg-priv" : ""}</span>
+        <button className="att-blank" onClick={onOff} title="Serve none of this entry's GPG keys">turn off</button>
+      </div>
+      <CapabilityRows cap={cap} columns={columns} onSave={onSave} onRemove={onRemove} />
+      {unused.length > 0 && (
+        <div className="cap-add">
+          <select className="inp" value={key} onChange={(e) => setKey(e.target.value)}>
+            <option value="">serve another attachment…</option>
+            {unused.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <button className="btn-accent" disabled={!key} onClick={() => { onSave({ attachment: key }); setKey(""); }}>Add</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// The settings sections an entry has, and "+ Add capability" for the rest.
+/// Materialize lives with the attachments it writes; SSH with its key.
+function CapabilitySections({ vaultId, entry }) {
+  const [caps, setCaps] = React.useState([]);
+  const [err, setErr] = React.useState("");
+  React.useEffect(() => {
+    let live = true;
+    setErr("");
+    (async () => {
+      try { const c = await api.entryCapabilities(vaultId, entry.id); if (live) setCaps(c || []); }
+      catch (e) { if (live) setErr(String(e)); }
+    })();
+    return () => { live = false; };
+  }, [vaultId, entry.id]);
+  const run = async (call) => {
+    try { setCaps((await call()) || []); setErr(""); }
+    catch (e) { setErr(String(e)); }
+  };
+  const handlers = (name) => ({
+    onSave: (attrs) => run(() => api.setCapabilityItem(vaultId, entry.id, name, Object.fromEntries(Object.entries(attrs).filter(([, v]) => v !== undefined)))),
+    onRemove: (key) => run(() => api.removeCapabilityItem(vaultId, entry.id, name, key)),
+    onOff: () => run(() => api.setCapabilityOn(vaultId, entry.id, name, false)),
+  });
+  const env = caps.find((c) => c.capability === "env-agent");
+  const gpg = caps.find((c) => c.capability === "gpg-agent");
+  const addable = [
+    env && !env.on && ["env-agent", "Export variables to trove exec"],
+    gpg && !gpg.on && gpg.attachments.length > 0 && ["gpg-agent", "Serve a GPG key"],
+  ].filter(Boolean);
+  return (
+    <>
+      {env?.on && <EnvSection cap={env} {...handlers("env-agent")} />}
+      {gpg?.on && <GpgSection cap={gpg} {...handlers("gpg-agent")} />}
+      {(addable.length > 0 || err) && (
+        <div className="dt-section cap-addcap">
+          {addable.map(([name, label]) => (
+            <button key={name} className="att-add" onClick={() => run(() => api.setCapabilityOn(vaultId, entry.id, name, true))}>
+              <Icon name="plus" size={13} /> {label}
+            </button>
+          ))}
+          {err && <div className="att-err">{err}</div>}
+        </div>
+      )}
+    </>
+  );
+}
+
 function fmtBytes(n) {
   if (n < 1024) return n + " B";
   if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
@@ -452,7 +657,7 @@ function AttachmentsSection({ vaultId, entry }) {
   const [newName, setNewName] = React.useState("");
   // Materialize fields are edited locally and applied on Save, so a half-typed
   // path is never written to the vault.
-  const [mat, setMat] = React.useState({ target: "", mode: "", ttl: "", allowDiskBacked: false });
+  const [mat, setMat] = React.useState({ target: "", mode: "", ttl: "", allowDiskBacked: false, useDir: false });
   // A picked file shows in the list the moment it is picked. The write behind
   // it is seconds of Argon2, and a list that stays empty until it lands reads
   // as "nothing happened" — which is what it looked like.
@@ -492,7 +697,10 @@ function AttachmentsSection({ vaultId, entry }) {
 
   const open = async (a) => {
     setSel(a.name); setErr(""); setDirty(false); setAdding(false);
-    setMat({ target: a.target, mode: a.mode, ttl: a.ttl, allowDiskBacked: a.allowDiskBacked });
+    // A target that comes from a group's directory is not the item's own: show
+    // it as inherited and keep the box empty, so saving keeps inheriting.
+    const inherited = !!a.targetFrom;
+    setMat({ target: inherited ? "" : a.target, mode: a.mode, ttl: a.ttl, allowDiskBacked: a.allowDiskBacked, useDir: inherited });
     setImg(null); setAsText(false);
     if (a.isImage) {
       try { setImg(await api.readAttachmentImage(vaultId, entry.id, a.name)); }
@@ -688,9 +896,16 @@ function AttachmentsSection({ vaultId, entry }) {
               <span>Path</span>
               <input
                 value={mat.target} spellCheck="false"
-                placeholder="leave empty to write nothing on unlock"
+                placeholder={current.targetFrom ? current.target + " (" + current.targetFrom + ")" : "leave empty to write nothing on unlock"}
                 onChange={(e) => setMat((m) => ({ ...m, target: e.target.value }))}
               />
+            </label>
+            <label className="att-check">
+              <input
+                type="checkbox" checked={mat.useDir} disabled={!!mat.target.trim()}
+                onChange={(e) => setMat((m) => ({ ...m, useDir: e.target.checked }))}
+              />
+              <span>With no path, write it into the folder's directory</span>
             </label>
             <label>
               <span>Mode</span>
@@ -799,6 +1014,8 @@ function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, on
 
         <AttachmentsSection vaultId={vaultId} entry={entry} />
 
+        <CapabilitySections vaultId={vaultId} entry={entry} />
+
         {fields && fields.length > 0 && (
           <div className="dt-section">
             <div className="dt-sec-label">Attributes</div>
@@ -829,4 +1046,4 @@ function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, on
   );
 }
 
-export { relTime, fullDate, strengthInfo, Sidebar, EntryList, Detail };
+export { relTime, fullDate, strengthInfo, Sidebar, EntryList, Detail, CapabilitySections };

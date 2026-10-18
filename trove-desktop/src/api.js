@@ -223,5 +223,37 @@ export const setAttachmentMaterialize = (id, entryId, name, m) =>
       mode: m.mode || '',
       ttl: m.ttl || '',
       allowDiskBacked: !!m.allowDiskBacked,
+      useDir: !!m.useDir,
     },
   });
+
+/* ---- Capability settings documents ---- */
+// EnvAgent.settings, Materialize.settings, GpgAgent.settings on an entry, and
+// a group's (or, with group '', the database's) defaults. Each returns the
+// fresh state so the panel never has to guess what was written.
+
+// entry_capabilities(id, entryId) -> Vec<CapabilityDto>
+//   { capability, on, legacy, items: [{ key, own, effective: { k: { value, from } } }],
+//     fields, attachments }
+export const entryCapabilities = (id, entryId) =>
+  invoke('entry_capabilities', { id, entryId });
+
+// Add or replace one item; blank values are dropped so they inherit.
+export const setCapabilityItem = (id, entryId, capability, attrs) =>
+  invoke('set_capability_item', { id, entryId, capability, attrs });
+
+export const removeCapabilityItem = (id, entryId, capability, key) =>
+  invoke('remove_capability_item', { id, entryId, capability, key });
+
+// on: create an empty document (the capability is on, with nothing in it yet);
+// off: delete it.
+export const setCapabilityOn = (id, entryId, capability, on) =>
+  invoke('set_capability_on', { id, entryId, capability, on });
+
+// group_capabilities(id, group) -> Vec<{ capability, defaults, allowed }>
+export const groupCapabilities = (id, group) =>
+  invoke('group_capabilities', { id, group });
+
+// An empty value clears the default, so it is inherited again.
+export const setGroupDefault = (id, group, capability, name, value) =>
+  invoke('set_group_default', { id, group, capability, name, value });

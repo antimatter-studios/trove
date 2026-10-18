@@ -28,6 +28,8 @@ vi.mock('@tauri-apps/api/window', () => ({
 }));
 
 vi.mock('../src/api.js', () => ({
+  entryCapabilities: vi.fn(() => Promise.resolve([])),
+  groupCapabilities: vi.fn(() => Promise.resolve([])),
   listVaults: vi.fn(),
   registerVault: vi.fn(),
   createVault: vi.fn(),
