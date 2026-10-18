@@ -460,6 +460,13 @@ jobs:
     needs: [build, build-desktop]
     if: ${{ !inputs.crate_only && !inputs.dry_run }}
     runs-on: ubuntu-latest
+    # id-token + attestations: the build-provenance attestation below. The
+    # Homebrew tap refuses to point brew at an asset without one, so a release
+    # that is not attested never reaches `brew install`.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout (CHANGELOG.md + release-notes tooling)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -487,6 +494,16 @@ jobs:
             fi
           done
           cat SHA256SUMS
+
+      # Sign that this workflow, from this repository, built these bytes. Anyone
+      # can check a download with
+      #   gh attestation verify <file> --repo antimatter-studios/trove \
+      #     --signer-workflow antimatter-studios/trove/.github/workflows/release.yml
+      # which is what the tap's verify-release.sh runs before a formula moves.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
 
       # Reuses the github-guard changelog guard, which ALSO enforces (pre-push)
       # that this version's section exists — so the release body can never drift
