@@ -6,6 +6,43 @@ README; the full history and the pre-1.0 development milestones live here.
 
 ## v0.26.0 — 2026-10-18
 
+**Capability settings documents.** An entry now says which capability uses
+its secrets, and under what rules, in one XML document per capability:
+`EnvAgent.settings` (what `trove exec` exports), `Materialize.settings` (which
+attachments are written where on unlock) and `GpgAgent.settings` (which GPG
+keys the agent serves), beside KeePassXC's `KeeAgent.settings`. A document
+holds rules and the names of fields and attachments, never a value. No
+document means the capability is off: `trove exec` exports nothing from an
+entry without `EnvAgent.settings`, and the `TROVE_<TITLE>_*` fallback names
+are gone. A group or the database can hold the same documents in `CustomData`,
+with defaults only, so a folder never grants; an entry's items inherit from
+its folders, the nearest value winning, and constraints only tighten. During
+the transition `Exec.*` and `Materialize.*` fields and a `gpg-priv` attachment
+still count as a document; `trove settings migrate` converts a vault, and
+`trove add file` writes the document. A KeePassXC open-and-save keeps every
+document, measured by an oracle test. (#397, #399, #400)
+
+**Commands for them.** `trove env-agent add|remove|disable|defaults`,
+`trove materialize add|remove|disable|defaults`, `trove gpg-agent
+enable|disable|defaults` and `trove ssh-agent enable|disable` edit the
+documents on the vault file or through the daemon; `trove settings show
+[--effective] [--json]`, `edit`, `validate` and `migrate` inspect and edit any
+of them. `trove env-agent add antimatter-studios/gitea GITEA_TOKEN --field
+gitea-token` is all it takes to hand an agent a token through `trove exec`.
+The desktop app gains Environment and GPG agent sections, a materialize editor
+that shows a folder's directory as inherited, and folder defaults in Edit
+Folder. (#401, #402)
+
+**Touch ID approval.** An item with `confirm="true"` hands its secret over
+only after a fingerprint: the daemon asks before `GetField` or `Get` returns
+it, and the GPG agent before signing or decrypting with such a key. Where no
+approval can be asked, the secret is refused rather than released on the
+strength of the unlock. One approval covers the item for its `lifetime`.
+(#403)
+
+**Shell exports.** A variable whose settings say `export="shell"` is also
+exported by `trove unlock --export` and set in the session subshell. (#404)
+
 **`.env.trove.yaml` replaces `.env.trove`.** `--env` reads one YAML file:
 vault passwords under `databases:`, keyed by vault filename, and other
 variables under `environment:`. The dotenv `.env.trove`, its
@@ -16,9 +53,10 @@ config-file promise in `docs/stability.md`, which now says so. Convert by
 moving each password under `databases:` and every other variable under
 `environment:`, then delete the old file. (#396)
 
-**`trove exec` grows up.** An entry can map several variables, each to any
-field or, with `@<attachment>`, to an attachment's path (`Exec.PGUSER=UserName`,
-`Exec.PGPASSWORD=Password`) (#374). Without `--vault`, exec reads the vaults
+**`trove exec` grows up.** Before settings documents, an entry could already
+map several variables, each to any field or, with `@<attachment>`, to an
+attachment's path (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`); those
+fields now count as an `EnvAgent.settings` during the transition (#374). Without `--vault`, exec reads the vaults
 unlocked in troved with `TROVE_SESSION` and no password (#382). On Linux its
 files go to a memory-backed directory rather than disk-backed `/tmp` (#363).
 
