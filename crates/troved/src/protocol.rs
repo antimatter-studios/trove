@@ -218,6 +218,16 @@ pub enum Request {
     ShowEntry {
         path: String,
     },
+    /// Read a capability settings document: an entry's, with its items
+    /// resolved through inheritance, or with `group` a group's defaults (the
+    /// database's when `path` is empty). Settings hold rules and references,
+    /// never secret values, so like `ShowEntry` this needs no session code.
+    Settings {
+        path: String,
+        capability: String,
+        #[serde(default)]
+        group: bool,
+    },
     /// Search unprotected metadata; protected values never match or leave the
     /// vault. Older clients send a string `term`; omitted filters default empty.
     /// Read safe discovery metadata for an entry or every entry in a group.
@@ -495,6 +505,16 @@ impl std::fmt::Debug for Request {
                 .field("code", &"<redacted>")
                 .finish(),
             Request::ShowEntry { path } => f.debug_struct("ShowEntry").field("path", path).finish(),
+            Request::Settings {
+                path,
+                capability,
+                group,
+            } => f
+                .debug_struct("Settings")
+                .field("path", path)
+                .field("capability", capability)
+                .field("group", group)
+                .finish(),
             Request::Search {
                 term,
                 fields,
@@ -688,6 +708,153 @@ pub struct DescribeAttachmentDto {
 }
 
 /// Full non-secret view of one entry, for `ShowEntry`. Everything here is
+/// One capability settings document, as `Settings` and `trove settings show
+/// --json` report it. Shared by the daemon and the CLI's offline path so both
+/// print the same shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SettingsDto {
+    /// The capability's CLI name: `env-agent`, `materialize`, `gpg-agent`.
+    pub capability: String,
+    /// The entry or group path; empty for the database.
+    pub path: String,
+    pub group: bool,
+    /// The document's XML. For an entry with no settings attachment, the
+    /// document converted from its legacy fields; `None` when the capability
+    /// is off.
+    pub document: Option<String>,
+    /// `document` was converted from legacy fields (`Exec.*`, `Materialize.*`,
+    /// a `gpg-priv` attachment) rather than read from an attachment.
+    pub legacy: bool,
+    /// For an entry, every item with its attributes resolved through the
+    /// entry's defaults, its groups and the database.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<Vec<EffectiveItemDto>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveItemDto {
+    pub key: String,
+    pub attributes: std::collections::BTreeMap<String, ResolvedDto>,
+}
+
+/// A resolved attribute and where it came from: `item`, `entry` (the entry's
+/// own defaults), `group` (with `group` naming it) or `database`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedDto {
+    pub value: String,
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+impl SettingsDto {
+    /// An entry's document and effective items, read from `vault`.
+    pub fn for_entry(
+        vault: &trove_core::Vault,
+        id: &trove_core::EntryId,
+        path: &str,
+        capability: trove_core::settings::Capability,
+    ) -> trove_core::Result<Self> {
+        let stored = vault.settings_document(id, capability)?;
+        let legacy = stored.is_none();
+        let document = match stored {
+            Some(d) => Some(d),
+            None => vault.legacy_settings(id, capability)?,
+        };
+        let effective = match &document {
+            Some(_) => vault
+                .effective_settings(id, capability)?
+                .map(|items| items.into_iter().map(EffectiveItemDto::from).collect()),
+            None => None,
+        };
+        Ok(SettingsDto {
+            capability: capability.cli_name().to_string(),
+            path: path.to_string(),
+            group: false,
+            legacy: legacy && document.is_some(),
+            document: document.map(|d| d.to_xml()),
+            effective,
+        })
+    }
+
+    /// A group's (or with `path` empty, the database's) defaults document.
+    pub fn for_group(
+        vault: &trove_core::Vault,
+        path: &str,
+        capability: trove_core::settings::Capability,
+    ) -> trove_core::Result<Self> {
+        Ok(SettingsDto {
+            capability: capability.cli_name().to_string(),
+            path: path.to_string(),
+            group: true,
+            legacy: false,
+            document: vault.group_settings(path, capability)?.map(|d| d.to_xml()),
+            effective: None,
+        })
+    }
+
+    /// The effective items, as `trove exec` and the CLI read them.
+    pub fn effective_items(&self) -> Option<Vec<trove_core::settings::EffectiveItem>> {
+        use trove_core::settings::{EffectiveItem, Origin, Resolved};
+        self.effective.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|i| EffectiveItem {
+                    key: i.key.clone(),
+                    attributes: i
+                        .attributes
+                        .iter()
+                        .map(|(k, r)| {
+                            let origin = match (r.origin.as_str(), &r.group) {
+                                ("item", _) => Origin::Item,
+                                ("entry", _) => Origin::Entry,
+                                ("group", Some(g)) => Origin::Group(g.clone()),
+                                _ => Origin::Database,
+                            };
+                            (
+                                k.clone(),
+                                Resolved {
+                                    value: r.value.clone(),
+                                    origin,
+                                },
+                            )
+                        })
+                        .collect(),
+                })
+                .collect()
+        })
+    }
+}
+
+impl From<trove_core::settings::EffectiveItem> for EffectiveItemDto {
+    fn from(item: trove_core::settings::EffectiveItem) -> Self {
+        use trove_core::settings::Origin;
+        EffectiveItemDto {
+            key: item.key,
+            attributes: item
+                .attributes
+                .into_iter()
+                .map(|(k, r)| {
+                    let (origin, group) = match r.origin {
+                        Origin::Item => ("item", None),
+                        Origin::Entry => ("entry", None),
+                        Origin::Group(g) => ("group", Some(g)),
+                        Origin::Database => ("database", None),
+                    };
+                    (
+                        k,
+                        ResolvedDto {
+                            value: r.value,
+                            origin: origin.to_string(),
+                            group,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 /// safe to print without a session code: protected values (Password et al.)
 /// are represented only by their *names* in `custom_fields`, never by value.
 #[derive(Debug, Serialize)]
@@ -890,6 +1057,10 @@ pub enum OkBody {
     /// Response to `ShowEntry`.
     Show {
         entry: ShowDto,
+    },
+    /// Response to `Settings`.
+    Settings {
+        settings: SettingsDto,
     },
     /// Response to `GetField`: the field's string value (may be a secret —
     /// the request was code-gated).
@@ -1115,6 +1286,9 @@ impl Response {
     }
     pub fn ok_show(entry: ShowDto) -> Self {
         Response::Ok(OkBody::Show { entry })
+    }
+    pub fn ok_settings(settings: SettingsDto) -> Self {
+        Response::Ok(OkBody::Settings { settings })
     }
     pub fn ok_value(value: String) -> Self {
         Response::Ok(OkBody::Value { value })

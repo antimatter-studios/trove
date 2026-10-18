@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, RwLock};
 
+use trove_core::settings::{Capability, EffectiveItem};
 use trove_core::{EntryId, EntrySummary, Vault};
 
 pub mod paths;
@@ -72,24 +73,16 @@ pub const DEFAULT_MODE: u32 = 0o600;
 /// Why a single entry's materialization failed validation.
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
-    #[error(
-        "entry has '{}.' fields but none of them names a file to write; \
-         each attachment needs '{}<attachment>.Target'",
-        MATERIALIZE_FIELD_PREFIX,
-        MATERIALIZE_FIELD_PREFIX
-    )]
-    PartialOptIn,
+    /// The entry's `Materialize.settings` (or the fields it replaces) cannot
+    /// be used; the reason says why.
+    #[error("{0}")]
+    Settings(String),
 
     #[error(
-        "entry uses the removed entry-level materialize fields ('{}', '{}'). \
-         Materialization belongs to an attachment, not to an entry, so an entry \
-         with several attachments can write several files: rename them to \
-         '{}<attachment>.Target' (and .Mode / .TTL / .AllowDiskBacked)",
-        FIELD_SOURCE,
-        FIELD_TARGET,
-        MATERIALIZE_FIELD_PREFIX
+        "attachment '{0}' has no target: give its <File> a target, or set a dir \
+         in <Defaults> or on an enclosing group"
     )]
-    EntryLevelFields,
+    NoTarget(String),
 
     #[error("attachment '{0}' not found on entry")]
     AttachmentMissing(String),
@@ -108,7 +101,8 @@ pub enum PlanError {
 
     #[error(
         "target {0:?} is not on a memory-backed (tmpfs) filesystem; \
-             set Materialize.AllowDiskBacked=true to override"
+             set allowDiskBacked=\"true\" on its <File> in Materialize.settings \
+             (or Materialize.<attachment>.AllowDiskBacked=true) to override"
     )]
     NotTmpfs(PathBuf),
 
@@ -197,44 +191,14 @@ pub fn build_plans_with_live(
     (plans, errors)
 }
 
-/// The settings that can follow an attachment name, longest first so that a
-/// name ending in one of them cannot be mistaken for the setting itself.
-const NAMESPACED_SETTINGS: [&str; 4] = ["AllowDiskBacked", "Target", "Mode", "TTL"];
-
-/// Split `Materialize.<attachment>.<Setting>` into its two halves.
-///
-/// `None` for the un-namespaced `Materialize.Target` form, which names its
-/// attachment separately in `Materialize.Source`.
-///
-/// Attachment names contain dots — `app_distribution.cer.pem` — so this cannot
-/// split on the separator. It works from the end instead: the setting is one of
-/// a known few, and everything between the prefix and it is the name.
-fn split_namespaced(key: &str) -> Option<(&str, &str)> {
-    let rest = key.strip_prefix(MATERIALIZE_FIELD_PREFIX)?;
-    for setting in NAMESPACED_SETTINGS {
-        if rest == setting {
-            return None; // the legacy, entry-level form
-        }
-        if let Some(name) = rest.strip_suffix(setting).and_then(|r| r.strip_suffix('.')) {
-            if !name.is_empty() {
-                return Some((name, setting));
-            }
-        }
-    }
-    None
-}
-
 /// Every file this entry asks to have written, not just one.
 ///
 /// An entry holds many attachments — an SSH key and its `.pub`, a certificate
 /// and the key that matches it — so materialization belongs to the attachment
-/// rather than to the entry. `Materialize.<attachment>.Target` says so directly;
-/// the older `Materialize.Target` plus `Materialize.Source` names one
-/// attachment out of the several an entry may have, and is still read so
-/// existing vaults keep working.
-///
-/// The two forms may appear together: the older one describes its named
-/// attachment, and namespaced keys describe theirs.
+/// rather than to the entry. The entry's `Materialize.settings` lists them,
+/// one `<File>` each, with `<Defaults>` and every enclosing group's defaults
+/// filling in what an item leaves out. An entry without the document but with
+/// the older `Materialize.<attachment>.*` fields is read as if it had one.
 pub fn plans_for_entry(
     vault: &Vault,
     entry: &EntrySummary,
@@ -247,82 +211,52 @@ fn plans_for_entry_with_live(
     entry: &EntrySummary,
     live: &[PathBuf],
 ) -> Result<Vec<MaterializationPlan>, PlanError> {
-    let opted = vault.fields_with_prefix(&entry.id, MATERIALIZE_FIELD_PREFIX)?;
-    if opted.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Which attachments have a namespaced target, in the order the fields came.
-    let mut named: Vec<String> = Vec::new();
-    for key in &opted {
-        if let Some((attachment, setting)) = split_namespaced(key) {
-            if setting == "Target" && !named.iter().any(|n| n == attachment) {
-                named.push(attachment.to_string());
-            }
+    let items = match vault.effective_settings(&entry.id, Capability::Materialize) {
+        Ok(Some(items)) => items,
+        Ok(None) => return Ok(Vec::new()),
+        Err(trove_core::Error::InvalidSettings { reason, .. }) => {
+            return Err(PlanError::Settings(reason))
         }
-    }
-
-    let mut plans = Vec::new();
-
-    // The entry-level form is gone. Say so rather than ignoring it: the field
-    // was documented, and a silent no-op on an entry that asked for a file
-    // would be the worst of the available outcomes.
-    for legacy in [
-        FIELD_SOURCE,
-        FIELD_TARGET,
-        FIELD_MODE,
-        FIELD_TTL,
-        FIELD_ALLOW_DISK,
-    ] {
-        if vault.get_field(&entry.id, legacy)?.is_some() {
-            return Err(PlanError::EntryLevelFields);
-        }
-    }
-    if named.is_empty() {
-        // Opted in with some `Materialize.` field, but nothing that names a
-        // file to write.
-        return Err(PlanError::PartialOptIn);
-    }
-
-    for attachment in named {
-        let key = format!("{MATERIALIZE_FIELD_PREFIX}{attachment}.Target");
-        let Some(target) = vault.get_field(&entry.id, &key)? else {
-            continue;
-        };
-        plans.push(build_plan(vault, entry, &attachment, &target, live)?);
-    }
-
-    Ok(plans)
+        Err(e) => return Err(e.into()),
+    };
+    items
+        .iter()
+        .map(|item| build_plan(entry, item, live))
+        .collect()
 }
 
-/// Read one attachment's settings and validate its target.
+/// Validate one `<File>` and resolve where it goes: its own `target`, else the
+/// attachment's name inside the inherited `dir`.
 fn build_plan(
-    vault: &Vault,
     entry: &EntrySummary,
-    source: &str,
-    target: &str,
+    item: &EffectiveItem,
     live: &[PathBuf],
 ) -> Result<MaterializationPlan, PlanError> {
+    let source = item.key.as_str();
     if !entry.attachment_names.iter().any(|n| n == source) {
         return Err(PlanError::AttachmentMissing(source.to_string()));
     }
 
-    let field = |setting: &str| format!("{MATERIALIZE_FIELD_PREFIX}{source}.{setting}");
-
-    let mode = match vault.get_field(&entry.id, &field("Mode"))? {
-        Some(s) => parse_mode(&s)?,
+    let target = match (item.get("target"), item.get("dir")) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(dir)) => format!("{}/{source}", dir.trim_end_matches('/')),
+        (None, None) => return Err(PlanError::NoTarget(source.to_string())),
+    };
+    let mode = match item.get("mode") {
+        Some(s) => parse_mode(s)?,
         None => DEFAULT_MODE,
     };
-    let ttl = match vault.get_field(&entry.id, &field("TTL"))? {
-        Some(s) => Some(parse_ttl(&s)?),
+    // `0` is "no limit" in a settings document; only a real duration arms a timer.
+    let ttl = match item.get("ttl").filter(|s| *s != "0") {
+        Some(s) => Some(parse_ttl(s)?),
         None => None,
     };
-    let allow_disk_backed = match vault.get_field(&entry.id, &field("AllowDiskBacked"))? {
-        Some(s) => parse_bool(&s)?,
+    let allow_disk_backed = match item.get("allowDiskBacked") {
+        Some(s) => parse_bool(s)?,
         None => false,
     };
 
-    let resolved = match paths::resolve_and_validate_target(target) {
+    let resolved = match paths::resolve_and_validate_target(&target) {
         Err(paths::PathError::AlreadyExists(p)) if live.contains(&p) => p,
         other => other?,
     };

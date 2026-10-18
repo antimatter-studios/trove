@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use trove_core::settings::{Capability, EffectiveItem};
 use trove_core::{EntrySummary, SearchFieldFilter, SearchHit, SearchQuery, Vault};
 
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
@@ -1038,6 +1039,11 @@ async fn handle_request(
         }
 
         Request::ShowEntry { path } => show_entry(state, &path).await,
+        Request::Settings {
+            path,
+            capability,
+            group,
+        } => show_settings(state, &path, &capability, group).await,
 
         Request::Describe { path } => {
             let mut guard = state.lock().await;
@@ -1525,6 +1531,14 @@ async fn add_gpg(
                 shutdown: false,
             };
         }
+        // Name the key in the entry's GpgAgent.settings, so the agent serves it:
+        // adding a GPG key is what turns the capability on for the entry.
+        if let Err(e) = vault.ensure_settings_item(&id, Capability::GpgAgent, "gpg-priv") {
+            return Handled {
+                response: Response::err(format!("writing GpgAgent.settings: {e}")),
+                shutdown: false,
+            };
+        }
         if let Err(e) = vault.save() {
             return Handled {
                 response: Response::err(format!("saving vault: {e}")),
@@ -1801,6 +1815,48 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
         expires: summary.expires,
         icon: summary.icon,
     }))
+}
+
+/// Ungated (like `ShowEntry`): settings documents hold rules and the names of
+/// fields and attachments, never their values.
+async fn show_settings(state: &SharedState, path: &str, capability: &str, group: bool) -> Handled {
+    let Some(cap) = Capability::from_name(capability) else {
+        return err_handled(format!(
+            "unknown capability {capability:?}: expected env-agent, materialize or gpg-agent"
+        ));
+    };
+    let guard = state.lock().await;
+    if !group {
+        let (vault, id) = match guard.find_entry(path) {
+            Ok(found) => found,
+            Err(e) => return err_handled(e.to_string()),
+        };
+        return match crate::protocol::SettingsDto::for_entry(vault, &id, path, cap) {
+            Ok(dto) => ok_handled(Response::ok_settings(dto)),
+            Err(e) => err_handled(e.to_string()),
+        };
+    }
+    // A group (or the database, for an empty path) lives in one vault; with
+    // several unlocked, the group must name exactly one of them.
+    let holders: Vec<&Vault> = guard
+        .iter()
+        .filter(|v| path.is_empty() || v.group_exists(path))
+        .collect();
+    let vault = match holders.as_slice() {
+        [one] => *one,
+        [] => return err_handled(format!("no unlocked vault has a group {path:?}")),
+        _ => {
+            return err_handled(if path.is_empty() {
+                "several vaults are unlocked; database settings need one, or --vault".to_string()
+            } else {
+                format!("group {path:?} exists in several unlocked vaults; use --vault")
+            })
+        }
+    };
+    match crate::protocol::SettingsDto::for_group(vault, path, cap) {
+        Ok(dto) => ok_handled(Response::ok_settings(dto)),
+        Err(e) => err_handled(e.to_string()),
+    }
 }
 
 /// Ungated (like `List`): substring search over non-secret surfaces.
@@ -2568,22 +2624,78 @@ async fn add_totp(
 pub fn gpg_public_keys_from_vault(vault: &Vault, filter: Option<&str>) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for entry in vault.list_entries() {
-        if !entry_matches_filter(&entry, filter)
-            || !entry.attachment_names.iter().any(|a| a == "gpg-priv")
-        {
+        if !entry_matches_filter(&entry, filter) {
             continue;
         }
-        let Ok(Some(bytes)) = vault.read_binary(&entry.id, "gpg-priv") else {
+        let Ok(Some(items)) = vault.effective_settings(&entry.id, Capability::GpgAgent) else {
             continue;
         };
-        if parse_gpg_entry(vault, &entry, &bytes).is_err() {
-            continue;
-        }
-        if let Ok(export) = gpg_keys::public_key_export(&bytes) {
-            out.push((entry.display_path(), export));
+        for item in items {
+            let Ok(Some(bytes)) = vault.read_binary(&entry.id, &item.key) else {
+                continue;
+            };
+            if gpg_keys_for_item(vault, &entry, &item, &bytes).is_err() {
+                continue;
+            }
+            if let Ok(export) = gpg_keys::public_key_export(&bytes) {
+                out.push((entry.display_path(), export));
+            }
         }
     }
     out
+}
+
+/// The keys one `<Key>` of an entry's `GpgAgent.settings` serves: those its
+/// export holds, narrowed to the listed `keygrips` and to its `uses`.
+fn gpg_keys_for_item(
+    vault: &Vault,
+    entry: &EntrySummary,
+    item: &EffectiveItem,
+    bytes: &[u8],
+) -> Result<Vec<LoadedGpgKey>, String> {
+    let mut keys = parse_gpg_entry(vault, entry, bytes).map_err(|e| match e {
+        gpg_keys::ParseError::NoSigningKey => {
+            "no signing key in this export (supported: ed25519, RSA)".to_string()
+        }
+        gpg_keys::ParseError::Encrypted => "the secret key is passphrase-protected and the \
+             entry has no Password to decrypt it with"
+            .to_string(),
+        other => other.to_string(),
+    })?;
+    if let Some(wanted) = item.get("keygrips") {
+        let wanted: Vec<String> = wanted
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        if let Some(missing) = wanted
+            .iter()
+            .find(|g| !keys.iter().any(|k| &k.keygrip_hex() == *g))
+        {
+            return Err(format!("keygrip {missing} is not in this export"));
+        }
+        keys.retain(|k| wanted.contains(&k.keygrip_hex()));
+    }
+    match item.get("uses").unwrap_or("both") {
+        "both" => {}
+        uses => {
+            // An RSA key signs and decrypts with the same key material, so it
+            // cannot be limited to one of them here. Say so rather than serve
+            // it for both while the document says one.
+            if keys.iter().any(|k| matches!(k, LoadedGpgKey::Rsa(_))) {
+                return Err(format!(
+                    "uses=\"{uses}\" cannot be applied to an RSA key, which signs and \
+                     decrypts with the same key; set uses=\"both\" or leave it out"
+                ));
+            }
+            let sign = uses == "sign";
+            keys.retain(|k| match k {
+                LoadedGpgKey::Ed25519(_) => sign,
+                LoadedGpgKey::Cv25519(_) => !sign,
+                LoadedGpgKey::Rsa(_) => true,
+            });
+        }
+    }
+    Ok(keys)
 }
 
 /// Parse an entry's `gpg-priv` export. A passphrase-protected one is
@@ -2689,44 +2801,51 @@ fn load_gpg_keys_reporting(
     filter: Option<&str>,
     skipped: &mut Vec<SkippedKeyDto>,
 ) -> Vec<LoadedGpgKey> {
-    const ATTACHMENT_NAME: &str = "gpg-priv";
     let mut out = Vec::new();
     let entries: Vec<EntrySummary> = vault.list_entries();
     for entry in entries {
         if !entry_matches_filter(&entry, filter) {
             continue;
         }
-        if !entry.attachment_names.iter().any(|a| a == ATTACHMENT_NAME) {
-            continue;
-        }
-        let mut skip = |reason: String| {
-            skipped.push(skipped_key("gpg", vault, &entry, ATTACHMENT_NAME, reason));
-        };
-        let bytes = match vault.read_binary(&entry.id, ATTACHMENT_NAME) {
-            Ok(Some(b)) => b,
+        // No `GpgAgent.settings` (and no legacy `gpg-priv`) means the entry
+        // serves no GPG key; a broken document is reported, never skipped
+        // silently.
+        let items = match vault.effective_settings(&entry.id, Capability::GpgAgent) {
+            Ok(Some(items)) => items,
             Ok(None) => continue,
             Err(e) => {
-                skip(format!("failed to read the attachment: {e}"));
+                skipped.push(skipped_key(
+                    "gpg",
+                    vault,
+                    &entry,
+                    Capability::GpgAgent.attachment_name(),
+                    e.to_string(),
+                ));
                 continue;
             }
         };
-        match parse_gpg_entry(vault, &entry, &bytes) {
-            Ok(loaded) => {
-                for k in loaded {
-                    out.push(k);
+        for item in items {
+            let mut skip = |reason: String| {
+                skipped.push(skipped_key("gpg", vault, &entry, &item.key, reason));
+            };
+            let bytes = match vault.read_binary(&entry.id, &item.key) {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    skip(
+                        "GpgAgent.settings names this attachment, which the entry doesn't have"
+                            .to_string(),
+                    );
+                    continue;
                 }
+                Err(e) => {
+                    skip(format!("failed to read the attachment: {e}"));
+                    continue;
+                }
+            };
+            match gpg_keys_for_item(vault, &entry, &item, &bytes) {
+                Ok(loaded) => out.extend(loaded),
+                Err(reason) => skip(reason),
             }
-            Err(gpg_keys::ParseError::NoSigningKey) => {
-                skip("no signing key in this export (supported: ed25519, RSA)".to_string());
-            }
-            Err(gpg_keys::ParseError::Encrypted) => {
-                skip(
-                    "the secret key is passphrase-protected and the entry has no Password \
-                     to decrypt it with"
-                        .to_string(),
-                );
-            }
-            Err(e) => skip(e.to_string()),
         }
     }
     out

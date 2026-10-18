@@ -632,7 +632,8 @@ fn check_value(cap: Capability, spec: &AttrSpec, value: &str) -> Result<()> {
                 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !ok {
                 return Err(bad(
-                    "is not a variable name (letters, digits and _, not starting with a digit)",
+                    "is not a valid environment variable name (letters, digits and _, \
+                     not starting with a digit)",
                 ));
             }
         }
@@ -853,6 +854,10 @@ fn split_materialize(key: &str) -> Option<(&str, &'static str)> {
     None
 }
 
+/// The attachment `trove add gpg` stores a GPG secret key in, and which every
+/// trove before settings documents served without being asked.
+pub const LEGACY_GPG_ATTACHMENT: &str = "gpg-priv";
+
 /// The error for the removed entry-level materialize fields, kept word for
 /// word from the daemon that used to raise it.
 pub const MATERIALIZE_ENTRY_LEVEL_MESSAGE: &str = "entry uses the removed entry-level materialize \
@@ -893,6 +898,29 @@ impl Vault {
             }
             None => self.remove_binary(id, capability.attachment_name()),
         }
+    }
+
+    /// Make sure the entry's document for `capability` has an item keyed
+    /// `key`, creating the document if needed and leaving an existing item's
+    /// options alone. Returns whether anything was written.
+    pub fn ensure_settings_item(
+        &mut self,
+        id: &EntryId,
+        capability: Capability,
+        key: &str,
+    ) -> Result<bool> {
+        let mut doc = self
+            .settings_document(id, capability)?
+            .unwrap_or_else(|| Document::new(capability));
+        if doc.item(key).is_some() {
+            return Ok(false);
+        }
+        doc.upsert_item(vec![(
+            capability.key_attribute().to_string(),
+            key.to_string(),
+        )])?;
+        self.set_settings_document(id, capability, Some(&doc))?;
+        Ok(true)
     }
 
     /// A group's settings document, or with `path` empty the database's.
@@ -1033,8 +1061,30 @@ impl Vault {
         match capability {
             Capability::Materialize => self.legacy_materialize(id),
             Capability::EnvAgent => self.legacy_env_agent(id),
-            Capability::GpgAgent => Ok(None),
+            Capability::GpgAgent => self.legacy_gpg_agent(id),
         }
+    }
+
+    /// Before settings documents, every `gpg-priv` attachment was served. During
+    /// the transition such an entry keeps working as if it had a document
+    /// naming that attachment, as `Exec.*` and `Materialize.*` fields do.
+    fn legacy_gpg_agent(&self, id: &EntryId) -> Result<Option<Document>> {
+        let entry = self
+            .get_entry(id)
+            .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
+        if !entry
+            .attachment_names
+            .iter()
+            .any(|a| a == LEGACY_GPG_ATTACHMENT)
+        {
+            return Ok(None);
+        }
+        let mut doc = Document::new(Capability::GpgAgent);
+        doc.items.push(vec![(
+            "attachment".to_string(),
+            LEGACY_GPG_ATTACHMENT.to_string(),
+        )]);
+        Ok(Some(doc))
     }
 
     fn legacy_materialize(&self, id: &EntryId) -> Result<Option<Document>> {
@@ -1057,6 +1107,11 @@ impl Vault {
                 continue;
             };
             let value = self.get_field(id, key)?.unwrap_or_default();
+            let value = if attr == "allowDiskBacked" {
+                lenient_bool(&value)
+            } else {
+                value
+            };
             let item = by_attachment
                 .entry(attachment.to_string())
                 .or_insert_with(|| vec![("attachment".to_string(), attachment.to_string())]);
@@ -1171,6 +1226,16 @@ impl Vault {
         };
         keys.sort();
         Ok(keys)
+    }
+}
+
+/// The legacy `Materialize.*.AllowDiskBacked` field took `1`/`yes`/`0`/`no`
+/// too; a document takes only `true` and `false`.
+fn lenient_bool(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => "true".to_string(),
+        "false" | "0" | "no" => "false".to_string(),
+        _ => value.to_string(),
     }
 }
 
@@ -1319,7 +1384,7 @@ mod tests {
             Capability::EnvAgent,
             &wrap("<Variable name=\"1A\" field=\"f\"/>")
         ))
-        .contains("not a variable name"));
+        .contains("not a valid environment variable name"));
     }
 
     #[test]
@@ -1689,7 +1754,7 @@ mod tests {
             .unwrap();
         v.set_field(&id, "Materialize.app.cer.pem.Mode", "0644")
             .unwrap();
-        v.set_field(&id, "Materialize.app.cer.pem.AllowDiskBacked", "true")
+        v.set_field(&id, "Materialize.app.cer.pem.AllowDiskBacked", "Yes")
             .unwrap();
         let doc = v
             .entry_settings(&id, Capability::Materialize)
@@ -1704,6 +1769,26 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+
+    #[test]
+    fn a_gpg_priv_attachment_counts_as_a_document_during_the_transition() {
+        let (_dir, mut v) = vault();
+        let id = entry_in(&mut v, "", "signing");
+        assert_eq!(v.entry_settings(&id, Capability::GpgAgent).unwrap(), None);
+        v.attach_binary(&id, "gpg-priv", b"x").unwrap();
+        let doc = v
+            .entry_settings(&id, Capability::GpgAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.attachments(), vec!["gpg-priv"]);
+        let other = entry_in(&mut v, "", "other-name");
+        v.attach_binary(&other, "release.gpg", b"x").unwrap();
+        assert_eq!(
+            v.entry_settings(&other, Capability::GpgAgent).unwrap(),
+            None,
+            "any other attachment needs a document"
         );
     }
 
@@ -1795,6 +1880,37 @@ mod tests {
             .unwrap();
         assert!(got.item("OLD").is_none());
         assert!(got.item("GITEA_TOKEN").is_some());
+    }
+
+    #[test]
+    fn ensure_settings_item_creates_once_and_keeps_options() {
+        let (_dir, mut v) = vault();
+        let id = entry_in(&mut v, "", "signing");
+        assert!(v
+            .ensure_settings_item(&id, Capability::GpgAgent, "gpg-priv")
+            .unwrap());
+        let mut doc = v
+            .settings_document(&id, Capability::GpgAgent)
+            .unwrap()
+            .unwrap();
+        doc.upsert_item(vec![
+            ("attachment".into(), "gpg-priv".into()),
+            ("uses".into(), "sign".into()),
+        ])
+        .unwrap();
+        v.set_settings_document(&id, Capability::GpgAgent, Some(&doc))
+            .unwrap();
+        assert!(!v
+            .ensure_settings_item(&id, Capability::GpgAgent, "gpg-priv")
+            .unwrap());
+        let doc = v
+            .settings_document(&id, Capability::GpgAgent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attr_get(doc.item("gpg-priv").unwrap(), "uses"),
+            Some("sign")
+        );
     }
 
     #[test]

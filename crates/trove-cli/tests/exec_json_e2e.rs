@@ -227,6 +227,24 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         ),
         "add colliding root entry",
     );
+    // Exec exports only what an entry's settings name; there is no fallback
+    // name for an unconfigured entry.
+    ok(
+        &run_trove(
+            &trove,
+            &[
+                "--vault",
+                &vs,
+                "--password-stdin",
+                "edit",
+                "Infra",
+                "--set",
+                "Exec.Env=TROVE_INFRA_PASSWORD",
+            ],
+            &format!("{PW}\n"),
+        ),
+        "set colliding root entry's Exec.Env",
+    );
 
     let out = run_trove(
         &trove,

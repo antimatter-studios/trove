@@ -708,12 +708,12 @@ enum Command {
     /// materialize into a private per-run directory (0700) whose contents
     /// are wiped when the command exits.
     ///
-    /// Naming: an entry's `Exec.Env` custom field names the variable
-    /// (`Exec.Env=KUBECONFIG` on a kubeconfig attachment →
-    /// `KUBECONFIG=/tmp/.../kubeconfig` in the child). Without it:
-    /// `TROVE_<TITLE>_PASSWORD` / `TROVE_<TITLE>_FILE`. For several
-    /// variables from one entry, map each with `Exec.<VAR>` naming a field
-    /// or `@attachment` (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`).
+    /// What an entry exports is its `EnvAgent.settings`: one variable per
+    /// `<Variable>`, naming a field (`field="gitea-token"`) or an attachment,
+    /// whose temp-file path is exported. An entry without the document
+    /// exports nothing; `trove env-agent add` creates it. The older
+    /// `Exec.Env` and `Exec.<VAR>` fields still count as the document until
+    /// it exists.
     /// The child's exit code becomes trove's. With the global `--vault` it
     /// opens that file; without it, it reads the vaults unlocked in the
     /// daemon, gated by `TROVE_SESSION`.
@@ -3859,6 +3859,14 @@ fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: boo
             vault
                 .attach_binary(&id, GPG_KEY_ATTACHMENT, &key_bytes)
                 .context("attaching gpg secret key")?;
+            // Naming the key in GpgAgent.settings is what has the agent serve it.
+            vault
+                .ensure_settings_item(
+                    &id,
+                    trove_core::settings::Capability::GpgAgent,
+                    GPG_KEY_ATTACHMENT,
+                )
+                .context("writing GpgAgent.settings")?;
 
             vault.save().context("saving vault")?;
             println!("stored gpg secret key on entry {id} ({title})");
