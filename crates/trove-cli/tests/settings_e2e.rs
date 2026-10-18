@@ -561,6 +561,13 @@ impl Drop for Troved {
 /// and its socket path and session code.
 #[cfg(unix)]
 fn daemon(dir: &Path, vault: &Path, approver: &str) -> (Troved, String, String) {
+    let (guard, sock, code, _stdout) = daemon_unlocked(dir, vault, approver);
+    (guard, sock, code)
+}
+
+/// [`daemon`], also returning what `trove unlock --export` printed.
+#[cfg(unix)]
+fn daemon_unlocked(dir: &Path, vault: &Path, approver: &str) -> (Troved, String, String, String) {
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
     let troved = trove().parent().unwrap().join("troved");
@@ -610,7 +617,8 @@ fn daemon(dir: &Path, vault: &Path, approver: &str) -> (Troved, String, String) 
         .find_map(|l| l.strip_prefix("export TROVE_SESSION="))
         .map(|c| c.trim().trim_matches('\'').to_string())
         .expect("session code");
-    (guard, sock_s, code)
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    (guard, sock_s, code, stdout)
 }
 
 /// A variable marked `confirm="true"` reaches exec through the daemon only
@@ -672,6 +680,69 @@ fn a_confirm_flagged_variable_waits_for_the_daemons_approval() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+/// `trove unlock --export` also exports every variable whose settings say
+/// `export="shell"`, so a shell that unlocked has them; others stay exec-only,
+/// and a confirm-flagged one still waits for Touch ID.
+#[cfg(unix)]
+#[test]
+fn unlock_exports_the_variables_that_ask_for_the_shell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let v = gitea_vault(tmp.path());
+    let entry = "antimatter-studios/gitea";
+    ok(
+        &v,
+        &[
+            "env-agent",
+            "add",
+            entry,
+            "GITEA_TOKEN",
+            "--field",
+            "gitea-token",
+            "--export",
+            "shell",
+        ],
+    );
+    ok(
+        &v,
+        &[
+            "env-agent",
+            "add",
+            entry,
+            "GITEA_USER",
+            "--field",
+            "UserName",
+        ],
+    );
+    ok(
+        &v,
+        &[
+            "env-agent",
+            "add",
+            entry,
+            "GITEA_PASS",
+            "--field",
+            "Password",
+            "--export",
+            "shell",
+            "--confirm",
+        ],
+    );
+    let (_d, _sock, _code, stdout) = daemon_unlocked(tmp.path(), &v, "deny");
+    assert!(
+        stdout.contains("export GITEA_TOKEN='tok-e2e-123'"),
+        "the shell variable is exported, quoted: {stdout}"
+    );
+    assert!(
+        !stdout.contains("GITEA_USER"),
+        "an exec-only variable is not: {stdout}"
+    );
+    assert!(
+        !stdout.contains("GITEA_PASS"),
+        "a refused approval exports nothing: {stdout}"
+    );
+    assert!(stdout.contains("export TROVE_SESSION="), "{stdout}");
 }
 
 /// The motivating case through a real daemon: the agent's shell has only
