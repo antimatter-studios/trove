@@ -1707,6 +1707,14 @@ trove env-agent add antimatter-studios/gitea GITEA_TOKEN --field gitea-token
 trove exec --entry antimatter-studios/gitea -- tea pr list
 ```
 
+With `--export shell`, `trove unlock --export` (and the session subshell
+`trove unlock` opens at a terminal) also sets the variable, so everything run
+from that shell has it. That is the convenient form and the weaker one: an
+exported variable is inherited by every child of the shell and readable by
+anything in it, which is why it is opt-in per variable and exec is the default.
+A `confirm` variable still waits for Touch ID at unlock, and is left out, with a
+warning, when refused. An attachment cannot be exported to a shell.
+
 ## trove settings
 
 ```
@@ -2088,7 +2096,7 @@ names of what they refer to, never a value.
 | --- | --- | --- |
 | `name` | `<Variable>` | the environment variable; identifies the item |
 | `field` / `attachment` | `<Variable>` | exactly one: the field whose value, or the attachment whose temp-file path, is exported |
-| `export` | `<Variable>`, defaults | `none` (the default) or `shell` |
+| `export` | `<Variable>`, defaults | `none` (the default): `trove exec` only; `shell`: also exported into the shell by `trove unlock --export` (fields only) |
 | `attachment` | `<File>`, `<Key>` | the attachment written or served; identifies the item |
 | `target` | `<File>` | where to write it; `~`, `$HOME`, `$XDG_RUNTIME_DIR` are expanded by the daemon |
 | `dir` | `<File>`, defaults | where to write it, under its attachment's name, when there is no `target` |

@@ -142,8 +142,13 @@ const STANDARD_FIELDS: [&str; 5] = ["Title", "UserName", "Password", "URL", "Not
 
 impl DaemonSource {
     pub fn connect() -> Result<Self> {
+        Self::with_code(crate::require_session_code()?)
+    }
+
+    /// For `trove unlock`, which holds the code it was just handed before any
+    /// environment does.
+    pub fn with_code(code: String) -> Result<Self> {
         use serde_json::Value;
-        let code = crate::require_session_code()?;
         let resp = crate::daemon_call(&crate::daemon::Request::List)?;
         let strings = |v: &Value, k: &str| -> Vec<String> {
             v.get(k)
@@ -363,6 +368,58 @@ pub fn resolve(v: &dyn Source, scope: Scope, tmp: &Path) -> Result<Vec<Injection
         ));
     }
     Ok(out)
+}
+
+/// The variables the open vaults ask to have exported into the shell at
+/// `trove unlock --export`: every `<Variable>` whose `export` resolves to
+/// `shell`. Read through the daemon like exec's, so a `confirm` item waits for
+/// Touch ID here too. Problems are warnings, not failures: an unlock that
+/// worked must not be reported as failed because one variable did not.
+pub fn shell_exports(code: &str) -> Vec<Injection> {
+    let source = match DaemonSource::with_code(code.to_string()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("trove: warning: shell exports skipped: {e:#}");
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<Injection> = Vec::new();
+    for e in &source.entries {
+        let items = match source.settings(e) {
+            Ok(Some(items)) => items,
+            Ok(None) => continue,
+            Err(err) => {
+                eprintln!("trove: warning: {}: {err:#}", e.display_path());
+                continue;
+            }
+        };
+        for item in items.iter().filter(|i| i.get("export") == Some("shell")) {
+            let path = e.display_path();
+            let var = &item.key;
+            let Some(field) = item.get("field") else {
+                eprintln!(
+                    "trove: warning: {path}: {var} names an attachment, which cannot be \
+                     exported to a shell; use `trove exec`"
+                );
+                continue;
+            };
+            if out.iter().any(|i| &i.name == var) {
+                eprintln!("trove: warning: {path}: {var} is already exported by another entry; kept the first");
+                continue;
+            }
+            match source.field(e, field) {
+                Ok(Some(value)) => out.push(Injection {
+                    name: var.clone(),
+                    value,
+                }),
+                Ok(None) => eprintln!(
+                    "trove: warning: {path}: {var} names field '{field}', which the entry doesn't have"
+                ),
+                Err(err) => eprintln!("trove: warning: {path}: {var}: {err:#}"),
+            }
+        }
+    }
+    out
 }
 
 /// One entry's variables, from its effective `EnvAgent.settings` items. A

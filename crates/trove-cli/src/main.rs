@@ -7556,16 +7556,26 @@ fn cmd_unlock(
     // rather than a mode.
     let code = code.ok_or_else(|| anyhow!("daemon unlocked but returned no session code"))?;
 
+    // Variables whose EnvAgent.settings say export="shell" travel with the
+    // session code, into the subshell or the `eval`.
+    let exports = exec::shell_exports(code);
     let spawn_shell = shell || (!export && std::io::stdout().is_terminal());
     if spawn_shell {
         eprintln!(
             "trove: unlocked {} · session active in this shell — run add/get here, `exit` to end",
             vault.display()
         );
-        return exec_session_shell(code, agent_sock.as_deref());
+        return exec_session_shell(code, agent_sock.as_deref(), &exports);
     }
     if let Some(sock) = &agent_sock {
         println!("export SSH_AUTH_SOCK={}", sh_single_quote(sock));
+    }
+    for e in &exports {
+        println!("export {}={}", e.name, sh_single_quote(&e.value));
+    }
+    if !exports.is_empty() {
+        let names: Vec<&str> = exports.iter().map(|e| e.name.as_str()).collect();
+        eprintln!("trove: exported {} into the shell", names.join(", "));
     }
     println!("export TROVE_SESSION={code}");
     eprintln!(
@@ -7591,11 +7601,18 @@ fn sh_single_quote(s: &str) -> String {
 /// On Unix we `exec` (replace this process) so no stray `trove` lingers; on
 /// other platforms we spawn and wait, forwarding the shell's exit status. The
 /// code is passed only via the child's environment — never written to disk.
-fn exec_session_shell(code: &str, agent_sock: Option<&str>) -> Result<()> {
+fn exec_session_shell(
+    code: &str,
+    agent_sock: Option<&str>,
+    exports: &[exec::Injection],
+) -> Result<()> {
     // The user's login shell (zsh, bash, fish, …); fall back to /bin/sh.
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| std::ffi::OsString::from("/bin/sh"));
     let mut cmd = std::process::Command::new(&shell);
     cmd.env("TROVE_SESSION", code);
+    for e in exports {
+        cmd.env(&e.name, &e.value);
+    }
     // Only set when the daemon had to correct it, so a working environment is
     // left exactly as the operator had it.
     if let Some(sock) = agent_sock {
