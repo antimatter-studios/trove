@@ -4,6 +4,15 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.26.1 — 2026-10-18
+
+**Release assets are attested.** Every file a release uploads now carries a
+build-provenance attestation signed by trove's release workflow, which the
+Homebrew tap requires before its formula and cask move, so this is the first
+release `brew install` can follow since v0.24.0. Check a download with
+`gh attestation verify <file> --repo antimatter-studios/trove`. Nothing else
+changed from v0.26.0. (#405)
+
 ## v0.26.0 — 2026-10-18
 
 **Capability settings documents.** An entry now says which capability uses

@@ -426,6 +426,9 @@ Early but real — the headless-daemon path works end-to-end on Linux and macOS 
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.26.1
+Release assets carry build-provenance attestations, so the Homebrew tap can ship them; otherwise v0.26.0.
+
 ### v0.26.0
 Capability settings documents: `EnvAgent.settings`, `Materialize.settings` and `GpgAgent.settings` say what `trove exec` exports, which files are written and which GPG keys are served, with folder defaults that never grant; no document means off. New `trove env-agent`, `trove materialize add`, `trove gpg-agent enable`, `trove settings`, desktop panels for all of it, Touch ID approval for items marked `confirm`, and `export="shell"` variables set by `trove unlock --export`. `--env` reads `.env.trove.yaml` (passwords under `databases:`, settings under `environment:`); the old `.env.trove` formats are refused with directions to convert. `trove exec` maps several variables per entry and runs against the unlocked daemon. SSH keys load passphrase-protected, from PuTTY `.ppk` and as P-521, and `import-ssh` bootstraps a vault from `~/.ssh`. New `trove doctor`, `trove health` and `analyze --reuse/--weak/--age/--expired`; `troved --resident` with service units; entry expiry and icons.
 
@@ -452,6 +455,3 @@ Read and status commands support `--json`; `trove describe` exposes safe metadat
 
 ### v0.19.0
 `trove unlock --filter TAG` enables only entries with that native KDBX tag, including tags inherited from groups—so SSH offers the right keys before a server's authentication-attempt limit. Entry and group tags can be edited through the CLI and desktop. Favorites now use the native `Favorite` tag while keeping the star and Favorites view; the old `_TroveFav=1` custom field is ignored, not migrated.
-
-### v0.18.0
-`trove unlock --detach` unlocks the vault and hands your prompt straight back — no subshell, nothing to `eval`, and no session code. Both agents serve the vault's keys and `Materialize.*` entries are written as always, so `ssh`, `git` and `gpg` work; what is refused in that shell is extraction (`get`, `materialize`), because no code was minted. Not minted and withheld — not minted: a code nobody holds is still a live extraction capability sitting in daemon memory. Detaching one vault leaves an earlier session working, since unlock is additive. **`--no-shell` is removed**; it aliased `--export` and read like a statement about your terminal when it was really about `eval`, which made it the obvious wrong flag to reach for. `--export` is the replacement. The socket path `--export` prints is now shell-quoted.

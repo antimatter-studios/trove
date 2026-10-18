@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "trove-cli"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "trove-core"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "base32",
  "hmac 0.12.1",
@@ -2716,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "troved"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "aes 0.8.4",
  "aes-kw",
