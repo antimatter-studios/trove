@@ -5,8 +5,12 @@
 //! The binary lives in `src/main.rs` and re-imports from this library.
 
 // Unsafe remains denied crate-wide. The Windows IPC module has one narrowly
-// scoped allowance for Tokio's raw SECURITY_ATTRIBUTES API.
+// scoped allowance for Tokio's raw SECURITY_ATTRIBUTES API, and the macOS
+// approval prompt one for LocalAuthentication's generated bindings.
 #![deny(unsafe_code)]
+
+/// Touch ID approval for settings items that say `confirm="true"`.
+pub mod approval;
 
 /// Enumerate + reap trove control daemons across the runtime dirs (Unix only;
 /// builds on the singleton flock, which has no Windows analogue).

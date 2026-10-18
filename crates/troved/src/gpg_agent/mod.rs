@@ -37,7 +37,8 @@ pub use keys::LoadedGpgKey;
 
 use crate::gpg_agent::assuan::{
     percent_encode, write_data, write_err, write_ok, write_ok_with, write_status, AssuanWriter,
-    Line, ERR_INV_VALUE, ERR_NO_SCDAEMON, ERR_NO_SECRET_KEY, ERR_UNKNOWN_COMMAND,
+    Line, ERR_INV_VALUE, ERR_NOT_CONFIRMED, ERR_NO_SCDAEMON, ERR_NO_SECRET_KEY,
+    ERR_UNKNOWN_COMMAND,
 };
 use crate::gpg_agent::pkdecrypt::ecdh_decrypt;
 use crate::idle::IdleTracker;
@@ -447,6 +448,15 @@ async fn handle_command(
                     return CommandOutcome::Continue;
                 }
             };
+            // A key whose GpgAgent.settings says confirm="true" signs only
+            // after Touch ID.
+            if let Some(gate) = crate::approval::gpg_gate(&grip) {
+                if let Err(why) = crate::approval::require(&[gate]).await {
+                    eprintln!("gpg-agent: PKSIGN refused: {why}");
+                    send!(write_err(w, ERR_NOT_CONFIRMED, "not confirmed"));
+                    return CommandOutcome::Continue;
+                }
+            }
             // The sig-val S-expression differs by algorithm, so build it while
             // we still know which variant answered.
             let sexp_opt: Option<Vec<u8>> = {
@@ -535,6 +545,14 @@ async fn handle_command(
             };
             if std::env::var("TROVE_GPG_TRACE").is_ok() {
                 eprintln!("gpg-agent: got ciphertext {} bytes", ciphertext_bytes.len());
+            }
+
+            if let Some(gate) = crate::approval::gpg_gate(&grip) {
+                if let Err(why) = crate::approval::require(&[gate]).await {
+                    eprintln!("gpg-agent: PKDECRYPT refused: {why}");
+                    send!(write_err(w, ERR_NOT_CONFIRMED, "not confirmed"));
+                    return CommandOutcome::Continue;
+                }
             }
 
             // Resolve the key and decrypt under a single read lock. The

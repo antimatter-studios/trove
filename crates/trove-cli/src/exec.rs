@@ -66,6 +66,12 @@ pub trait Source {
     /// The entry's `EnvAgent.settings` items, resolved through inheritance;
     /// `None` when exec is off for the entry.
     fn settings(&self, e: &Entry) -> Result<Option<Vec<EffectiveItem>>>;
+    /// Whether this source asks for Touch ID itself before handing over a
+    /// value whose item says `confirm="true"`. The daemon does; a vault file
+    /// opened here has no one between it and the caller, so exec asks.
+    fn approves_itself(&self) -> bool {
+        false
+    }
 }
 
 /// A vault file opened by `exec` itself.
@@ -259,6 +265,9 @@ impl Source for DaemonSource {
             base64::engine::general_purpose::STANDARD.decode(data)?,
         ))
     }
+    fn approves_itself(&self) -> bool {
+        true
+    }
     fn settings(&self, e: &Entry) -> Result<Option<Vec<EffectiveItem>>> {
         let resp = crate::daemon_call(&crate::daemon::Request::Settings {
             path: e.display_path(),
@@ -369,11 +378,17 @@ fn injections(
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let var = &item.key;
-        if item.flag("confirm") {
-            return Err(anyhow!(
-                "{path}: {var} needs Touch ID approval (confirm=\"true\"), which trove exec \
-                 cannot ask for yet"
-            ));
+        if item.flag("confirm") && !v.approves_itself() {
+            let reason = format!("use {var} from {path}");
+            match troved::approval::approve(&reason) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(anyhow!(
+                        "{path}: {var} needs Touch ID approval, which was refused or timed out"
+                    ))
+                }
+                Err(why) => return Err(anyhow!("{path}: {var}: {why}")),
+            }
         }
         let value = if let Some(att) = item.get("attachment") {
             let bytes = v.attachment(e, att)?.ok_or_else(|| {
@@ -773,6 +788,9 @@ mod tests {
 
     #[test]
     fn a_confirm_flagged_variable_is_refused_until_approval_exists() {
+        // Debug builds read this instead of showing a real prompt; "none" is
+        // the machine with no Touch ID, where the answer must be no.
+        std::env::set_var("TROVE_TEST_APPROVER", "none");
         let dir = TempDir::new().unwrap();
         let v = doc_vault(
             &dir,

@@ -546,6 +546,7 @@ async fn handle_request(
                         let mut gkeys = gpg_store.write().await;
                         gkeys.clear();
                     }
+                    crate::approval::clear();
                 }
             }
 
@@ -642,6 +643,7 @@ async fn handle_request(
                 let mut gkeys = gpg_store.write().await;
                 gkeys.clear();
             }
+            crate::approval::clear();
             scoped::clear_all(scoped_agents).await;
             *session_guard = None;
             Handled {
@@ -1346,6 +1348,39 @@ async fn get_secret(
             }
         }
     };
+    let gates = crate::approval::gates_for(
+        vault,
+        vault.path(),
+        &id,
+        title,
+        crate::approval::Reads::Attachment(attachment),
+    );
+    if !gates.is_empty() {
+        drop(guard);
+        drop(sess);
+        if let Err(why) = crate::approval::require(&gates).await {
+            return err_handled(why);
+        }
+        let sess = session.lock().await;
+        if !session_matches(&sess, peer_uid, code) {
+            return session_refused();
+        }
+        let guard = state.lock().await;
+        let (vault, id) = match guard.find_entry(title) {
+            Ok(found) => found,
+            Err(e) => return err_handled(e.to_string()),
+        };
+        return match vault.read_binary(&id, attachment) {
+            Ok(Some(bytes)) => {
+                use base64::Engine;
+                ok_handled(Response::ok_secret(
+                    base64::engine::general_purpose::STANDARD.encode(&bytes),
+                ))
+            }
+            Ok(None) => err_handled(format!("entry '{title}' has no attachment '{attachment}'")),
+            Err(e) => err_handled(format!("reading attachment: {e}")),
+        };
+    }
     match vault.read_binary(&id, attachment) {
         Ok(Some(bytes)) => {
             use base64::Engine;
@@ -2077,6 +2112,36 @@ async fn get_field(
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
+    let gates = crate::approval::gates_for(
+        vault,
+        vault.path(),
+        &id,
+        path,
+        crate::approval::Reads::Field(field),
+    );
+    if !gates.is_empty() {
+        // Ask with no lock held, then read again: the prompt can wait a
+        // minute, and every other request would wait with it.
+        drop(guard);
+        drop(sess);
+        if let Err(why) = crate::approval::require(&gates).await {
+            return err_handled(why);
+        }
+        let sess = session.lock().await;
+        if !session_matches(&sess, peer_uid, code) {
+            return session_refused();
+        }
+        let guard = state.lock().await;
+        let (vault, id) = match guard.find_entry(path) {
+            Ok(found) => found,
+            Err(e) => return err_handled(e.to_string()),
+        };
+        return match vault.get_field(&id, field) {
+            Ok(Some(value)) => ok_handled(Response::ok_value(value)),
+            Ok(None) => err_handled(format!("entry '{path}' has no field '{field}'")),
+            Err(e) => err_handled(format!("reading field: {e}")),
+        };
+    }
     match vault.get_field(&id, field) {
         Ok(Some(value)) => ok_handled(Response::ok_value(value)),
         Ok(None) => err_handled(format!("entry '{path}' has no field '{field}'")),
@@ -2225,6 +2290,7 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
     let mut ssh_seen: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut gpg: Vec<LoadedGpgKey> = Vec::new();
     let mut gpg_seen: HashMap<[u8; 20], usize> = HashMap::new();
+    let mut gates = HashMap::new();
     for (vault, filter) in set.iter_with_filters() {
         let vault_label = vault
             .path()
@@ -2244,6 +2310,7 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
                 }
             }
         }
+        gates.extend(gpg_gates_for_vault(vault, filter));
         for key in load_gpg_keys_from_vault_filtered(vault, filter) {
             let grip = gpg_keygrip(&key);
             match gpg_seen.get(&grip) {
@@ -2255,7 +2322,43 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
             }
         }
     }
+    crate::approval::set_gpg_gates(gates);
     (ssh, gpg)
+}
+
+/// Which served GPG keys need Touch ID: those whose `<Key>` resolves
+/// `confirm="true"`, by keygrip.
+fn gpg_gates_for_vault(
+    vault: &Vault,
+    filter: Option<&str>,
+) -> std::collections::HashMap<String, crate::approval::Gate> {
+    let mut out = std::collections::HashMap::new();
+    for entry in vault.list_entries() {
+        if !entry_matches_filter(&entry, filter) {
+            continue;
+        }
+        let Ok(Some(items)) = vault.effective_settings(&entry.id, Capability::GpgAgent) else {
+            continue;
+        };
+        for item in items.iter().filter(|i| i.flag("confirm")) {
+            let Ok(Some(bytes)) = vault.read_binary(&entry.id, &item.key) else {
+                continue;
+            };
+            let Ok(keys) = gpg_keys_for_item(vault, &entry, item, &bytes) else {
+                continue;
+            };
+            let gate = crate::approval::gate(
+                vault.path(),
+                &entry.display_path(),
+                Capability::GpgAgent,
+                item,
+            );
+            for k in keys {
+                out.insert(k.keygrip_hex(), gate.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Find the one SSH key across the open vaults that `entry` names.
