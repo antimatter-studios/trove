@@ -2199,12 +2199,28 @@ impl Vault {
                 .iter()
                 .filter(|name| name.starts_with("Materialize."))
                 .count();
+            // A Materialize.settings document's files count one each.
+            if let Some(doc) =
+                self.settings_document(&entry.id, settings::Capability::Materialize)?
+            {
+                plan.materialize_fields_removed += doc.items().len();
+            }
             plan.entries.push((entry.display_path(), target));
         }
         plan.groups
             .sort_by_key(|(source, _)| source.matches('/').count());
         plan.entries.sort_by_key(|a| a.0.to_lowercase());
         Ok(plan)
+    }
+
+    /// Remove what has an entry write files on unlock — its `Materialize.*`
+    /// fields and `Materialize.settings` — so a copy cannot write to the same
+    /// targets as its original.
+    pub fn strip_materialize(&mut self, id: &EntryId) -> Result<()> {
+        for field in self.fields_with_prefix(id, "Materialize.")? {
+            self.remove_field(id, &field)?;
+        }
+        self.set_settings_document(id, settings::Capability::Materialize, None)
     }
 
     /// Copy a whole group tree, preserving groups, direct tags, entries and attachments.
@@ -2254,9 +2270,7 @@ impl Vault {
                 let dst_id = self.copy_entry(&entry.id, &target)?;
                 self.set_tags(&dst_id, &entry.tags)?;
                 if !keep_materialize {
-                    for field in self.fields_with_prefix(&dst_id, "Materialize.")? {
-                        self.remove_field(&dst_id, &field)?;
-                    }
+                    self.strip_materialize(&dst_id)?;
                 }
             }
             Ok(())

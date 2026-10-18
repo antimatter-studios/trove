@@ -228,6 +228,23 @@ pub enum Request {
         #[serde(default)]
         group: bool,
     },
+    /// Code-gated write: store (or with `document` absent, delete) a capability
+    /// settings document on an entry, a group, or with `group` and an empty
+    /// `path` the database. An entry's legacy fields for the capability are
+    /// removed. `ssh-agent` writes the entry's `KeeAgent.settings`, in UTF-16
+    /// when `utf16` is set, as KeePassXC writes it.
+    SetSettings {
+        path: String,
+        capability: String,
+        #[serde(default)]
+        group: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        document: Option<String>,
+        #[serde(default)]
+        utf16: bool,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
     /// Search unprotected metadata; protected values never match or leave the
     /// vault. Older clients send a string `term`; omitted filters default empty.
     /// Read safe discovery metadata for an entry or every entry in a group.
@@ -505,6 +522,22 @@ impl std::fmt::Debug for Request {
                 .field("code", &"<redacted>")
                 .finish(),
             Request::ShowEntry { path } => f.debug_struct("ShowEntry").field("path", path).finish(),
+            Request::SetSettings {
+                path,
+                capability,
+                group,
+                document,
+                utf16,
+                code: _,
+            } => f
+                .debug_struct("SetSettings")
+                .field("path", path)
+                .field("capability", capability)
+                .field("group", group)
+                .field("document", &document.as_ref().map(|d| d.len()))
+                .field("utf16", utf16)
+                .field("code", &"<redacted>")
+                .finish(),
             Request::Settings {
                 path,
                 capability,
@@ -748,6 +781,25 @@ pub struct ResolvedDto {
 }
 
 impl SettingsDto {
+    /// An entry's `KeeAgent.settings`, as text, for `ssh-agent`.
+    pub fn for_keeagent(
+        vault: &trove_core::Vault,
+        id: &trove_core::EntryId,
+        path: &str,
+    ) -> trove_core::Result<Self> {
+        let document = vault
+            .read_binary(id, "KeeAgent.settings")?
+            .and_then(|b| crate::ssh_agent::keeagent::decode(&b));
+        Ok(SettingsDto {
+            capability: "ssh-agent".to_string(),
+            path: path.to_string(),
+            group: false,
+            document,
+            legacy: false,
+            effective: None,
+        })
+    }
+
     /// An entry's document and effective items, read from `vault`.
     pub fn for_entry(
         vault: &trove_core::Vault,
