@@ -630,8 +630,9 @@ its path exported.
 **An entry without the document exports nothing.** To turn `exec` on for an
 entry, create its document with `trove env-agent add`. A scope in which no
 entry has one is an error that says so, rather than a command run with nothing
-injected. A variable whose item sets `confirm="true"` is refused, because
-`exec` cannot ask for the approval it needs.
+injected. A variable whose item sets `confirm="true"` is handed over only after
+Touch ID approves it — asked by the daemon, or by `exec` itself with `--vault` —
+and refused where no approval can be asked.
 
 During the transition, the fields the document replaces still count as one, so
 existing vaults keep working:
@@ -2096,8 +2097,8 @@ names of what they refer to, never a value.
 | `allowDiskBacked` | `<File>`, defaults | `true` allows a target that is not memory-backed |
 | `keygrips` | `<Key>` | serve only these space-separated keygrips from the export |
 | `uses` | `<Key>`, defaults | `sign`, `decrypt` or `both` (the default); an RSA key must be `both` |
-| `confirm` | items, defaults | `true` requires Touch ID approval for each use |
-| `lifetime` | items, defaults | seconds a use stays valid; `0` is no limit |
+| `confirm` | items, defaults | `true` requires Touch ID approval before the secret is used |
+| `lifetime` | items, defaults | seconds one approval covers the item; without it, every use asks |
 
 The rules:
 
@@ -2114,6 +2115,16 @@ The rules:
   The nearest wins, except for constraints, which only tighten: `confirm` is on
   if any level turns it on, and `lifetime` and `ttl` take the shortest positive
   value.
+- **Approval.** An item with `confirm="true"` hands its secret over only after
+  Touch ID: the daemon asks before `GetField` or `Get` returns a field or
+  attachment such an item names, and before the GPG agent signs or decrypts
+  with such a key (refused with `GPG_ERR_NOT_CONFIRMED` otherwise). A
+  fingerprint, not a dialog, because software running as you can click a
+  dialog. Where no approval can be asked — another platform, no reader, no one
+  at the Mac — the secret is refused, never handed over on the strength of the
+  unlock. One approval covers the item for its `lifetime`; locking forgets
+  every approval. A caller holding the vault password can open the file
+  directly and is not stopped by this: it gates the daemon, not the file.
 - **Renaming an attachment** rewrites every item that names it.
 - **KeePassXC** keeps the documents through an open and save, but has no editor
   for trove's three; use `trove settings edit` or the commands above.

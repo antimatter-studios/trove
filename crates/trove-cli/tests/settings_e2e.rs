@@ -33,6 +33,8 @@ fn run(env: &[(&str, &str)], args: &[&str], stdin: &str) -> Output {
         .env_remove("SSH_AUTH_SOCK")
         .env("TROVE_NO_AUTOSPAWN", "1")
         .env("TROVE_NO_VERSION_WARN", "1")
+        // Never a real Touch ID prompt from a test: debug builds read this.
+        .env("TROVE_TEST_APPROVER", "none")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -80,6 +82,7 @@ fn gitea_vault(dir: &Path) -> PathBuf {
     let id = v.add_entry("gitea").unwrap();
     v.move_entry(&id, "antimatter-studios").unwrap();
     v.set_field(&id, "UserName", "chris").unwrap();
+    v.set_field(&id, "Password", "pw-e2e").unwrap();
     v.set_field(&id, "gitea-token", "tok-e2e-123").unwrap();
     v.attach_binary(&id, "gitea_ed25519", b"not a real key")
         .unwrap();
@@ -542,56 +545,56 @@ fn make_executable(path: &Path) {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) {}
 
-/// The motivating case through a real daemon: the agent's shell has only
-/// `TROVE_SESSION`, never the vault password.
 #[cfg(unix)]
-#[test]
-fn env_agent_add_and_exec_through_the_daemon() {
+struct Troved(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Troved {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A real `troved` on sockets in `dir`, answering approval prompts with
+/// `approver` (debug builds only), with `vault` unlocked. Returns the daemon
+/// and its socket path and session code.
+#[cfg(unix)]
+fn daemon(dir: &Path, vault: &Path, approver: &str) -> (Troved, String, String) {
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
-
-    struct Troved(std::process::Child);
-    impl Drop for Troved {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    let v = gitea_vault(dir);
     let troved = trove().parent().unwrap().join("troved");
     assert!(
         troved.is_file(),
         "troved not built next to trove at {}",
         troved.display()
     );
-    let sock = dir.join("trove.sock");
+    let sock = dir.join(format!("trove-{approver}.sock"));
     let child = Command::new(&troved)
         .env("TROVE_SOCK", &sock)
-        .env("TROVE_SSH_SOCK", dir.join("trove-ssh.sock"))
-        .env("TROVE_GPG_SOCK", dir.join("trove-gpg.sock"))
+        .env("TROVE_SSH_SOCK", dir.join(format!("ssh-{approver}.sock")))
+        .env("TROVE_GPG_SOCK", dir.join(format!("gpg-{approver}.sock")))
         .env("TROVE_IDLE_TIMEOUT", "600")
         .env("TROVE_SSH_FORWARD", "0")
+        .env("TROVE_TEST_APPROVER", approver)
         .env_remove("SSH_AUTH_SOCK")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn troved");
-    let _troved = Troved(child);
+    let guard = Troved(child);
     let deadline = Instant::now() + Duration::from_secs(30);
     while UnixStream::connect(&sock).is_err() {
         assert!(Instant::now() < deadline, "troved never came up");
         std::thread::sleep(Duration::from_millis(25));
     }
-    let sock_s = sock.to_str().unwrap();
+    let sock_s = sock.to_str().unwrap().to_string();
     let out = run(
-        &[("TROVE_SOCK", sock_s)],
+        &[("TROVE_SOCK", &sock_s)],
         &[
             "unlock",
-            v.to_str().unwrap(),
+            vault.to_str().unwrap(),
             "--password-stdin",
             "--export",
         ],
@@ -607,6 +610,80 @@ fn env_agent_add_and_exec_through_the_daemon() {
         .find_map(|l| l.strip_prefix("export TROVE_SESSION="))
         .map(|c| c.trim().trim_matches('\'').to_string())
         .expect("session code");
+    (guard, sock_s, code)
+}
+
+/// A variable marked `confirm="true"` reaches exec through the daemon only
+/// once Touch ID approves it, and not at all where no approval can be asked.
+#[cfg(unix)]
+#[test]
+fn a_confirm_flagged_variable_waits_for_the_daemons_approval() {
+    let tmp = tempfile::tempdir().unwrap();
+    let v = gitea_vault(tmp.path());
+    let entry = "antimatter-studios/gitea";
+    ok(
+        &v,
+        &[
+            "env-agent",
+            "add",
+            entry,
+            "GITEA_TOKEN",
+            "--field",
+            "gitea-token",
+            "--confirm",
+        ],
+    );
+    let print = [
+        "exec",
+        "--entry",
+        entry,
+        "--",
+        "sh",
+        "-c",
+        "printf %s \"$GITEA_TOKEN\"",
+    ];
+    for (approver, allowed) in [("allow", true), ("deny", false), ("none", false)] {
+        let (_d, sock, code) = daemon(tmp.path(), &v, approver);
+        let env = [
+            ("TROVE_SOCK", sock.as_str()),
+            ("TROVE_SESSION", code.as_str()),
+        ];
+        let out = run(&env, &print, "");
+        assert_eq!(
+            out.status.success(),
+            allowed,
+            "approver={approver}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if allowed {
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "tok-e2e-123");
+        } else {
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("Touch ID"),
+                "approver={approver}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // A field no confirm-flagged item names is read as before.
+        let out = run(&env, &["get", "password", entry], "");
+        assert!(
+            out.status.success(),
+            "approver={approver}: an ungated field reads: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The motivating case through a real daemon: the agent's shell has only
+/// `TROVE_SESSION`, never the vault password.
+#[cfg(unix)]
+#[test]
+fn env_agent_add_and_exec_through_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let v = gitea_vault(dir);
+    let (_d, sock, code) = daemon(dir, &v, "none");
+    let sock_s = sock.as_str();
     let env = [("TROVE_SOCK", sock_s), ("TROVE_SESSION", code.as_str())];
     let entry = "antimatter-studios/gitea";
 

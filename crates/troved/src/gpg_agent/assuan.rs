@@ -42,6 +42,7 @@ pub const ERR_UNKNOWN_COMMAND: u32 = 100_663_363; // GPG_ERR_UNKNOWN_IPC_COMMAND
 pub const ERR_MISSING_KEY: u32 = 67_108_881; // alias for clarity at call sites
 pub const ERR_INV_VALUE: u32 = 67_108_919; // GPG_ERR_INV_VALUE for malformed args
 pub const ERR_GENERAL: u32 = 67_108_877; // GPG_ERR_GENERAL fallback
+pub const ERR_NOT_CONFIRMED: u32 = 67_108_978; // GPG_ERR_NOT_CONFIRMED (source=4, code=114)
 
 /// Cap on a single Assuan input line. Spec says 1000; we accept 4 KiB so a
 /// stray long `OPTION putenv=...` doesn't kill the connection.

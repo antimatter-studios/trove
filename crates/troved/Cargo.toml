@@ -74,6 +74,14 @@ base64 = "0.22"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
 
+# macOS only: Touch ID approval for settings items that say confirm="true"
+# (see `approval`). The same LocalAuthentication bindings the desktop app uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError", "block2"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
+objc2 = "0.6"
+block2 = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = {
     version = "0.61",
