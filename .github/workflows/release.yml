@@ -262,7 +262,7 @@ jobs:
           Compress-Archive -Path staging/* -DestinationPath "$name.zip" -Force
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.label }}
           path: |
@@ -448,7 +448,7 @@ jobs:
           ls -la bundles/
 
       - name: Upload desktop artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-${{ matrix.label }}
           path: trove-desktop/bundles/*
