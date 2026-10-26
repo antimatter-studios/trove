@@ -67,8 +67,8 @@ struct Cli {
     ///
     /// Bare `--env` looks for `.env.trove.yaml` in the working directory and
     /// then beside the vault being opened; pass a path to read a specific file.
-    /// The file is YAML: `databases:` maps each vault's filename (`work.kdbx`)
-    /// to its password, and `environment:` sets variables such as
+    /// The file is YAML: `databases:` maps a vault filename or path suffix to
+    /// its password; the longest whole-component suffix wins. `environment:` sets variables such as
     /// `TROVE_IDLE_TIMEOUT`. An existing environment variable wins over the
     /// file, and an exported `TROVE_VAULT_PASSWORD` wins over `databases:`.
     ///
@@ -4556,7 +4556,7 @@ fn env_vault_path() -> Option<PathBuf> {
     std::env::var_os(VAULT_VAR).map(PathBuf::from)
 }
 /// Per-vault credentials loaded from the `databases:` map of `.env.trove.yaml`,
-/// keyed by exact filename (for example, `work.kdbx`).
+/// keyed by filename or path suffix (for example, `homelab/work.kdbx`).
 static VAULT_PASSWORDS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
     std::sync::OnceLock::new();
 
@@ -4812,7 +4812,7 @@ fn parse_databases(
 ) -> Result<std::collections::HashMap<String, String>> {
     let map = section.as_mapping().ok_or_else(|| {
         anyhow!(
-            "{}: `databases` must map vault filenames to passwords",
+            "{}: `databases` must map vault filenames or path suffixes to passwords",
             path.display()
         )
     })?;
@@ -4821,10 +4821,15 @@ fn parse_databases(
         let name = name
             .as_str()
             .ok_or_else(|| anyhow!("{}: vault names must be strings", path.display()))?;
-        if name.is_empty() || name.contains(['/', '\\']) {
+        let suffix = Path::new(name);
+        if suffix.file_name().is_none()
+            || suffix
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
             return Err(anyhow!(
-                "{}: {name:?} must be a vault filename such as work.kdbx, not a path — \
-                 the password is matched against the filename of the vault being opened",
+                "{}: {name:?} must be a vault filename or path suffix ending in a filename, \
+                 without parent-directory (`..`) components",
                 path.display()
             ));
         }
@@ -4940,14 +4945,32 @@ fn password_from_env() -> Option<String> {
 
 /// Resolve the opt-in password source for a particular vault: an exported
 /// `TROVE_VAULT_PASSWORD` first, so an explicit caller wins over the file, then
-/// the file's `databases:` entry for the vault's filename.
+/// the file's most specific `databases:` suffix matching the supplied vault path.
 fn password_for_vault(vault: &Path) -> Option<String> {
     password_from_env().or_else(|| {
         if !ENV_OPT_IN.get().copied().unwrap_or(false) {
             return None;
         }
-        let name = vault.file_name()?.to_str()?;
-        VAULT_PASSWORDS.get().and_then(|map| map.get(name).cloned())
+        // Include cwd for relative paths, while preserving meaningful symlink
+        // aliases such as `homelab` instead of resolving them to mount names.
+        let vault = if vault.is_absolute() {
+            vault.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(vault)
+        };
+        VAULT_PASSWORDS.get().and_then(|map| {
+            map.iter()
+                .filter_map(|(suffix, password)| {
+                    let suffix_path = Path::new(suffix);
+                    vault
+                        .ends_with(suffix_path)
+                        .then(|| (suffix_path.components().count(), suffix, password))
+                })
+                // More components win. Equivalent spellings use the first key
+                // alphabetically, so HashMap iteration cannot change selection.
+                .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(a.1)))
+                .map(|(_, _, password)| password.clone())
+        })
     })
 }
 
@@ -7386,17 +7409,20 @@ fn cmd_unlock(
         .ok_or_else(|| anyhow!("vault path is not valid utf-8"))?
         .to_string();
     // Same order as `open_vault`: the sources that cannot block come first.
-    let password = if let Some(p) = password_for_vault(&vault_abs) {
-        p
-    } else if pw_stdin {
-        read_password_from_stdin().context("reading vault password from stdin")?
-    } else if let Some(p) = password_from_keychain(Some(&vault_abs))? {
-        p
-    } else {
-        rpassword::prompt_password("Vault password: ").context(
-            "reading vault password (use --password-stdin when no terminal is available)",
-        )?
-    };
+    // Prefer the caller's alias, retaining the old canonical filename fallback
+    // for a file symlink whose name differs from the target's.
+    let password =
+        if let Some(p) = password_for_vault(vault).or_else(|| password_for_vault(&vault_abs)) {
+            p
+        } else if pw_stdin {
+            read_password_from_stdin().context("reading vault password from stdin")?
+        } else if let Some(p) = password_from_keychain(Some(&vault_abs))? {
+            p
+        } else {
+            rpassword::prompt_password("Vault password: ").context(
+                "reading vault password (use --password-stdin when no terminal is available)",
+            )?
+        };
 
     let req = daemon::Request::Unlock {
         path: vault_str,
@@ -8902,9 +8928,18 @@ mod env_file_tests {
     }
 
     #[test]
-    fn a_database_name_is_a_filename_not_a_path() {
-        assert!(err("databases:\n  /v/a.kdbx: x\n").contains("not a path"));
-        assert!(err("databases:\n  v\\\\a.kdbx: x\n").contains("not a path"));
+    fn database_names_accept_filenames_and_path_suffixes() {
+        let got =
+            parse("databases:\n  a.kdbx: x\n  docs/a.kdbx: y\n  homelab/docs/a.kdbx: z\n").unwrap();
+        assert_eq!(got.databases.len(), 3);
+        assert_eq!(got.databases["homelab/docs/a.kdbx"], "z");
+    }
+
+    #[test]
+    fn database_suffixes_require_a_filename_and_no_parent_components() {
+        for suffix in ["", ".", "..", "/", "docs/..", "docs/../a.kdbx"] {
+            assert!(err(&format!("databases:\n  {suffix:?}: x\n")).contains("ending in a filename"));
+        }
     }
 
     #[test]

@@ -86,6 +86,189 @@ fn fixture(trove: &Path, dir: &Path) -> PathBuf {
     vault
 }
 
+fn write_suffix_credentials(path: &Path, entries: &[(&str, &str)]) {
+    let databases: std::collections::BTreeMap<_, _> = entries.iter().copied().collect();
+    let text = serde_yaml::to_string(&serde_json::json!({"databases": databases}))
+        .expect("serialize credentials");
+    std::fs::write(path, text).expect("write credentials");
+}
+
+#[test]
+fn yaml_path_suffixes_disambiguate_same_named_vaults() {
+    let trove = find_trove().expect("cargo-built trove");
+    let tmp = TempDir::new().expect("tempdir");
+    let credentials = tmp.path().join(".env.trove.yaml");
+    write_suffix_credentials(
+        &credentials,
+        &[
+            ("v.kdbx", "fallback-password"),
+            ("docs/v.kdbx", "wrong-generic-password"),
+            ("lab/docs/v.kdbx", "wrong-partial-directory-password"),
+            ("homelab/docs/v.kdbx", "homelab-password"),
+            ("icloud/docs/v.kdbx", "icloud-password"),
+        ],
+    );
+    let env_arg = format!("--env={}", credentials.display());
+
+    for (directory, password) in [
+        ("homelab/docs", "homelab-password"),
+        ("icloud/docs", "icloud-password"),
+        ("archive", "fallback-password"),
+    ] {
+        let dir = tmp.path().join(directory);
+        std::fs::create_dir_all(&dir).expect("create vault directory");
+        let vault = dir.join("v.kdbx");
+        let init = run_in(
+            &trove,
+            &dir,
+            &["init", "--vault", "v.kdbx", "--password-stdin"],
+            &format!("{password}\n"),
+            &[],
+        );
+        assert!(
+            init.status.success(),
+            "init: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        // A bare filename must still match its parent directories from cwd.
+        for path in ["v.kdbx", vault.to_str().unwrap()] {
+            let out = run_in(&trove, &dir, &["list", "--vault", path, &env_arg], "", &[]);
+            assert!(
+                out.status.success(),
+                "{directory} ({path}): {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn yaml_path_suffixes_do_not_match_partial_components() {
+    let trove = find_trove().expect("cargo-built trove");
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp.path().join("homelab");
+    std::fs::create_dir_all(&dir).expect("create vault directory");
+    let vault = fixture(&trove, &dir);
+    let credentials = tmp.path().join(".env.trove.yaml");
+    write_suffix_credentials(
+        &credentials,
+        &[("lab/v.kdbx", PASSWORD), ("kdbx", PASSWORD)],
+    );
+    let out = run_in(
+        &trove,
+        &dir,
+        &[
+            "list",
+            "--vault",
+            vault.to_str().unwrap(),
+            &format!("--env={}", credentials.display()),
+        ],
+        "",
+        &[],
+    );
+    assert!(
+        !out.status.success(),
+        "partial components must not supply a password"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unlock_preserves_alias_suffixes_and_legacy_canonical_filenames() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::{fs::symlink, net::UnixListener};
+    use std::time::Duration;
+
+    let trove = find_trove().expect("cargo-built trove");
+    // Keep the socket below macOS's Unix-domain socket path length limit.
+    let tmp = tempfile::Builder::new()
+        .prefix("trove-suffix-")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    let storage = tmp.path().join("storage");
+    std::fs::create_dir(&storage).expect("create storage");
+    let vault = fixture(&trove, &storage);
+    let alias = tmp.path().join("homelab");
+    symlink(&storage, &alias).expect("create alias");
+    symlink(&vault, tmp.path().join("renamed.kdbx")).expect("create renamed file alias");
+    let credentials = tmp.path().join(".env.trove.yaml");
+    write_suffix_credentials(
+        &credentials,
+        &[
+            ("v.kdbx", "legacy-password"),
+            ("homelab/v.kdbx", "alias-password"),
+        ],
+    );
+    let socket = tmp.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind isolated mock daemon");
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        // Each unlock is followed by a list request for shell exports.
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().expect("accept unlock");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone stream"))
+                .read_line(&mut line)
+                .expect("read unlock");
+            let request: serde_json::Value = serde_json::from_str(&line).expect("unlock JSON");
+            match request["cmd"].as_str() {
+                Some("unlock") => {
+                    stream
+                        .write_all(b"{\"status\":\"ok\",\"code\":\"test-session\"}\n")
+                        .expect("unlock reply");
+                    requests.push(request);
+                }
+                Some("list") => {
+                    stream
+                        .write_all(b"{\"status\":\"ok\",\"entries\":[]}\n")
+                        .expect("list reply");
+                }
+                cmd => panic!("unexpected mock command: {cmd:?}"),
+            }
+        }
+        requests
+    });
+    for path in ["homelab/v.kdbx", "renamed.kdbx"] {
+        let out = run_in(
+            &trove,
+            tmp.path(),
+            &[
+                "unlock",
+                path,
+                &format!("--env={}", credentials.display()),
+                "--export",
+            ],
+            "",
+            &[
+                ("TROVE_SOCK", socket.to_str().unwrap()),
+                ("TROVE_NO_AUTOSPAWN", "1"),
+                ("TROVE_NO_VERSION_WARN", "1"),
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let requests = server.join().expect("mock daemon");
+    assert_eq!(
+        requests[0]["password"], "alias-password",
+        "alias-specific credentials must win"
+    );
+    assert_eq!(requests[1]["password"], "legacy-password");
+    for request in requests {
+        assert_eq!(
+            request["path"],
+            std::fs::canonicalize(&vault).unwrap().to_str().unwrap()
+        );
+    }
+}
+
 #[test]
 fn bare_env_reads_dot_env_trove_from_the_current_directory() {
     let Some(trove) = find_trove() else { return };

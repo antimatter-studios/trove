@@ -4,6 +4,22 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.27.0 — 2026-10-26
+
+**Select vault passwords by path suffix.** The `databases:` map in
+`.env.trove.yaml` accepts keys such as `homelab/docs/work.kdbx` alongside
+existing filename-only keys. The longest matching suffix wins, using whole
+path components, so copies with different passwords can share one credentials
+file. Relative paths include the caller's working directory, and symlink
+aliases are preserved for matching. Existing filename entries and the
+exported `TROVE_VAULT_PASSWORD` override keep working.
+
+**Update SSH cryptography dependencies.** The SSH backend moves to the upstream
+`ssh-key` 0.7.0-rc.11 release candidate to use patched `crypto-bigint` arithmetic,
+and `ctutils` is updated for its constant-time fixes. These resolve
+RUSTSEC-2026-0387 and RUSTSEC-2026-0385. Agent-selected RSA signature hashes
+continue to use the existing stable RSA implementation.
+
 ## v0.26.1 — 2026-10-18
 
 **Release assets are attested.** Every file a release uploads now carries a

@@ -20,12 +20,13 @@
 //! (`string algo || string sig_data`) — exactly what the SSH agent
 //! protocol's `SIGN_RESPONSE` carries.
 
-use rsa::pkcs1::DecodeRsaPrivateKey as _;
 use rsa::pkcs1v15;
-use rsa::pkcs8::DecodePrivateKey as _;
 use rsa::signature::{SignatureEncoding as _, Signer as _};
+use rsa_ssh::pkcs1::DecodeRsaPrivateKey as _;
+use rsa_ssh::pkcs8::DecodePrivateKey as _;
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
+use signature::Signer as _;
 use ssh_key::private::{KeypairData, RsaKeypair};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, PrivateKey};
 use std::time::{Duration, Instant};
@@ -213,12 +214,12 @@ impl LoadedKey {
             }
             KeypairData::Rsa(kp) => {
                 wire::put_string(&mut body, b"ssh-rsa");
-                wire::put_string(&mut body, kp.public.n.as_bytes());
-                wire::put_string(&mut body, kp.public.e.as_bytes());
-                wire::put_string(&mut body, kp.private.d.as_bytes());
-                wire::put_string(&mut body, kp.private.iqmp.as_bytes());
-                wire::put_string(&mut body, kp.private.p.as_bytes());
-                wire::put_string(&mut body, kp.private.q.as_bytes());
+                wire::put_string(&mut body, kp.public().n().as_bytes());
+                wire::put_string(&mut body, kp.public().e().as_bytes());
+                wire::put_string(&mut body, kp.private().d().as_bytes());
+                wire::put_string(&mut body, kp.private().iqmp().as_bytes());
+                wire::put_string(&mut body, kp.private().p().as_bytes());
+                wire::put_string(&mut body, kp.private().q().as_bytes());
             }
             KeypairData::Ecdsa(kp) => {
                 let curve = kp.curve().as_str();
@@ -227,8 +228,7 @@ impl LoadedKey {
                 wire::put_string(&mut body, kp.public_key_bytes());
                 // The private scalar goes on the wire as an `mpint`, not a
                 // `string` — fixed-width bytes would be rejected by OpenSSH.
-                let d = Mpint::from_positive_bytes(kp.private_key_bytes())
-                    .map_err(|_| AddIdentityError::Unsupported(format!("ecdsa-{curve}")))?;
+                let d = Mpint::from_positive_bytes(kp.private_key_bytes());
                 wire::put_string(&mut body, d.as_bytes());
             }
             other => {
@@ -327,28 +327,28 @@ fn encode_ssh_string_pair(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// before returning, so passing the same prime twice always fails.
 fn build_rsa_private_key(keypair: &RsaKeypair) -> Result<rsa::RsaPrivateKey, SignError> {
     let n_bytes = keypair
-        .public
-        .n
+        .public()
+        .n()
         .as_positive_bytes()
         .ok_or(SignError::Failed)?;
     let e_bytes = keypair
-        .public
-        .e
+        .public()
+        .e()
         .as_positive_bytes()
         .ok_or(SignError::Failed)?;
     let d_bytes = keypair
-        .private
-        .d
+        .private()
+        .d()
         .as_positive_bytes()
         .ok_or(SignError::Failed)?;
     let p_bytes = keypair
-        .private
-        .p
+        .private()
+        .p()
         .as_positive_bytes()
         .ok_or(SignError::Failed)?;
     let q_bytes = keypair
-        .private
-        .q
+        .private()
+        .q()
         .as_positive_bytes()
         .ok_or(SignError::Failed)?;
     rsa::RsaPrivateKey::from_components(
@@ -555,7 +555,8 @@ pub fn generate_private_key(key_type: KeyType, comment: &str) -> Result<Vec<u8>,
             "ecdsa-p384",
         ),
     };
-    let mut key = PrivateKey::random(&mut rand_core::OsRng, algorithm)
+    let mut rng = ssh_key::rand_core::UnwrapErr(ssh_key::getrandom::SysRng);
+    let mut key = PrivateKey::random(&mut rng, algorithm)
         .map_err(|e| GenerateError::Generation(label, e.to_string()))?;
     key.set_comment(comment);
     let pem = key
@@ -583,12 +584,12 @@ fn parse_pem_private_key(s: &str) -> Result<PrivateKey, ParseError> {
     {
         return Ok(pk);
     }
-    if let Ok(rsa) = rsa::RsaPrivateKey::from_pkcs1_pem(s) {
+    if let Ok(rsa) = rsa_ssh::RsaPrivateKey::from_pkcs1_pem(s) {
         let kp = RsaKeypair::try_from(rsa)
             .map_err(|e| ParseError::NotOpenssh(format!("rsa pkcs1: {e}")))?;
         return Ok(PrivateKey::from(kp));
     }
-    if let Ok(rsa) = rsa::RsaPrivateKey::from_pkcs8_pem(s) {
+    if let Ok(rsa) = rsa_ssh::RsaPrivateKey::from_pkcs8_pem(s) {
         let kp = RsaKeypair::try_from(rsa)
             .map_err(|e| ParseError::NotOpenssh(format!("rsa pkcs8: {e}")))?;
         return Ok(PrivateKey::from(kp));
@@ -743,7 +744,7 @@ fn rsa_modulus_bits(kp: &RsaKeypair) -> usize {
     // RsaKeypair holds the public modulus `n` as an Mpint. Its
     // `as_positive_bytes()` returns the big-endian bytes with no leading
     // zero. The bit length is then `bytes.len() * 8 - leading_zeros_in_top_byte`.
-    let n_bytes = kp.public.n.as_positive_bytes().unwrap_or(&[]);
+    let n_bytes = kp.public().n().as_positive_bytes().unwrap_or(&[]);
     if n_bytes.is_empty() {
         return 0;
     }
@@ -779,8 +780,7 @@ mod tests {
     use super::*;
 
     fn random_key(alg: Algorithm) -> PrivateKey {
-        use rand_core::OsRng;
-        let mut rng = OsRng;
+        let mut rng = ssh_key::rand_core::UnwrapErr(ssh_key::getrandom::SysRng);
         PrivateKey::random(&mut rng, alg).expect("random key")
     }
 
@@ -792,9 +792,52 @@ mod tests {
 
     fn encrypted_pem_of(pk: &PrivateKey, passphrase: &str) -> String {
         pem_of(
-            &pk.encrypt(&mut rand_core::OsRng, passphrase)
+            &pk.encrypt(&mut ssh_key::getrandom::SysRng, passphrase)
                 .expect("encrypt"),
         )
+    }
+
+    #[test]
+    fn decrypts_encrypted_keys_produced_by_openssh() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        for (kind, bits) in [
+            ("ed25519", None),
+            ("ecdsa", Some("256")),
+            ("rsa", Some("2048")),
+        ] {
+            let path = tmp.path().join(kind);
+            let mut cmd = std::process::Command::new("ssh-keygen");
+            cmd.args(["-q", "-t", kind, "-N", "interop-passphrase", "-f"])
+                .arg(&path);
+            if let Some(bits) = bits {
+                cmd.args(["-b", bits]);
+            }
+            let out = match cmd.output() {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("SKIP: ssh-keygen not on PATH");
+                    return;
+                }
+                other => other.expect("run ssh-keygen"),
+            };
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let pem = std::fs::read(&path).expect("read encrypted private key");
+            let loaded = parse_private_key_with_passphrase(&pem, kind, Some(b"interop-passphrase"))
+                .expect("decrypt OpenSSH key");
+            let public =
+                std::fs::read_to_string(path.with_extension("pub")).expect("read public key");
+            let expected = ssh_key::PublicKey::from_openssh(&public)
+                .expect("parse public key")
+                .to_bytes()
+                .unwrap();
+            assert_eq!(loaded.public_blob, expected);
+            loaded
+                .sign(b"encrypted OpenSSH interoperability", 0x02)
+                .expect("sign");
+        }
     }
 
     #[test]
@@ -979,7 +1022,22 @@ dHJvdmUudGVzdAEC
             };
             assert!(status.success(), "ssh-keygen failed");
             let pem = std::fs::read_to_string(&path).expect("read key");
-            if PrivateKey::from_openssh(&pem).is_ok() {
+            // Upstream now accepts short P-521 scalars. Inspect the original
+            // encoding rather than treating parser rejection as a length test.
+            let blob = openssh_pem_body(&pem).expect("OpenSSH armor");
+            let mut outer = Cursor(blob.strip_prefix(b"openssh-key-v1\0").expect("magic"));
+            for _ in 0..3 {
+                outer.string().expect("cipher/KDF fields");
+            }
+            assert_eq!(outer.u32(), Some(1));
+            outer.string().expect("public key");
+            let mut private = Cursor(outer.string().expect("private section"));
+            private.u32().expect("check integer");
+            private.u32().expect("repeated check integer");
+            for _ in 0..3 {
+                private.string().expect("key type, curve, and point");
+            }
+            if private.string().expect("private scalar").len() >= 66 {
                 continue; // full-width scalar; try another
             }
             let loaded = parse_private_key(pem.as_bytes(), "p521").expect("parse short p521");
