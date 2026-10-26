@@ -8,9 +8,10 @@ use trove_core::Vault;
 use troved::handler::load_ssh_keys_from_vault;
 
 fn encrypted_key(passphrase: &str) -> Vec<u8> {
-    let pk = ssh_key::PrivateKey::random(&mut rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+    let mut rng = ssh_key::rand_core::UnwrapErr(ssh_key::getrandom::SysRng);
+    let pk = ssh_key::PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
         .expect("random key")
-        .encrypt(&mut rand_core::OsRng, passphrase)
+        .encrypt(&mut ssh_key::getrandom::SysRng, passphrase)
         .expect("encrypt");
     pk.to_openssh(ssh_key::LineEnding::LF)
         .expect("encode")

@@ -214,7 +214,7 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
     use ssh_key::Algorithm;
     match pubkey.algorithm() {
         Algorithm::Ed25519 | Algorithm::Ecdsa { .. } => {
-            use rsa::signature::Verifier;
+            use signature::Verifier;
             pubkey
                 .key_data()
                 .verify(message, &sig)
@@ -230,8 +230,8 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
                 ssh_key::public::KeyData::Rsa(p) => p,
                 _ => panic!("not rsa"),
             };
-            let n_bytes = rsa_pub.n.as_positive_bytes().unwrap();
-            let e_bytes = rsa_pub.e.as_positive_bytes().unwrap();
+            let n_bytes = rsa_pub.n().as_positive_bytes().unwrap();
+            let e_bytes = rsa_pub.e().as_positive_bytes().unwrap();
             let pk = rsa::RsaPublicKey::new(
                 rsa::BigUint::from_bytes_be(n_bytes),
                 rsa::BigUint::from_bytes_be(e_bytes),
