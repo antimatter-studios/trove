@@ -426,6 +426,9 @@ Early but real — the headless-daemon path works end-to-end on Linux and macOS 
 
 Most recent releases; the full history and the pre-1.0 development milestones live in [CHANGELOG.md](CHANGELOG.md).
 
+### v0.27.0
+Vault passwords in `.env.trove.yaml` can be selected by path suffix: `homelab/docs/work.kdbx` overrides `work.kdbx` for matching paths, with the longest whole-component match winning. Existing filename keys remain compatible. SSH cryptography dependencies are updated for the `crypto-bigint` and `ctutils` timing advisories.
+
 ### v0.26.1
 Release assets carry build-provenance attestations, so the Homebrew tap can ship them; otherwise v0.26.0.
 
@@ -452,6 +455,3 @@ Read and status commands support `--json`; `trove describe` exposes safe metadat
 
 ### v0.20.0
 `trove unlock --env` selects the right password for each database in a directory. Use a YAML map keyed by vault filename or dotenv profiles pairing `TROVE_VAULT_<NAME>_FILE` with `TROVE_VAULT_<NAME>_PASSWORD`; the existing `TROVE_VAULT_PASSWORD` still works for a shared password.
-
-### v0.19.0
-`trove unlock --filter TAG` enables only entries with that native KDBX tag, including tags inherited from groups—so SSH offers the right keys before a server's authentication-attempt limit. Entry and group tags can be edited through the CLI and desktop. Favorites now use the native `Favorite` tag while keeping the star and Favorites view; the old `_TroveFav=1` custom field is ignored, not migrated.
