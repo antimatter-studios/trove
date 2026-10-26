@@ -1908,10 +1908,11 @@ dotfile repositories, and this file holds a vault password.
 ### Syntax
 
 ```yaml
-# vault passwords, keyed by the exact vault filename
+# vault passwords, keyed by filename or path suffix
 databases:
   work.kdbx: "work vault password"
   personal.kdbx: "personal vault password"
+  homelab/docs/work.kdbx: "homelab work password"
 
 # any other variables to set
 environment:
@@ -1921,9 +1922,15 @@ environment:
 
 Either section may be left out, but a file needs at least one.
 
-- **`databases:`** maps a vault's filename, including `.kdbx`, to its password.
+- **`databases:`** maps a vault's filename or path suffix, including `.kdbx`, to its password.
   `trove unlock work.kdbx --env` uses the work password, wherever `work.kdbx` is.
-  A name is a filename, never a path. A password must be a string, so quote it:
+  Existing filename-only entries remain compatible. Add as many parent directories
+  as needed to distinguish same-named vaults: `work.kdbx`, `docs/work.kdbx`, or
+  `homelab/docs/work.kdbx`. The matching suffix with the most path components wins.
+  Matches use whole components: `lab/docs/work.kdbx` does not match
+  `homelab/docs/work.kdbx`. Equivalent suffix spellings use the alphabetically
+  first key. A suffix must end in a filename and cannot contain `..` components.
+  A password must be a string, so quote it:
   YAML reads an unquoted `1e3`, `0x10` or `true` as a number or boolean, and
   trove refuses that rather than guess what text was meant.
 - **`environment:`** sets variables before trove runs: `TROVE_VAULT`,
@@ -1936,6 +1943,11 @@ Either section may be left out, but a file needs at least one.
 A variable **already set in the environment wins**, so the file supplies defaults
 rather than overriding its caller. In the same way an exported `TROVE_VAULT_PASSWORD`
 wins over `databases:`.
+
+Relative database paths include the caller's working directory when matching.
+Symlink aliases in the supplied path are preserved; `unlock` retains its resolved-path
+fallback if no supplied-path entry matches. Suffixes are not expanded as shell variables
+or globs.
 
 Unknown top-level keys are errors, not ignored, so a typo cannot quietly disable a
 section.
