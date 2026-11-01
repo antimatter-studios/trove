@@ -4,6 +4,14 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## v0.27.1 — 2026-11-01
+
+**Maintenance release; trove's behaviour is unchanged from v0.27.0.** Scheduled
+fuzzing is back: it now uses a pinned nightly toolchain, because newer nightlies
+fail to build `ssh-key` 0.7.0-rc.11 (rust-lang/rust#165263). The conformance
+suite also handles KeePassXC 2.8, whose `--version` output depends on how the
+binary is launched, so CI passes again on macOS. (#413)
+
 ## v0.27.0 — 2026-10-26
 
 **Select vault passwords by path suffix.** The `databases:` map in
