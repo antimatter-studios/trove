@@ -16,7 +16,7 @@
 #     from everything the previous nights found. The cache is saved even when
 #     the target crashes, so the corpus isn't lost with it.
 #   * Reproduce a crash locally: download the `fuzz-crash-<target>` artifact,
-#     then `cargo +nightly fuzz run <target> <crash-file>` from
+#     then `cargo +<FUZZ_TOOLCHAIN> fuzz run <target> <crash-file>` from
 #     crates/troved/fuzz (see its README).
 
 name: Fuzz
@@ -40,6 +40,11 @@ env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_MULTIPLEXING: "false"
   FUZZ_SECONDS: "600"
+  # Pinned because newer nightlies reject ssh-key's recursive KeyData type with
+  # E0391 ("cycle detected when computing when ... needs async drop"). Go back
+  # to plain `nightly` once this is fixed:
+  # https://github.com/rust-lang/rust/issues/165263
+  FUZZ_TOOLCHAIN: nightly-2026-10-30
 
 jobs:
   fuzz:
@@ -60,7 +65,7 @@ jobs:
       - name: Install Rust toolchain (nightly)
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: nightly
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -83,7 +88,7 @@ jobs:
         run: cargo fetch --locked
 
       - name: Build fuzz targets
-        run: cargo +nightly fuzz build
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build
 
       - name: Restore corpus
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -103,7 +108,7 @@ jobs:
           mkdir -p "corpus/$TARGET"
           dirs=("corpus/$TARGET")
           if [ -d "seeds/$TARGET" ]; then dirs+=("seeds/$TARGET"); fi
-          cargo +nightly fuzz run "$TARGET" "${dirs[@]}" -- \
+          cargo "+$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "${dirs[@]}" -- \
             -max_total_time="$FUZZ_SECONDS" -timeout=30
 
       - name: Save corpus
@@ -144,4 +149,4 @@ jobs:
           fi
           gh issue create --title "$title" --label bug --body "The nightly fuzz run failed: $RUN_URL
 
-          Crashing inputs are attached to the run as \`fuzz-crash-<target>\` artifacts. Reproduce with \`cargo +nightly fuzz run <target> <crash-file>\` from \`crates/troved/fuzz\`."
+          Crashing inputs are attached to the run as \`fuzz-crash-<target>\` artifacts. Reproduce with \`cargo +$FUZZ_TOOLCHAIN fuzz run <target> <crash-file>\` from \`crates/troved/fuzz\`."
