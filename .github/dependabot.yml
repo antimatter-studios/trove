@@ -7,3 +7,43 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # Trove keeps its dependencies current (see AGENTS.md). Minor and patch updates
+  # arrive as one PR per directory; each major update gets its own PR.
+  #
+  # keepass is ignored here because these manifests take it from the
+  # antimatter-studios/keepass-rs fork through [patch.crates-io], which moves by
+  # hand. Remove this once Trove is back on the upstream release:
+  # https://github.com/antimatter-studios/trove/issues/353
+  - package-ecosystem: "cargo"
+    directories:
+      - "/"
+      - "/crates/troved/fuzz"
+      - "/trove-desktop/src-tauri"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "keepass"
+
+  # The conformance harness pins old keepass releases on purpose, to test vaults
+  # those versions wrote. Everything else in it stays current.
+  - package-ecosystem: "cargo"
+    directory: "/crates/keepass-spec-tests"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "keepass"
+
+  - package-ecosystem: "npm"
+    directory: "/trove-desktop"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
