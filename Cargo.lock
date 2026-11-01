@@ -2852,7 +2852,7 @@ name = "trove-core"
 version = "0.27.1"
 dependencies = [
  "base32",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "keepass",
  "quick-xml",
  "rand 0.8.7",
@@ -2873,7 +2873,7 @@ dependencies = [
  "block2",
  "chrono",
  "ed25519-dalek 2.2.0",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
