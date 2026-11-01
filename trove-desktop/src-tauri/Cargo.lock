@@ -4861,7 +4861,7 @@ dependencies = [
 
 [[package]]
 name = "trove-core"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "base32",
  "hmac 0.12.1",
@@ -4874,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "trove-desktop"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -4894,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "troved"
-version = "0.27.0"
+version = "0.27.1"
 dependencies = [
  "aes 0.8.4",
  "aes-kw",
