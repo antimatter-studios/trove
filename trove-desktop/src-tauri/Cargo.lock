@@ -2237,8 +2237,8 @@ dependencies = [
 
 [[package]]
 name = "keepass"
-version = "0.15.0"
-source = "git+https://github.com/antimatter-studios/keepass-rs?rev=0bfc807e99add516c5693e587e4176ef8404aa58#0bfc807e99add516c5693e587e4176ef8404aa58"
+version = "0.17.0"
+source = "git+https://github.com/antimatter-studios/keepass-rs?rev=886a4ab9fc6783172c42bf53fe4ee4f2470684cc#886a4ab9fc6783172c42bf53fe4ee4f2470684cc"
 dependencies = [
  "aes 0.9.2",
  "base32",

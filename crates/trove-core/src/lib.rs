@@ -1776,9 +1776,9 @@ impl Vault {
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
         let expires = expiry.is_some();
-        if entry.times.expires != Some(expires) || (expires && entry.times.expiry != expiry) {
+        if entry.times.expires != Some(expires) || expiry.is_some_and(|t| entry.times.expiry != t) {
             entry.times.expires = Some(expires);
-            if expires {
+            if let Some(expiry) = expiry {
                 entry.times.expiry = expiry;
             }
             touch_modified(&mut entry);
@@ -3192,7 +3192,7 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
             .last_modification
             .map(|dt| dt.and_utc().to_rfc3339()),
         expires: if e.times.expires == Some(true) {
-            e.times.expiry.map(|dt| dt.and_utc().to_rfc3339())
+            Some(e.times.expiry.and_utc().to_rfc3339())
         } else {
             None
         },
