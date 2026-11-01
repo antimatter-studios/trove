@@ -73,19 +73,35 @@ pub fn discover() -> Vec<Oracle> {
     oracles
 }
 
-/// Run `<path> --version`; return the trimmed stdout iff the process ran,
+/// Run `<path> --version`; return the parsed version iff the process ran,
 /// exited success, and produced non-empty output.
 fn probe_version(path: &Path) -> Option<String> {
     let out = Command::new(path).arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version)
-    }
+    parse_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Reduce `--version` output to the bare version number, or `None` if empty.
+///
+/// KeePassXC 2.8 prefixes the version with a name that depends on how the binary
+/// was launched: `KeePassXC 2.8.0` from the app bundle, `keepassxc-cli 2.8.0`
+/// through a symlink such as Homebrew's. Older releases print only `2.7.12`. The
+/// last token is the version in all three, so one install dedupes to one oracle.
+fn parse_version(stdout: &str) -> Option<String> {
+    stdout.split_whitespace().last().map(str::to_string)
+}
+
+#[test]
+fn parse_version_ignores_the_launch_dependent_name_prefix() {
+    assert_eq!(parse_version("2.7.12\n").as_deref(), Some("2.7.12"));
+    assert_eq!(parse_version("KeePassXC 2.8.0\n").as_deref(), Some("2.8.0"));
+    assert_eq!(
+        parse_version("keepassxc-cli 2.8.0\n").as_deref(),
+        Some("2.8.0")
+    );
+    assert_eq!(parse_version(" \n"), None);
 }
 
 /// Mint a `.kdbx` from `spec` using **keepassxc-cli's KeePass-XML import**
