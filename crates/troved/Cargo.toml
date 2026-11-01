@@ -60,7 +60,7 @@ aes = { version = "0.8", default-features = false }
 # cryptographic CSPRNG strictly speaking — we're overwriting bytes that the
 # storage device may or may not actually rewrite in place — but using OsRng
 # costs nothing and makes the intent obvious in code review.
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng"] }
 # The stable RSA signing/interoperability tests still use rand_core 0.6.
 # SSH key generation uses ssh-key's re-exported OS RNG and rand_core 0.10.
 rand_core = { version = "0.6", features = ["getrandom"] }

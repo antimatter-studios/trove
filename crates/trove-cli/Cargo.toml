@@ -43,7 +43,7 @@ serde_yaml = "0.9"
 base64 = "0.22"
 # `add password --generate` / `generate password|diceware` mint secrets with
 # the OS CSPRNG. Same pinning as troved's.
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng"] }
 # `trove estimate` — Dropbox's zxcvbn strength estimator (the same engine
 # KeePassXC's estimate is modeled on).
 zxcvbn = "3"
