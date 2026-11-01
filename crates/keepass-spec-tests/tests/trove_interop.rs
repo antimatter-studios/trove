@@ -326,9 +326,11 @@ fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
     assert!(before.0.contains("/tmp/rest-mail"), "{}", before.0);
     assert!(before.1.contains("lifetime"), "{}", before.1);
 
+    // Every oracle starts from trove's own file. `resave` adds a fixed group, so
+    // feeding one oracle's output to the next would fail with "already exists".
+    let trove_written = std::fs::read(&vault).expect("read vault");
     for oracle in &oracles {
-        let current = std::fs::read(&vault).expect("read vault");
-        let resaved = keepassxc_party::resave(oracle, &current, &pw_spec())
+        let resaved = keepassxc_party::resave(oracle, &trove_written, &pw_spec())
             .unwrap_or_else(|e| panic!("keepassxc@{} open+save failed: {e}", oracle.version));
         std::fs::write(&vault, &resaved).expect("write resaved vault");
         assert_eq!(
