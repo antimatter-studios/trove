@@ -4,6 +4,24 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## Unreleased
+
+**Rename a folder in the desktop app.** The Edit Folder dialog has a Name
+field, and its Save button applies a new name and new tags in one click. The
+folder keeps its UUID, its place among its siblings and everything inside it,
+so agent keys and materialized files follow it as they do for `trove mv -r`.
+A name a sibling already has is refused, with the reason shown under the
+field, rather than moving the folder into that sibling. (#265)
+
+**The desktop app hosts the daemon.** When no `troved` is running, the app
+runs the daemon in-process, so `trove` commands, `ssh-add -l` and GPG work
+against the app while it is open, and `trove daemons` lists the app. When a
+`troved` already runs, the app uses it instead, and takes over on the next
+unlock if that daemon exits. Quitting the app removes its sockets, and the
+next `trove` command starts a standalone `troved` as before. Settings shows
+which daemon is in use, or why hosting failed. An in-process `serve` that
+stops no longer leaves its agent listeners and idle timer running. (#300)
+
 ## v0.27.1 — 2026-11-01
 
 **Maintenance release; trove's behaviour is unchanged from v0.27.0.** Scheduled

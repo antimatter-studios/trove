@@ -370,7 +370,7 @@ For each upstream rejection, is the justification valid? Are we right to ignore 
 
 **Not a real technical reason.** The browser-extension proxy talks to the GUI app over native messaging because that's how it was built — not because cryptographically or architecturally it must. A headless daemon serving the same native-messaging protocol is straightforward. droidmonkey's answer is a maintenance-scope reply, not an architectural objection.
 
-**Our stance:** headless mode from day one. The CLI/daemon is the primary surface; the GUI is one of several clients of it. Shipped; the browser host without the GUI is #289.
+**Our stance:** headless mode from day one. The CLI/daemon is the primary surface. The desktop app hosts the daemon or uses a running one, but still unlocks databases for itself (#300). Shipped; the browser host without the GUI is #289.
 
 ### Cloud sync server (Vaultwarden-shape) — *no upstream argument; defaults to scope*
 
@@ -416,7 +416,7 @@ It's tempting to argue file materialization weakens the "encrypted at rest" guar
 3. **Explicit risk acknowledgement** for anything that puts secrets on disk, in env vars, or on the network.
 4. **Sandbox plugins.** No "run arbitrary code as the password manager" footguns.
 5. **Open formats for sidecars.** If we store something outside kdbx, the format is documented and inspectable.
-6. **Headless first.** GUI is a client of the daemon, not the other way around.
+6. **Headless first.** The daemon runs without the GUI. The desktop app hosts it in-process when none runs and uses the running one otherwise; it still loads its own unlocked databases' keys (#300).
 
 ## Status
 

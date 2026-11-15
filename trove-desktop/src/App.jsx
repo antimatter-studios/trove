@@ -582,13 +582,30 @@ function App() {
     if (selId === entryId) setDetail(detail);
     patch({ entries: await api.listEntries(database.id) });
   };
-  const saveGroupTags = async (group, tags) => {
-    const path = group.groupPath.join("/");
-    const groups = await api.setGroupTags(database.id, path, tags);
-    const entries = await api.listEntries(database.id);
-    patch({ groups, entries });
+  // Edit Folder's Save: a rename (when `name` is set) and the tags, in one
+  // click. A refused rename throws, so the dialog stays open and shows why.
+  const saveFolder = async (group, tags, name) => {
+    let path = group.groupPath.join("/");
+    if (name != null) {
+      const source = path;
+      const res = await api.renameGroup(database.id, source, name);
+      path = [...group.groupPath.slice(0, -1), name].join("/");
+      // Browsing the renamed folder, or one inside it: follow it.
+      patch((v) => ({
+        entries: res.entries,
+        groups: res.groups,
+        group: v.group === source || v.group.startsWith(source + "/") ? path + v.group.slice(source.length) : v.group,
+      }));
+    }
+    const before = group.tags || [];
+    const tagsChanged = tags.length !== before.length || tags.some((t, i) => t !== before[i]);
+    if (tagsChanged || name == null) {
+      const groups = await api.setGroupTags(database.id, path, tags);
+      const entries = await api.listEntries(database.id);
+      patch({ groups, entries });
+    }
     setGroupEditor(null);
-    flashPlain("Folder tags saved");
+    flashPlain(name != null ? "Folder renamed" : "Folder tags saved");
   };
   const deleteFolder = async (folder) => {
     const path = folder.groupPath.join("/");
@@ -853,7 +870,7 @@ function App() {
         {historyEntry && !database.locked && <EntryHistoryModal key={database.id + historyEntry.id} database={database} entry={historyEntry} onClose={() => setHistoryEntry(null)} onSaved={revisionSaved} />}
         {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => { setSyncOpen(false); const entry = entries.find((item) => item.id === id); patch({ selId: id, group: entry?.groupPath || "__root" }); }} />}
         {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onCreateFolder={createFolder} onDelete={(e) => { setForm(null); setDel(e); }} />}
-        {groupEditor && <EditFolderModal group={groupEditor} entries={entries} databaseId={database?.id} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} onDelete={deleteFolder} />}
+        {groupEditor && <EditFolderModal group={groupEditor} entries={entries} databaseId={database?.id} onClose={() => setGroupEditor(null)} onSave={saveFolder} onDelete={deleteFolder} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}
         {help && <HelpModal onClose={() => setHelp(false)} />}
         {settingsOpen && settings && <SettingsModal settings={settings} onChange={saveSettings} onClose={() => setSettingsOpen(false)} />}
