@@ -123,6 +123,8 @@ The honest spectrum: SSH/GPG agents > materialization (with tmpfs + TTL) > mater
 
 `100% .kdbx format compatibility` is the project's hard constraint — you can open the same database in KeePassXC or any other kdbx client without losing data. We extend; we never break.
 
+An opt-in native format, trvdb, is being designed for features kdbx4 cannot express (per-field history, sealed metadata, a signed write log, delta sync). kdbx4 stays the default. The record model and the operations the backend trait must cover are in [trvdb-data-model.md](trvdb-data-model.md).
+
 **(Historical: v0.0.4–v0.0.9 vendored a fork of `keepass` 0.7.33 in `vendor/keepass/`. The fork had three patches because upstream 0.7.33 had two real bugs in our use case:
 
 1. `<Binary Ref="..."/>` references inside entries are parsed but discarded on read.
