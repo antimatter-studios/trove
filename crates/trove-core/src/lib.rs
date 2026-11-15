@@ -453,6 +453,17 @@ impl ChallengeResponse {
         ))
     }
 
+    /// The serial number of the YubiKey this provider answers with, or
+    /// `None` for the software provider.
+    pub fn yubikey_serial(&self) -> Option<u32> {
+        match &self.0 {
+            keepass::ChallengeResponseKey::YubikeyChallenge(device, _) => {
+                Some(device.serial_number)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn key(&self) -> keepass::ChallengeResponseKey {
         self.0.clone()
     }

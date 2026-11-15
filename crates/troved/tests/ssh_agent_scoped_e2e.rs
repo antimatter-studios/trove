@@ -153,6 +153,7 @@ impl Harness {
                 keyfile: None,
                 filter: None,
                 session: None,
+                challenge_response: None,
             })
             .await;
         assert_eq!(resp["status"], "ok", "unlock failed: {resp}");

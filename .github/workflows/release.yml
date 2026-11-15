@@ -156,7 +156,23 @@ jobs:
         # released build.
         env:
           TROVE_RELEASE: "1"
-        run: cargo build --release --locked --target ${{ matrix.target }} -p trove-cli -p troved
+        #
+        # The yubikey feature (challenge-response unlock) is on for every
+        # target; libusb is compiled in on macOS and Windows, so the binaries
+        # gain no runtime library dependency.
+        run: cargo build --release --locked --target ${{ matrix.target }} -p trove-cli -p troved --features trove-cli/yubikey
+
+      - name: Smoke check (--yubikey is built in)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/trove"
+          [ -x "$bin" ] || bin="$bin.exe"
+          "$bin" --help | grep -q -- '--yubikey'
+          case "${{ runner.os }}" in
+            macOS) ! otool -L "$bin" target/${{ matrix.target }}/release/troved | grep -i libusb ;;
+            Linux) ! ldd "$bin" target/${{ matrix.target }}/release/troved | grep -i libusb ;;
+          esac
 
       # Sign the macOS binaries before they go into the tarball. This is not
       # only about Gatekeeper: troved holds decrypted vault material, and an
@@ -165,8 +181,9 @@ jobs:
       # get-task-allow entitlement, refuses that — the same protection Apple's
       # own ssh-agent gets from SIP. The binaries are signed with no
       # entitlements at all: troved only serves Unix sockets and runs
-      # /usr/bin/id and launchctl, none of which the hardened runtime restricts,
-      # and the YubiKey (USB HID) path is Linux-only and not built here.
+      # /usr/bin/id and launchctl, none of which the hardened runtime restricts.
+      # The YubiKey path talks to USB through IOKit; the hardened runtime has
+      # no USB entitlement (only the App Sandbox does), so it needs none.
       # Skipped when the cert secret is absent, so forks and secretless runs
       # still produce (unsigned) artifacts.
       - name: Import signing certificate (macOS)

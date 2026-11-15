@@ -24,6 +24,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
 use crate::ipc;
+#[cfg(feature = "yubikey")]
+pub use troved::protocol::ChallengeResponseSpec;
 pub use troved::protocol::Request;
 
 /// Resolve the control-socket path the same way `troved` does. Used by every

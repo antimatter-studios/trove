@@ -245,6 +245,40 @@ async fn resync_materialized(
     }
 }
 
+/// Open a database for `Unlock`, with the challenge-response factor when the
+/// request carries one. The database keeps the provider, so every save the
+/// daemon makes answers the fresh challenge.
+fn open_for_unlock(
+    path: &std::path::Path,
+    password: &str,
+    keyfile: Option<&[u8]>,
+    challenge_response: Option<crate::protocol::ChallengeResponseSpec>,
+) -> trove_core::Result<Database> {
+    let Some(spec) = challenge_response else {
+        return Database::open_with_key(path, password, keyfile);
+    };
+    #[cfg(feature = "yubikey")]
+    {
+        use crate::protocol::ChallengeResponseSpec;
+        let provider = match spec {
+            ChallengeResponseSpec::Yubikey { slot, serial } => {
+                trove_core::ChallengeResponse::yubikey(slot, serial)?
+            }
+            ChallengeResponseSpec::Software { secret_hex } => {
+                trove_core::ChallengeResponse::software(secret_hex)
+            }
+        };
+        Database::open_with_challenge_response(path, password, keyfile, provider)
+    }
+    #[cfg(not(feature = "yubikey"))]
+    {
+        let _ = spec;
+        Err(trove_core::Error::ChallengeResponse(
+            "this troved was built without YubiKey support (the `yubikey` feature)".into(),
+        ))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: Request,
@@ -292,6 +326,7 @@ async fn handle_request(
             keyfile,
             filter,
             session: mint_session,
+            challenge_response,
         } => {
             let path_buf = PathBuf::from(path);
             // Decode composite-key material (if any) before the blocking open.
@@ -313,7 +348,12 @@ async fn handle_request(
             // trove-core's Database::open is sync (and may do blocking file I/O +
             // KDF work). Wrap it in spawn_blocking to keep the runtime healthy.
             let result = tokio::task::spawn_blocking(move || {
-                Database::open_with_key(&path_buf, &password, keyfile_bytes.as_deref())
+                open_for_unlock(
+                    &path_buf,
+                    &password,
+                    keyfile_bytes.as_deref(),
+                    challenge_response,
+                )
             })
             .await;
             match result {

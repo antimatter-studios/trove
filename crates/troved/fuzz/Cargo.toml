@@ -30,7 +30,7 @@ resolver = "2"
 # workspace root), but `trove-core` — pulled in via `troved` — needs the same
 # keepass-rs fork. Same fork as the root workspace; keep the two pins identical.
 [patch.crates-io]
-keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "0bfc807e99add516c5693e587e4176ef8404aa58" }
+keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "deb3d2f54cc3ed6998b085405749f00da0c65090" }
 
 [package.metadata]
 cargo-fuzz = true

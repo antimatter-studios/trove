@@ -93,6 +93,7 @@ impl Harness {
                     keyfile: None,
                     filter: None,
                     session: None,
+                    challenge_response: None,
                 },
                 OWNER,
             )

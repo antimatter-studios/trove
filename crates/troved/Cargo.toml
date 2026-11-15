@@ -14,6 +14,12 @@ path = "src/lib.rs"
 name = "troved"
 path = "src/main.rs"
 
+[features]
+# Challenge-response unlock (YubiKey HMAC-SHA1) through the daemon: `trove
+# unlock --yubikey`. troved talks to the device itself, so every save it makes
+# answers a fresh challenge.
+yubikey = ["trove-core/yubikey"]
+
 [dependencies]
 trove-core.workspace = true
 tokio = { workspace = true, features = ["time"] }

@@ -173,6 +173,7 @@ async fn unlock_writes_file_lock_wipes_it() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -223,6 +224,7 @@ async fn ttl_wipes_file_while_database_remains_unlocked() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
@@ -267,6 +269,7 @@ async fn multi_file_unlock_and_lock() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
@@ -319,6 +322,7 @@ async fn one_bad_entry_does_not_block_others() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock should still ok");
@@ -355,6 +359,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -428,6 +433,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
 
@@ -475,6 +481,7 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
@@ -595,6 +602,7 @@ impl Daemon {
                 keyfile: None,
                 filter: None,
                 session: None,
+                challenge_response: None,
             })
             .await;
         assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");

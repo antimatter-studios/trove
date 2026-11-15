@@ -103,6 +103,7 @@ fn unlock(path: &Path) -> Request {
         keyfile: None,
         filter: None,
         session: None,
+        challenge_response: None,
     }
 }
 
@@ -252,6 +253,7 @@ fn unlock_detached(path: &Path) -> Request {
         timeout: None,
         keyfile: None,
         session: Some(false),
+        challenge_response: None,
         filter: None,
     }
 }

@@ -100,6 +100,7 @@ fn unlock(path: &Path) -> Request {
         keyfile: None,
         filter: None,
         session: None,
+        challenge_response: None,
     }
 }
 

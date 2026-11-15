@@ -98,6 +98,7 @@ impl Daemon {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await
     }
@@ -110,6 +111,7 @@ impl Daemon {
             keyfile: None,
             filter: Some(filter.to_string()),
             session: None,
+            challenge_response: None,
         })
         .await
     }
