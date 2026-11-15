@@ -110,13 +110,21 @@ trove [--database <PATH>] show [OPTIONS] <ENTRY_PATH>
 ```
 
 Print an entry's details: path, title, username, URL, notes, custom-field
-*names* and attachment names. Protected fields (`Password`, `otp`) are hidden
-from `--json` field names unless `--show-protected` is set; the flag also
-reveals protected values where the selected mode returns them.
+*names* and attachment names. Protected fields (`Password`, `otp`, a passkey's
+`KPEX_PASSKEY_PRIVATE_KEY_PEM`, and offline any field stored with the
+Protected flag) are hidden from `--json` field names unless `--show-protected`
+is set; the flag also reveals protected values where the selected mode returns
+them.
+
+An entry holding a passkey prints `Passkey: <relying party> (<username>)`.
+Passkeys are created in KeePassXC; trove keeps them through its own edits and
+shows them, but does not create them or sign in with them. The private key is
+printed only by `trove show <ENTRY> --attr KPEX_PASSKEY_PRIVATE_KEY_PEM
+--show-protected`. See [passkeys.md](passkeys.md) for the stored format.
 
 | Flag | Description |
 | --- | --- |
-| `--attr <NAME>` | Print only this attribute's raw value (repeatable, order kept). Any standard or custom field name. Protected attributes (`Password`, `otp`) additionally require `--show-protected`. |
+| `--attr <NAME>` | Print only this attribute's raw value (repeatable, order kept). Any standard or custom field name. Protected attributes (`Password`, `otp`, `KPEX_PASSKEY_PRIVATE_KEY_PEM`, and offline any field stored Protected) additionally require `--show-protected`. |
 | `--base64` | With exactly one `--attr`, print its value as standard base64 with no wrapping. A terminal gets a final newline; a pipe gets none. |
 | `--show-protected` | Reveal protected values instead of masking/refusing. |
 | `--totp` | Print the entry's CURRENT TOTP code (from its `otp` otpauth URI, KeePassXC's format). Stdout is exactly the code (pipes cleanly); a TTY gets the remaining validity on stderr. Daemon mode uses the code-gated `GetTotp` RPC — only the ephemeral code crosses the wire, never the shared secret. |
@@ -852,6 +860,7 @@ An array of entry summaries, in database order:
     "group_path": [string],     // containing groups, root first; [] at the top level
     "tags": [string],           // the entry's own tags
     "inherited_tags": [string], // tags of containing groups, root first
+    "passkey": bool,            // the entry holds a passkey
     "matched"?: [string]        // search only: what caused the hit
   }
 ]
@@ -873,7 +882,8 @@ it. `matched` names each surface that matched: `title`, `username`, `url`,
     "tags": ["web"],
     "title": "forge",
     "url": "https://forge.example",
-    "username": "octo"
+    "username": "octo",
+    "passkey": false
   }
 ]
 ```
@@ -895,15 +905,22 @@ One object:
   "tags": [string],
   "inherited_tags": [string],
   "expires": string | null,     // RFC 3339 UTC; null if it never expires
-  "icon": integer | null        // built-in KeePass icon 0-68; null for none or a custom one
+  "icon": integer | null,       // built-in KeePass icon 0-68; null for none or a custom one
+  "passkey": {                  // null when the entry holds no passkey
+    "relying_party": string,
+    "username": string,
+    "credential_id": string,    // base64url, as KeePassXC stores it
+    "user_handle": string       // base64url, as KeePassXC stores it
+  } | null
 }
 ```
 
 `fields` holds the custom fields, keyed by name. Offline, the values are
 strings. In daemon mode they are all `null`: the summary carries names only, and
 each value is a separate code-gated read, so fetch the ones you want with
-`--attr`. Protected fields (`otp`) are left out unless `--show-protected` is
-given.
+`--attr`. Protected fields (`otp`, a passkey's private key, and offline any
+field stored Protected) are left out unless `--show-protected` is given.
+`passkey` never contains the private key.
 
 ```json
 {
@@ -917,7 +934,8 @@ given.
   "url": "https://forge.example",
   "username": "octo",
   "expires": null,
-  "icon": null
+  "icon": null,
+  "passkey": null
 }
 ```
 
@@ -937,7 +955,8 @@ entry at or under it for a group path). Same shape in both modes:
     "attributes": {string: string},   // unprotected About.* fields
     "attachments": [
       {"name": string, "size": integer}   // size in bytes
-    ]
+    ],
+    "has_passkey": bool
   }
 ]
 ```
@@ -951,7 +970,8 @@ entry at or under it for a group path). Same shape in both modes:
     "notes": "work account",
     "path": "Web/forge",
     "url": "https://forge.example",
-    "username": "octo"
+    "username": "octo",
+    "has_passkey": false
   }
 ]
 ```

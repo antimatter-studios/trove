@@ -178,6 +178,7 @@ fn entry_summary_offline() -> Value {
         "group_path": ["string"],
         "tags": ["string"],
         "inherited_tags": ["string"],
+        "passkey": "bool",
     })
 }
 
@@ -192,6 +193,7 @@ fn entry_summary_daemon() -> Value {
         "group_path": ["string"],
         "tags": ["string"],
         "inherited_tags": ["string"],
+        "passkey": "bool",
     })
 }
 
@@ -215,6 +217,7 @@ fn show_spec(field_values: &str) -> Value {
         "inherited_tags": ["string"],
         "expires": "string|null",
         "icon": "integer|null",
+        "passkey": "object|null",
     })
 }
 
@@ -227,6 +230,7 @@ fn describe_spec() -> Value {
         "has_password": "bool",
         "attributes": {"*": "string"},
         "attachments": [{"name": "string", "size": "integer"}],
+        "has_passkey": "bool",
     }])
 }
 

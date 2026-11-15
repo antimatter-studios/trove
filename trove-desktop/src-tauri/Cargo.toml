@@ -40,6 +40,11 @@ trove-core = { path = "../../crates/trove-core" }
 # is running anyway.
 troved = { path = "../../crates/troved" }
 
+[dev-dependencies]
+# Tests write entries the way KeePassXC does (protected custom fields) and read
+# the saved file back to check the Protected flags trove-core does not expose.
+keepass = { version = "0.15", features = ["save_kdbx4"] }
+
 # Argon2 is deliberately CPU-heavy, and unoptimised it is ~10x slower still: a
 # debug build took 11.4s to open a database the release CLI opens in ~1.5s. That
 # is a dev-experience trap, not a database problem — so optimise the crates that

@@ -837,7 +837,7 @@ function App() {
             <Detail
               databaseId={database.id}
               appActions={appActions}
-              entry={selected} notes={detail.notes} fields={detail.fields} password={detail.password}
+              entry={selected} notes={detail.notes} fields={detail.fields} password={detail.password} passkey={detail.passkey}
               onCopy={copy} copiedKey={copiedKey}
               onEdit={openEdit} onDelete={(e) => setDel(e)} onToggleFav={toggleFav}
               onSaveAttribute={saveCustomAttribute} onDeleteAttribute={deleteCustomAttribute}

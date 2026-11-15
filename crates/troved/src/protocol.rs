@@ -718,6 +718,9 @@ pub struct EntryDto {
     /// Tags inherited from containing groups, root → nearest parent.
     #[serde(default)]
     pub inherited_tags: Vec<String>,
+    /// The entry holds a passkey.
+    #[serde(default)]
+    pub passkey: bool,
     /// Safe metadata surfaces that caused a search hit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub matched: Vec<String>,
@@ -733,6 +736,7 @@ pub struct DescribeEntryDto {
     pub has_password: bool,
     pub attributes: std::collections::BTreeMap<String, String>,
     pub attachments: Vec<DescribeAttachmentDto>,
+    pub has_passkey: bool,
 }
 
 /// Attachment name and byte size, without contents.
@@ -933,6 +937,30 @@ pub struct ShowDto {
     pub expires: Option<String>,
     /// The entry's built-in icon (0-68), or null.
     pub icon: Option<usize>,
+    /// The entry's passkey, without its private key, or null. Boxed: most
+    /// entries have none, and it would otherwise make every response larger.
+    pub passkey: Option<Box<PasskeyDto>>,
+}
+
+/// A passkey's public parts, as `show --json` prints them. The private key is
+/// never part of it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PasskeyDto {
+    pub relying_party: String,
+    pub username: String,
+    pub credential_id: String,
+    pub user_handle: String,
+}
+
+impl From<trove_core::Passkey> for PasskeyDto {
+    fn from(passkey: trove_core::Passkey) -> Self {
+        PasskeyDto {
+            relying_party: passkey.relying_party,
+            username: passkey.username,
+            credential_id: passkey.credential_id,
+            user_handle: passkey.user_handle,
+        }
+    }
 }
 
 /// One SSH key served by the agent, for `ssh-agent list`. Rendered by the CLI
