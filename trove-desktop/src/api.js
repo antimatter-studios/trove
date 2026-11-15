@@ -100,6 +100,16 @@ export function dropGroup(id, source, parent, copy, order) {
   }));
 }
 
+// rename_group(id, path, name) -> { entries, groups }
+// Rename folder `path` to `name` in place. Refused, with nothing written, when
+// a sibling already has the name or the name is empty or holds a "/".
+export function renameGroup(id, path, name) {
+  return invoke('rename_group', { id, path, name }).then((res) => ({
+    entries: normEntries(res.entries),
+    groups: res.groups || [],
+  }));
+}
+
 /* ---- Reading one entry (secrets, on demand) ---- */
 
 // get_field(id, entryId, field) -> Option<String>
@@ -181,6 +191,13 @@ export function setAgentKey(id, entryId, enabled, policy = {}) {
 // build_info() -> { version, commit, dev }
 export function buildInfo() {
   return invoke('build_info');
+}
+
+// daemon_status() -> { mode: 'hosted' } | { mode: 'client', pid } |
+//   { mode: 'failed', error } | { mode: 'stopped' }
+// Who runs the trove daemon: this app, another troved, or nobody.
+export function daemonStatus() {
+  return invoke('daemon_status');
 }
 
 /* ---- external changes ---- */

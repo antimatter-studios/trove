@@ -127,8 +127,11 @@ fn build_lock_callback(
 /// 2. `$XDG_RUNTIME_DIR/trove.sock`
 /// 3. `$TMPDIR/trove-$UID.sock` (fallback `/tmp`)
 ///
+/// Public so a host such as the desktop app can find the daemon it runs or
+/// talks to.
+///
 /// TODO(v0.0.2): refuse to start if the chosen parent dir is world-writable.
-fn resolve_socket_path() -> PathBuf {
+pub fn resolve_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("TROVE_SOCK") {
         return PathBuf::from(p);
     }

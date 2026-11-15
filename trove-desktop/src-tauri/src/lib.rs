@@ -1,11 +1,13 @@
 mod biometric;
 mod commands;
+mod daemon_host;
 
 use commands::{AppState, DatabaseState};
+use daemon_host::DaemonHost;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager,
+    Manager, RunEvent,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -13,10 +15,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DatabaseState::new(AppState::default()))
+        .manage(DaemonHost::new(
+            tauri::async_runtime::handle().inner().clone(),
+        ))
         .setup(|app| {
             // Before anything reads settings or the database list: the bundle
             // identifier changed, and macOS keys the config directory by it.
             commands::migrate_legacy_config(app.handle());
+
+            // Host the daemon unless one already runs, in which case this app
+            // is its client. Off the setup path: the window opens either way,
+            // and a failure only shows in Settings.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                handle.state::<DaemonHost>().ensure().await;
+            });
 
             // System tray: the Trove icon in the menu bar / system tray, with a
             // small menu. Additive — it does not change the window's close
@@ -44,6 +57,7 @@ pub fn run() {
             commands::create_database,
             commands::unlock_database,
             commands::build_info,
+            commands::daemon_status,
             commands::get_settings,
             commands::set_agent_key,
             commands::set_settings,
@@ -84,14 +98,25 @@ pub fn run() {
             commands::delete_entry,
             commands::drop_entry,
             commands::drop_group,
+            commands::rename_group,
             commands::set_favorite,
             commands::biometric_status,
             commands::biometric_unlock,
             commands::biometric_enroll,
             commands::biometric_forget,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Quit from the tray, or any normal exit: stop the hosted daemon so
+            // its sockets go and the next `trove` command autospawns troved.
+            if let RunEvent::Exit = event {
+                let host = app.state::<DaemonHost>();
+                if !tauri::async_runtime::block_on(host.stop(daemon_host::STOP_TIMEOUT)) {
+                    eprintln!("trove-desktop: the hosted daemon did not stop in time");
+                }
+            }
+        });
 }
 
 /// Reveal and focus the app's primary window (label-agnostic).

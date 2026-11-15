@@ -5092,6 +5092,7 @@ version = "0.27.1"
 dependencies = [
  "base64 0.22.1",
  "block2",
+ "keepass",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
@@ -5101,6 +5102,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tokio",
  "trove-core",
  "troved",
  "zxcvbn",

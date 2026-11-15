@@ -598,15 +598,24 @@ function EditFolderModal({ group, entries, onClose, onSave, onDelete, databaseId
   const [confirming, setConfirming] = React.useState(false);
   const path = group.groupPath.join("/");
   const label = path || "Root";
+  const ownName = group.groupPath[group.groupPath.length - 1] || "";
+  const [name, setName] = React.useState(ownName);
+  const [nameErr, setNameErr] = React.useState("");
   // Everything the delete takes with it: entries here and in every subfolder.
   const doomed = path
     ? entries.filter((e) => e.groupPath === path || e.groupPath.startsWith(path + "/"))
     : [];
   const inBin = !!group.inRecycleBin;
+  // The root has no name of its own, and the bin keeps the one KeePass gave it.
+  const renamable = !!path && !inBin;
   const save = async () => {
     if (busy) return;
     setBusy(true);
-    try { await onSave(group, tags); } catch (e) { setBusy(false); }
+    setNameErr("");
+    // Not trimmed: a name that already ends in a space must survive a save
+    // that never touched it. An unchanged name sends no rename at all.
+    const rename = renamable && name !== ownName ? name : null;
+    try { await onSave(group, tags, rename); } catch (e) { setNameErr(String(e?.message ?? e)); setBusy(false); }
   };
   const remove = async () => {
     if (busy) return;
@@ -637,11 +646,21 @@ function EditFolderModal({ group, entries, onClose, onSave, onDelete, databaseId
           </div>
         ) : (
           <div className="modal-body">
+            {renamable && (
+              <div className="fld">
+                <label htmlFor="folder-name">Name</label>
+                <input id="folder-name" className="inp" value={name} aria-invalid={nameErr ? "true" : undefined}
+                  onChange={(e) => { setName(e.target.value); setNameErr(""); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") save(); }} />
+                {nameErr && <div role="alert" className="att-err">{nameErr}</div>}
+              </div>
+            )}
             <div className="fld">
               <label>Tags on this folder</label>
               <TagEditor tags={tags} onChange={setTags} placeholder="Add a folder tag" />
             </div>
             {group.inheritedTags?.length > 0 && <div className="tag-inherited"><span>Inherited</span> {group.inheritedTags.join(", ")}</div>}
+            {nameErr && !renamable && <div role="alert" className="att-err">{nameErr}</div>}
             {!inBin && <FolderDefaults databaseId={databaseId} path={path} />}
           </div>
         )}
@@ -655,7 +674,7 @@ function EditFolderModal({ group, entries, onClose, onSave, onDelete, databaseId
             {path && <button className="btn-danger" onClick={askDelete} disabled={busy}><Icon name="trash" size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 5 }} />Delete folder</button>}
             <div className="grow" />
             <button className="btn-ghost" onClick={onClose}>Cancel</button>
-            <button className="btn-primary" onClick={save} disabled={busy}>Save tags</button>
+            <button className="btn-primary" onClick={save} disabled={busy}>Save</button>
           </div>
         )}
       </div>
@@ -821,9 +840,29 @@ function SetRow({ title, desc, sub, off, children }) {
   );
 }
 
+// The one line Settings shows about the daemon behind `trove` commands and
+// the agent sockets.
+function daemonLine(status) {
+  if (!status) return "Daemon: checking…";
+  switch (status.mode) {
+    case "hosted": return "Daemon: hosted by this app";
+    case "client": return status.pid != null ? `Daemon: using troved (pid ${status.pid})` : "Daemon: using troved";
+    case "failed": return `Daemon: ${status.error}`;
+    default: return "Daemon: not running";
+  }
+}
+
 function SettingsModal({ settings, onChange, onClose }) {
   const set = (patch) => onChange({ ...settings, ...patch });
   const agent = settings.systemAgent;
+  const [daemon, setDaemon] = React.useState(null);
+  React.useEffect(() => {
+    let live = true;
+    new Promise((resolve) => resolve(api.daemonStatus()))
+      .then((status) => { if (live) setDaemon(status || { mode: "stopped" }); })
+      .catch((e) => { if (live) setDaemon({ mode: "failed", error: String(e?.message ?? e) }); });
+    return () => { live = false; };
+  }, []);
   return (
     <div className="scrim center" onMouseDown={onClose}>
       <div className="modal" style={{ width: "min(560px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
@@ -887,6 +926,8 @@ function SettingsModal({ settings, onChange, onClose }) {
               <Switch checked={settings.materialize} onChange={(v) => set({ materialize: v })} />
             </SetRow>
           </div>
+
+          <p className="set-note" data-testid="daemon-status">{daemonLine(daemon)}</p>
 
           <p className="set-note">
             Which keys are eligible is decided per entry — open a key and use
@@ -1170,4 +1211,4 @@ function OpenDatabaseModal({ recents, activeId, onPick, onBrowse, onClose }) {
   );
 }
 
-export { Unlock, CommandPalette, EntryForm, EditFolderModal, FolderDefaults, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, DatabaseSwitcher, DatabaseMetadataModal, OpenDatabaseModal, SettingsModal, NewDatabaseModal, UnlockProgress, Switch };
+export { daemonLine, Unlock, CommandPalette, EntryForm, EditFolderModal, FolderDefaults, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, DatabaseSwitcher, DatabaseMetadataModal, OpenDatabaseModal, SettingsModal, NewDatabaseModal, UnlockProgress, Switch };

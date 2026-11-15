@@ -24,6 +24,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
 use crate::biometric;
+use crate::daemon_host::{DaemonHost, DaemonStatus};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, Manager, State};
 use trove_core::settings::{self, Attributes, Capability, Document, Origin};
@@ -1675,6 +1676,13 @@ pub async fn unlock_database(
             .clone()
     };
 
+    // A daemon this app was a client of may have exited since: host one
+    // again. In the background, so the unlock never waits on it.
+    let host_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        host_app.state::<DaemonHost>().ensure().await;
+    });
+
     step(&app, "open", "pending", "decrypting");
     let open_path = path.clone();
     // Timed, because opening and saving pay the same Argon2 bill: the UI has
@@ -1803,6 +1811,12 @@ pub async fn lock_database(
     };
     undo_side_effects(exported, materialized).await;
     Ok(())
+}
+
+/// Who runs the trove daemon: this app, another process, or nobody.
+#[tauri::command]
+pub async fn daemon_status(host: State<'_, DaemonHost>) -> Result<DaemonStatus, String> {
+    Ok(host.status().await)
 }
 
 /// Current app settings, for the settings UI.
@@ -2948,6 +2962,161 @@ pub async fn drop_group(
     .await
 }
 
+/// Compare two folder names the way the sidebar sorts unarranged folders:
+/// case-insensitive, with runs of digits compared as numbers.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn chunks(s: &str) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        for c in s.chars() {
+            let digit = c.is_ascii_digit();
+            match out.last_mut() {
+                Some((d, run)) if *d == digit => run.push(c),
+                _ => out.push((digit, c.to_string())),
+            }
+        }
+        out
+    }
+    let (left, right) = (chunks(a), chunks(b));
+    for ((ld, l), (rd, r)) in left.iter().zip(&right) {
+        let order = if *ld && *rd {
+            let (l, r) = (l.trim_start_matches('0'), r.trim_start_matches('0'));
+            l.len().cmp(&r.len()).then_with(|| l.cmp(r))
+        } else {
+            l.to_lowercase().cmp(&r.to_lowercase())
+        };
+        if order.is_ne() {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+/// The children of `parent` in sidebar order: arranged ones by position,
+/// then the rest by name.
+fn sibling_order(database: &Database, parent: &[String]) -> Vec<(String, Option<u32>)> {
+    let mut siblings: Vec<(String, Option<u32>)> = database
+        .list_groups()
+        .into_iter()
+        .filter(|g| g.path.len() == parent.len() + 1 && g.path[..parent.len()] == *parent)
+        .map(|g| (g.path[parent.len()].clone(), g.position))
+        .collect();
+    siblings.sort_by(|(a, pa), (b, pb)| {
+        let (pa, pb) = (pa.unwrap_or(u32::MAX), pb.unwrap_or(u32::MAX));
+        pa.cmp(&pb).then_with(|| natural_cmp(a, b))
+    });
+    siblings
+}
+
+/// Rename the folder at `path` to `name`, keeping it under the same parent and
+/// in the same place among its siblings. Returns the new path.
+///
+/// A plain `move_group_to_path` would move the folder INTO a sibling that
+/// already has the name, like `mv -r A B` does, so that is refused here first.
+/// Group lookups ignore ASCII case, so a sibling differing only in case
+/// clashes too.
+fn apply_rename_group(database: &mut Database, path: &str, name: &str) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("a folder name cannot be empty".into());
+    }
+    if name.contains('/') {
+        return Err("a folder name cannot contain \"/\"".into());
+    }
+    let parts: Vec<String> = path.split('/').map(String::from).collect();
+    if path.is_empty() || parts.iter().any(String::is_empty) {
+        return Err("cannot rename the root folder".into());
+    }
+    let (old, parent) = parts.split_last().expect("path is not empty");
+    if old == name {
+        return Ok(path.to_string());
+    }
+    let parent_path = parent.join("/");
+    let parent_label = if parent.is_empty() {
+        "Root"
+    } else {
+        parent_path.as_str()
+    };
+    let before = sibling_order(database, parent);
+    if !before.iter().any(|(n, _)| n == old) {
+        return Err(format!("folder not found: {path}"));
+    }
+    let clash = before
+        .iter()
+        .any(|(n, _)| n != old && n.eq_ignore_ascii_case(name))
+        || (parent.is_empty() && name.eq_ignore_ascii_case("Root"));
+    if clash {
+        return Err(format!(
+            "a folder named \"{name}\" already exists in {parent_label}"
+        ));
+    }
+    let join = |leaf: &str| {
+        if parent.is_empty() {
+            leaf.to_string()
+        } else {
+            format!("{parent_path}/{leaf}")
+        }
+    };
+    let target = join(name);
+    if old.eq_ignore_ascii_case(name) {
+        // Only the case changes. The lookup would find the folder itself and
+        // read it as "move into", so go through a name nothing else has.
+        let mut step = format!("{name}.renaming");
+        while before.iter().any(|(n, _)| n.eq_ignore_ascii_case(&step)) {
+            step.push('_');
+        }
+        database
+            .move_group_to_path(path, &join(&step))
+            .map_err(|e| e.to_string())?;
+        database
+            .move_group_to_path(&join(&step), &target)
+            .map_err(|e| e.to_string())?;
+    } else {
+        database
+            .move_group_to_path(path, &target)
+            .map_err(|e| e.to_string())?;
+    }
+    // An arranged folder keeps its position; an unarranged one would sort to
+    // wherever its new name lands, so pin the order the sidebar showed.
+    let order: Vec<String> = before
+        .iter()
+        .map(|(n, _)| {
+            if n == old {
+                name.to_string()
+            } else {
+                n.clone()
+            }
+        })
+        .collect();
+    let after: Vec<String> = sibling_order(database, parent)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    if after != order {
+        database
+            .set_group_order(&parent_path, &order)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(target)
+}
+
+/// Rename a folder in place, save, return the fresh lists.
+#[tauri::command]
+pub async fn rename_group(
+    app: AppHandle,
+    id: String,
+    path: String,
+    name: String,
+) -> Result<SaveResult, String> {
+    on_database_write(app, id, move |database| {
+        apply_rename_group(database, &path, &name)?;
+        Ok(SaveResult {
+            entries: build_entry_dtos(database),
+            groups: build_group_dtos(database),
+            id: String::new(),
+        })
+    })
+    .await
+}
+
 /// Move an entry to the recycle bin, save, return the fresh list.
 #[tauri::command]
 pub async fn delete_entry(
@@ -3236,6 +3405,181 @@ mod tests {
         assert!(paths.contains(&"empty".to_string()));
         assert!(paths.contains(&"empty/nested".to_string()));
         assert!(build_entry_dtos(&database).is_empty());
+    }
+
+    /// The UUID of the group at `path`, read back from the saved file.
+    fn saved_group_uuid(path: &Path, group: &[&str]) -> String {
+        let mut file = std::fs::File::open(path).unwrap();
+        let key = keepass::DatabaseKey::new().with_password("correct horse");
+        let db = keepass::Database::open(&mut file, key).unwrap();
+        let uuid = db.root().group_by_path(group).unwrap().id().uuid();
+        uuid.to_string()
+    }
+
+    fn group_paths(database: &Database) -> Vec<String> {
+        database
+            .list_groups()
+            .into_iter()
+            .map(|g| g.path.join("/"))
+            .collect()
+    }
+
+    fn child_names(database: &Database, parent: &[&str]) -> Vec<String> {
+        let parent: Vec<String> = parent.iter().map(|s| s.to_string()).collect();
+        sibling_order(database, &parent)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect()
+    }
+
+    #[test]
+    fn rename_group_keeps_uuids_tags_and_entries() {
+        let (mut database, path) = temp_database();
+        database.add_group("infra/web").unwrap();
+        database.add_group("infra/zz").unwrap();
+        database
+            .set_group_tags("infra/web", &["prod".to_string()])
+            .unwrap();
+        let eid = apply_save_entry(&mut database, &input(None, "infra/web/deploy")).unwrap();
+        database.set_tags(&eid, &["ssh".to_string()]).unwrap();
+        database.save().unwrap();
+        let uuid = saved_group_uuid(&path, &["infra", "web"]);
+
+        let renamed = apply_rename_group(&mut database, "infra/web", "frontend").unwrap();
+        database.save().unwrap();
+
+        assert_eq!(renamed, "infra/frontend");
+        assert_eq!(saved_group_uuid(&path, &["infra", "frontend"]), uuid);
+        let group = database
+            .list_groups()
+            .into_iter()
+            .find(|g| g.path.join("/") == "infra/frontend")
+            .unwrap();
+        assert_eq!(group.tags, vec!["prod".to_string()]);
+        assert!(!group_paths(&database).contains(&"infra/web".to_string()));
+        let entry = database.get_entry(&eid).expect("same entry UUID");
+        assert_eq!(entry.display_path(), "infra/frontend/deploy");
+        assert_eq!(entry.tags, vec!["ssh".to_string()]);
+        // Unarranged siblings would re-sort by the new name; the order the
+        // sidebar showed is kept instead.
+        assert_eq!(child_names(&database, &["infra"]), vec!["frontend", "zz"]);
+    }
+
+    #[test]
+    fn rename_group_keeps_its_place_among_arranged_and_unarranged_siblings() {
+        let (mut database, _p) = temp_database();
+        for g in ["a", "m", "z"] {
+            database.add_group(g).unwrap();
+        }
+        apply_rename_group(&mut database, "a", "zzz").unwrap();
+        assert_eq!(child_names(&database, &[]), vec!["zzz", "m", "z"]);
+
+        database
+            .set_group_order("", &["z".to_string(), "zzz".to_string(), "m".to_string()])
+            .unwrap();
+        apply_rename_group(&mut database, "zzz", "b").unwrap();
+        assert_eq!(child_names(&database, &[]), vec!["z", "b", "m"]);
+    }
+
+    #[test]
+    fn rename_group_changes_only_the_case() {
+        let (mut database, _p) = temp_database();
+        database.add_group("infra/web").unwrap();
+        assert_eq!(
+            apply_rename_group(&mut database, "infra", "Infra").unwrap(),
+            "Infra"
+        );
+        assert_eq!(group_paths(&database), vec!["", "Infra", "Infra/web"]);
+    }
+
+    #[test]
+    fn rename_group_keeps_materialize_and_agent_settings() {
+        let (mut database, id) = settings_database();
+        let agent = database.read_binary(&id, "KeeAgent.settings").unwrap();
+        let input = MaterializeInput {
+            target: "/tmp/cert.pem".to_string(),
+            mode: "0640".to_string(),
+            ttl: String::new(),
+            allow_disk_backed: false,
+            use_dir: false,
+        };
+        apply_materialize(&mut database, &id, "cert.pem", &input).unwrap();
+        let document = database
+            .settings_document(&id, Capability::Materialize)
+            .unwrap();
+        assert!(document.is_some());
+
+        apply_rename_group(&mut database, "Apps", "Services").unwrap();
+
+        assert_eq!(
+            database.get_entry(&id).unwrap().display_path(),
+            "Services/api"
+        );
+        assert_eq!(
+            database.read_binary(&id, "KeeAgent.settings").unwrap(),
+            agent
+        );
+        assert_eq!(
+            database
+                .settings_document(&id, Capability::Materialize)
+                .unwrap(),
+            document
+        );
+        assert_eq!(
+            materialize_views(&database, &id).unwrap()["cert.pem"].target,
+            "/tmp/cert.pem"
+        );
+    }
+
+    #[test]
+    fn rename_group_refuses_an_existing_sibling() {
+        let (mut database, _p) = temp_database();
+        database.add_group("infra/web").unwrap();
+        database.add_group("infra/db").unwrap();
+        let before = group_paths(&database);
+
+        assert_eq!(
+            apply_rename_group(&mut database, "infra/web", "db"),
+            Err("a folder named \"db\" already exists in infra".to_string())
+        );
+        assert_eq!(
+            apply_rename_group(&mut database, "infra/web", "DB"),
+            Err("a folder named \"DB\" already exists in infra".to_string())
+        );
+        database.add_group("ops").unwrap();
+        assert_eq!(
+            apply_rename_group(&mut database, "ops", "infra"),
+            Err("a folder named \"infra\" already exists in Root".to_string())
+        );
+        assert!(apply_rename_group(&mut database, "ops", "root").is_err());
+
+        let mut expected = before;
+        expected.push("ops".to_string());
+        expected.sort_by_key(|p| p.to_lowercase());
+        assert_eq!(group_paths(&database), expected, "nothing moved");
+        assert!(!group_paths(&database).contains(&"infra/db/web".to_string()));
+    }
+
+    #[test]
+    fn rename_group_refuses_empty_and_slash_names() {
+        let (mut database, _p) = temp_database();
+        database.add_group("infra/web").unwrap();
+        let before = group_paths(&database);
+        for name in ["", "   ", "a/b", "/"] {
+            assert!(
+                apply_rename_group(&mut database, "infra/web", name).is_err(),
+                "{name:?} accepted"
+            );
+        }
+        assert!(apply_rename_group(&mut database, "", "x").is_err());
+        assert_eq!(group_paths(&database), before);
+    }
+
+    #[test]
+    fn natural_order_matches_the_sidebar() {
+        let mut names = vec!["b", "a10", "A2", "a1", "B1"];
+        names.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(names, vec!["a1", "A2", "a10", "b", "B1"]);
     }
 
     #[test]

@@ -39,6 +39,10 @@ trove-core = { path = "../../crates/trove-core" }
 # it. Same arrangement trove-cli already uses; it pulls in tokio, which Tauri
 # is running anyway.
 troved = { path = "../../crates/troved" }
+# The app hosts the daemon in-process (`daemon_host`): its shutdown handle is a
+# tokio `Notify`, and the host pings the control socket. Same tokio the daemon
+# and Tauri already run on.
+tokio = { version = "1", features = ["sync", "time", "io-util", "rt", "net"] }
 
 # Argon2 is deliberately CPU-heavy, and unoptimised it is ~10x slower still: a
 # debug build took 11.4s to open a database the release CLI opens in ~1.5s. That
@@ -68,6 +72,12 @@ opt-level = 3
 # macOS only: Touch ID (LocalAuthentication) plus the login keychain that holds
 # the password it gates. `LAContext` needs no entitlement — verified from an
 # unsigned binary — so the prompt works without a provisioning profile.
+[dev-dependencies]
+# Tests read a saved file back to check what trove-core does not expose, such
+# as a group's UUID. Same version and patch as trove-core's.
+keepass = "0.15"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }

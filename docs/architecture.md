@@ -164,7 +164,7 @@ Implications:
 - **Scriptable.** A CI runner can `unlock` once, run a series of `kubectl` / `git` / `ssh` invocations, and `lock`. No pinentry prompt, no GUI dependency.
 - **Automatable.** A laptop-lid-close handler can fire a `lock` RPC; a screensaver hook can fire `set-idle-timeout 60`. The daemon does not need to be aware of any specific desktop environment.
 - **Headless-server-friendly.** Run the daemon on a build machine over SSH. The database file lives on disk; `unlock` over the (daemon-local) control socket; SSH-forward `TROVE_SSH_SOCK` if you really want to (and you've thought about it).
-- **GUI is a future client.** When we do build a GUI, it will speak the same control protocol as everything else. No special "GUI knows about the database" code path; no second source of truth.
+- **The desktop app hosts the daemon or uses it.** At startup the app runs `troved::server::serve` in-process ([daemon_host.rs](../trove-desktop/src-tauri/src/daemon_host.rs)), so `trove` commands and the SSH and GPG agent sockets are served by the app while it is open; `trove daemons` lists the app's PID. When a `troved` already runs, the app leaves it alone and is its client, and if that `troved` exits, the next unlock in the app hosts again. Quitting the app stops the hosted daemon and removes its sockets, so the next `trove` command autospawns a standalone `troved`. Settings shows which of these is in effect. The app still unlocks its own copy of a database and loads that database's keys into the OS agent itself; handing that to the daemon is #300's Part B.
 
 This is the part of the spec where we explicitly diverge from upstream. droidmonkey on the KeePassXC tracker: "Likely not possible unless you modify the code." Modifying the code is exactly what we did.
 
@@ -200,7 +200,7 @@ Honest list. None of these are show-stoppers; all of them are real.
 - **No keyfile / hardware-token database unlock.** Password only. KeePassXC supports both; we will eventually.
 - **No KDBX 3 read.** KDBX 4 only. KDBX 3 databases must be migrated by KeePassXC first.
 - **No re-materialize on `add`-while-unlocked.** Adding a `file` entry to an open database doesn't materialize it; you have to lock and unlock. Easy follow-up.
-- **No GUI.** Daemon-only project today.
+- **The desktop app keeps its own key stores.** It hosts or uses the daemon (see [Why headless-first](#why-headless-first)), but a desktop unlock does not yet unlock the daemon, so the daemon's agent sockets serve only what `trove unlock` loaded.
 - **No sync, no per-user key sidecar.** Both are explicitly on the spec; neither is built.
 - **No browser native messaging.** The headless-daemon design supports it; nothing implemented yet.
 
