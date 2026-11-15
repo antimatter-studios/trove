@@ -4870,7 +4870,7 @@ dependencies = [
  "quick-xml 0.42.0",
  "sha1",
  "sha2 0.11.1",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "uuid",
  "zeroize",
 ]
@@ -4922,7 +4922,7 @@ dependencies = [
  "signature 3.0.0",
  "ssh-key",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.19",
  "tokio",
  "trove-core",
  "windows-sys 0.61.2",
