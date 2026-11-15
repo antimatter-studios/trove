@@ -607,7 +607,8 @@ enum Command {
     /// The point is to give one reused key a second, accurate name so the two
     /// can be rotated apart later. The copy is INDEPENDENT: nothing records
     /// that the entries share key material, because such a link invites tools
-    /// that rotate one and take the other with it.
+    /// that rotate one and take the other with it. To copy into ANOTHER
+    /// database use `trove send`, which does record where the copy came from.
     ///
     /// Same destination rules as `mv`, and an existing entry is refused rather
     /// than overwritten. Nothing is written to disk on the way — the key never
@@ -631,6 +632,50 @@ enum Command {
         /// Show the preflighted transfer without changing the database.
         #[arg(long, requires = "recursive")]
         dry_run: bool,
+    },
+
+    /// Copy an entry into another database, or with `--move` move it there.
+    ///
+    /// The copy gets a new UUID and records the source entry and database in
+    /// its CustomData (`Trove.Send.SourceEntry`, `Trove.Send.SourceDatabase`),
+    /// so sending the same entry again updates that copy in place, keeping its
+    /// old values as history, instead of making a second one. An unrelated
+    /// entry already at the destination path is never overwritten.
+    ///
+    /// Fields (with their protection), TOTP, tags, icon and attachments are
+    /// copied. `{REF:<F>@I:<uuid>}` references are resolved against the source
+    /// and sent as literal values. History is dropped unless `--with-history`.
+    ///
+    /// `--move` writes the target, reopens it from disk and compares, and only
+    /// then moves the source to the Recycle Bin.
+    ///
+    /// Offline (`--database SRC`) the source password is stdin line 1 and the
+    /// target's line 2 with `--password-stdin`. Through the daemon, a target
+    /// that is not unlocked asks for its password (stdin line 1 with
+    /// `--password-stdin`).
+    Send {
+        /// Entry path to send, e.g. "Web/github".
+        entry_path: String,
+        /// The target database file.
+        #[arg(long = "to", value_name = "PATH")]
+        to: PathBuf,
+        /// Put the entry in this group of the target instead of its own group
+        /// path. Created if missing.
+        #[arg(long = "to-group", value_name = "GROUP")]
+        to_group: Option<String>,
+        /// Move instead of copy: the source goes to its Recycle Bin once the
+        /// copy is verified.
+        #[arg(long = "move")]
+        move_source: bool,
+        /// Copy the entry's history versions too.
+        #[arg(long = "with-history")]
+        with_history: bool,
+        /// Key file for the target database (offline mode).
+        #[arg(long = "to-key-file", value_name = "PATH")]
+        to_key_file: Option<PathBuf>,
+        /// Don't ask for confirmation. Required without a terminal.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// Create a group hierarchy. Intermediate groups are created as needed
@@ -1671,6 +1716,7 @@ fn challenge_response_uses_offline_database(command: &Command, database: Option<
         | Command::Rm { .. }
         | Command::Mv { .. }
         | Command::Cp { .. }
+        | Command::Send { .. }
         | Command::Mkdir { .. }
         | Command::Rmdir { .. }
         | Command::RenameAttachment { .. }
@@ -2362,6 +2408,25 @@ fn run(cli: Cli) -> Result<()> {
             &group_path,
             recursive,
             verbose,
+            pw_stdin,
+        ),
+        Command::Send {
+            entry_path,
+            to,
+            to_group,
+            move_source,
+            with_history,
+            to_key_file,
+            yes,
+        } => cmd_send(
+            database,
+            &entry_path,
+            &to,
+            SendCliOptions {
+                options: trove_core::SendOptions::new(to_group, with_history, move_source),
+                to_key_file,
+                yes,
+            },
             pw_stdin,
         ),
         Command::Cp {
@@ -6425,6 +6490,174 @@ fn cmd_cp(
     }
     println!("copied '{entry_path}' to '{dest_path}'");
     Ok(())
+}
+
+struct SendCliOptions {
+    options: trove_core::SendOptions,
+    to_key_file: Option<PathBuf>,
+    yes: bool,
+}
+
+/// `trove send`: see [`Command::Send`].
+fn cmd_send(
+    database: Option<&Path>,
+    entry_path: &str,
+    to: &Path,
+    cli: SendCliOptions,
+    pw_stdin: bool,
+) -> Result<()> {
+    let SendCliOptions {
+        options,
+        to_key_file,
+        yes,
+    } = cli;
+    // Confirmation reads stdin, so it needs a terminal there, and one not
+    // already carrying passwords.
+    if !yes && (pw_stdin || !std::io::stdin().is_terminal()) {
+        return Err(DaemonClassified {
+            message: "no terminal to confirm on; pass --yes to send without asking".to_string(),
+            exit: EXIT_USER_ERROR,
+        }
+        .into());
+    }
+    if !to.exists() {
+        return Err(CoreError::NotFound(to.to_path_buf()).into());
+    }
+    let verb = if options.move_source { "move" } else { "copy" };
+    let confirm = |dest: &str| -> Result<bool> {
+        if yes {
+            return Ok(true);
+        }
+        eprint!(
+            "{verb} '{entry_path}' to {} as '{dest}'? [y/N] ",
+            to.display()
+        );
+        std::io::stderr().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer)?;
+        Ok(matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        ))
+    };
+    let (sent_path, updated, moved) = match database {
+        Some(path) => {
+            let mut source = open_database(path, pw_stdin)?;
+            let id = source
+                .find_by_title(entry_path)
+                .ok_or_else(|| CoreError::EntryNotFound(entry_path.to_string()))?;
+            let target_password = if pw_stdin {
+                read_password_from_stdin()
+                    .context("reading TARGET database password from stdin (line 2)")?
+            } else {
+                rpassword::prompt_password("Target database password: ")
+                    .context("reading the target database password")?
+            };
+            let target_keyfile = match to_key_file.as_deref() {
+                Some(p) => Some(
+                    std::fs::read(p)
+                        .with_context(|| format!("reading target key file {}", p.display()))?,
+                ),
+                None => None,
+            };
+            let mut target =
+                Database::open_with_key(to, &target_password, target_keyfile.as_deref())
+                    .with_context(|| format!("opening target database {}", to.display()))?;
+            if canonical_or_self(path) == canonical_or_self(to) {
+                return Err(anyhow!(
+                    "{} is the database the entry is in; use `trove cp` to copy within it",
+                    to.display()
+                ));
+            }
+            let prepared = source
+                .prepare_send(&id, &options)
+                .context("sending entry")?;
+            if !confirm(&prepared.dest_path)? {
+                eprintln!("nothing sent");
+                return Ok(());
+            }
+            let outcome = trove_core::send_entry(&mut source, &id, &mut target, &options)
+                .context("sending entry")?;
+            (outcome.path, outcome.updated, outcome.moved)
+        }
+        None => {
+            let code = require_session_code()?;
+            let dest = match options.to_group.as_deref() {
+                Some(group) => format!(
+                    "{}/{}",
+                    group.trim_matches('/'),
+                    entry_path.rsplit('/').next().unwrap_or(entry_path)
+                ),
+                None => entry_path.to_string(),
+            };
+            if !confirm(&dest)? {
+                eprintln!("nothing sent");
+                return Ok(());
+            }
+            let target_password = if daemon_has_unlocked(to) {
+                None
+            } else if pw_stdin {
+                Some(
+                    read_password_from_stdin()
+                        .context("reading TARGET database password from stdin")?,
+                )
+            } else {
+                Some(
+                    rpassword::prompt_password("Target database password: ")
+                        .context("reading the target database password")?,
+                )
+            };
+            let response = daemon_call(&daemon::Request::SendEntry {
+                path: entry_path.to_string(),
+                to: std::path::absolute(to).unwrap_or_else(|_| to.to_path_buf()),
+                to_group: options.to_group.clone(),
+                move_source: options.move_source,
+                with_history: options.with_history,
+                target_password,
+                code,
+            })?;
+            (
+                response
+                    .get("sent_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&dest)
+                    .to_string(),
+                response
+                    .get("updated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                response
+                    .get("moved")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        }
+    };
+    let what = match (updated, moved) {
+        (true, true) => "moved, updating the earlier copy at",
+        (true, false) => "updated the earlier copy at",
+        (false, true) => "moved to",
+        (false, false) => "copied to",
+    };
+    println!("'{entry_path}' {what} '{sent_path}' in {}", to.display());
+    Ok(())
+}
+
+fn canonical_or_self(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether the running daemon has `path` unlocked.
+fn daemon_has_unlocked(path: &Path) -> bool {
+    let want = canonical_or_self(path);
+    daemon::send(&daemon::Request::Status)
+        .ok()
+        .and_then(|status| status.get("database_paths").cloned())
+        .and_then(|paths| paths.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|p| canonical_or_self(Path::new(p)) == want)
 }
 
 fn group_transfer_from_json(value: &Value) -> Result<GroupTransferPlan> {

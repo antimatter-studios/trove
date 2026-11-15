@@ -113,6 +113,7 @@ fn changes_database(req: &Request) -> bool {
             | Request::RemoveEntry { .. }
             | Request::MoveEntry { .. }
             | Request::CopyEntry { .. }
+            | Request::SendEntry { .. }
             | Request::MoveGroup { .. }
             | Request::CopyGroup { .. }
             | Request::Rmdir { .. }
@@ -1224,6 +1225,32 @@ async fn handle_request(
                 peer_uid,
                 &path,
                 &dest,
+                &code,
+            )
+            .await
+        }
+
+        Request::SendEntry {
+            path,
+            to,
+            to_group,
+            move_source,
+            with_history,
+            target_password,
+            code,
+        } => {
+            let options = trove_core::SendOptions::new(to_group, with_history, move_source);
+            send_entry(
+                state,
+                session,
+                key_store,
+                gpg_store,
+                scoped_agents,
+                peer_uid,
+                &path,
+                &to,
+                &options,
+                target_password.as_deref(),
                 &code,
             )
             .await
@@ -2754,6 +2781,91 @@ async fn copy_entry(
     }
     rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_empty())
+}
+
+/// Code-gated write: `trove send`. The target is written, saved and checked
+/// against the file on disk before a move touches the source.
+#[allow(clippy::too_many_arguments)]
+async fn send_entry(
+    state: &SharedState,
+    session: &SessionStore,
+    key_store: &KeyStore,
+    gpg_store: &GpgKeyStore,
+    scoped_agents: &ScopedAgents,
+    peer_uid: u32,
+    path: &str,
+    to: &std::path::Path,
+    options: &trove_core::SendOptions,
+    target_password: Option<&str>,
+    code: &str,
+) -> Handled {
+    // Hold authorization stable through database access (session -> state).
+    let sess = session.lock().await;
+    if !session_matches(&sess, peer_uid, code) {
+        return session_refused();
+    }
+    let mut guard = state.lock().await;
+    let (prepared, source_id, source_key) = match guard.find_entry(path) {
+        Ok((database, id)) => match database.prepare_send(&id, options) {
+            Ok(prepared) => (
+                prepared,
+                id,
+                crate::databases::canonical_key(database.path()),
+            ),
+            Err(e) => return err_handled(format!("sending entry: {e}")),
+        },
+        Err(e) => return err_handled(e.to_string()),
+    };
+    let target_key = crate::databases::canonical_key(to);
+    if target_key == source_key {
+        return err_handled(format!(
+            "{} is the database the entry is in; use `trove cp` to copy within it",
+            to.display()
+        ));
+    }
+    let write = |target: &mut Database| -> Result<trove_core::SendOutcome, trove_core::Error> {
+        let outcome = target.receive_send(&prepared)?;
+        target.save()?;
+        target.verify_on_disk(&outcome.id, &prepared.snapshot)?;
+        Ok(outcome)
+    };
+    let written = if guard.contains(to) {
+        let target = guard
+            .iter_mut()
+            .find(|d| crate::databases::canonical_key(d.path()) == target_key)
+            .expect("contains() found it");
+        write(target)
+    } else {
+        let Some(password) = target_password else {
+            return err_handled(format!(
+                "database {} is not unlocked; unlock it, or give its password",
+                to.display()
+            ));
+        };
+        match Database::open(to, password) {
+            Ok(mut target) => write(&mut target),
+            Err(e) => Err(e),
+        }
+    };
+    let mut outcome = match written {
+        Ok(outcome) => outcome,
+        Err(e) => return err_handled(format!("sending entry: {e}")),
+    };
+    if options.move_source {
+        let source = guard
+            .iter_mut()
+            .find(|d| crate::databases::canonical_key(d.path()) == source_key)
+            .expect("the source database is still open");
+        if let Err(e) = source.recycle_entry(&source_id, false) {
+            return err_handled(format!("moving the source to the Recycle Bin: {e}"));
+        }
+        if let Err(e) = source.save() {
+            return err_handled(format!("saving database: {e}"));
+        }
+        outcome.moved = true;
+    }
+    rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
+    ok_handled(Response::ok_sent(&outcome, target_key))
 }
 
 /// Code-gated write: create a group hierarchy.
