@@ -1,0 +1,12 @@
+{
+  "request": {
+    "cmd": "get-field",
+    "path": "web",
+    "field": "Password",
+    "code": "$CODE"
+  },
+  "response": {
+    "status": "string",
+    "value": "string"
+  }
+}

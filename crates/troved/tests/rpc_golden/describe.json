@@ -1,0 +1,30 @@
+{
+  "request": {
+    "cmd": "describe",
+    "path": "web"
+  },
+  "response": {
+    "status": "string",
+    "descriptions": [
+      {
+        "path": "string",
+        "username": "string|null",
+        "url": "string|null",
+        "notes": "string|null",
+        "has_password": "bool",
+        "attributes": {
+          "*": "string"
+        },
+        "attachments": [
+          {
+            "name": "string",
+            "size": "integer"
+          }
+        ]
+      }
+    ]
+  },
+  "nonempty": [
+    "descriptions"
+  ]
+}

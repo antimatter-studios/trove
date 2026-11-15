@@ -200,7 +200,7 @@ async fn idle_expiry_clears_all_secret_material() {
     // Database dropped — List should report no database unlocked.
     let resp = h.handle(Request::List).await;
     match resp {
-        Response::Err { error } => assert!(
+        Response::Err { error, .. } => assert!(
             error.contains("no database"),
             "expected 'no database unlocked'; got {error}"
         ),

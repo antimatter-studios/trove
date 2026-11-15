@@ -62,15 +62,19 @@ pub fn send(req: &Request) -> Result<Value> {
     Ok(v)
 }
 
-/// The prefix `troved` puts on the error for a request it could not decode.
-const UNDECODABLE_REQUEST: &str = "invalid request: ";
+/// The prefixes `troved` puts on the error for a request it could not decode:
+/// `invalid request: ` from every daemon, and `unknown command: ` from one
+/// speaking protocol version 1 or later when it doesn't know the `cmd`. Read
+/// from the text rather than the `kind` field so an older daemon, which sends
+/// no `kind`, gets the same treatment.
+const UNDECODABLE_REQUEST: [&str; 2] = ["invalid request: ", "unknown command: "];
 
 /// The error for a request the daemon could not decode, explained, or `None`
 /// when the reply is anything else or the daemon is this very build (then the
 /// raw message is a real bug report and is left alone).
 fn undecodable_request_message(reply: &Value) -> Option<String> {
     let raw = response_error(reply)?;
-    if !raw.starts_with(UNDECODABLE_REQUEST) {
+    if !UNDECODABLE_REQUEST.iter().any(|p| raw.starts_with(p)) {
         return None;
     }
     let daemon_version = send_raw(&Request::GetVersion).ok().and_then(|v| {
@@ -555,10 +559,9 @@ mod tests {
         std::env::remove_var("TROVE_SOCK");
     }
 
-    /// An older daemon that cannot decode a request: every command gets the
-    /// explained error, naming both versions, instead of the raw serde text.
-    #[test]
-    fn send_explains_a_request_an_older_daemon_cannot_decode() {
+    /// Serve `replies` on a fresh `TROVE_SOCK`, one connection each, send
+    /// `status` through [`send`] and return the error it reports.
+    fn send_status_against(replies: [Value; 2]) -> String {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("daemon.sock");
@@ -566,14 +569,7 @@ mod tests {
 
         let listener = UnixListener::bind(&sock).expect("bind");
         let server = std::thread::spawn(move || {
-            // The command, which it cannot decode, then the version probe.
-            for reply in [
-                serde_json::json!({
-                    "status": "err",
-                    "error": "invalid request: unknown variant `ssh_agent_sockets`"
-                }),
-                serde_json::json!({"status": "ok", "daemon_version": "0.0.1-old"}),
-            ] {
+            for reply in replies {
                 let (stream, _) = listener.accept().expect("accept");
                 let mut reader = BufReader::new(stream.try_clone().expect("clone"));
                 let mut line = String::new();
@@ -588,7 +584,42 @@ mod tests {
         let resp = send(&Request::Status).expect("send");
         server.join().expect("server thread");
         std::env::remove_var("TROVE_SOCK");
-        let error = response_error(&resp).expect("still an error");
+        response_error(&resp).expect("still an error")
+    }
+
+    /// A versioned daemon that doesn't know the `cmd` says `unknown command`
+    /// (with a `kind` the CLI doesn't need); it gets the same explanation.
+    #[test]
+    fn send_explains_an_unknown_command_from_a_versioned_daemon() {
+        let error = send_status_against([
+            serde_json::json!({
+                "status": "err",
+                "kind": "unknown-command",
+                "error": "unknown command: status"
+            }),
+            serde_json::json!({
+                "status": "ok",
+                "daemon_version": "0.0.2-old",
+                "protocol_version": 1
+            }),
+        ]);
+        assert!(error.contains("troved 0.0.2-old"), "{error}");
+        assert!(error.contains(RESTART_DAEMON), "{error}");
+        assert!(error.ends_with("unknown command: status"), "{error}");
+    }
+
+    /// An older daemon that cannot decode a request: every command gets the
+    /// explained error, naming both versions, instead of the raw serde text.
+    #[test]
+    fn send_explains_a_request_an_older_daemon_cannot_decode() {
+        // The command, which it cannot decode, then the version probe.
+        let error = send_status_against([
+            serde_json::json!({
+                "status": "err",
+                "error": "invalid request: unknown variant `ssh_agent_sockets`"
+            }),
+            serde_json::json!({"status": "ok", "daemon_version": "0.0.1-old"}),
+        ]);
         assert!(error.contains("troved 0.0.1-old"), "{error}");
         assert!(error.contains(RESTART_DAEMON), "{error}");
         assert!(error.contains("unknown variant"), "{error}");

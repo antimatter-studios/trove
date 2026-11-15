@@ -185,7 +185,7 @@ async fn handle_connection(
             continue;
         }
 
-        let response = match serde_json::from_str::<Request>(&line) {
+        let response = match crate::protocol::parse_request(&line) {
             Ok(req) => {
                 let explicit_shutdown = matches!(req, Request::Shutdown);
                 let handled = handle(
@@ -208,7 +208,7 @@ async fn handle_connection(
                 }
                 handled.response
             }
-            Err(e) => Response::err(format!("invalid request: {e}")),
+            Err(bad) => Response::from(bad),
         };
 
         if write_response(&mut write_half, &response).await.is_err() {
@@ -221,8 +221,9 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
     w: &mut W,
     resp: &Response,
 ) -> std::io::Result<()> {
-    let mut buf = serde_json::to_vec(resp)
-        .unwrap_or_else(|_| br#"{"status":"err","error":"serialization failed"}"#.to_vec());
+    let mut buf = serde_json::to_vec(resp).unwrap_or_else(|_| {
+        br#"{"status":"err","kind":"failed","error":"serialization failed"}"#.to_vec()
+    });
     buf.push(b'\n');
     w.write_all(&buf).await
 }

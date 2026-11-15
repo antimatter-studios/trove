@@ -1,0 +1,15 @@
+{
+  "request": {
+    "cmd": "gpg-agent-list"
+  },
+  "response": {
+    "status": "string",
+    "gpg_keys": [
+      {
+        "keygrip": "string",
+        "key_type": "string",
+        "comment": "string"
+      }
+    ]
+  }
+}

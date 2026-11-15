@@ -298,8 +298,9 @@ bigger ideas, grouped:
 - **Sharing and teams:** member identity keys (#231), sealed fields with group
   keys (#232), per-entry permissions for company databases (#233), sending one
   entry to a person (#235), admin audit review (#327), SSO/OIDC unlock (#286).
-- **Automation:** a documented, versioned RPC API for scripts (#309), a browser
-  native-messaging host without the GUI (#289).
+- **Automation:** the control socket is a documented, versioned API for
+  scripts ([docs/rpc.md](docs/rpc.md), #309); next, a browser native-messaging
+  host without the GUI (#289).
 - **Passkeys, one-time codes, hardware:** passkeys in KeePassXC's format
   (#310), HOTP, Steam and Yandex codes (#311), FIDO2 as a primary unlock factor
   (#312).

@@ -2048,24 +2048,7 @@ The CLI's `ssh-agent socket` / `gpg-agent socket` subcommands resolve the same w
 
 ### Control protocol (line-JSON)
 
-Connect to the control socket, write one JSON object per line, read one response per line. The protocol is defined in [crates/troved/src/protocol.rs](../crates/troved/src/protocol.rs).
-
-Request envelope: `{"cmd": "<name>", ...}`. Response envelope: `{"status": "ok"|"err", ...}`.
-
-| `cmd` | Request fields | Response on success | Notes |
-| --- | --- | --- | --- |
-| `ping` | none | `{"status":"ok","pong":true}` | Heartbeat. Does **not** reset the idle timer. |
-| `unlock` | `path: string`, `password: string`, `filter?: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…],"ssh_forward_warnings":[…]}` | **Additive** — adds this database to the unlocked set rather than replacing it, and the SSH/GPG stores are rebuilt from the union of every open database (see [multi-database.md](multi-database.md)). Re-unlocking a database already open replaces just that one. When `filter` is present, only entries carrying that KeePass-native tag are exposed through the agents and materialization. Otherwise runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every selected materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the database) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. A target another unlocked database already materialized is skipped and warned about, never overwritten. Also forwards the selected SSH keys into the agent named by `$SSH_AUTH_SOCK`, under the same contract: never fails the unlock, per-key failures land in `ssh_forward_warnings` (omitted when empty). |
-| `list` | none | `{"status":"ok","entries":[{"id","title","username","url","attachments"}, ...]}` | The union across every unlocked database, in unlock order. Errors if none is unlocked. |
-| `lock` | `database: string` *(optional)* | `{"status":"ok"}` | Without `database`: wipes all materialized files, drops every database, clears the SSH+GPG stores, cancels the idle timer. With `database`: drops only that database, wipes only **its** materialized files, rebuilds the key stores from what is still open, and keeps the idle timer armed; errors if no database is unlocked at that path. Either way, keys that dropped out of the store are also removed from the agent named by `$SSH_AUTH_SOCK` (unless the entry set `RemoveAtDatabaseClose=false`); keys another still-unlocked database provides stay. Idempotent. |
-| `shutdown` | none | `{"status":"ok"}` | Same as `lock`, then signals the daemon main loop to exit. |
-| `materialize-status` | none | `{"status":"ok","materialized":[{"title","target_path","database","ttl_remaining_seconds","exists"}, ...]}` | Read-only; works even with every database locked (returns empty array). `database` names the unlocked database the file came from. |
-| `set-idle-timeout` | `seconds: u64` | `{"status":"ok"}` | `0` disables auto-lock. Takes effect immediately; if the new timeout has already elapsed, the timer fires on the next driver wake. |
-| `get-idle-timeout` | none | `{"status":"ok","seconds": u64, "remaining": u64\|null}` | `seconds` is the configured timeout. `remaining` is seconds-until-fire if a database is unlocked, else `null`. |
-
-Error responses: `{"status":"err","error":"<message>"}`. Errors do not close the connection — you can pipeline more commands.
-
-The `unlock` request payload contains the master password in cleartext. The connection is a Unix socket bound `0600`; treat it the way you'd treat any other same-UID IPC channel.
+Connect to the control socket, write one JSON object per line, read one response per line. Every request, its fields and response, the error kinds, which requests are stable for scripts and how the protocol is versioned are in [rpc.md](rpc.md).
 
 ### SSH agent protocol
 

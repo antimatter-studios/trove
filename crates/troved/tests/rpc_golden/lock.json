@@ -1,0 +1,14 @@
+{
+  "request": {
+    "cmd": "lock",
+    "database": "$DB"
+  },
+  "response": {
+    "status": "string"
+  },
+  "older_requests": [
+    {
+      "cmd": "lock"
+    }
+  ]
+}

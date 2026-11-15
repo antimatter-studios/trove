@@ -1,0 +1,40 @@
+{
+  "request": {
+    "cmd": "unlock",
+    "path": "$DB",
+    "password": "$PW",
+    "timeout": 0,
+    "session": true
+  },
+  "response": {
+    "status": "string",
+    "code?": "string",
+    "daemon_version": "string",
+    "materialize_warnings?": [
+      "string"
+    ],
+    "skipped_keys?": [
+      {
+        "agent": "string",
+        "database": "string",
+        "entry": "string",
+        "attachment": "string",
+        "reason": "string"
+      }
+    ],
+    "ssh_forward_warnings?": [
+      "string"
+    ],
+    "ssh_forward_notes?": [
+      "string"
+    ],
+    "ssh_forward_socket?": "string"
+  },
+  "older_requests": [
+    {
+      "cmd": "unlock",
+      "path": "$DB",
+      "password": "$PW"
+    }
+  ]
+}

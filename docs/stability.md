@@ -30,17 +30,27 @@ and are released together.
   4.1. New databases use Argon2d, and trove doesn't retune an AES-KDF database
   (KeePassXC does that).
 
+- **The control-socket RPC, for stable requests.** The daemon's control socket
+  is a public, versioned API. [rpc.md](rpc.md) marks each request `stable` or
+  `internal`. A stable request's name, fields, response shape and error `kind`
+  values follow the versioning rules there: adding a request, an optional
+  request field or a response field leaves `protocol_version` alone; removing
+  or renaming a stable request or field, retyping a field or changing what it
+  means bumps it, and is deprecated for at least one minor release first, as
+  below. Error `error` text is not covered.
+
 ## Not covered
 
 - **Human-readable output.** Wording, layout and colours of anything that isn't
   `--json`. Scripts should use `--json` or the exit code.
 - **The desktop app's layout.** Windows, menus and screens can change in any
   release.
-- **The daemon's control-socket protocol.** It is internal: the CLI and
-  `troved` only promise to understand each other at the same version, and a
-  mismatch produces an error naming both versions and saying how to restart the
-  daemon. A stable scripting API over the socket is tracked in
-  [#309](https://github.com/antimatter-studios/trove/issues/309).
+- **Internal control-socket requests.** The requests [rpc.md](rpc.md) marks
+  internal exist for the CLI and the desktop app and may change in any
+  release; scripts should run the matching command with `--json` instead.
+  Across versions, the CLI and `troved` promise only to understand each other
+  at the same version; a mismatch produces an error naming both versions and
+  saying how to restart the daemon.
 - **Experimental platforms.** See below.
 
 ## Platforms
