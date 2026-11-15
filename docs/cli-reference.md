@@ -1811,7 +1811,7 @@ The next command starts the current daemon, and databases need unlocking again.
 ## trove doctor
 
 ```
-trove [--database <PATH>] doctor [--json]
+trove [--database <PATH>] [--key-file <PATH>] doctor [--json]
 ```
 
 Check the setup around trove and say what to fix. Read-only, and it never starts
@@ -1829,6 +1829,9 @@ a daemon.
 | `gpg-agent` | whether gpg's agent socket (`gpgconf --list-dirs agent-socket`) is a symlink to trove's |
 | `database` | the database from `--database` or `TROVE_DATABASE` opens and is KDBX 4 (KDBX 3.1 is a warning) |
 | `env-file` | each `.env.trove.yaml` a bare `--env` would find is readable only by its owner; a retired `.env.trove` where one belongs fails |
+| `keychain` | macOS only, when a database is named: whether `trove keychain save` stored a password for it. Asks for the item's attributes only, never the password, so it raises no dialog and works without a terminal. Absent is `info` |
+| `key-file` | only with `--key-file`: the file exists and is readable (else `FAIL`), and on Unix is not readable by group or others (else `warn`) |
+| `session` | with a database unlocked: whether `TROVE_SESSION` is set. Unset is `info`, since `get` and `materialize` are refused in that shell; `eval "$(trove unlock --export <PATH>)"` gets a session |
 
 Each line is `ok`, `info`, `warn` or `FAIL`, with a suggested fix under it where
 there is one. Exits 1 if any check fails. See

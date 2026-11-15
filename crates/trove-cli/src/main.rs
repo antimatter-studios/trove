@@ -351,7 +351,9 @@ enum Command {
 
     /// Check the setup around trove: the daemon and its version, stray
     /// daemons, where `SSH_AUTH_SOCK` and gpg's agent socket point, the database
-    /// file (`--database` or `TROVE_DATABASE`) and `.env.trove.yaml` permissions.
+    /// file (`--database` or `TROVE_DATABASE`) and its keychain entry (macOS),
+    /// the `--key-file`, whether this shell has a `TROVE_SESSION`, and
+    /// `.env.trove.yaml` permissions.
     ///
     /// Read-only, and never starts a daemon. Exits 1 if any check fails.
     Doctor {
@@ -1851,8 +1853,10 @@ fn run(cli: Cli) -> Result<()> {
         );
     }
     let pw_stdin = cli.password_stdin;
-    // Fail fast on an unreadable keyfile, before any password prompt.
+    // Fail fast on an unreadable keyfile, before any password prompt. `doctor`
+    // reads no database, so it reports the key file as a check instead.
     let keyfile_bytes = match cli.key_file.as_deref() {
+        Some(_) if matches!(cli.command, Command::Doctor { .. }) => None,
         Some(p) => {
             Some(std::fs::read(p).with_context(|| format!("reading key file {}", p.display()))?)
         }
@@ -2110,7 +2114,7 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_unlock(&database, timeout, filter, export, shell, detach, pw_stdin),
         Command::Lock { database } => cmd_lock(database.as_deref()),
         Command::Status { json, verbose } => cmd_status(json, verbose),
-        Command::Doctor { json } => cmd_doctor(database, json),
+        Command::Doctor { json } => cmd_doctor(database, cli.key_file.as_deref(), json),
         #[cfg(unix)]
         Command::Daemons { op } => match op.unwrap_or(DaemonsOp::List { json: false }) {
             DaemonsOp::List { json } => cmd_daemons_list(json),
@@ -7876,8 +7880,8 @@ fn cmd_lock(database: Option<&std::path::Path>) -> Result<()> {
 
 /// `trove status` — pretty-print the daemon's `Status` response.
 /// `trove doctor` — run the pre-flight checks in [`doctor`] and report them.
-fn cmd_doctor(database: Option<&Path>, json: bool) -> Result<()> {
-    let checks = doctor::run_checks(database);
+fn cmd_doctor(database: Option<&Path>, key_file: Option<&Path>, json: bool) -> Result<()> {
+    let checks = doctor::run_checks(database, key_file);
     let failed = checks
         .iter()
         .filter(|c| c.status == doctor::Level::Fail)
