@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use tempfile::TempDir;
-use trove_core::{Database, Error, RECYCLE_BIN_GROUP};
+use trove_core::{Database, Error, SearchFieldFilter, SearchQuery, RECYCLE_BIN_GROUP};
 
 const PW: &str = "test password";
 
@@ -274,6 +274,76 @@ fn search_matches_all_unprotected_surfaces_only() {
     assert_eq!(hit("work"), vec!["Work/GitHub".to_string()]); // group path
     assert!(hit("hunter2").is_empty(), "protected values must not match");
     assert!(hit("zzz-no-hit").is_empty());
+}
+
+#[test]
+fn search_tag_filter_matches_inherited_group_tags() {
+    let dir = TempDir::new().unwrap();
+    let mut v = new_database(&dir);
+    v.add_group("Work").unwrap();
+    v.set_group_tags("Work", &["work".into()]).unwrap();
+    v.add_entry("Work/vpn").unwrap();
+    v.add_entry("Personal/bank").unwrap();
+
+    let hits = v.search_entries_with(&SearchQuery::default().with_tags(vec!["WORK".into()]));
+    assert_eq!(hits.len(), 1, "only the entry in the tagged group");
+    assert_eq!(hits[0].entry.display_path(), "Work/vpn");
+    assert_eq!(hits[0].matched, vec!["tag work".to_string()]);
+
+    let none = v.search_entries_with(&SearchQuery::default().with_tags(vec!["home".into()]));
+    assert!(none.is_empty());
+}
+
+#[test]
+fn search_field_filter_ignores_protected_custom_fields() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("t.kdbx");
+    let mut v = Database::create(&path, PW).unwrap();
+    v.add_entry("Build/signing").unwrap();
+    v.save().unwrap();
+    drop(v);
+
+    // trove has no API for a protected custom field, so write one with the
+    // crate, the way KeePassXC would store it.
+    let mut file = std::fs::File::open(&path).unwrap();
+    let mut db =
+        keepass::Database::open(&mut file, keepass::DatabaseKey::new().with_password(PW)).unwrap();
+    drop(file);
+    let raw_id = db
+        .iter_all_entries()
+        .find(|e| e.get_title() == Some("signing"))
+        .unwrap()
+        .id();
+    db.entry_mut(raw_id)
+        .unwrap()
+        .set_protected("Deploy.Token", "tok-secret-value");
+    let mut file = std::fs::File::create(&path).unwrap();
+    db.save(&mut file, keepass::DatabaseKey::new().with_password(PW))
+        .unwrap();
+    drop(file);
+
+    let v = reopen(&path);
+    let by_value =
+        v.search_entries_with(
+            &SearchQuery::default().with_fields(vec![SearchFieldFilter::new(
+                "Deploy.Token",
+                Some("tok-secret-value".into()),
+            )]),
+        );
+    assert!(
+        by_value.is_empty(),
+        "NAME=VALUE must not match a protected field"
+    );
+    let by_name = v.search_entries_with(
+        &SearchQuery::default().with_fields(vec![SearchFieldFilter::new("Deploy.Token", None)]),
+    );
+    assert!(by_name.is_empty(), "NAME must not match a protected field");
+    let by_term =
+        v.search_entries_with(&SearchQuery::default().with_term(Some("tok-secret".into())));
+    assert!(
+        by_term.is_empty(),
+        "the term must not match a protected value"
+    );
 }
 
 #[test]

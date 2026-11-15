@@ -159,7 +159,8 @@ repeated filters within a category are alternatives.
 - `--field NAME` matches any unprotected field with that name (field names
   compare case-insensitively).
 - `--field NAME=VALUE` requires an exact, case-sensitive value match.
-- `--tag TAG` matches an entry tag or an inherited group tag, case-insensitively.
+- `--tag TAG` matches an entry tag or an inherited group tag, case-insensitively,
+  e.g. `trove search --tag work`.
 - `--attachment GLOB` matches attachment names with case-insensitive `*` and
   `?` wildcards, e.g. `--attachment '*.p8'`.
 

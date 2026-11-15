@@ -233,6 +233,69 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
     );
 }
 
+#[test]
+fn search_by_tag_finds_tagged_and_inherited_entries() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let database = dir.path().join("tags.kdbx");
+    let db = database.to_str().expect("utf8 path");
+    let pw_line = format!("{PASSWORD}\n");
+    let run = |args: &[&str]| {
+        let mut full = vec!["--database", db, "--password-stdin"];
+        full.extend_from_slice(args);
+        run_trove(&trove, &full, &pw_line)
+    };
+    assert_ok(&run(&["init"]), "init");
+    assert_ok(&run(&["mkdir", "Work"]), "mkdir");
+    assert_ok(
+        &run(&["group", "edit", "Work", "--tag", "work"]),
+        "tag group",
+    );
+    for path in ["Work/vpn", "Home/laptop", "Home/router"] {
+        let full = [
+            "--database",
+            db,
+            "--password-stdin",
+            "add",
+            "password",
+            path,
+            "--secret-stdin",
+        ];
+        let out = run_trove(&trove, &full, &format!("{PASSWORD}\nsecret\n"));
+        assert_ok(&out, path);
+    }
+    assert_ok(&run(&["edit", "Home/laptop", "--tag", "work"]), "tag entry");
+
+    let out = run(&["search", "--tag", "work"]);
+    assert_ok(&out, "search --tag");
+    let listing = stdout_str(&out);
+    assert!(listing.contains("Work/vpn"), "{listing}");
+    assert!(listing.contains("Home/laptop"), "{listing}");
+    assert!(!listing.contains("Home/router"), "{listing}");
+
+    let out = run(&["search", "--tag", "work", "--json"]);
+    assert_ok(&out, "search --tag --json");
+    let hits: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    let hits = hits.as_array().expect("array");
+    assert_eq!(hits.len(), 2);
+    for hit in hits {
+        assert!(
+            hit["matched"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::Value::String("tag work".into())),
+            "{hit}"
+        );
+    }
+
+    let out = run(&["search", "--tag", "nobody-uses-this"]);
+    assert_ok(&out, "search with no hits");
+    assert!(stdout_str(&out).is_empty());
+}
+
 /// The whole CRUD lifecycle against one database file, one process per step.
 #[test]
 fn offline_crud_lifecycle() {
