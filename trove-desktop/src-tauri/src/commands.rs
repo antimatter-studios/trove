@@ -27,7 +27,7 @@ use crate::biometric;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, Manager, State};
 use trove_core::settings::{self, Attributes, Capability, Document, Origin};
-use trove_core::{DatabaseMetadata, EntryId, Database};
+use trove_core::{Database, DatabaseMetadata, EntryId};
 use troved::materialize::{self, MaterializedFile, MaterializedStore};
 use troved::ssh_agent::{self, keeagent, ForwardedKey, LoadedKey};
 use zxcvbn::zxcvbn;
@@ -143,9 +143,7 @@ impl From<DatabaseMetadataDto> for DatabaseMetadata {
         Self {
             name: metadata.name.filter(|value| !value.is_empty()),
             description: metadata.description.filter(|value| !value.is_empty()),
-            default_username: metadata
-                .default_username
-                .filter(|value| !value.is_empty()),
+            default_username: metadata.default_username.filter(|value| !value.is_empty()),
             trove_uuid: metadata.trove_uuid.filter(|value| !value.is_empty()),
         }
     }
@@ -1126,11 +1124,18 @@ fn keeagent_attachment_name(bytes: &[u8]) -> Option<String> {
 
 /// Set a standard field when `value` is non-empty, otherwise clear it —
 /// "empty string clears/omits" per the contract.
-fn set_or_clear(database: &mut Database, id: &EntryId, field: &str, value: &str) -> Result<(), String> {
+fn set_or_clear(
+    database: &mut Database,
+    id: &EntryId,
+    field: &str,
+    value: &str,
+) -> Result<(), String> {
     if value.is_empty() {
         database.remove_field(id, field).map_err(|e| e.to_string())
     } else {
-        database.set_field(id, field, value).map_err(|e| e.to_string())
+        database
+            .set_field(id, field, value)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1199,7 +1204,9 @@ fn apply_save_entry(database: &mut Database, input: &EntryInput) -> Result<Entry
     set_or_clear(database, &entry_id, "Notes", &input.notes)?;
     set_or_clear(database, &entry_id, "_TroveType", &input.entry_type)?;
     if let Some(tags) = &input.tags {
-        database.set_tags(&entry_id, tags).map_err(|e| e.to_string())?;
+        database
+            .set_tags(&entry_id, tags)
+            .map_err(|e| e.to_string())?;
     }
     if let Some(fields) = &input.fields {
         apply_attributes(database, &entry_id, fields)?;
@@ -1225,7 +1232,11 @@ fn apply_save_entry(database: &mut Database, input: &EntryInput) -> Result<Entry
 /// found it, and a reconcile that wrote `foo` would create one key and delete
 /// the other, breaking anything that looks the attribute up by name. Whitespace
 /// only decides whether a row counts as blank.
-fn apply_attributes(database: &mut Database, eid: &EntryId, fields: &[KvDto]) -> Result<(), String> {
+fn apply_attributes(
+    database: &mut Database,
+    eid: &EntryId,
+    fields: &[KvDto],
+) -> Result<(), String> {
     let existing: Vec<String> = database
         .custom_field_names(eid)
         .map_err(|e| e.to_string())?
@@ -1245,7 +1256,9 @@ fn apply_attributes(database: &mut Database, eid: &EntryId, fields: &[KvDto]) ->
     }
     for old in existing {
         if !kept.iter().any(|k| *k == old) {
-            database.remove_field(eid, &old).map_err(|e| e.to_string())?;
+            database
+                .remove_field(eid, &old)
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -1288,7 +1301,9 @@ fn apply_custom_attribute(
     if name.trim().is_empty() || !is_user_attribute(name) || is_standard_field(name) {
         return Err("attribute name is empty or reserved".to_string());
     }
-    let existing = database.custom_field_names(eid).map_err(|e| e.to_string())?;
+    let existing = database
+        .custom_field_names(eid)
+        .map_err(|e| e.to_string())?;
     if let Some(old) = old_name {
         if !existing
             .iter()
@@ -1314,7 +1329,9 @@ fn apply_remove_custom_attribute(
     eid: &EntryId,
     name: &str,
 ) -> Result<(), String> {
-    let existing = database.custom_field_names(eid).map_err(|e| e.to_string())?;
+    let existing = database
+        .custom_field_names(eid)
+        .map_err(|e| e.to_string())?;
     if !existing
         .iter()
         .any(|field| field == name && is_user_attribute(field))
@@ -1335,7 +1352,10 @@ fn entry_detail(database: &Database, eid: &EntryId) -> Result<EntryDetailDto, St
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
     let mut fields = Vec::new();
-    for k in database.custom_field_names(eid).map_err(|e| e.to_string())? {
+    for k in database
+        .custom_field_names(eid)
+        .map_err(|e| e.to_string())?
+    {
         // custom_field_names already excludes the five standard fields; drop
         // the reserved _Trove* keys too — they are never user attributes.
         //
@@ -1410,7 +1430,10 @@ fn apply_delete(database: &mut Database, eid: &EntryId) -> Result<(), String> {
 /// All registered databases whose file still exists on disk. Syncs persisted
 /// recents into state (as locked) first, so this is safe to call on startup.
 #[tauri::command]
-pub fn list_databases(app: AppHandle, state: State<'_, DatabaseState>) -> Result<Vec<DatabaseDto>, String> {
+pub fn list_databases(
+    app: AppHandle,
+    state: State<'_, DatabaseState>,
+) -> Result<Vec<DatabaseDto>, String> {
     let mut guard = state.lock().map_err(poisoned)?;
     let recents = load_recents(&app);
     for r in &recents {
@@ -1658,13 +1681,14 @@ pub async fn unlock_database(
     // no other way to know that a save on THIS database takes two seconds rather
     // than fifty milliseconds, and a progress bar that guesses is a lie.
     let started = Instant::now();
-    let database = tauri::async_runtime::spawn_blocking(move || Database::open(&open_path, &password))
-        .await
-        .map_err(|e| format!("unlock task panicked: {e}"))?
-        .map_err(|e| {
-            step(&app, "open", "failed", "wrong password");
-            e.to_string()
-        })?;
+    let database =
+        tauri::async_runtime::spawn_blocking(move || Database::open(&open_path, &password))
+            .await
+            .map_err(|e| format!("unlock task panicked: {e}"))?
+            .map_err(|e| {
+                step(&app, "open", "failed", "wrong password");
+                e.to_string()
+            })?;
     let open_ms = started.elapsed().as_millis() as u64;
     step(&app, "open", "done", "");
 
@@ -1841,10 +1865,7 @@ pub async fn get_database_metadata(
     app: AppHandle,
     id: String,
 ) -> Result<DatabaseMetadataDto, String> {
-    on_database(app, id, |database| {
-        Ok(database.database_metadata().into())
-    })
-    .await
+    on_database(app, id, |database| Ok(database.database_metadata().into())).await
 }
 
 #[tauri::command]
@@ -1948,7 +1969,10 @@ struct AttachmentPlan {
 }
 
 /// What each attachment's `<File>` resolves to, by attachment name.
-fn materialize_views(v: &Database, eid: &EntryId) -> Result<BTreeMap<String, AttachmentPlan>, String> {
+fn materialize_views(
+    v: &Database,
+    eid: &EntryId,
+) -> Result<BTreeMap<String, AttachmentPlan>, String> {
     let mut out = BTreeMap::new();
     let Some(items) = v
         .effective_settings(eid, Capability::Materialize)
@@ -2871,7 +2895,9 @@ pub async fn drop_entry(
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
     on_database_write(app, id, move |database| {
         let landed = if copy {
-            database.copy_entry(&eid, &group).map_err(|e| e.to_string())?
+            database
+                .copy_entry(&eid, &group)
+                .map_err(|e| e.to_string())?
         } else {
             database
                 .move_entry_to_path(&eid, &group)

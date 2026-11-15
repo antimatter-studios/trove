@@ -1732,8 +1732,8 @@ warning, when refused. An attachment cannot be exported to a shell.
 ## trove settings
 
 ```
-trove [--database <PATH>] settings show [<PATH>] [<CAPABILITY>] [--group | --database] [--effective] [--json]
-trove [--database <PATH>] settings edit <CAPABILITY> [<PATH>] [--group | --database]
+trove [--database <PATH>] settings show [<PATH>] [<CAPABILITY>] [--group | --at-database] [--effective] [--json]
+trove [--database <PATH>] settings edit <CAPABILITY> [<PATH>] [--group | --at-database]
 trove [--database <PATH>] settings validate [<SCOPE>]
 trove [--database <PATH>] settings migrate [<SCOPE>] [--dry-run]
 ```

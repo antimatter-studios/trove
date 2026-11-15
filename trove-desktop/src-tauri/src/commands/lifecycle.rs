@@ -63,9 +63,14 @@ mod tests {
     use super::*;
 
     fn registered_database() -> (DatabaseState, String, PathBuf, PathBuf) {
+        // Tests run in parallel and can start within one clock tick; without
+        // the counter two of them share a directory and its databases.json.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "trove-lifecycle-{}-{}",
+            "trove-lifecycle-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")

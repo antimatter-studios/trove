@@ -94,7 +94,10 @@ beforeEach(() => {
 
 async function openApp() {
   const view = render(<App />);
-  await waitFor(() => expect(view.container.querySelectorAll('.erow').length).toBe(2));
+  // A database opens in the folder of its first entry (there is no All
+  // entries view since the Library section went), so mail in Alpha is listed.
+  await waitFor(() => expect(view.container.querySelectorAll('.erow').length).toBe(1));
+  expect(view.container.querySelector('.erow').textContent).toContain('mail');
   return view;
 }
 const startDrag = (el, init = {}) => fireEvent.pointerDown(el, { button: 0, clientX: 500, clientY: 500, ...init });

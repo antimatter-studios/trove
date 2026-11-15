@@ -40,7 +40,9 @@ mod imp {
 
     /// A database is addressed by its canonical path, matching the CLI.
     fn account(database: &Path) -> Result<String, String> {
-        let canonical = database.canonicalize().unwrap_or_else(|_| database.to_path_buf());
+        let canonical = database
+            .canonicalize()
+            .unwrap_or_else(|_| database.to_path_buf());
         canonical
             .to_str()
             .map(str::to_string)

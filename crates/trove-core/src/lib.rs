@@ -399,6 +399,10 @@ pub struct Database {
     pub(crate) inner: DatabaseInner,
 }
 
+/// The former name of [`Database`], kept so existing callers still build.
+#[deprecated(note = "renamed to `Database`")]
+pub type Vault = Database;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DatabaseMetadata {
     pub name: Option<String>,

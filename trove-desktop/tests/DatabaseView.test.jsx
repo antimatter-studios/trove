@@ -63,13 +63,24 @@ const ENTRIES = [
 ];
 const DETAIL = { notes: 'primary db', fields: [{ k: 'Host', v: 'db.prod' }], password: 'pg-Pr0d-8842!zQmx-vK' };
 // An already-unlocked database so the app lazily loads its entries via list_entries.
+// The Library section (All entries, Favorites) is gone: a database opens in the
+// folder of its first entry, so postgres in infra/prod is the one row listed.
 const OPEN_DATABASE = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/databases/personal.kdbx', locked: false };
 
 async function mountUnlocked() {
   const utils = render(<App />);
   const c = utils.container;
-  await waitFor(() => expect(c.querySelectorAll('.list .erow').length).toBe(2));
+  await waitFor(() => expect(c.querySelectorAll('.list .erow').length).toBe(1));
+  expect(c.querySelector('.list .erow .etitle-txt').textContent).toBe('postgres');
   return c;
+}
+
+// Sidebar folders are `.tree-row`; expand `parent`, then select `leaf`.
+async function browse(c, parent, leaf) {
+  const row = (re) => [...c.querySelectorAll('.pane.sidebar .tree-row')].find((r) => re.test(r.textContent));
+  if (!row(leaf)) fireEvent.click(row(parent).querySelector('.tw'));
+  await waitFor(() => expect(row(leaf)).toBeTruthy());
+  fireEvent.click(row(leaf));
 }
 
 beforeEach(() => {
@@ -95,33 +106,30 @@ describe('unlocked database interactions', () => {
     expect(c.querySelector('.body .pane.sidebar')).toBeTruthy();
     expect(c.querySelector('.body .pane.list')).toBeTruthy();
     expect(c.querySelector('.body .pane.detail')).toBeTruthy();
-    expect(c.textContent).toContain('All entries');
+    expect(c.textContent).not.toContain('All entries');
+    expect(c.querySelector('.erow.sel .etitle-txt').textContent).toBe('postgres');
     expect(api.listEntries).toHaveBeenCalledWith('v1');
   });
 
-  it('shows favorites separately and toggles them with the star', async () => {
+  it('toggles a favorite with the star', async () => {
     const c = await mountUnlocked();
-    const favorites = [...c.querySelectorAll('.sidebar .tree-row')]
-      .find((row) => row.querySelector('.tr-name')?.textContent === 'Favorites');
-    expect(favorites.querySelector('.tr-count').textContent).toBe('1');
-    fireEvent.click(favorites);
-    await waitFor(() => expect(c.querySelectorAll('.list .erow')).toHaveLength(1));
-    expect(c.querySelector('.list .erow .etitle-txt').textContent).toBe('postgres');
+    expect(c.querySelector('.list .erow .fav')).toBeTruthy();
 
     api.setFavorite.mockResolvedValue(ENTRIES.map((entry) => ({ ...entry, fav: false })));
     fireEvent.click(c.querySelector('.detail button[title="Favorite"]'));
     await waitFor(() => expect(api.setFavorite).toHaveBeenCalledWith('v1', 'e1', false));
-    await waitFor(() => expect(c.querySelectorAll('.list .erow')).toHaveLength(0));
-    expect(favorites.querySelector('.tr-count').textContent).toBe('0');
+    await waitFor(() => expect(c.querySelector('.list .erow .fav')).toBeFalsy());
+    expect(c.querySelectorAll('.list .erow')).toHaveLength(1);
   });
 
   it('reloads when the database file is changed by something else', async () => {
     const c = await mountUnlocked();
-    expect(c.querySelectorAll('.list .erow').length).toBe(ENTRIES.length);
+    expect(c.querySelectorAll('.list .erow').length).toBe(1);
 
     // The CLI (or KeePassXC, or another Mac via iCloud) writes the file.
+    // Filed beside postgres, so it appears in the folder being browsed.
     const AFTER = [...ENTRIES, { ...ENTRIES[0], id: 'e-new', title: 'added-elsewhere',
-      path: 'Work/added-elsewhere', groupPath: 'Work' }];
+      path: 'infra/prod/added-elsewhere' }];
     api.databaseChangedOnDisk.mockResolvedValue(true);
     api.reloadDatabase.mockResolvedValue(AFTER);
 
@@ -131,7 +139,7 @@ describe('unlocked database interactions', () => {
 
     await waitFor(() => expect(api.reloadDatabase).toHaveBeenCalledWith('v1'));
     await waitFor(() =>
-      expect(c.querySelectorAll('.list .erow').length).toBe(AFTER.length));
+      expect(c.querySelectorAll('.list .erow').length).toBe(2));
     expect(c.textContent).toContain('added-elsewhere');
   });
 
@@ -141,15 +149,15 @@ describe('unlocked database interactions', () => {
     fireEvent.focus(window);
     await waitFor(() => expect(api.databaseChangedOnDisk).toHaveBeenCalled());
     expect(api.reloadDatabase).not.toHaveBeenCalled();
-    expect(c.querySelectorAll('.list .erow').length).toBe(ENTRIES.length);
+    expect(c.querySelectorAll('.list .erow').length).toBe(1);
   });
 
   it('selecting a different entry updates the detail title (via get_entry_detail)', async () => {
     const c = await mountUnlocked();
     const before = c.querySelector('.detail .dt-title')?.textContent;
-    const rows = [...c.querySelectorAll('.list .erow')];
-    const other = rows.find((r) => r.querySelector('.etitle-txt')?.textContent !== before);
-    fireEvent.click(other);
+    await browse(c, /personal/i, /email/i);
+    await waitFor(() => expect(c.querySelector('.list .erow .etitle-txt')?.textContent).toBe('fastmail'));
+    fireEvent.click(c.querySelector('.list .erow'));
     await waitFor(() => {
       const after = c.querySelector('.detail .dt-title')?.textContent;
       expect(after).toBeTruthy();
@@ -266,12 +274,7 @@ describe('unlocked database interactions', () => {
     //
     // `infra` itself holds no entries (postgres is in `infra/prod`) and now
     // lists nothing, so the leaf is where the entry is: expand, then select.
-    const row = (re) => [...c.querySelectorAll('.pane.sidebar .tree-row')].find((r) => re.test(r.textContent));
-    const infra = row(/infra/i);
-    expect(infra).toBeTruthy();
-    fireEvent.click(infra.querySelector('.tw'));
-    await waitFor(() => expect(row(/prod/i)).toBeTruthy());
-    fireEvent.click(row(/prod/i));
+    await browse(c, /infra/i, /prod/i);
     await waitFor(() => expect(c.querySelectorAll('.list .erow').length).toBe(1));
 
     fireEvent.click(c.querySelectorAll('.list .erow')[0]);
@@ -299,10 +302,10 @@ describe('unlocked database interactions', () => {
     const save = [...c.querySelectorAll('.modal button')].find((b) => /save changes/i.test(b.textContent));
     fireEvent.click(save);
     await waitFor(() => expect(api.saveEntry).toHaveBeenCalled());
-    // Browsing All entries, so relative and absolute coincide: the entry keeps
-    // the path it already had rather than being re-prefixed. The list is
-    // title-sorted, so row 0 is fastmail.
-    expect(api.saveEntry.mock.calls[0][1].path).toBe('personal/email/fastmail');
+    // Browsing infra/prod, where postgres is filed: the form shows the path
+    // relative to that folder, and the path sent is resolved back against it
+    // rather than re-prefixed or dropped to the root.
+    expect(api.saveEntry.mock.calls[0][1].path).toBe('infra/prod/postgres');
   });
 
   // Without a key on EntryForm, React reused the instance and its useState

@@ -305,7 +305,7 @@ fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
     t(&[
         "env-agent",
         "defaults",
-        "--database",
+        "--at-database",
         "--confirm",
         "--lifetime",
         "600",
@@ -319,7 +319,7 @@ fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
                 "--group",
                 "--json",
             ]),
-            t(&["settings", "show", "--database", "--json"]),
+            t(&["settings", "show", "--at-database", "--json"]),
         )
     };
     let before = show();
