@@ -620,6 +620,7 @@ impl Daemon {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
                 unsets: unsets.iter().map(|s| s.to_string()).collect(),
+                protected: Vec::new(),
                 add_tags: Vec::new(),
                 remove_tags: Vec::new(),
                 clear_tags: false,

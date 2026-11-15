@@ -826,3 +826,149 @@ fn env_agent_add_and_exec_through_the_daemon() {
     let shown: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(shown[0]["effective"][0]["key"], "GITEA_TOKEN");
 }
+
+fn value_prompt_add(entry: &str, var: &str, field: &str) -> Vec<String> {
+    [
+        "env-agent",
+        "add",
+        entry,
+        var,
+        "--field",
+        field,
+        "--value-prompt",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn assert_protected_variable(path: &Path, entry: &str, var: &str, field: &str, value: &str) {
+    let database = reopen(path);
+    let id = database.find_by_title(entry).unwrap();
+    assert_eq!(
+        database.get_field(&id, field).unwrap().as_deref(),
+        Some(value)
+    );
+    assert_eq!(database.field_is_protected(&id, field).unwrap(), Some(true));
+    let doc = database
+        .settings_document(&id, Capability::EnvAgent)
+        .unwrap()
+        .expect("the document exists");
+    let item = doc.item(var).expect("the variable exists");
+    assert!(
+        item.iter().any(|(k, v)| k == "field" && v == field),
+        "{var} names {field}: {item:?}"
+    );
+    assert!(
+        database.search_entries(value).is_empty(),
+        "a protected field is not searchable"
+    );
+}
+
+/// `--value-prompt` creates the field protected and the variable together,
+/// offline (value on stdin line 2) and through the daemon (line 1).
+#[cfg(unix)]
+#[test]
+fn env_agent_value_prompt_creates_a_protected_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let v = gitea_database(tmp.path());
+    let entry = "antimatter-studios/gitea";
+
+    let mut args = vec!["--database", v.to_str().unwrap(), "--password-stdin"];
+    let add = value_prompt_add(entry, "API_TOKEN", "api-token");
+    args.extend(add.iter().map(String::as_str));
+    let out = run(&[], &args, &format!("{PW}\nsecret-offline\n"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_protected_variable(&v, entry, "API_TOKEN", "api-token", "secret-offline");
+
+    let out = ok(
+        &v,
+        &[
+            "exec",
+            "--entry",
+            entry,
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$API_TOKEN\"",
+        ],
+    );
+    assert_eq!(out, "secret-offline");
+    let shown = ok(&v, &["show", entry, "--json"]);
+    assert!(!shown.contains("secret-offline"), "{shown}");
+    let err = fails(&v, &["show", entry, "--attr", "api-token"]);
+    assert!(err.contains("--show-protected"), "{err}");
+    let shown = ok(
+        &v,
+        &["show", entry, "--attr", "api-token", "--show-protected"],
+    );
+    assert_eq!(shown.trim(), "secret-offline");
+    let described = ok(&v, &["describe", entry]);
+    assert!(!described.contains("secret-offline"), "{described}");
+
+    let (_d, sock, code) = daemon(tmp.path(), &v, "none");
+    let env = [
+        ("TROVE_SOCK", sock.as_str()),
+        ("TROVE_SESSION", code.as_str()),
+    ];
+    let add = value_prompt_add(entry, "DEPLOY_KEY", "deploy-key");
+    let args: Vec<&str> = add.iter().map(String::as_str).collect();
+    let out = run(&env, &args, "secret-daemon\n");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_protected_variable(&v, entry, "DEPLOY_KEY", "deploy-key", "secret-daemon");
+    let out = run(&env, &["show", entry, "--json"], "");
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("deploy-key"),
+        "a protected field is left out of the daemon's show --json"
+    );
+}
+
+/// An existing field is never overwritten, and the file is left as it was;
+/// `--value-prompt` needs `--field` and refuses `--attachment`.
+#[test]
+fn env_agent_value_prompt_refuses_an_existing_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let v = gitea_database(tmp.path());
+    let entry = "antimatter-studios/gitea";
+    let before = std::fs::read(&v).unwrap();
+
+    let mut args = vec!["--database", v.to_str().unwrap(), "--password-stdin"];
+    let add = value_prompt_add(entry, "GITEA_TOKEN", "gitea-token");
+    args.extend(add.iter().map(String::as_str));
+    let out = run(&[], &args, &format!("{PW}\nreplacement\n"));
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!(
+            "field 'gitea-token' already exists on {entry}; drop --value-prompt to use it"
+        )),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&v).unwrap(), before, "the file is unchanged");
+
+    for usage in [
+        vec!["env-agent", "add", entry, "X", "--value-prompt"],
+        vec![
+            "env-agent",
+            "add",
+            entry,
+            "X",
+            "--attachment",
+            "gitea_ed25519",
+            "--value-prompt",
+        ],
+    ] {
+        let out = offline(&v, &usage);
+        assert_eq!(out.status.code(), Some(2), "{usage:?} is a usage error");
+    }
+    assert_eq!(std::fs::read(&v).unwrap(), before, "the file is unchanged");
+}

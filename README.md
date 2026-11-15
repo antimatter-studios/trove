@@ -293,11 +293,12 @@ bigger ideas, grouped:
   templates that reference other entries (#275), per-shell env injection with
   `trove env` (#282), exec through the unlocked daemon (#281), memory-backed
   targets on macOS (#273).
-- **Sync and multi-device:** delta sync (#230), an opt-in self-hosted sync
-  server (#236).
-- **Sharing and teams:** member identity keys (#231), sealed fields with group
-  keys (#232), per-entry permissions for company databases (#233), sending one
-  entry to a person (#235), admin audit review (#327), SSO/OIDC unlock (#286).
+- **Sync and multi-device:** delta sync on trove's own vault format (#439), an
+  opt-in self-hosted server for read auditing, write prevention and use-only
+  keys (#440).
+- **Sharing and teams:** member identity keys, sealed fields with group keys,
+  per-entry permissions for company databases, sending one entry to a person,
+  admin audit review and SSO/OIDC unlock (#440).
 - **Automation:** a documented, versioned RPC API for scripts (#309), a browser
   native-messaging host without the GUI (#289).
 - **Passkeys, one-time codes, hardware:** passkeys in KeePassXC's format
@@ -334,7 +335,7 @@ For each upstream rejection, is the justification valid? Are we right to ignore 
 
 **What upstream misses:** the gaps that BYO-sync *cannot* fix — visual 3-way merge, conflict UI, multi-client lock coordination, delta sync for large databases. These are protocol/UX problems, not adapter problems.
 
-**Our stance:** don't build OAuth adapters. *Do* build a sync engine that handles conflicts, deltas, and multi-client awareness on top of any backing store (filesystem, WebDAV, S3, our own server). Adapters are commodity; the merge UX is the actual value.
+**Our stance:** don't build OAuth adapters. *Do* build a sync engine that handles conflicts, deltas, and multi-client awareness on top of any backing store (filesystem, WebDAV, S3, our own server). Adapters are commodity; the merge UX is the actual value. Delta sync is tracked in #439; the optional server in #440.
 
 ### Per-user keys / shared database — *upstream technically right, but solving the wrong problem*
 
@@ -376,7 +377,7 @@ For each upstream rejection, is the justification valid? Are we right to ignore 
 
 No explicit upstream rejection, but the "keep complexity low / not tied to a provider" line from the cloud-sync FAQ implicitly applies.
 
-**Our stance:** optional, opt-in self-hosted server (#236). Never required. The database file always works without it. Server adds: presence/lock coordination, delta sync, per-user-key bundle distribution, audit log storage. Not OAuth, not a "cloud."
+**Our stance:** optional, opt-in self-hosted server (#440). Never required. The database file always works without it. Server adds: presence/lock coordination, delta sync, per-user-key bundle distribution, audit log storage. Not OAuth, not a "cloud."
 
 ### `op run` / FUSE / SSO-OIDC / FIDO2-primary — *no upstream rejection; just nobody's done it*
 

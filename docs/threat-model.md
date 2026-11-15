@@ -102,6 +102,28 @@ back. See
 same-UID-openable by design — they never expose private bytes, only signatures, so
 unlock-once is already safe there.)
 
+## Server-only features
+
+Three team controls cannot be provided by a local database file, whatever the
+format:
+
+- **Read auditing.** Anyone who can decrypt the file can read it without
+  telling anyone. A log written by the client that read the secret records only
+  what that client chose to record.
+- **Write prevention.** Anyone who can decrypt the file can write a new copy of
+  it. Signed writes can make an unauthorised change *detectable*, but nothing
+  local can stop the bytes being written.
+- **Use-only keys.** A key that is in the file can be exported by anyone who can
+  open the file. A key that signs on request and never leaves its holder needs
+  that holder to be something other than the reader's own machine.
+
+These are features of the optional self-hosted server only, where the server
+holds the authoritative copy, refuses writes the permission map does not allow,
+logs the reads that pass through it and keeps use-only keys. trove does not
+approximate them locally, and no local command claims to provide them. The
+server is not built; it is tracked in
+[#440](https://github.com/antimatter-studios/trove/issues/440).
+
 ## Comparisons
 
 ### vs. status quo (plaintext on disk forever)

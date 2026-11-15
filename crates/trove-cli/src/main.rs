@@ -5330,6 +5330,21 @@ fn daemon_call(req: &daemon::Request) -> Result<Value> {
 /// The fields trove-core stores with the kdbx Protected flag (see
 /// `Database::set_field`): `Password` and `otp` — the same pair KeePassXC
 /// memory-protects by default.
+/// The custom fields the daemon reports as stored Protected on an entry.
+fn daemon_protected_fields(entry_path: &str) -> Result<Vec<String>> {
+    let resp = daemon_call(&daemon::Request::ShowEntry {
+        path: entry_path.to_string(),
+    })?;
+    Ok(resp
+        .get("entry")
+        .and_then(|e| e.get("protected_fields"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect())
+}
+
 fn is_protected_field(name: &str) -> bool {
     name.eq_ignore_ascii_case("password") || name.eq_ignore_ascii_case("otp")
 }
@@ -5757,6 +5772,13 @@ fn cmd_show(
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
             if !attrs.is_empty() {
                 for attr in attrs {
+                    if !show_protected && v.field_is_protected(&id, attr)? == Some(true) {
+                        return Err(anyhow!(
+                            "attribute '{attr}' is protected; pass --show-protected to print it"
+                        ));
+                    }
+                }
+                for attr in attrs {
                     let value = v
                         .get_field(&id, attr)
                         .context("reading field")?
@@ -5783,7 +5805,9 @@ fn cmd_show(
                 // what is in it. Protected ones stay behind --show-protected.
                 let mut fields = serde_json::Map::new();
                 for name in &custom {
-                    if is_protected_field(name) && !show_protected {
+                    let protected =
+                        is_protected_field(name) || v.field_is_protected(&id, name)? == Some(true);
+                    if protected && !show_protected {
                         continue;
                     }
                     if let Ok(Some(value)) = v.get_field(&id, name) {
@@ -5828,6 +5852,14 @@ fn cmd_show(
             if !attrs.is_empty() {
                 // Raw values (possibly protected) — always code-gated.
                 let code = require_session_code()?;
+                if !show_protected {
+                    let protected = daemon_protected_fields(entry_path)?;
+                    if let Some(p) = attrs.iter().find(|a| protected.contains(a)) {
+                        return Err(anyhow!(
+                            "attribute '{p}' is protected; pass --show-protected to print it"
+                        ));
+                    }
+                }
                 for attr in attrs {
                     let resp = daemon_call(&daemon::Request::GetField {
                         path: entry_path.to_string(),
@@ -5894,8 +5926,9 @@ fn cmd_show(
                 // with `--attr`, rather than this silently pulling every secret
                 // in the entry across the wire.
                 let mut fields = serde_json::Map::new();
+                let protected = list("protected_fields");
                 for name in list("custom_fields") {
-                    if is_protected_field(&name) && !show_protected {
+                    if (is_protected_field(&name) || protected.contains(&name)) && !show_protected {
                         continue;
                     }
                     fields.insert(name, Value::Null);
@@ -6247,6 +6280,7 @@ fn cmd_edit(
                 title: title.map(str::to_string),
                 sets,
                 unsets: unsets.to_vec(),
+                protected: Vec::new(),
                 add_tags: tags.to_vec(),
                 remove_tags: untags.to_vec(),
                 clear_tags,

@@ -1156,6 +1156,7 @@ async fn handle_request(
             title,
             sets,
             unsets,
+            protected,
             add_tags,
             remove_tags,
             clear_tags,
@@ -1172,6 +1173,7 @@ async fn handle_request(
                 title.as_deref(),
                 &sets,
                 &unsets,
+                &protected,
                 &add_tags,
                 &remove_tags,
                 clear_tags,
@@ -1863,6 +1865,11 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
     let summary = database.get_entry(&id).expect("entry just resolved");
     let notes = database.get_field(&id, "Notes").ok().flatten();
     let custom_fields = database.custom_field_names(&id).unwrap_or_default();
+    let protected_fields = custom_fields
+        .iter()
+        .filter(|name| matches!(database.field_is_protected(&id, name), Ok(Some(true))))
+        .cloned()
+        .collect();
     ok_handled(Response::ok_show(crate::protocol::ShowDto {
         id: summary.id.to_string(),
         title: summary.title,
@@ -1870,6 +1877,7 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
         url: summary.url,
         notes,
         custom_fields,
+        protected_fields,
         attachments: summary.attachment_names,
         group_path: summary.group_path,
         tags: summary.tags,
@@ -2577,6 +2585,7 @@ async fn edit_entry(
     title: Option<&str>,
     sets: &std::collections::BTreeMap<String, String>,
     unsets: &[String],
+    protected: &[String],
     add_tags: &[String],
     remove_tags: &[String],
     clear_tags: bool,
@@ -2599,8 +2608,18 @@ async fn edit_entry(
             Err(e) => return err_handled(format!("checking field {field}: {e}")),
         }
     }
+    if let Some(field) = protected.iter().find(|f| !sets.contains_key(*f)) {
+        return err_handled(format!(
+            "protected field '{field}' is not among the fields set"
+        ));
+    }
     for (field, value) in sets {
-        if let Err(e) = database.set_field(&id, field, value) {
+        let stored = if protected.contains(field) {
+            database.set_protected_field(&id, field, value)
+        } else {
+            database.set_field(&id, field, value)
+        };
+        if let Err(e) = stored {
             return err_handled(format!("setting {field}: {e}"));
         }
     }
