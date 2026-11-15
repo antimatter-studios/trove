@@ -27,7 +27,7 @@ zeroize.workspace = true
 # all of them. `encryption` decrypts passphrase-protected keys with the entry's
 # Password, as KeePassXC does.
 # 0.7 moves ECDSA to the patched crypto-bigint 0.7 stack (RUSTSEC-2026-0387).
-ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["std", "alloc", "ed25519", "p256", "p384", "p521", "rsa", "encryption", "getrandom"] }
+ssh-key = { version = "=0.7.0-rc.12", default-features = false, features = ["std", "alloc", "ed25519", "p256", "p384", "p521", "rsa", "encryption", "getrandom"] }
 # PEM decoding must use the RSA types ssh-key 0.7 converts from. Keep the
 # existing stable RSA signing path below for agent-selected hash algorithms.
 rsa-ssh = { package = "rsa", version = "0.10.0-rc.18", default-features = false, features = ["std", "encoding"] }
