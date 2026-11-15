@@ -1,0 +1,84 @@
+diff --git a/trove-desktop/src-tauri/src/biometric.rs b/trove-desktop/src-tauri/src/biometric.rs
+index e80e131..f0387bd 100644
+--- a/trove-desktop/src-tauri/src/biometric.rs
++++ b/trove-desktop/src-tauri/src/biometric.rs
+@@ -25,19 +25,41 @@ mod imp {
+     use objc2_foundation::{NSError, NSString};
+     use objc2_local_authentication::{LAContext, LAPolicy};
+     use security_framework::passwords::{
+-        delete_generic_password, get_generic_password, set_generic_password,
++        delete_generic_password, delete_generic_password_options, generic_password,
++        get_generic_password, set_generic_password, set_generic_password_options,
+     };
++    use security_framework::passwords_options::{AccessControlOptions, PasswordOptions};
+     use std::path::Path;
+     use std::time::Duration;
+ 
+-    /// Must match `trove-cli`'s `keychain::SERVICE`, so a vault enrolled from
+-    /// the CLI unlocks with Touch ID here and vice versa.
++    /// The login-keychain entry, shared with `trove-cli`'s `keychain::SERVICE`.
++    /// Used only when the Secure Enclave path is unavailable — an unsigned dev
++    /// build, or a release that somehow shipped without its profile.
+     const SERVICE: &str = "trove vault password";
+ 
++    /// The data-protection-keychain entry. A DIFFERENT service name on purpose:
++    /// the two keychains are separate stores with different guarantees, and one
++    /// name spanning both would make "is this vault enrolled?" ambiguous — and
++    /// would quietly answer "yes, weakly" when the caller meant the strong one.
++    const SERVICE_SECURE: &str = "trove vault password (secure enclave)";
++
++    /// The access group the entitlement grants. Must match
++    /// `macos/entitlements.plist` and the App ID the provisioning profile
++    /// covers, or every call returns `errSecMissingEntitlement`.
++    const ACCESS_GROUP: &str = "43UMKXZ8P4.com.antimatterstudios.trove";
++
+     /// `errSecItemNotFound` — nothing stored, which is a state rather than a
+     /// failure.
+     const NOT_FOUND: i32 = -25300;
+ 
++    /// `errSecMissingEntitlement` — this build cannot use the data-protection
++    /// keychain, so the weaker login keychain is the only option.
++    const MISSING_ENTITLEMENT: i32 = -34018;
++
++    /// `errSecUserCanceled` — the fingerprint prompt was dismissed. An ordinary
++    /// outcome, not a failure to report.
++    const USER_CANCELED: i32 = -128;
++
+     /// A vault is addressed by its canonical path, matching the CLI.
+     fn account(vault: &Path) -> Result<String, String> {
+         let canonical = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
+@@ -47,6 +69,34 @@ mod imp {
+             .ok_or_else(|| format!("vault path is not valid UTF-8: {}", vault.display()))
+     }
+ 
++    /// Options addressing this vault's entry in the data-protection keychain.
++    fn secure_opts(account: &str) -> PasswordOptions {
++        let mut o = PasswordOptions::new_generic_password(SERVICE_SECURE, account);
++        o.set_access_group(ACCESS_GROUP);
++        o
++    }
++
++    /// Can this build actually reach the data-protection keychain?
++    ///
++    /// Answered by asking it something harmless and seeing whether the answer
++    /// is `errSecMissingEntitlement` rather than by inspecting our own
++    /// signature: what matters is whether the kernel honours the entitlement
++    /// here and now, and a dev build, an ad-hoc signature and a release with a
++    /// stale profile all differ in ways a self-inspection would miss.
++    ///
++    /// Cached: the answer cannot change while the process runs, and each call
++    /// is a syscall into `securityd`.
++    pub fn secure_available() -> bool {
++        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        *AVAILABLE.get_or_init(|| {
++            match generic_password(secure_opts("__trove_probe__")) {
++                // Found (absurd) or simply absent: either way the store answered.
++                Ok(_) => true,
++                Err(e) => e.code() != MISSING_ENTITLEMENT,
++            }
++        })
++    }
++
+     /// Is there a fingerprint reader with an enrolled finger, right now?
+     ///
+     /// False also covers "the lid is shut and this is an external keyboard" and

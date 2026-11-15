@@ -1,0 +1,2 @@
+# Patch files keep the diff format exactly, including blank context lines.
+*.patch -whitespace
