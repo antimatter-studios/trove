@@ -1,4 +1,4 @@
-//! Idle-lock tracker. Drops vault state after a configurable period of no
+//! Idle-lock tracker. Drops database state after a configurable period of no
 //! client activity.
 //!
 //! ## Design
@@ -30,10 +30,10 @@
 //!
 //! Storage of secret material is owned by `main.rs`/`handler.rs`. The tracker
 //! takes a `Box<dyn Fn() -> BoxFuture<()>>` lock callback, which `main.rs`
-//! constructs to wipe the materialize store, drop the vault, and clear both
+//! constructs to wipe the materialize store, drop the database, and clear both
 //! key stores. This keeps the tracker:
 //!
-//!   * unit-testable without `Vault` / `KeyStore` types;
+//!   * unit-testable without `Database` / `KeyStore` types;
 //!   * decoupled from trove-core / ssh-key / gpg packet types;
 //!   * trivially reusable if we ever need a second timer (e.g. screensaver).
 
@@ -59,7 +59,7 @@ pub type LockCallback = Box<dyn Fn() -> LockFuture + Send + Sync>;
 pub enum IdleState {
     /// Timeout is configured to 0 — auto-lock disabled.
     Disabled,
-    /// Timeout > 0 but no timer is running (vault not unlocked).
+    /// Timeout > 0 but no timer is running (database not unlocked).
     NotRunning,
     /// Timer is running; this many seconds remain before fire.
     Running { remaining_secs: u64 },
@@ -123,7 +123,7 @@ impl IdleTracker {
     }
 
     /// Note recent activity, resetting the remaining countdown. No-op if the
-    /// timer isn't running (vault locked) or auto-lock is disabled.
+    /// timer isn't running (database locked) or auto-lock is disabled.
     ///
     /// Cheap: one atomic store + one Notify CAS. No allocations, no mutex.
     #[inline]
@@ -299,7 +299,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             t.bump();
         }
-        // After bumps stop, vault should still be live for ~1.9s.
+        // After bumps stop, database should still be live for ~1.9s.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(count.load(Ordering::SeqCst), 0, "shouldn't have fired yet");
 

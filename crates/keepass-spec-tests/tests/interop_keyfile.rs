@@ -2,8 +2,8 @@
 #![allow(missing_docs)]
 
 //! Composite-key (password + keyfile) interop against the `keepassxc-cli`
-//! oracle: a vault trove creates with `--key-file` must open in keepassxc
-//! with `-k`, and a keepassxc-created composite-key vault must open in trove.
+//! oracle: a database trove creates with `--key-file` must open in keepassxc
+//! with `-k`, and a keepassxc-created composite-key database must open in trove.
 //! Oracle-mandatory — a missing binary is a failure, never a skip.
 
 mod matrix;
@@ -12,7 +12,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use matrix::{keepassxc_party, trove_party, Config, EntrySpec, KeyMaterial, VaultSpec};
+use matrix::{keepassxc_party, trove_party, Config, EntrySpec, KeyMaterial, DatabaseSpec};
 
 const PASSWORD: &str = "interop-keyfile-pw";
 const SECRET: &str = "composite-locked-secret";
@@ -71,10 +71,10 @@ fn keyfile_bytes() -> Vec<u8> {
     (100u8..132).collect()
 }
 
-/// trove `--key-file` vault opens in keepassxc with `-k`, and the wrong /
+/// trove `--key-file` database opens in keepassxc with `-k`, and the wrong /
 /// missing keyfile is rejected there too.
 #[test]
-fn trove_keyfile_vault_opens_in_keepassxc() {
+fn trove_keyfile_database_opens_in_keepassxc() {
     let trove = trove_bin();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("v.kdbx");
@@ -88,7 +88,7 @@ fn trove_keyfile_vault_opens_in_keepassxc() {
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             dbs,
             "--key-file",
             kfs,
@@ -100,7 +100,7 @@ fn trove_keyfile_vault_opens_in_keepassxc() {
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             dbs,
             "--key-file",
             kfs,
@@ -126,19 +126,19 @@ fn trove_keyfile_vault_opens_in_keepassxc() {
 
         // Without the keyfile keepassxc must refuse.
         let (ok, _, _) = run(&oracle.path, &["show", "-q", dbs, "locked"], &pw);
-        assert!(!ok, "keepassxc must refuse the vault without the keyfile");
+        assert!(!ok, "keepassxc must refuse the database without the keyfile");
     }
 }
 
-/// keepassxc-created composite-key vault opens in trove with `--key-file`,
+/// keepassxc-created composite-key database opens in trove with `--key-file`,
 /// and trove's re-save keeps it keepassxc-openable (key survives the cycle).
 #[test]
-fn keepassxc_keyfile_vault_round_trips_through_trove() {
+fn keepassxc_keyfile_database_round_trips_through_trove() {
     let trove = trove_bin();
     let pw = format!("{PASSWORD}\n");
 
     for oracle in oracles() {
-        let spec = VaultSpec {
+        let spec = DatabaseSpec {
             name: "interop-keyfile".to_string(),
             password: PASSWORD,
             key: KeyMaterial::PasswordAndKeyfile(keyfile_bytes()),
@@ -159,7 +159,7 @@ fn keepassxc_keyfile_vault_round_trips_through_trove() {
             .unwrap_or_else(|e| panic!("keepassxc produce: {e}"));
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("kpxc.kdbx");
-        std::fs::write(&db, &bytes).expect("write vault");
+        std::fs::write(&db, &bytes).expect("write database");
         let dbs = db.to_str().expect("utf8");
         let kf = dir.path().join("key.bin");
         std::fs::write(&kf, keyfile_bytes()).expect("write keyfile");
@@ -169,7 +169,7 @@ fn keepassxc_keyfile_vault_round_trips_through_trove() {
         let out = run_ok(
             &trove,
             &[
-                "--vault",
+                "--database",
                 dbs,
                 "--key-file",
                 kfs,
@@ -186,7 +186,7 @@ fn keepassxc_keyfile_vault_round_trips_through_trove() {
         let (ok, _, _) = run(
             &trove,
             &[
-                "--vault",
+                "--database",
                 dbs,
                 "--password-stdin",
                 "get",
@@ -195,13 +195,13 @@ fn keepassxc_keyfile_vault_round_trips_through_trove() {
             ],
             &pw,
         );
-        assert!(!ok, "trove must refuse the vault without the keyfile");
+        assert!(!ok, "trove must refuse the database without the keyfile");
 
         // trove WRITES (re-save with the composite key), keepassxc still opens.
         run_ok(
             &trove,
             &[
-                "--vault",
+                "--database",
                 dbs,
                 "--key-file",
                 kfs,

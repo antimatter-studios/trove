@@ -82,7 +82,7 @@ See [windows.md](windows.md).
 ### 9. Explicit agent commands: `trove agent purge` / `trove agent lock`
 Client-side `REMOVE_ALL_IDENTITIES` / `LOCK` against an external agent. Both hit
 keys trove never added, so they must be deliberate user actions, never fired by
-a vault lock.
+a database lock.
 
 ---
 
@@ -118,13 +118,13 @@ key silently becomes unusable. Feeds item 4.
 
 ## Deferred (decided, not forgotten)
 
-- **Multi-vault phases 2–3** — dropping the vestigial `<VAULT>` positional and
-  `--vault` disambiguation on read/write commands. Today an ambiguous title is
-  refused with a message naming both vaults: safe, but not resolvable without
-  locking one. See [multi-vault.md](multi-vault.md).
+- **Multi-database phases 2–3** — dropping the vestigial `<DATABASE>` positional and
+  `--database` disambiguation on read/write commands. Today an ambiguous title is
+  refused with a message naming both databases: safe, but not resolvable without
+  locking one. See [multi-database.md](multi-database.md).
 - **Agent routing** — the backend-registry generalisation. Build the seam, not
   the ecosystem; no registration protocol until a real second backend exists.
   See [agent-routing.md](agent-routing.md).
-- **Key deconfliction across vaults** — union and last-wins for now. Revisit when
+- **Key deconfliction across databases** — union and last-wins for now. Revisit when
   a real conflict appears.
 - **NIST/brainpool curves for OpenPGP** — long tail, skip until asked.

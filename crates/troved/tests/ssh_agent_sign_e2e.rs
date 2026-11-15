@@ -23,8 +23,8 @@ use rsa::signature::Verifier as _;
 use ssh_key::PublicKey;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
-use trove_core::Vault;
-use troved::handler::load_ssh_keys_from_vault;
+use trove_core::Database;
+use troved::handler::load_ssh_keys_from_database;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::ssh_agent::keys::parse_private_key;
 use troved::ssh_agent::{self, KeyStore};
@@ -51,17 +51,17 @@ fn have_tool(name: &str) -> bool {
 /// parse, so the failure says which side broke: `read=None` / `0 bytes` is a
 /// read-side loss; `parse=Err(..)` with a non-zero length is corrupt/unparseable
 /// content. Keeps the opaque "0 != 1" from ever recurring without an explanation.
-fn diagnose_empty(vault: &Vault) -> String {
+fn diagnose_empty(database: &Database) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
-    for e in vault.list_entries() {
+    for e in database.list_entries() {
         let _ = write!(
             s,
             "entry {:?} attachments={:?}; ",
             e.title, e.attachment_names
         );
         for name in &e.attachment_names {
-            match vault.read_binary(&e.id, name) {
+            match database.read_binary(&e.id, name) {
                 Ok(Some(bytes)) => {
                     let parse = match parse_private_key(&bytes, "diag") {
                         Ok(_) => "parse=OK".to_string(),
@@ -136,7 +136,7 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
     let tmp = TempDir::new().expect("tempdir");
     let key_path = tmp.path().join("k");
     let pub_path = tmp.path().join("k.pub");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let sock_path = tmp.path().join("s.sock");
 
     let kg = Command::new("ssh-keygen")
@@ -153,10 +153,10 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
     let pub_blob = pubkey.to_bytes().expect("to_bytes");
 
     {
-        let mut vault = Vault::create(&vault_path, "pw").expect("create vault");
-        let id = vault.add_entry("sign-test").expect("add entry");
-        vault.attach_binary(&id, "id", &pem).expect("attach id");
-        vault.save().expect("save vault");
+        let mut database = Database::create(&database_path, "pw").expect("create database");
+        let id = database.add_entry("sign-test").expect("add entry");
+        database.attach_binary(&id, "id", &pem).expect("attach id");
+        database.save().expect("save database");
     }
 
     // Reopen from disk and load its SSH keys. This has flaked on CI (never
@@ -165,13 +165,13 @@ async fn sign_and_verify(keygen_args: &[&str], rsa_flags: u32) {
     // attachment bytes going missing on the read side (len 0 / read=None) vs.
     // present-but-unparseable bytes (bytes there, parse=Err). The message is
     // only built when the assertion fails, so the happy path pays nothing.
-    let vault = Vault::open(&vault_path, "pw").expect("reopen");
-    let keys = load_ssh_keys_from_vault(&vault);
+    let database = Database::open(&database_path, "pw").expect("reopen");
+    let keys = load_ssh_keys_from_database(&database);
     assert_eq!(
         keys.len(),
         1,
         "one key should load after reopen — {}",
-        diagnose_empty(&vault)
+        diagnose_empty(&database)
     );
     let store: KeyStore = Arc::new(RwLock::new(keys));
 

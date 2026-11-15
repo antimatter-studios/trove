@@ -1,14 +1,14 @@
 //! File materialization — trove's headline feature.
 //!
 //! ## What this module does
-//! On vault unlock, walk every entry, look for the `Materialize.*` custom
+//! On database unlock, walk every entry, look for the `Materialize.*` custom
 //! string fields, build a [`MaterializationPlan`], validate each entry's
 //! plan, and write each opted-in attachment to disk under the user's
-//! requested path with the user's requested permissions. On vault lock (and
+//! requested path with the user's requested permissions. On database lock (and
 //! on shutdown), wipe everything we materialized, in best-effort fashion.
 //!
 //! Optionally, an entry can specify a TTL (in seconds) after which the file
-//! is wiped even if the vault stays unlocked — useful for short-lived
+//! is wiped even if the database stays unlocked — useful for short-lived
 //! credentials. The TTL is implemented as a single `tokio::spawn`'d task per
 //! materialization that races a `tokio::time::sleep` against a cancel
 //! [`Notify`]. The `Notify` is fired on lock, ensuring the timer task is
@@ -21,7 +21,7 @@
 //!   asynchronously would race with the user's first `kubectl` invocation.
 //! * **Per-entry failure doesn't fail the whole unlock, but is never
 //!   silent.** The spec is explicit that a typo in `Materialize.Target` on one
-//!   entry must not prevent the rest of the vault from working. But a failure
+//!   entry must not prevent the rest of the database from working. But a failure
 //!   is both logged AND returned to the caller (`materialize_warnings` in the
 //!   unlock reply) so the CLI can warn loudly — `unlock` must never report `ok`
 //!   with a configured materialized file missing (issue #56).
@@ -43,7 +43,7 @@
 //!   can read these files; that's the existing threat model and we don't fix
 //!   it here.
 //! * Re-materialization on `add` while unlocked. If you add a file entry to
-//!   the vault while it's already open in the daemon, you have to lock and
+//!   the database while it's already open in the daemon, you have to lock and
 //!   unlock to materialize it. Easy follow-up; not in v0.0.5.0 scope.
 
 use std::path::PathBuf;
@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, RwLock};
 
 use trove_core::settings::{Capability, EffectiveItem};
-use trove_core::{EntryId, EntrySummary, Vault};
+use trove_core::{Database, EntryId, EntrySummary};
 
 pub mod paths;
 pub mod wipe;
@@ -106,7 +106,7 @@ pub enum PlanError {
     )]
     NotTmpfs(PathBuf),
 
-    #[error("vault: {0}")]
+    #[error("database: {0}")]
     Core(#[from] trove_core::Error),
 }
 
@@ -126,10 +126,10 @@ pub struct MaterializationPlan {
 /// wipe it on lock / TTL expiry.
 #[derive(Debug)]
 pub struct MaterializedFile {
-    /// Canonical path of the vault this file came from. Several vaults can be
+    /// Canonical path of the database this file came from. Several databases can be
     /// unlocked at once, so locking one must wipe only its own files and leave
     /// the others' in place.
-    pub vault: PathBuf,
+    pub database: PathBuf,
     pub entry_title: String,
     pub target: PathBuf,
     /// Parent directories trove itself created (mode 0700) to write `target`,
@@ -154,36 +154,36 @@ pub type MaterializedStore = Arc<RwLock<Vec<MaterializedFile>>>;
 /// Walk every entry and produce one plan per opted-in entry. Errors are
 /// collected per-entry and returned alongside the successful plans, so the
 /// caller can log per-entry failures without aborting unlock.
-pub fn build_plans(vault: &Vault) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
-    build_plans_filtered(vault, None)
+pub fn build_plans(database: &Database) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
+    build_plans_filtered(database, None)
 }
 
 /// Build plans only for entries carrying `filter` as a KeePass-native tag.
 /// `None` preserves the historical behavior and includes every entry.
 pub fn build_plans_filtered(
-    vault: &Vault,
+    database: &Database,
     filter: Option<&str>,
 ) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
-    build_plans_with_live(vault, filter, &[])
+    build_plans_with_live(database, filter, &[])
 }
 
 /// [`build_plans_filtered`], except that a target in `live` may already
 /// exist: it is a file this daemon wrote and still tracks, not someone
 /// else's. Used to compare plans before and after a write while unlocked.
 pub fn build_plans_with_live(
-    vault: &Vault,
+    database: &Database,
     filter: Option<&str>,
     live: &[PathBuf],
 ) -> (Vec<MaterializationPlan>, Vec<(String, PlanError)>) {
     let mut plans = Vec::new();
     let mut errors = Vec::new();
-    for entry in vault.list_entries() {
+    for entry in database.list_entries() {
         if let Some(wanted) = filter {
             if !entry.has_tag(wanted) {
                 continue;
             }
         }
-        match plans_for_entry_with_live(vault, &entry, live) {
+        match plans_for_entry_with_live(database, &entry, live) {
             Ok(p) => plans.extend(p),
             Err(e) => errors.push((entry.title, e)),
         }
@@ -200,18 +200,18 @@ pub fn build_plans_with_live(
 /// filling in what an item leaves out. An entry without the document but with
 /// the older `Materialize.<attachment>.*` fields is read as if it had one.
 pub fn plans_for_entry(
-    vault: &Vault,
+    database: &Database,
     entry: &EntrySummary,
 ) -> Result<Vec<MaterializationPlan>, PlanError> {
-    plans_for_entry_with_live(vault, entry, &[])
+    plans_for_entry_with_live(database, entry, &[])
 }
 
 fn plans_for_entry_with_live(
-    vault: &Vault,
+    database: &Database,
     entry: &EntrySummary,
     live: &[PathBuf],
 ) -> Result<Vec<MaterializationPlan>, PlanError> {
-    let items = match vault.effective_settings(&entry.id, Capability::Materialize) {
+    let items = match database.effective_settings(&entry.id, Capability::Materialize) {
         Ok(Some(items)) => items,
         Ok(None) => return Ok(Vec::new()),
         Err(trove_core::Error::InvalidSettings { reason, .. }) => {
@@ -290,7 +290,7 @@ fn check_ephemeral(resolved: &std::path::Path, allow_disk_backed: bool) -> Resul
     Ok(())
 }
 
-/// Materialize a single plan: read the attachment bytes from `vault`, write
+/// Materialize a single plan: read the attachment bytes from `database`, write
 /// to `plan.resolved_target` with `plan.mode`, and (if `plan.ttl` is Some)
 /// spawn a TTL timer task that wipes the file when it expires. Returns a
 /// [`MaterializedFile`] bookkeeping handle that must be tracked by the
@@ -299,12 +299,12 @@ fn check_ephemeral(resolved: &std::path::Path, allow_disk_backed: bool) -> Resul
 /// Errors here mean we couldn't write the file. The daemon should log and
 /// continue with other plans (already true at the call site).
 pub fn materialize_one(
-    vault: &Vault,
-    vault_key: &std::path::Path,
+    database: &Database,
+    database_key: &std::path::Path,
     plan: &MaterializationPlan,
     store: MaterializedStore,
 ) -> Result<MaterializedFile, MaterializeError> {
-    let bytes = vault
+    let bytes = database
         .read_binary(&plan.entry_id, &plan.source_attachment)
         .map_err(MaterializeError::Core)?
         .ok_or_else(|| MaterializeError::AttachmentMissing(plan.source_attachment.clone()))?;
@@ -340,7 +340,7 @@ pub fn materialize_one(
     }
 
     Ok(MaterializedFile {
-        vault: vault_key.to_path_buf(),
+        database: database_key.to_path_buf(),
         entry_title: plan.entry_title.clone(),
         target: plan.resolved_target.clone(),
         created_dirs,
@@ -429,7 +429,7 @@ pub enum MaterializeError {
     #[error("write {0:?}: {1}")]
     Io(PathBuf, std::io::Error),
 
-    #[error("vault: {0}")]
+    #[error("database: {0}")]
     Core(trove_core::Error),
 }
 
@@ -524,50 +524,50 @@ pub async fn wipe_all(store: &MaterializedStore) {
     wipe_each(drained);
 }
 
-/// Wipe only the files materialized from `vault`, leaving every other unlocked
-/// vault's files on disk. This is what `lock --vault` and a re-unlock of an
-/// already-open vault use: locking one vault must not pull another vault's
+/// Wipe only the files materialized from `database`, leaving every other unlocked
+/// database's files on disk. This is what `lock --database` and a re-unlock of an
+/// already-open database use: locking one database must not pull another database's
 /// kubeconfig out from under a running process.
-pub async fn wipe_for_vault(store: &MaterializedStore, vault: &std::path::Path) {
+pub async fn wipe_for_database(store: &MaterializedStore, database: &std::path::Path) {
     let taken: Vec<MaterializedFile> = {
         let mut guard = store.write().await;
         // `extract_if` isn't stable for Vec on our MSRV, so partition by hand.
         let (mine, theirs) = std::mem::take(&mut *guard)
             .into_iter()
-            .partition(|m| m.vault == vault);
+            .partition(|m| m.database == database);
         *guard = theirs;
         mine
     };
     wipe_each(taken);
 }
 
-/// Wipe the one file `vault` materialized at `target`, if it is still live.
+/// Wipe the one file `database` materialized at `target`, if it is still live.
 /// Used when a write while unlocked removes or changes the plan behind it.
 pub async fn wipe_target(
     store: &MaterializedStore,
-    vault: &std::path::Path,
+    database: &std::path::Path,
     target: &std::path::Path,
 ) {
     let taken: Vec<MaterializedFile> = {
         let mut guard = store.write().await;
         let (mine, rest) = std::mem::take(&mut *guard)
             .into_iter()
-            .partition(|m| m.vault == vault && m.target == target);
+            .partition(|m| m.database == database && m.target == target);
         *guard = rest;
         mine
     };
     wipe_each(taken);
 }
 
-/// The resolved targets currently claimed by materialized files, with the vault
-/// that claimed each. Used at unlock to spot a second vault materializing over
-/// a path a first vault already owns.
+/// The resolved targets currently claimed by materialized files, with the database
+/// that claimed each. Used at unlock to spot a second database materializing over
+/// a path a first database already owns.
 pub async fn claimed_targets(store: &MaterializedStore) -> Vec<(PathBuf, PathBuf)> {
     store
         .read()
         .await
         .iter()
-        .map(|m| (m.target.clone(), m.vault.clone()))
+        .map(|m| (m.target.clone(), m.database.clone()))
         .collect()
 }
 
@@ -598,10 +598,10 @@ fn wipe_each(files: Vec<MaterializedFile>) {
 pub struct MaterializeStatus {
     pub title: String,
     pub target_path: String,
-    /// Which unlocked vault this file came from. Wire-optional so an older CLI
+    /// Which unlocked database this file came from. Wire-optional so an older CLI
     /// reading a newer daemon's reply ignores it rather than failing to parse.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub vault: String,
+    pub database: String,
     /// Seconds remaining until TTL expiry, or `null` if no TTL.
     pub ttl_remaining_seconds: Option<u64>,
     /// `true` if the file currently exists on disk. (Best-effort: race
@@ -622,7 +622,7 @@ pub async fn status_snapshot(store: &MaterializedStore) -> Vec<MaterializeStatus
         .map(|m| MaterializeStatus {
             title: m.entry_title.clone(),
             target_path: m.target.display().to_string(),
-            vault: m.vault.display().to_string(),
+            database: m.database.display().to_string(),
             ttl_remaining_seconds: m.expires_at.map(
                 |t| {
                     if t > now {

@@ -42,15 +42,15 @@ fn ok(out: &Output, what: &str) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-/// Vault with a string secret (custom env name), a fallback-named secret and
+/// Database with a string secret (custom env name), a fallback-named secret and
 /// a file attachment entry, built through the CLI + trove-core.
 fn seed(trove: &std::path::Path, dir: &tempfile::TempDir) -> String {
-    let vault = dir.path().join("x.kdbx");
-    let vs = vault.to_str().unwrap().to_string();
+    let database = dir.path().join("x.kdbx");
+    let vs = database.to_str().unwrap().to_string();
     ok(
         &run_trove(
             trove,
-            &["--vault", &vs, "--password-stdin", "init"],
+            &["--database", &vs, "--password-stdin", "init"],
             &format!("{PW}\n"),
         ),
         "init",
@@ -59,7 +59,7 @@ fn seed(trove: &std::path::Path, dir: &tempfile::TempDir) -> String {
         &run_trove(
             trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "add",
@@ -75,7 +75,7 @@ fn seed(trove: &std::path::Path, dir: &tempfile::TempDir) -> String {
         &run_trove(
             trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "edit",
@@ -94,7 +94,7 @@ fn seed(trove: &std::path::Path, dir: &tempfile::TempDir) -> String {
         &run_trove(
             trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "add",
@@ -113,7 +113,7 @@ fn seed(trove: &std::path::Path, dir: &tempfile::TempDir) -> String {
         &run_trove(
             trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "edit",
@@ -144,7 +144,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "exec",
@@ -179,7 +179,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             &vs,
             "--password-stdin",
             "exec",
@@ -197,7 +197,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             &vs,
             "--password-stdin",
             "exec",
@@ -215,7 +215,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "add",
@@ -233,7 +233,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "edit",
@@ -249,7 +249,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             &vs,
             "--password-stdin",
             "exec",
@@ -274,7 +274,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "exec",
@@ -295,7 +295,7 @@ fn exec_injects_wipes_and_propagates_exit_codes() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "exec",
@@ -326,7 +326,7 @@ fn json_outputs_parse_with_expected_fields() {
     let list: serde_json::Value = serde_json::from_str(&ok(
         &run_trove(
             &trove,
-            &["--vault", &vs, "--password-stdin", "list", "--json"],
+            &["--database", &vs, "--password-stdin", "list", "--json"],
             &pw,
         ),
         "list --json",
@@ -344,7 +344,7 @@ fn json_outputs_parse_with_expected_fields() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "search",
@@ -362,7 +362,7 @@ fn json_outputs_parse_with_expected_fields() {
     let info: serde_json::Value = serde_json::from_str(&ok(
         &run_trove(
             &trove,
-            &["--vault", &vs, "--password-stdin", "db-info", "--json"],
+            &["--database", &vs, "--password-stdin", "db-info", "--json"],
             &pw,
         ),
         "db-info --json",

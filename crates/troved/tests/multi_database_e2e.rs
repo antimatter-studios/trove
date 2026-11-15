@@ -1,11 +1,11 @@
-//! End-to-end tests for holding several vaults unlocked at once.
+//! End-to-end tests for holding several databases unlocked at once.
 //!
-//! `Unlock` is additive (see `docs/multi-vault.md`): a second unlock adds to
+//! `Unlock` is additive (see `docs/multi-database.md`): a second unlock adds to
 //! the open set instead of replacing it, the SSH/GPG agents serve the union of
-//! every open vault's keys, and `Lock { vault }` drops exactly one vault.
+//! every open database's keys, and `Lock { database }` drops exactly one database.
 //!
 //! Like the other daemon e2e suites these drive `handle()` directly with the
-//! same `Request` types the wire carries — the goal is the multi-vault
+//! same `Request` types the wire carries — the goal is the multi-database
 //! lifecycle, not the JSON framing.
 
 #![allow(missing_docs)]
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -25,7 +25,7 @@ use troved::protocol::{Request, Response};
 use troved::ssh_agent::scoped::ScopedAgents;
 use troved::ssh_agent::KeyStore;
 
-const PASSWORD: &str = "multi-vault-test-pw";
+const PASSWORD: &str = "multi-database-test-pw";
 const TEST_UID: u32 = 1000;
 
 /// Two distinct throwaway, passphrase-less ed25519 keys. Real, so the agent
@@ -63,7 +63,7 @@ impl Daemon {
     fn new() -> Self {
         let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
         Self {
-            state: Arc::new(Mutex::new(troved::vaults::VaultSet::new())),
+            state: Arc::new(Mutex::new(troved::databases::DatabaseSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
             scoped_agents: troved::ssh_agent::scoped::new_registry(),
@@ -90,9 +90,9 @@ impl Daemon {
         .response
     }
 
-    async fn unlock(&self, vault: &Path) -> Response {
+    async fn unlock(&self, database: &Path) -> Response {
         self.handle(Request::Unlock {
-            path: vault.to_string_lossy().into_owned(),
+            path: database.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -102,9 +102,9 @@ impl Daemon {
         .await
     }
 
-    async fn unlock_filtered(&self, vault: &Path, filter: &str) -> Response {
+    async fn unlock_filtered(&self, database: &Path, filter: &str) -> Response {
         self.handle(Request::Unlock {
-            path: vault.to_string_lossy().into_owned(),
+            path: database.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -128,25 +128,25 @@ impl Daemon {
     }
 }
 
-/// Create a vault holding one SSH key entry.
-fn vault_with_key(path: &Path, entry: &str, key: &[u8]) {
-    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+/// Create a database holding one SSH key entry.
+fn database_with_key(path: &Path, entry: &str, key: &[u8]) {
+    let mut v = Database::create(path, PASSWORD).expect("create database");
     let id = v.add_entry(entry).expect("add entry");
     v.attach_binary(&id, "id", key).expect("attach key");
     v.save().expect("save");
 }
 
-fn vault_with_tagged_key(path: &Path, entry: &str, key: &[u8], tag: &str) {
-    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+fn database_with_tagged_key(path: &Path, entry: &str, key: &[u8], tag: &str) {
+    let mut v = Database::create(path, PASSWORD).expect("create database");
     let id = v.add_entry(entry).expect("add entry");
     v.set_tags(&id, &[tag.to_string()]).expect("set tag");
     v.attach_binary(&id, "id", key).expect("attach key");
     v.save().expect("save");
 }
 
-/// Create a vault holding one entry that materializes `bytes` to `target`.
-fn vault_with_materialize(path: &Path, entry: &str, bytes: &[u8], target: &Path) {
-    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+/// Create a database holding one entry that materializes `bytes` to `target`.
+fn database_with_materialize(path: &Path, entry: &str, bytes: &[u8], target: &Path) {
+    let mut v = Database::create(path, PASSWORD).expect("create database");
     let id = v.add_entry(entry).expect("add entry");
     v.attach_binary(&id, "blob", bytes).expect("attach");
     v.set_field(
@@ -186,8 +186,8 @@ async fn second_unlock_adds_to_the_set_instead_of_replacing_it() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
-    vault_with_key(&a, "personal/github.com", KEY_A);
-    vault_with_key(&b, "work/gitlab.com", KEY_B);
+    database_with_key(&a, "personal/github.com", KEY_A);
+    database_with_key(&b, "work/gitlab.com", KEY_B);
 
     let d = Daemon::new();
     assert!(matches!(d.unlock(&a).await, Response::Ok(_)));
@@ -198,10 +198,10 @@ async fn second_unlock_adds_to_the_set_instead_of_replacing_it() {
     assert_eq!(
         d.served_ssh_comments().await,
         vec!["a:personal/github.com", "b:work/gitlab.com"],
-        "the agent must serve the union of both vaults' keys"
+        "the agent must serve the union of both databases' keys"
     );
 
-    // And both vaults' entries are visible to `list`.
+    // And both databases' entries are visible to `list`.
     let body = serde_json::to_value(&d.handle(Request::List).await).expect("serialize");
     let titles: Vec<String> = body["entries"]
         .as_array()
@@ -216,52 +216,52 @@ async fn second_unlock_adds_to_the_set_instead_of_replacing_it() {
 #[tokio::test]
 async fn unlock_filter_exposes_only_entries_with_the_selected_tag() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault = tmp.path().join("filtered.kdbx");
-    vault_with_tagged_key(&vault, "gitlab-key", KEY_A, "GitLab");
-    let mut v = Vault::open(&vault, PASSWORD).expect("open");
+    let database = tmp.path().join("filtered.kdbx");
+    database_with_tagged_key(&database, "gitlab-key", KEY_A, "GitLab");
+    let mut v = Database::open(&database, PASSWORD).expect("open");
     let untagged = v.add_entry("personal-key").expect("add untagged entry");
     v.attach_binary(&untagged, "id", KEY_B).expect("attach key");
     v.save().expect("save");
 
     let d = Daemon::new();
     assert!(matches!(
-        d.unlock_filtered(&vault, "gitlab").await,
+        d.unlock_filtered(&database, "gitlab").await,
         Response::Ok(_)
     ));
     assert_eq!(d.served_ssh_comments().await, vec!["filtered:gitlab-key"]);
 }
 
 #[tokio::test]
-async fn status_reports_every_unlocked_vault() {
+async fn status_reports_every_unlocked_database() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
-    vault_with_key(&a, "personal/github.com", KEY_A);
-    vault_with_key(&b, "work/gitlab.com", KEY_B);
+    database_with_key(&a, "personal/github.com", KEY_A);
+    database_with_key(&b, "work/gitlab.com", KEY_B);
 
     let d = Daemon::new();
     d.unlock(&a).await;
     d.unlock(&b).await;
 
     let body = serde_json::to_value(&d.handle(Request::Status).await).expect("serialize");
-    let paths = body["vault_paths"].as_array().expect("vault_paths");
-    assert_eq!(paths.len(), 2, "status must list both vaults: {body}");
-    // Back-compat: an older CLI reads `vault_path` and must still see a vault
+    let paths = body["database_paths"].as_array().expect("database_paths");
+    assert_eq!(paths.len(), 2, "status must list both databases: {body}");
+    // Back-compat: an older CLI reads `database_path` and must still see a database
     // rather than null.
     assert!(
-        body["vault_path"].is_string(),
-        "vault_path must stay populated for older clients: {body}"
+        body["database_path"].is_string(),
+        "database_path must stay populated for older clients: {body}"
     );
     assert_eq!(body["ssh_keys"], 2);
 }
 
 #[tokio::test]
-async fn locking_one_vault_leaves_the_other_serving() {
+async fn locking_one_database_leaves_the_other_serving() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
-    vault_with_key(&a, "personal/github.com", KEY_A);
-    vault_with_key(&b, "work/gitlab.com", KEY_B);
+    database_with_key(&a, "personal/github.com", KEY_A);
+    database_with_key(&b, "work/gitlab.com", KEY_B);
 
     let d = Daemon::new();
     d.unlock(&a).await;
@@ -269,12 +269,12 @@ async fn locking_one_vault_leaves_the_other_serving() {
 
     let resp = d
         .handle(Request::Lock {
-            vault: Some(a.to_string_lossy().into_owned()),
+            database: Some(a.to_string_lossy().into_owned()),
         })
         .await;
     assert!(
         matches!(resp, Response::Ok(_)),
-        "lock --vault failed: {resp:?}"
+        "lock --database failed: {resp:?}"
     );
 
     assert_eq!(
@@ -303,22 +303,22 @@ async fn locking_one_vault_leaves_the_other_serving() {
 }
 
 #[tokio::test]
-async fn locking_a_vault_that_is_not_open_is_an_error() {
+async fn locking_a_database_that_is_not_open_is_an_error() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let ghost = tmp.path().join("ghost.kdbx");
-    vault_with_key(&a, "personal/github.com", KEY_A);
+    database_with_key(&a, "personal/github.com", KEY_A);
 
     let d = Daemon::new();
     d.unlock(&a).await;
 
     let resp = d
         .handle(Request::Lock {
-            vault: Some(ghost.to_string_lossy().into_owned()),
+            database: Some(ghost.to_string_lossy().into_owned()),
         })
         .await;
     assert!(
-        err_message(&resp).contains("no vault unlocked at"),
+        err_message(&resp).contains("no database unlocked at"),
         "expected a targeted error, got: {resp:?}"
     );
     // …and the mistake must not have locked anything.
@@ -326,19 +326,19 @@ async fn locking_a_vault_that_is_not_open_is_an_error() {
 }
 
 #[tokio::test]
-async fn bare_lock_still_locks_every_vault() {
+async fn bare_lock_still_locks_every_database() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
-    vault_with_key(&a, "personal/github.com", KEY_A);
-    vault_with_key(&b, "work/gitlab.com", KEY_B);
+    database_with_key(&a, "personal/github.com", KEY_A);
+    database_with_key(&b, "work/gitlab.com", KEY_B);
 
     let d = Daemon::new();
     d.unlock(&a).await;
     d.unlock(&b).await;
 
     assert!(matches!(
-        d.handle(Request::Lock { vault: None }).await,
+        d.handle(Request::Lock { database: None }).await,
         Response::Ok(_)
     ));
     assert!(d.served_ssh_comments().await.is_empty());
@@ -346,13 +346,13 @@ async fn bare_lock_still_locks_every_vault() {
 }
 
 #[tokio::test]
-async fn a_title_in_two_vaults_refuses_rather_than_guessing() {
+async fn a_title_in_two_databases_refuses_rather_than_guessing() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
-    // Same entry path in both vaults — the one genuine title collision.
-    vault_with_key(&a, "github.com", KEY_A);
-    vault_with_key(&b, "github.com", KEY_B);
+    // Same entry path in both databases — the one genuine title collision.
+    database_with_key(&a, "github.com", KEY_A);
+    database_with_key(&b, "github.com", KEY_B);
 
     let d = Daemon::new();
     d.unlock(&a).await;
@@ -372,19 +372,19 @@ async fn a_title_in_two_vaults_refuses_rather_than_guessing() {
         .await;
     let msg = err_message(&resp);
     assert!(
-        msg.contains("exists in 2 unlocked vaults"),
+        msg.contains("exists in 2 unlocked databases"),
         "expected an ambiguity refusal, got: {msg}"
     );
-    // The message must name both vaults or the user can't act on it.
+    // The message must name both databases or the user can't act on it.
     assert!(msg.contains("a.kdbx"), "{msg}");
     assert!(msg.contains("b.kdbx"), "{msg}");
 }
 
 #[tokio::test]
-async fn re_unlocking_the_same_vault_does_not_duplicate_its_keys() {
+async fn re_unlocking_the_same_database_does_not_duplicate_its_keys() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
-    vault_with_key(&a, "personal/github.com", KEY_A);
+    database_with_key(&a, "personal/github.com", KEY_A);
 
     let d = Daemon::new();
     d.unlock(&a).await;
@@ -393,39 +393,39 @@ async fn re_unlocking_the_same_vault_does_not_duplicate_its_keys() {
     assert_eq!(
         d.served_ssh_comments().await,
         vec!["a:personal/github.com"],
-        "a re-unlock must replace the vault, not stack a second copy"
+        "a re-unlock must replace the database, not stack a second copy"
     );
     assert_eq!(d.state.lock().await.len(), 1);
 }
 
 #[tokio::test]
-async fn a_second_vault_may_not_materialize_over_a_target_already_claimed() {
+async fn a_second_database_may_not_materialize_over_a_target_already_claimed() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
     let target = tmp.path().join("kubeconfig");
-    vault_with_materialize(&a, "a-kubeconfig", b"from vault a\n", &target);
-    vault_with_materialize(&b, "b-kubeconfig", b"from vault b\n", &target);
+    database_with_materialize(&a, "a-kubeconfig", b"from database a\n", &target);
+    database_with_materialize(&b, "b-kubeconfig", b"from database b\n", &target);
 
     let d = Daemon::new();
     assert!(matches!(d.unlock(&a).await, Response::Ok(_)));
-    assert_eq!(std::fs::read(&target).expect("read"), b"from vault a\n");
+    assert_eq!(std::fs::read(&target).expect("read"), b"from database a\n");
 
     // Unlocking b must NOT overwrite a's live file. Files are first-wins,
     // unlike keys: overwriting would replace data a running process is using,
-    // and locking either vault would then wipe a path the other still expects.
+    // and locking either database would then wipe a path the other still expects.
     let resp = d.unlock(&b).await;
     assert!(matches!(resp, Response::Ok(_)), "unlock b failed: {resp:?}");
     assert_eq!(
         std::fs::read(&target).expect("read"),
-        b"from vault a\n",
-        "vault b must not overwrite vault a's materialized file"
+        b"from database a\n",
+        "database b must not overwrite database a's materialized file"
     );
 
     // The skip must be reported, never a silent `ok` with the file missing.
     // (Which guard catches it depends on the state of the filesystem: with a's
     // file present, plan validation's refuse-to-clobber fires first. The
-    // cross-vault claim check below is the second line, for when the path is
+    // cross-database claim check below is the second line, for when the path is
     // gone from disk but still owned.)
     let warnings = unlock_warnings(&resp);
     assert_eq!(warnings.len(), 1, "the skip must be reported: {warnings:?}");
@@ -449,8 +449,8 @@ async fn a_claimed_target_stays_claimed_even_if_the_file_is_deleted() {
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
     let target = tmp.path().join("kubeconfig");
-    vault_with_materialize(&a, "a-kubeconfig", b"from vault a\n", &target);
-    vault_with_materialize(&b, "b-kubeconfig", b"from vault b\n", &target);
+    database_with_materialize(&a, "a-kubeconfig", b"from database a\n", &target);
+    database_with_materialize(&b, "b-kubeconfig", b"from database b\n", &target);
 
     let d = Daemon::new();
     d.unlock(&a).await;
@@ -458,38 +458,38 @@ async fn a_claimed_target_stays_claimed_even_if_the_file_is_deleted() {
     // Someone removes the file behind trove's back. a still owns the path: the
     // daemon is tracking it and will wipe it when a locks. Plan validation's
     // "target already exists" guard can no longer see a conflict, so this is
-    // exactly the case the cross-vault claim check exists for.
+    // exactly the case the cross-database claim check exists for.
     std::fs::remove_file(&target).expect("remove");
 
     let resp = d.unlock(&b).await;
     assert!(matches!(resp, Response::Ok(_)), "unlock b failed: {resp:?}");
     assert!(
         !target.exists(),
-        "b must not seize a path another vault still owns"
+        "b must not seize a path another database still owns"
     );
     let warnings = unlock_warnings(&resp);
     assert_eq!(warnings.len(), 1, "the skip must be reported: {warnings:?}");
     assert!(
-        warnings[0].contains("already materialized by vault"),
-        "warning must name the owning vault: {}",
+        warnings[0].contains("already materialized by database"),
+        "warning must name the owning database: {}",
         warnings[0]
     );
     assert!(
         warnings[0].contains("a.kdbx"),
-        "warning must identify which vault owns it: {}",
+        "warning must identify which database owns it: {}",
         warnings[0]
     );
 }
 
 #[tokio::test]
-async fn locking_one_vault_wipes_only_its_own_materialized_files() {
+async fn locking_one_database_wipes_only_its_own_materialized_files() {
     let tmp = TempDir::new().expect("tempdir");
     let a = tmp.path().join("a.kdbx");
     let b = tmp.path().join("b.kdbx");
     let target_a = tmp.path().join("conf-a");
     let target_b = tmp.path().join("conf-b");
-    vault_with_materialize(&a, "a-conf", b"aaa\n", &target_a);
-    vault_with_materialize(&b, "b-conf", b"bbb\n", &target_b);
+    database_with_materialize(&a, "a-conf", b"aaa\n", &target_a);
+    database_with_materialize(&b, "b-conf", b"bbb\n", &target_b);
 
     let d = Daemon::new();
     d.unlock(&a).await;
@@ -497,7 +497,7 @@ async fn locking_one_vault_wipes_only_its_own_materialized_files() {
     assert!(target_a.exists() && target_b.exists());
 
     d.handle(Request::Lock {
-        vault: Some(a.to_string_lossy().into_owned()),
+        database: Some(a.to_string_lossy().into_owned()),
     })
     .await;
 

@@ -1,5 +1,5 @@
 //! `trove import-ssh` against a throwaway `.ssh`-like directory of real keys,
-//! offline (`--vault`, `--password-stdin`, `--yes`). Proves the usable keys
+//! offline (`--database`, `--password-stdin`, `--yes`). Proves the usable keys
 //! land as entries with their `.pub` comment, the unusable ones are reported
 //! and left out, a second run doesn't overwrite, `--dry-run` changes nothing,
 //! and the key files are left as they were.
@@ -11,7 +11,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use trove_core::Vault;
+use trove_core::Database;
 
 const PASSWORD: &str = "import-ssh-test-pw";
 
@@ -33,7 +33,7 @@ fn run_trove(trove: &Path, args: &[&str], stdin: &str) -> Output {
     let mut child = Command::new(trove)
         .args(args)
         .env_remove("TROVE_SESSION")
-        .env_remove("TROVE_VAULT")
+        .env_remove("TROVE_DATABASE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -109,9 +109,9 @@ fn import_ssh_stores_usable_keys_and_reports_the_rest() {
     .unwrap();
     let before = std::fs::read(keys.join("id_ed25519")).unwrap();
 
-    let vault = tmp.path().join("v.kdbx");
-    Vault::create(&vault, PASSWORD).expect("create vault");
-    let v = vault.to_str().unwrap();
+    let database = tmp.path().join("v.kdbx");
+    Database::create(&database, PASSWORD).expect("create database");
+    let v = database.to_str().unwrap();
     let k = keys.to_str().unwrap();
     let stdin = format!("{PASSWORD}\n");
 
@@ -119,7 +119,7 @@ fn import_ssh_stores_usable_keys_and_reports_the_rest() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             v,
             "--password-stdin",
             "import-ssh",
@@ -143,16 +143,16 @@ fn import_ssh_stores_usable_keys_and_reports_the_rest() {
         "{listing}"
     );
     assert!(!listing.contains("known_hosts"), "{listing}");
-    let opened = Vault::open(&vault, PASSWORD).unwrap();
+    let opened = Database::open(&database, PASSWORD).unwrap();
     assert!(
         opened.list_entries().is_empty(),
-        "dry run wrote to the vault"
+        "dry run wrote to the database"
     );
 
     // Without --yes and no terminal, it refuses rather than guessing.
     let out = run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "import-ssh", k],
+        &["--database", v, "--password-stdin", "import-ssh", k],
         &stdin,
     );
     assert!(!out.status.success(), "{}", text(&out));
@@ -160,13 +160,20 @@ fn import_ssh_stores_usable_keys_and_reports_the_rest() {
 
     let out = run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "import-ssh", k, "--yes"],
+        &[
+            "--database",
+            v,
+            "--password-stdin",
+            "import-ssh",
+            k,
+            "--yes",
+        ],
         &stdin,
     );
     assert!(out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("imported"), "{}", text(&out));
 
-    let opened = Vault::open(&vault, PASSWORD).unwrap();
+    let opened = Database::open(&database, PASSWORD).unwrap();
     let mut paths: Vec<String> = opened
         .list_entries()
         .iter()
@@ -194,7 +201,14 @@ fn import_ssh_stores_usable_keys_and_reports_the_rest() {
     // A second run leaves the existing entry alone.
     let out = run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "import-ssh", k, "--yes"],
+        &[
+            "--database",
+            v,
+            "--password-stdin",
+            "import-ssh",
+            k,
+            "--yes",
+        ],
         &stdin,
     );
     assert!(out.status.success(), "{}", text(&out));

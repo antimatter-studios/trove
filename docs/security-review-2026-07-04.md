@@ -78,7 +78,7 @@ username when git supplies one. This is git's standard per-host credential
 model. An attacker-controlled remote only ever retrieves the credential the
 user themselves filed for that host; no cross-host leakage (host compared
 exactly). `store`/`erase` are no-ops, so a hostile `store` cannot poison the
-vault.
+database.
 
 ### 6. XML/CSV export — OK (plaintext by design, loudly flagged)
 
@@ -89,9 +89,9 @@ the destination (stdout).
 
 ### 7. Keyfile / challenge-response material in memory — OK
 
-Keyfile bytes and the challenge-response provider are held in `VaultInner`
-for the vault's lifetime (needed: kdbx rotates the master seed per save, so
-each write re-derives the composite key). `VaultInner::drop` zeroizes the
+Keyfile bytes and the challenge-response provider are held in `DatabaseInner`
+for the database's lifetime (needed: kdbx rotates the master seed per save, so
+each write re-derives the composite key). `DatabaseInner::drop` zeroizes the
 password and keyfile bytes; the `keepass` crate's `ChallengeResponseKey` is
 `ZeroizeOnDrop`. `rekey` zeroizes the superseded credentials after a
 successful save.
@@ -99,7 +99,7 @@ successful save.
 ### 8. `resolve` / secret refs — OK
 
 `trove://` resolution is a path+field lookup with no evaluation or
-interpolation; it cannot be induced to read outside the vault. Errors are
+interpolation; it cannot be induced to read outside the database. Errors are
 precise and do not echo secret values.
 
 ## Best-effort erasure caveat (pre-existing, unchanged)

@@ -2,7 +2,7 @@
 //! manager (launchd, systemd, `brew services`) must outlive a lock, explicit or
 //! idle, so the agent sockets stay up for `ssh` and `git` between unlocks. It
 //! still exits on an explicit `shutdown`. Without the flag, locking the last
-//! vault exits the daemon as before.
+//! database exits the daemon as before.
 //!
 //! Skips gracefully if the `troved` binary isn't built. Unix-only.
 
@@ -80,12 +80,12 @@ fn kill(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// A throwaway vault under `dir`, and the `unlock` request line for it.
-fn vault_and_unlock_line(dir: &Path) -> String {
+/// A throwaway database under `dir`, and the `unlock` request line for it.
+fn database_and_unlock_line(dir: &Path) -> String {
     let path = dir.join("resident.kdbx");
-    let mut v = trove_core::Vault::create(&path, PASSWORD).expect("create vault");
+    let mut v = trove_core::Database::create(&path, PASSWORD).expect("create database");
     v.add_entry("resident-entry").expect("add entry");
-    v.save().expect("save vault");
+    v.save().expect("save database");
     serde_json::json!({
         "cmd": "unlock",
         "path": path.to_str().unwrap(),
@@ -104,7 +104,7 @@ fn unlock(ctrl: &Path, line: &str, dir: &Path) {
 }
 
 #[test]
-fn without_resident_locking_the_last_vault_exits() {
+fn without_resident_locking_the_last_database_exits() {
     let Some(bin) = troved_bin() else {
         eprintln!("troved binary not built; skipping resident e2e");
         return;
@@ -112,7 +112,7 @@ fn without_resident_locking_the_last_vault_exits() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     let ctrl = dir.join("trove.sock");
-    let line = vault_and_unlock_line(dir);
+    let line = database_and_unlock_line(dir);
 
     let mut child = spawn_troved(&bin, dir, &[], 0);
     assert!(wait_connectable(&ctrl, STARTUP), "log:\n{}", read_log(dir));
@@ -135,7 +135,7 @@ fn resident_daemon_outlives_an_explicit_lock() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     let ctrl = dir.join("trove.sock");
-    let line = vault_and_unlock_line(dir);
+    let line = database_and_unlock_line(dir);
 
     let mut child = spawn_troved(&bin, dir, &["--resident"], 0);
     assert!(wait_connectable(&ctrl, STARTUP), "log:\n{}", read_log(dir));
@@ -170,7 +170,7 @@ fn resident_daemon_outlives_an_idle_lock() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     let ctrl = dir.join("trove.sock");
-    let line = vault_and_unlock_line(dir);
+    let line = database_and_unlock_line(dir);
 
     let mut child = spawn_troved(&bin, dir, &["--resident"], 1);
     assert!(wait_connectable(&ctrl, STARTUP), "log:\n{}", read_log(dir));

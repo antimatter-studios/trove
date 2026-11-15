@@ -1,13 +1,13 @@
 //! Discovery + consumer for the external `keepassxc-cli` oracle (every version
 //! found on the box). The consumer opens a crate-produced `.kdbx` with
-//! `keepassxc-cli` and recovers a normalized [`crate::matrix::VaultRepr`] for
+//! `keepassxc-cli` and recovers a normalized [`crate::matrix::DatabaseRepr`] for
 //! cross-tool conformance checking:
 //!   - the five standard string fields come from `export -f csv` (the password
 //!     column is plaintext, and the CSV reader rejoins multi-line Notes),
 //!   - tags + non-standard custom fields come from `show` (see [`consume`]),
 //!   - attachment bytes come from one `attachment-export` per (entry, name).
 //!
-//! A vault keepassxc can't parse makes `export` exit non-zero; we surface its
+//! A database keepassxc can't parse makes `export` exit non-zero; we surface its
 //! stderr first line as `Err(..)` so the harness records a read error rather
 //! than a content mismatch.
 //!
@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 
-use crate::matrix::{EntrySpec, VaultSpec};
+use crate::matrix::{EntrySpec, DatabaseSpec};
 
 /// One discovered keepassxc-cli binary: its `--version` string and its path.
 #[derive(Clone)]
@@ -106,7 +106,7 @@ fn parse_version_ignores_the_launch_dependent_name_prefix() {
 
 /// Mint a `.kdbx` from `spec` using **keepassxc-cli's KeePass-XML import**
 /// (`keepassxc-cli import <xml> <db>`), the reverse direction of [`consume`]:
-/// it proves keepassxc-written vaults are readable by the keepass crate / trove.
+/// it proves keepassxc-written databases are readable by the keepass crate / trove.
 ///
 /// # Why XML import (not `db-create` + `add` + `attachment-import`)
 /// The `add` command can set only the five standard string fields plus a
@@ -142,7 +142,7 @@ fn parse_version_ignores_the_launch_dependent_name_prefix() {
 /// 0.13.13), not defects in this producer — keepassxc round-trips its own output
 /// perfectly, and the XML we feed `import` is correct. The matrix records them as
 /// `Xfail` in `expect()` for the `Keepassxc → Crate0xx` cells whose fixture has
-/// attachments. Confirmed by reading produced vaults directly with each crate:
+/// attachments. Confirmed by reading produced databases directly with each crate:
 ///   1. **Multiple attachments → wrong/dropped bytes.** keepassxc stores KDBX-3.1
 ///      attachments in the XML `<Meta><Binaries>` pool. The crate's pool loader
 ///      (`format/xml_db/mod.rs`) assigns every pool entry an id via
@@ -151,13 +151,13 @@ fn parse_version_ignores_the_launch_dependent_name_prefix() {
 ///      `0`; they collide in the id→attachment `HashMap` and only one survives.
 ///      Each entry's `<Binary Ref="n"/>` then resolves to that single id-0 blob (so
 ///      every attachment reads as the same wrong bytes) or to a missing id (so the
-///      attachment is silently dropped). Triggers whenever a vault has ≥2 pool
+///      attachment is silently dropped). Triggers whenever a database has ≥2 pool
 ///      binaries total. NOT fixable from here: the crate ignores our `<Binary ID>`
 ///      and recomputes the id itself, so no id/ref scheme we emit changes the
 ///      outcome; and keepassxc-cli can only write KDBX 3.1 (header-stored KDBX-4
 ///      attachments, which the crate reads correctly, are unreachable). Single- or
-///      zero-attachment vaults read fine.
-///   2. **Zero-byte attachment → vault won't open at all.** keepassxc always
+///      zero-attachment databases read fine.
+///   2. **Zero-byte attachment → database won't open at all.** keepassxc always
 ///      serializes an empty-byte attachment as a self-closing `<Binary ID="n"
 ///      Compressed="True"/>` (no text child), regardless of input form or whether
 ///      it was made via `import` or `attachment-import`. The crate's `Binary`
@@ -170,7 +170,7 @@ fn parse_version_ignores_the_launch_dependent_name_prefix() {
 ///
 /// The new db's password is set with `-p`, which prompts twice (encrypt +
 /// repeat) — see [`run_with_password_twice`].
-pub fn produce(oracle: &Oracle, spec: &VaultSpec) -> Result<Vec<u8>, String> {
+pub fn produce(oracle: &Oracle, spec: &DatabaseSpec) -> Result<Vec<u8>, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
     let xmlfile = dir.path().join("import.xml");
     let dbfile = dir.path().join("v.kdbx");
@@ -178,10 +178,10 @@ pub fn produce(oracle: &Oracle, spec: &VaultSpec) -> Result<Vec<u8>, String> {
     let xml = build_import_xml(spec);
     std::fs::write(&xmlfile, xml.as_bytes()).map_err(|e| format!("write xml: {e}"))?;
 
-    // Composite-key vault: `import` can set a keyfile on the NEW db with
+    // Composite-key database: `import` can set a keyfile on the NEW db with
     // `--set-key-file <path>` (the `-k <path>` spelling is deprecated for this
     // subcommand). Stage the keyfile bytes and pass the flag so keepassxc mints
-    // a password+keyfile vault. Without a keyfile the args are exactly as before.
+    // a password+keyfile database. Without a keyfile the args are exactly as before.
     let mut import_args: Vec<&std::ffi::OsStr> = vec![
         "import".as_ref(),
         "-p".as_ref(),
@@ -216,7 +216,7 @@ pub fn produce(oracle: &Oracle, spec: &VaultSpec) -> Result<Vec<u8>, String> {
 ///   - Each `EntrySpec` is placed by walking/creating the nested `<Group>` chain
 ///     named by its `group_path`; sibling entries that share a prefix reuse the
 ///     same `<Group>` node (the group tree is merged, not duplicated).
-fn build_import_xml(spec: &VaultSpec) -> String {
+fn build_import_xml(spec: &DatabaseSpec) -> String {
     // ---- attachment pool: every (entry, attachment) gets its own `<Binary>`
     // pool slot with a stable id assigned in first-seen iteration order — the
     // same order the per-entry `<Binary Ref=..>` references are emitted below,
@@ -390,15 +390,15 @@ fn xml_escape(s: &str) -> String {
 pub fn consume(
     oracle: &Oracle,
     bytes: &[u8],
-    spec: &crate::matrix::VaultSpec,
-) -> Result<crate::matrix::VaultRepr, String> {
+    spec: &crate::matrix::DatabaseSpec,
+) -> Result<crate::matrix::DatabaseRepr, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
     let dbfile = dir.path().join("v.kdbx");
     std::fs::write(&dbfile, bytes).map_err(|e| format!("write db: {e}"))?;
 
-    // Composite-key vault: stage the keyfile once and pass `-k <path>` on EVERY
+    // Composite-key database: stage the keyfile once and pass `-k <path>` on EVERY
     // invocation that opens the db (`export`, `attachment-export`, `show`), in
-    // addition to the password on stdin. Password-only vaults set `keyfile` to
+    // addition to the password on stdin. Password-only databases set `keyfile` to
     // `None`, leaving the args untouched.
     let keyfile_path = dir.path().join("v.keyfile");
     let keyfile: Option<&Path> = match spec.key.keyfile() {
@@ -409,7 +409,7 @@ pub fn consume(
         None => None,
     };
 
-    // String fields via CSV export. Non-zero exit == unreadable vault.
+    // String fields via CSV export. Non-zero exit == unreadable database.
     let csv = run_with_password(
         &oracle.path,
         &with_keyfile(
@@ -532,7 +532,7 @@ fn recover_tags_and_custom_fields(
     abs_path: &str,
     password: &str,
     keyfile: Option<&Path>,
-    repr: &mut crate::matrix::VaultRepr,
+    repr: &mut crate::matrix::DatabaseRepr,
     key: &str,
 ) {
     // Tags: one `-a Tags` fetch, comma-separated, sorted.
@@ -644,13 +644,13 @@ fn recover_tags_and_custom_fields(
 /// Returns the stderr first line as `Err(..)` if `mkdir` exits non-zero.
 ///
 /// Takes the full `spec` so it can derive the same composite key keepassxc used
-/// to lock the vault: the password (`spec.password`) on stdin and, for a
-/// composite-key vault, the keyfile (`spec.key.keyfile()`) staged to a file and
-/// passed via `-k`. Password-only vaults pass no keyfile, exactly as before.
+/// to lock the database: the password (`spec.password`) on stdin and, for a
+/// composite-key database, the keyfile (`spec.key.keyfile()`) staged to a file and
+/// passed via `-k`. Password-only databases pass no keyfile, exactly as before.
 pub fn resave(
     oracle: &Oracle,
     bytes: &[u8],
-    spec: &crate::matrix::VaultSpec,
+    spec: &crate::matrix::DatabaseSpec,
 ) -> Result<Vec<u8>, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
     let dbfile = dir.path().join("v.kdbx");
@@ -681,10 +681,10 @@ pub fn resave(
     std::fs::read(&dbfile).map_err(|e| format!("read resaved db: {e}"))
 }
 
-/// Parse keepassxc's CSV export into a `VaultRepr`. Columns are looked up by
+/// Parse keepassxc's CSV export into a `DatabaseRepr`. Columns are looked up by
 /// header name (not position); the entry path is built from `Group`+`Title`
 /// with the root group excluded (root entries have `Group=""`).
-fn parse_csv(csv: &str) -> Result<crate::matrix::VaultRepr, String> {
+fn parse_csv(csv: &str) -> Result<crate::matrix::DatabaseRepr, String> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_reader(csv.as_bytes());
@@ -703,7 +703,7 @@ fn parse_csv(csv: &str) -> Result<crate::matrix::VaultRepr, String> {
         idx("Notes"),
     );
 
-    let mut repr = crate::matrix::VaultRepr::new();
+    let mut repr = crate::matrix::DatabaseRepr::new();
     for rec in rdr.records() {
         let rec = rec.map_err(|e| format!("csv record: {e}"))?;
         // Notes can span multiple lines (CSV-quoted); the reader rejoins them.
@@ -743,7 +743,7 @@ fn parse_csv(csv: &str) -> Result<crate::matrix::VaultRepr, String> {
 /// from `keyfile_path`, which the caller must keep alive for the run.
 ///
 /// Used by every read command (`export`, `show`, `attachment-export`, `mkdir`):
-/// when the vault is locked with password + keyfile, keepassxc needs BOTH —
+/// when the database is locked with password + keyfile, keepassxc needs BOTH —
 /// the password on stdin and the keyfile via `-k`.
 fn with_keyfile<'a>(
     args: &[&'a std::ffi::OsStr],

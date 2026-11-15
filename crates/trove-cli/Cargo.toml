@@ -47,7 +47,7 @@ rand = { version = "0.8", default-features = false, features = ["std", "std_rng"
 # `trove estimate` — Dropbox's zxcvbn strength estimator (the same engine
 # KeePassXC's estimate is modeled on).
 zxcvbn = "3"
-# `trove analyze --hibp` hashes vault passwords for offline lookups in the
+# `trove analyze --hibp` hashes database passwords for offline lookups in the
 # sorted pwned-passwords dump. SHA-1 is HIBP's key format, not a trust choice.
 sha1 = "0.10"
 # `trove clip` — cross-platform clipboard (macOS pasteboard, Windows, X11).
@@ -70,7 +70,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "io-util", "sync", "process"] }
 
-# macOS only: `--keychain` stores a vault password in the login keychain. Not a
+# macOS only: `--keychain` stores a database password in the login keychain. Not a
 # hard dependency of anything else, and absent on other platforms — the module
 # compiles to a clear "macOS only" error there.
 [target.'cfg(target_os = "macos")'.dependencies]

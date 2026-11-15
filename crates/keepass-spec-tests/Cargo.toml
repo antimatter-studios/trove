@@ -42,7 +42,7 @@ uuid = { version = "1", features = ["v4"] }
 rust-argon2 = "3"
 
 # Additional keepass-crate versions, linked side by side under distinct names so
-# one test binary can MINT fixture vaults with each version and feed them to every
+# one test binary can MINT fixture databases with each version and feed them to every
 # consumer in the matrix. Cargo permits this because 0.12 and 0.13 are
 # semver-incompatible (0.x minor = breaking), so they coexist as separate
 # packages — but it forbids two *names* for the same version, so the bare

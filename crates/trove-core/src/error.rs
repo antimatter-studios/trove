@@ -3,16 +3,16 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("vault file already exists: {0}")]
+    #[error("database file already exists: {0}")]
     AlreadyExists(PathBuf),
 
-    #[error("vault file not found: {0}")]
+    #[error("database file not found: {0}")]
     NotFound(PathBuf),
 
     #[error("entry not found: {0}")]
     EntryNotFound(String),
 
-    #[error("invalid password or corrupted vault")]
+    #[error("invalid password or corrupted database")]
     BadPassword,
 
     #[error("kdbx error: {0}")]
@@ -22,9 +22,9 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error(
-        "the vault file changed on disk since it was opened, and the change could not be \
-         merged (it opens with other credentials, is not a copy of this vault, cannot be read, \
-         or kept changing while saving): {0}. Saving would discard it — reopen the vault, \
+        "the database file changed on disk since it was opened, and the change could not be \
+         merged (it opens with other credentials, is not a copy of this database, cannot be read, \
+         or kept changing while saving): {0}. Saving would discard it — reopen the database, \
          or save elsewhere."
     )]
     StaleWrite(PathBuf),
@@ -64,6 +64,9 @@ pub enum Error {
 
     #[error("invalid icon {0}: built-in icons are 0 to 68")]
     InvalidIcon(usize),
+
+    #[error("invalid Trove database UUID {0:?}: expected a UUID")]
+    InvalidDatabaseUuid(String),
 
     /// A capability settings document that cannot be used. A broken document
     /// is never treated as absent: that would silently turn a capability off.

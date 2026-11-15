@@ -2,7 +2,7 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::fs::File;
 use std::path::Path;
 use tempfile::TempDir;
-use trove_core::Vault;
+use trove_core::Database;
 
 fn non_utf8_blob() -> Vec<u8> {
     let mut buf: Vec<u8> = (0u16..=255).map(|n| n as u8).collect();
@@ -17,20 +17,23 @@ fn non_utf8_blob() -> Vec<u8> {
 #[test]
 fn non_utf8_binary_round_trips_across_save_reopen() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     let password = "pw";
     let blob = non_utf8_blob();
 
     let id = {
-        let mut vault = Vault::create(&path, password).expect("create");
-        let id = vault.add_entry("blob-host").expect("add");
-        vault.attach_binary(&id, "raw", &blob).expect("attach");
-        vault.save().expect("save");
+        let mut database = Database::create(&path, password).expect("create");
+        let id = database.add_entry("blob-host").expect("add");
+        database.attach_binary(&id, "raw", &blob).expect("attach");
+        database.save().expect("save");
         id
     };
 
-    let vault = Vault::open(&path, password).expect("reopen");
-    let read = vault.read_binary(&id, "raw").expect("ok").expect("present");
+    let database = Database::open(&path, password).expect("reopen");
+    let read = database
+        .read_binary(&id, "raw")
+        .expect("ok")
+        .expect("present");
     assert_eq!(read.len(), blob.len(), "length must match");
     assert_eq!(read, blob, "bytes must match exactly");
 
@@ -44,7 +47,7 @@ fn non_utf8_binary_round_trips_across_save_reopen() {
 #[test]
 fn multiple_attachments_with_mixed_names_and_sizes() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     let password = "pw";
 
     let tiny = vec![0xFFu8];
@@ -52,23 +55,23 @@ fn multiple_attachments_with_mixed_names_and_sizes() {
     let mid: Vec<u8> = (0..2048).map(|i| (i & 0xFF) as u8).collect();
 
     let id = {
-        let mut vault = Vault::create(&path, password).expect("create");
-        let id = vault.add_entry("multi").expect("add");
-        vault
+        let mut database = Database::create(&path, password).expect("create");
+        let id = database.add_entry("multi").expect("add");
+        database
             .attach_binary(&id, "tiny.bin", &tiny)
             .expect("attach tiny");
-        vault
+        database
             .attach_binary(&id, "note.txt", &ascii)
             .expect("attach ascii");
-        vault
+        database
             .attach_binary(&id, "data.bin", &mid)
             .expect("attach mid");
-        vault.save().expect("save");
+        database.save().expect("save");
         id
     };
 
-    let vault = Vault::open(&path, password).expect("reopen");
-    let summary = vault.get_entry(&id).expect("entry survives");
+    let database = Database::open(&path, password).expect("reopen");
+    let summary = database.get_entry(&id).expect("entry survives");
     let mut names = summary.attachment_names.clone();
     names.sort();
     assert_eq!(
@@ -80,13 +83,19 @@ fn multiple_attachments_with_mixed_names_and_sizes() {
         ]
     );
 
-    assert_eq!(vault.read_binary(&id, "tiny.bin").unwrap().unwrap(), tiny);
-    assert_eq!(vault.read_binary(&id, "note.txt").unwrap().unwrap(), ascii);
-    assert_eq!(vault.read_binary(&id, "data.bin").unwrap().unwrap(), mid);
+    assert_eq!(
+        database.read_binary(&id, "tiny.bin").unwrap().unwrap(),
+        tiny
+    );
+    assert_eq!(
+        database.read_binary(&id, "note.txt").unwrap().unwrap(),
+        ascii
+    );
+    assert_eq!(database.read_binary(&id, "data.bin").unwrap().unwrap(), mid);
 }
 
 fn decrypt_to_xml(path: &Path, password: &str) -> String {
-    let mut f = File::open(path).expect("open vault");
+    let mut f = File::open(path).expect("open database");
     let key = keepass::DatabaseKey::new().with_password(password);
     let xml = keepass::Database::get_xml(&mut f, key).expect("decrypt xml");
     String::from_utf8_lossy(&xml).into_owned()
@@ -100,30 +109,30 @@ fn decrypt_to_xml(path: &Path, password: &str) -> String {
 #[test]
 fn removing_one_attachment_leaves_the_others_intact() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     {
-        let mut vault = Vault::create(&path, "pw").unwrap();
+        let mut database = Database::create(&path, "pw").unwrap();
         for (title, bytes) in [
             ("a", b"AAAA"),
             ("b", b"BBBB"),
             ("c", b"CCCC"),
             ("d", b"DDDD"),
         ] {
-            let id = vault.add_entry(title).unwrap();
-            vault.attach_binary(&id, "f", bytes).unwrap();
+            let id = database.add_entry(title).unwrap();
+            database.attach_binary(&id, "f", bytes).unwrap();
         }
-        vault.save().unwrap();
+        database.save().unwrap();
     }
     {
-        let mut vault = Vault::open(&path, "pw").unwrap();
-        let b = vault.find_by_title("b").unwrap();
-        vault.remove_binary(&b, "f").unwrap();
-        vault.save().unwrap();
+        let mut database = Database::open(&path, "pw").unwrap();
+        let b = database.find_by_title("b").unwrap();
+        database.remove_binary(&b, "f").unwrap();
+        database.save().unwrap();
     }
-    let vault = Vault::open(&path, "pw").unwrap();
+    let database = Database::open(&path, "pw").unwrap();
     let read = |title: &str| {
-        let id = vault.find_by_title(title).unwrap();
-        vault.read_binary(&id, "f").unwrap()
+        let id = database.find_by_title(title).unwrap();
+        database.read_binary(&id, "f").unwrap()
     };
     assert_eq!(read("a").as_deref(), Some(&b"AAAA"[..]));
     assert_eq!(read("b"), None);

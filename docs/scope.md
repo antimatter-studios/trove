@@ -10,29 +10,29 @@ break is in [stability.md](stability.md).
 
 - **A first-party mobile app.** KeePassDX and Strongbox already exist, and
   building a third would duplicate years of work. trove's part is making
-  vaults it writes work well in those apps; the materialization metadata spec
+  databases it writes work well in those apps; the materialization metadata spec
   for them is #290. See also [threat-model.md](threat-model.md).
-- **A cloud-hosted vault.** No SaaS. The planned sync server is self-hosted
+- **A cloud-hosted database.** No SaaS. The planned sync server is self-hosted
   and opt-in (#236), and trove works fully offline without it.
 - **Plugins without a sandbox.** KeePassXC refuses plugins because in-process
-  native code gets full vault access, and that reason is correct. Plugins
+  native code gets full database access, and that reason is correct. Plugins
   only ship with capability-scoped sandboxing (#288).
 - **GPG key management in the agent.** trove's gpg-agent signs and decrypts
-  with keys from the vault. It does not implement `GENKEY`, `IMPORT_KEY` or
-  `PASSWD`; create and edit keys with gpg and store them in the vault.
+  with keys from the database. It does not implement `GENKEY`, `IMPORT_KEY` or
+  `PASSWD`; create and edit keys with gpg and store them in the database.
   [macos.md](macos.md) covers what owning the gpg-agent socket costs.
 
-## The vault format
+## The database format
 
 kdbx4 is the default and stays the default. Everything trove writes stays
-readable by KeePassXC, and trove keeps the data other clients put in a vault
+readable by KeePassXC, and trove keeps the data other clients put in a database
 even when it doesn't use it. Extensions go in custom fields, `CustomData` or
 documented sidecar files, never in a breaking change to kdbx.
 
 A trove-native format, a strict kdbx4 superset for features kdbx4 cannot
 express (sealed fields, per-member keys), may come later (#256). If it does,
-it is opt-in: a vault only changes format when you convert it, trove refuses
-a native-only feature on a kdbx4 vault rather than converting silently, and
+it is opt-in: a database only changes format when you convert it, trove refuses
+a native-only feature on a kdbx4 database rather than converting silently, and
 converting back to kdbx4 is always possible.
 
 ## Decisions that changed

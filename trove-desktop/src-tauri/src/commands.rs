@@ -1,9 +1,9 @@
 //! Tauri command surface bridging the UI to `trove-core`.
 //!
-//! The app manages a *set* of registered vaults (the "Open vaults" switcher).
+//! The app manages a *set* of registered databases (the "Open databases" switcher).
 //! Each is either **locked** (path known, not decrypted) or **unlocked**
-//! (a decrypted [`Vault`] held in memory). The whole set lives in Tauri-managed
-//! state behind a single `Mutex<AppState>`, keyed by a stable vault id derived
+//! (a decrypted [`Database`] held in memory). The whole set lives in Tauri-managed
+//! state behind a single `Mutex<AppState>`, keyed by a stable database id derived
 //! from the file's canonical path. The registered `{path, name}` list is
 //! persisted as JSON in the Tauri app config dir so it survives restarts.
 //!
@@ -27,14 +27,19 @@ use crate::biometric;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, Manager, State};
 use trove_core::settings::{self, Attributes, Capability, Document, Origin};
-use trove_core::{EntryId, Vault};
+use trove_core::{Database, DatabaseMetadata, EntryId};
 use troved::materialize::{self, MaterializedFile, MaterializedStore};
 use troved::ssh_agent::{self, keeagent, ForwardedKey, LoadedKey};
 use zxcvbn::zxcvbn;
 
+mod lifecycle;
+mod revisions;
+pub use lifecycle::*;
+pub use revisions::*;
+
 /// Basename of the JSON file (in the app config dir) that persists the
-/// registered vault set as a list of `{path, name}`.
-const RECENTS_FILE: &str = "vaults.json";
+/// registered database set as a list of `{path, name}`.
+const RECENTS_FILE: &str = "databases.json";
 
 /// Basename of the JSON file (in the app config dir) holding app settings.
 const SETTINGS_FILE: &str = "settings.json";
@@ -43,38 +48,40 @@ const FAVORITE_TAG: &str = "Favorite";
 
 // --- state -----------------------------------------------------------------
 
-/// A registered vault: its canonical path, display name, and — when unlocked —
-/// the decrypted [`Vault`]. `vault: None` means locked.
-pub struct RegisteredVault {
+/// A registered database: its canonical path, display name, and — when unlocked —
+/// the decrypted [`Database`]. `database: None` means locked.
+pub struct RegisteredDatabase {
     pub path: PathBuf,
     pub name: String,
-    pub vault: Option<Vault>,
-    /// The keys this vault pushed into the system agent, so locking removes
-    /// exactly those and never another vault's (or another app's) identities.
+    pub trove_uuid: Option<String>,
+    pub database: Option<Database>,
+    /// The keys this database pushed into the system agent, so locking removes
+    /// exactly those and never another database's (or another app's) identities.
     /// `ForwardedKey` carries the per-entry `RemoveAtDatabaseClose` wish.
     pub exported_keys: Vec<ForwardedKey>,
-    /// Files this vault materialized, wiped on lock. Shares the daemon's
+    /// Files this database materialized, wiped on lock. Shares the daemon's
     /// store type so `materialize::wipe_all` does the removal.
     pub materialized: MaterializedStore,
     /// Unix seconds at which the first forwarded key expires, or `None` when
     /// nothing was forwarded or nothing expires. The agent keeps its own clock
     /// and never reports it, so this is trove's record of what it asked for.
     pub keys_expire_at: Option<u64>,
-    /// How long this vault's last KDF-bearing operation took, in milliseconds:
+    /// How long this database's last KDF-bearing operation took, in milliseconds:
     /// seeded by the unlock, replaced by each save. Writing a KDBX is not
     /// instant — a fresh master seed per save means a fresh Argon2 derivation
-    /// — and the cost is a property of THIS vault's KDF settings, so a
+    /// — and the cost is a property of THIS database's KDF settings, so a
     /// measurement beats any constant we could pick. The UI sizes its progress
     /// bar with it.
     pub write_ms: Option<u64>,
 }
 
-impl RegisteredVault {
+impl RegisteredDatabase {
     pub fn new(path: PathBuf, name: String) -> Self {
         Self {
             path,
             name,
-            vault: None,
+            trove_uuid: None,
+            database: None,
             exported_keys: Vec::new(),
             materialized: MaterializedStore::default(),
             keys_expire_at: None,
@@ -88,8 +95,8 @@ impl RegisteredVault {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
-    /// Push the vault's SSH keys into the OS agent on unlock, remove on lock.
-    /// This is what makes vault keys usable by other applications and by a
+    /// Push the database's SSH keys into the OS agent on unlock, remove on lock.
+    /// This is what makes database keys usable by other applications and by a
     /// terminal, neither of which can be handed troved's own socket.
     ///
     /// The daemon reads `TROVE_SSH_FORWARD` for the same decision; a windowed
@@ -102,7 +109,7 @@ pub struct Settings {
     /// Write `Materialize.*` entries to their target paths on unlock, and wipe
     /// them on lock.
     pub materialize: bool,
-    /// Minutes of no interaction before the vault view locks itself. `0`
+    /// Minutes of no interaction before the database view locks itself. `0`
     /// disables it.
     ///
     /// This closes the window and drops the decrypted database; it does NOT
@@ -111,13 +118,44 @@ pub struct Settings {
     pub idle_lock_minutes: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseMetadataDto {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub default_username: Option<String>,
+    pub trove_uuid: Option<String>,
+}
+
+impl From<DatabaseMetadata> for DatabaseMetadataDto {
+    fn from(metadata: DatabaseMetadata) -> Self {
+        Self {
+            name: metadata.name,
+            description: metadata.description,
+            default_username: metadata.default_username,
+            trove_uuid: metadata.trove_uuid,
+        }
+    }
+}
+
+impl From<DatabaseMetadataDto> for DatabaseMetadata {
+    fn from(metadata: DatabaseMetadataDto) -> Self {
+        Self {
+            name: metadata.name.filter(|value| !value.is_empty()),
+            description: metadata.description.filter(|value| !value.is_empty()),
+            default_username: metadata.default_username.filter(|value| !value.is_empty()),
+            trove_uuid: metadata.trove_uuid.filter(|value| !value.is_empty()),
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             // On by default. The per-entry gate is the real control: only
             // entries whose KeeAgent.settings ask for agent loading are
             // exported, which is what `trove add ssh` writes and what
-            // KeePassXC users already set. A vault of hand-attached,
+            // KeePassXC users already set. A database of hand-attached,
             // unmarked keys exports nothing.
             system_agent: true,
             system_agent_lifetime: 900,
@@ -127,44 +165,48 @@ impl Default for Settings {
     }
 }
 
-/// The full multi-vault state: vault id → registered vault.
+/// The full multi-database state: database id → registered database.
 #[derive(Default)]
 pub struct AppState {
-    pub vaults: BTreeMap<String, RegisteredVault>,
+    pub databases: BTreeMap<String, RegisteredDatabase>,
 }
 
 /// Tauri-managed handle to [`AppState`].
-pub type VaultState = Mutex<AppState>;
+pub type DatabaseState = Mutex<AppState>;
 
-/// One persisted recent, mirrored to `vaults.json`.
+/// One persisted recent, mirrored to `databases.json`.
 #[derive(Serialize, Deserialize, Clone)]
 struct RecentEntry {
     path: String,
     name: String,
+    #[serde(default)]
+    trove_uuid: Option<String>,
 }
 
 // --- DTOs (serialized names are what the frontend sees) --------------------
 
-/// A registered vault as the switcher sees it.
+/// A registered database as the switcher sees it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BiometricDto {
     /// A fingerprint reader with an enrolled finger, usable right now.
     pub available: bool,
-    /// This vault has a password stored for Touch ID to release.
+    /// This database has a password stored for Touch ID to release.
     pub enrolled: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultDto {
+pub struct DatabaseDto {
     pub id: String,
     pub name: String,
     /// File basename including extension, e.g. `inpace.kdbx`.
     pub file: String,
     pub path: String,
+    pub trove_uuid: Option<String>,
     pub locked: bool,
-    /// How many of this vault's keys are currently sitting in the system
+    pub read_only: bool,
+    /// How many of this database's keys are currently sitting in the system
     /// agent. The whole point of forwarding is invisible otherwise — this is
     /// what makes "are my keys actually loaded?" answerable without a terminal.
     pub agent_keys: usize,
@@ -219,7 +261,7 @@ pub struct EntryDto {
     pub agent_lifetime: Option<u32>,
     /// Ask the agent to confirm before every use of this key.
     pub agent_confirm: bool,
-    /// Take this key back out of the agent when the vault is locked.
+    /// Take this key back out of the agent when the database is locked.
     pub agent_remove_on_close: bool,
 }
 
@@ -271,7 +313,7 @@ pub struct GroupDto {
     pub path: Vec<String>,
     pub tags: Vec<String>,
     pub inherited_tags: Vec<String>,
-    /// This group is the vault's recycle bin (the UI pins it apart).
+    /// This group is the database's recycle bin (the UI pins it apart).
     pub recycle_bin: bool,
     /// Place among its siblings once someone has arranged them; `None` sorts
     /// alphabetically after the arranged ones.
@@ -300,12 +342,12 @@ pub struct DeleteGroupResult {
 
 // --- id / path helpers -----------------------------------------------------
 
-/// Deterministic vault id: 16-char lowercase hex of an FNV-1a hash over the
+/// Deterministic database id: 16-char lowercase hex of an FNV-1a hash over the
 /// canonical path string. FNV-1a is used (not `std`'s `DefaultHasher`, whose
 /// output is not guaranteed stable across releases) so the *same file always
 /// maps to the same id* across app restarts — the persisted recents depend on
 /// it. Std-only, no extra dependency.
-fn vault_id_for(canonical: &Path) -> String {
+fn database_id_for(canonical: &Path) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = OFFSET;
@@ -334,49 +376,63 @@ fn absolute(p: &Path) -> PathBuf {
     }
 }
 
-/// Vault display name = file basename without extension (`inpace.kdbx` →
+/// Database display name = file basename without extension (`inpace.kdbx` →
 /// `inpace`).
-fn vault_name(path: &Path) -> String {
+fn database_name(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
 /// File basename including extension (`inpace.kdbx`).
-fn vault_file(path: &Path) -> String {
+fn database_file(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
-fn vault_dto(id: &str, rv: &RegisteredVault) -> VaultDto {
-    VaultDto {
+fn database_dto(id: &str, rv: &RegisteredDatabase) -> DatabaseDto {
+    DatabaseDto {
         id: id.to_string(),
         name: rv.name.clone(),
-        file: vault_file(&rv.path),
+        file: database_file(&rv.path),
         path: rv.path.to_string_lossy().into_owned(),
-        locked: rv.vault.is_none(),
+        trove_uuid: rv.trove_uuid.clone(),
+        locked: rv.database.is_none(),
+        read_only: database_is_read_only(&rv.path),
         agent_keys: rv.exported_keys.len(),
         keys_expire_at: rv.keys_expire_at,
     }
 }
 
-fn poisoned<T>(_: T) -> String {
-    "vault state was poisoned".to_string()
+fn database_is_read_only(path: &Path) -> bool {
+    let file_read_only = std::fs::metadata(path)
+        .map(|metadata| metadata.permissions().readonly())
+        .unwrap_or(true);
+    let parent_read_only = path
+        .parent()
+        .and_then(|parent| std::fs::metadata(parent).ok())
+        .map(|metadata| metadata.permissions().readonly())
+        .unwrap_or(true);
+    file_read_only || parent_read_only
 }
 
-/// Guard against a vault-id hash collision. The id maps 1:1 to a registered
-/// vault, so silently reusing it for a *different* file would clobber the first
+fn poisoned<T>(_: T) -> String {
+    "database state was poisoned".to_string()
+}
+
+/// Guard against a database-id hash collision. The id maps 1:1 to a registered
+/// database, so silently reusing it for a *different* file would clobber the first
 /// registration (and later id-routed unlock/save/delete calls would hit the
-/// wrong vault). Collisions are astronomically unlikely with a 64-bit FNV-1a id,
+/// wrong database). Collisions are astronomically unlikely with a 64-bit FNV-1a id,
 /// but we refuse rather than overwrite. Returns `Ok(true)` when `id` already
 /// maps to this same path (caller treats it as an idempotent no-op), `Ok(false)`
 /// when `id` is free.
 fn ensure_no_id_collision(state: &AppState, id: &str, cpath: &Path) -> Result<bool, String> {
-    match state.vaults.get(id) {
+    match state.databases.get(id) {
         Some(rv) if rv.path == cpath => Ok(true),
         Some(rv) => Err(format!(
-            "vault id collision: {id} already maps to {}; refusing to register {}",
+            "database id collision: {id} already maps to {}; refusing to register {}",
             rv.path.display(),
             cpath.display(),
         )),
@@ -390,13 +446,13 @@ fn ensure_no_id_collision(state: &AppState, id: &str, cpath: &Path) -> Result<bo
 /// directory used to be called.
 const LEGACY_BUNDLE_ID: &str = "com.trove.desktop";
 
-/// Move settings and the vault list over from the old identifier's directory,
+/// Move settings and the database list over from the old identifier's directory,
 /// once.
 ///
 /// macOS keys an app's data directory by bundle identifier, so renaming the
 /// bundle orphans everything the app had written — for trove that is the list
-/// of registered vaults and the agent settings, i.e. the app comes up looking
-/// factory-new with the user's vaults apparently gone. Copying rather than
+/// of registered databases and the agent settings, i.e. the app comes up looking
+/// factory-new with the user's databases apparently gone. Copying rather than
 /// moving leaves the old directory intact, so an older build still works and
 /// nothing is destroyed if this goes wrong.
 ///
@@ -422,7 +478,7 @@ pub fn migrate_legacy_config(app: &AppHandle) {
         }
         match std::fs::copy(&from, &to) {
             Ok(_) => eprintln!("trove: carried {name} over from {LEGACY_BUNDLE_ID}"),
-            // Not fatal: the app still opens, the user re-adds their vaults.
+            // Not fatal: the app still opens, the user re-adds their databases.
             Err(e) => eprintln!("trove: could not carry {name} over: {e}"),
         }
     }
@@ -464,7 +520,7 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Read settings, falling back to defaults for a missing or unreadable file —
-/// a corrupt settings file must never stop the app from opening a vault.
+/// a corrupt settings file must never stop the app from opening a database.
 pub fn load_settings(app: &AppHandle) -> Settings {
     let Ok(path) = settings_path(app) else {
         return Settings::default();
@@ -547,7 +603,7 @@ fn step(app: &AppHandle, step: &'static str, state: &'static str, detail: impl I
 
 // --- unlock/lock side effects ----------------------------------------------
 
-/// Push this vault's SSH keys into the system agent, returning what went in so
+/// Push this database's SSH keys into the system agent, returning what went in so
 /// `lock` can take exactly those back out.
 ///
 /// The heavy lifting is `troved`'s forwarding code, which honours each entry's
@@ -556,12 +612,12 @@ fn step(app: &AppHandle, step: &'static str, state: &'static str, detail: impl I
 /// fallback window, because the daemon takes those from the environment and a
 /// windowed app has no shell.
 ///
-/// Best-effort by design: a vault still opens if the agent is unreachable.
-async fn export_keys(vault: &Vault, settings: &Settings) -> (Vec<ForwardedKey>, Option<u64>) {
+/// Best-effort by design: a database still opens if the agent is unreachable.
+async fn export_keys(database: &Database, settings: &Settings) -> (Vec<ForwardedKey>, Option<u64>) {
     if !settings.system_agent {
         return (Vec::new(), None);
     }
-    let keys: Vec<LoadedKey> = troved::handler::load_ssh_keys_from_vault(vault);
+    let keys: Vec<LoadedKey> = troved::handler::load_ssh_keys_from_database(database);
     if keys.is_empty() {
         return (Vec::new(), None);
     }
@@ -603,24 +659,24 @@ fn soonest_expiry(keys: &[LoadedKey], default_secs: u32) -> Option<u64> {
 /// Materialize every entry whose `Materialize.*` fields validate. Plan errors
 /// are reported, never fatal — one bad entry must not block the unlock.
 fn materialize_all(
-    vault: &Vault,
-    vault_path: &Path,
+    database: &Database,
+    database_path: &Path,
     store: &MaterializedStore,
     settings: &Settings,
 ) {
     if !settings.materialize {
         return;
     }
-    // The daemon keys materialized files by vault so `lock --vault` wipes only
-    // that vault's; the app has one store per registered vault but passes the
+    // The daemon keys materialized files by database so `lock --database` wipes only
+    // that database's; the app has one store per registered database but passes the
     // same key so the bookkeeping matches.
-    let vault_key = troved::vaults::canonical_key(vault_path);
-    let (plans, errors) = materialize::build_plans(vault);
+    let database_key = troved::databases::canonical_key(database_path);
+    let (plans, errors) = materialize::build_plans(database);
     for (title, e) in errors {
         eprintln!("trove: skipping materialization for '{title}': {e}");
     }
     for plan in &plans {
-        match materialize::materialize_one(vault, &vault_key, plan, store.clone()) {
+        match materialize::materialize_one(database, &database_key, plan, store.clone()) {
             Ok(MaterializedFile { target, .. }) => {
                 eprintln!("trove: materialized {}", target.display())
             }
@@ -639,25 +695,54 @@ async fn undo_side_effects(exported: Vec<ForwardedKey>, materialized: Materializ
 }
 
 /// Add-or-update one recent by canonical path, then persist the whole list.
-fn persist_recent(app: &AppHandle, canonical: &Path, name: &str) -> Result<(), String> {
+fn persist_recent(
+    app: &AppHandle,
+    canonical: &Path,
+    name: &str,
+    trove_uuid: Option<Option<&str>>,
+) -> Result<(), String> {
     let cpath = canonical.to_string_lossy().into_owned();
     let mut recents = load_recents(app);
     if let Some(existing) = recents.iter_mut().find(|r| r.path == cpath) {
         existing.name = name.to_string();
+        if let Some(trove_uuid) = trove_uuid {
+            existing.trove_uuid = trove_uuid.map(str::to_string);
+        }
     } else {
         recents.push(RecentEntry {
             path: cpath,
             name: name.to_string(),
+            trove_uuid: trove_uuid.flatten().map(str::to_string),
         });
     }
     save_recents(app, &recents)
 }
 
-// --- open-vault access helpers ---------------------------------------------
+fn cache_database_uuid(
+    app: &AppHandle,
+    id: &str,
+    trove_uuid: Option<String>,
+) -> Result<(), String> {
+    let app_state = app.state::<DatabaseState>();
+    let mut state = app_state.lock().map_err(poisoned)?;
+    let database = state
+        .databases
+        .get_mut(id)
+        .ok_or_else(|| "database is not registered".to_string())?;
+    database.trove_uuid = trove_uuid.clone();
+    persist_recent(
+        app,
+        &database.path,
+        &database.name,
+        Some(trove_uuid.as_deref()),
+    )
+}
 
-/// Run `f` against an open vault, off the main thread.
+// --- open-database access helpers ---------------------------------------------
+
+/// Run `f` against an open database, off the main thread.
 ///
-/// EVERY command that touches a vault must go through this. A synchronous
+/// EVERY command that touches a database must go through this. A synchronous
 /// `#[tauri::command]` runs on the MAIN thread, and these commands hold a
 /// `std::sync::Mutex` over the whole app state while doing kdbx work — so a
 /// sync command is a frozen window and a queue of everything behind it. The
@@ -665,49 +750,49 @@ fn persist_recent(app: &AppHandle, canonical: &Path, name: &str) -> Result<(), S
 ///
 /// `AppHandle` is `Send`, which is what lets the state be reached from there;
 /// `State` itself cannot cross the boundary.
-async fn on_vault<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
+async fn on_database<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(&Vault) -> Result<T, String> + Send + 'static,
+    F: FnOnce(&Database) -> Result<T, String> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<VaultState>();
+        let state = app.state::<DatabaseState>();
         with_open(&state, &id, f)
     })
     .await
-    .map_err(|e| format!("vault task panicked: {e}"))?
+    .map_err(|e| format!("database task panicked: {e}"))?
 }
 
-/// [`on_vault`] for the mutating half. In-memory only — see
-/// [`on_vault_write`] for the mutations that have to reach the file.
-async fn on_vault_mut<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
+/// [`on_database`] for the mutating half. In-memory only — see
+/// [`on_database_write`] for the mutations that have to reach the file.
+async fn on_database_mut<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(&mut Vault) -> Result<T, String> + Send + 'static,
+    F: FnOnce(&mut Database) -> Result<T, String> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<VaultState>();
+        let state = app.state::<DatabaseState>();
         with_open_mut(&state, &id, f)
     })
     .await
-    .map_err(|e| format!("vault task panicked: {e}"))?
+    .map_err(|e| format!("database task panicked: {e}"))?
 }
 
-/// Progress for a vault write, emitted to the whole window.
+/// Progress for a database write, emitted to the whole window.
 ///
 /// A KDBX save is NOT instant and cannot be made so: the format rotates the
 /// master seed on every write, so every write re-derives the key with Argon2
 /// — at KeePassXC's own defaults, seconds. (That rotation is the point: it
-/// stops two versions of a vault being encrypted under the same key.) Without
+/// stops two versions of a database being encrypted under the same key.) Without
 /// something on screen the window looks hung and people click again.
-const VAULT_WRITE_EVENT: &str = "vault-write";
+const DATABASE_WRITE_EVENT: &str = "database-write";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WriteStep {
     /// `start`, `done` or `failed`.
     phase: &'static str,
-    /// What the last write on this vault actually cost, in milliseconds, so
+    /// What the last write on this database actually cost, in milliseconds, so
     /// the bar is drawn against a measurement rather than a guess. `0` before
     /// anything has been measured — draw an indeterminate bar for that.
     estimate_ms: u64,
@@ -717,7 +802,7 @@ struct WriteStep {
 fn write_step(app: &AppHandle, phase: &'static str, estimate_ms: u64, detail: impl Into<String>) {
     // Best-effort: a UI that isn't listening must never fail a save.
     let _ = app.emit(
-        VAULT_WRITE_EVENT,
+        DATABASE_WRITE_EVENT,
         WriteStep {
             phase,
             estimate_ms,
@@ -726,51 +811,51 @@ fn write_step(app: &AppHandle, phase: &'static str, estimate_ms: u64, detail: im
     );
 }
 
-/// What the next write on this vault is likely to cost, from the last one.
+/// What the next write on this database is likely to cost, from the last one.
 fn write_estimate_ms(app: &AppHandle, id: &str) -> u64 {
-    let state = app.state::<VaultState>();
+    let state = app.state::<DatabaseState>();
     state
         .lock()
         .ok()
-        .and_then(|g| g.vaults.get(id).and_then(|rv| rv.write_ms))
+        .and_then(|g| g.databases.get(id).and_then(|rv| rv.write_ms))
         .unwrap_or(0)
 }
 
-/// Mutate an open vault AND persist it, reporting progress while it happens.
+/// Mutate an open database AND persist it, reporting progress while it happens.
 ///
 /// Every mutation that must survive a lock or a quit goes through here.
-/// `on_vault_mut` alone changes memory only — a vault edited that way looks
+/// `on_database_mut` alone changes memory only — a database edited that way looks
 /// saved and isn't.
-async fn on_vault_write<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
+async fn on_database_write<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(&mut Vault) -> Result<T, String> + Send + 'static,
+    F: FnOnce(&mut Database) -> Result<T, String> + Send + 'static,
 {
     let estimate = write_estimate_ms(&app, &id);
     write_step(&app, "start", estimate, "");
 
     let task_app = app.clone();
     let out = tauri::async_runtime::spawn_blocking(move || {
-        let state = task_app.state::<VaultState>();
+        let state = task_app.state::<DatabaseState>();
         let mut guard = state.lock().map_err(poisoned)?;
         let rv = guard
-            .vaults
+            .databases
             .get_mut(&id)
-            .ok_or_else(|| "vault is not registered".to_string())?;
-        let vault = rv
-            .vault
+            .ok_or_else(|| "database is not registered".to_string())?;
+        let database = rv
+            .database
             .as_mut()
-            .ok_or_else(|| "vault is locked".to_string())?;
-        let out = f(vault)?;
+            .ok_or_else(|| "database is locked".to_string())?;
+        let out = f(database)?;
         // Measure the save alone. The mutation before it is memory work and
         // costs nothing worth reporting; the KDF is the whole of the wait.
         let started = Instant::now();
-        vault.save().map_err(|e| e.to_string())?;
+        database.save().map_err(|e| e.to_string())?;
         rv.write_ms = Some(started.elapsed().as_millis() as u64);
         Ok::<T, String>(out)
     })
     .await
-    .map_err(|e| format!("vault task panicked: {e}"))?;
+    .map_err(|e| format!("database task panicked: {e}"))?;
 
     match &out {
         Ok(_) => write_step(&app, "done", 0, ""),
@@ -780,7 +865,7 @@ where
 }
 
 /// Run any state-touching work off the main thread, for commands that need the
-/// registry rather than an open vault.
+/// registry rather than an open database.
 async fn off_main<T, F>(app: AppHandle, f: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -792,37 +877,37 @@ where
 }
 
 fn with_open<T>(
-    state: &State<'_, VaultState>,
+    state: &State<'_, DatabaseState>,
     id: &str,
-    f: impl FnOnce(&Vault) -> Result<T, String>,
+    f: impl FnOnce(&Database) -> Result<T, String>,
 ) -> Result<T, String> {
     let guard = state.lock().map_err(poisoned)?;
     let rv = guard
-        .vaults
+        .databases
         .get(id)
-        .ok_or_else(|| "vault is not registered".to_string())?;
-    let vault = rv
-        .vault
+        .ok_or_else(|| "database is not registered".to_string())?;
+    let database = rv
+        .database
         .as_ref()
-        .ok_or_else(|| "vault is locked".to_string())?;
-    f(vault)
+        .ok_or_else(|| "database is locked".to_string())?;
+    f(database)
 }
 
 fn with_open_mut<T>(
-    state: &State<'_, VaultState>,
+    state: &State<'_, DatabaseState>,
     id: &str,
-    f: impl FnOnce(&mut Vault) -> Result<T, String>,
+    f: impl FnOnce(&mut Database) -> Result<T, String>,
 ) -> Result<T, String> {
     let mut guard = state.lock().map_err(poisoned)?;
     let rv = guard
-        .vaults
+        .databases
         .get_mut(id)
-        .ok_or_else(|| "vault is not registered".to_string())?;
-    let vault = rv
-        .vault
+        .ok_or_else(|| "database is not registered".to_string())?;
+    let database = rv
+        .database
         .as_mut()
-        .ok_or_else(|| "vault is locked".to_string())?;
-    f(vault)
+        .ok_or_else(|| "database is locked".to_string())?;
+    f(database)
 }
 
 // --- entry <-> DTO ----------------------------------------------------------
@@ -857,17 +942,17 @@ fn derive_type(url: &str) -> String {
     }
 }
 
-fn build_entry_dtos(vault: &Vault) -> Vec<EntryDto> {
-    vault
+fn build_entry_dtos(database: &Database) -> Vec<EntryDto> {
+    database
         .list_entries()
         .into_iter()
-        .map(|s| entry_dto(vault, s))
+        .map(|s| entry_dto(database, s))
         .collect()
 }
 
-fn build_group_dtos(vault: &Vault) -> Vec<GroupDto> {
-    let bin = vault.recycle_bin_path();
-    vault
+fn build_group_dtos(database: &Database) -> Vec<GroupDto> {
+    let bin = database.recycle_bin_path();
+    database
         .list_groups()
         .into_iter()
         .map(|group| GroupDto {
@@ -880,16 +965,16 @@ fn build_group_dtos(vault: &Vault) -> Vec<GroupDto> {
         .collect()
 }
 
-fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
+fn entry_dto(database: &Database, s: trove_core::EntrySummary) -> EntryDto {
     // Read the reserved fields + password (for strength/length) per entry.
     // These are computed server-side; the password never leaves this function.
-    let password = vault
+    let password = database
         .get_field(&s.id, "Password")
         .ok()
         .flatten()
         .unwrap_or_default();
-    let trove_type = vault.get_field(&s.id, "_TroveType").ok().flatten();
-    let fav = vault
+    let trove_type = database.get_field(&s.id, "_TroveType").ok().flatten();
+    let fav = database
         .get_entry_tags(&s.id)
         .is_ok_and(|tags| tags.iter().any(|tag| is_favorite_tag(tag)));
 
@@ -904,7 +989,7 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
     let pw_len = u16::try_from(password.chars().count()).unwrap_or(u16::MAX);
     let strength = strength(&password);
     let (ssh_key_attachment, agent_key, policy) =
-        agent_key_state(vault, &s.id, &s.attachment_names);
+        agent_key_state(database, &s.id, &s.attachment_names);
 
     EntryDto {
         id,
@@ -939,7 +1024,7 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
 /// still offer the toggle, and report it as not declared (which is exactly how
 /// the export path treats it).
 fn agent_key_state(
-    vault: &Vault,
+    database: &Database,
     id: &EntryId,
     attachment_names: &[String],
 ) -> (String, bool, keeagent::AgentPolicy) {
@@ -947,7 +1032,7 @@ fn agent_key_state(
         .iter()
         .any(|a| a == keeagent::ATTACHMENT_NAME)
     {
-        if let Ok(Some(bytes)) = vault.read_binary(id, keeagent::ATTACHMENT_NAME) {
+        if let Ok(Some(bytes)) = database.read_binary(id, keeagent::ATTACHMENT_NAME) {
             // A declared entry names its attachment and is opted in; an entry
             // that opted out still says which attachment it was about, so read
             // that out of the blob either way. The policy comes back for both,
@@ -983,7 +1068,7 @@ fn agent_key_state(
     let found = attachment_names
         .iter()
         .find(|name| {
-            vault
+            database
                 .read_binary(id, name)
                 .ok()
                 .flatten()
@@ -1039,11 +1124,18 @@ fn keeagent_attachment_name(bytes: &[u8]) -> Option<String> {
 
 /// Set a standard field when `value` is non-empty, otherwise clear it —
 /// "empty string clears/omits" per the contract.
-fn set_or_clear(vault: &mut Vault, id: &EntryId, field: &str, value: &str) -> Result<(), String> {
+fn set_or_clear(
+    database: &mut Database,
+    id: &EntryId,
+    field: &str,
+    value: &str,
+) -> Result<(), String> {
     if value.is_empty() {
-        vault.remove_field(id, field).map_err(|e| e.to_string())
+        database.remove_field(id, field).map_err(|e| e.to_string())
     } else {
-        vault.set_field(id, field, value).map_err(|e| e.to_string())
+        database
+            .set_field(id, field, value)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1069,9 +1161,9 @@ fn split_entry_path(path: &str) -> Result<(Vec<String>, String), String> {
 /// Apply a possibly-changed path to an existing entry: move it to the new
 /// group (creating the group with `mkdir -p` semantics) when the group path
 /// changed, then set its title.
-fn update_entry_path(vault: &mut Vault, id: &EntryId, path: &str) -> Result<(), String> {
+fn update_entry_path(database: &mut Database, id: &EntryId, path: &str) -> Result<(), String> {
     let (groups, leaf) = split_entry_path(path)?;
-    let current = vault
+    let current = database
         .get_entry(id)
         .ok_or_else(|| "entry not found".to_string())?;
     if current.group_path != groups {
@@ -1079,43 +1171,45 @@ fn update_entry_path(vault: &mut Vault, id: &EntryId, path: &str) -> Result<(), 
         if !group_path.is_empty() {
             // move_entry requires the destination to exist; ensure it. A
             // pre-existing leaf group is fine (ignore GroupExists).
-            match vault.add_group(&group_path) {
+            match database.add_group(&group_path) {
                 Ok(()) | Err(trove_core::Error::GroupExists(_)) => {}
                 Err(e) => return Err(e.to_string()),
             }
         }
-        vault
+        database
             .move_entry(id, &group_path)
             .map_err(|e| e.to_string())?;
     }
-    vault
+    database
         .set_field(id, "Title", &leaf)
         .map_err(|e| e.to_string())
 }
 
 /// Create or update an entry from `input`, returning its id. The caller saves
-/// — every command that mutates goes through [`on_vault_write`], which is
+/// — every command that mutates goes through [`on_database_write`], which is
 /// where the save, its progress events and its timing live.
-fn apply_save_entry(vault: &mut Vault, input: &EntryInput) -> Result<EntryId, String> {
+fn apply_save_entry(database: &mut Database, input: &EntryInput) -> Result<EntryId, String> {
     let entry_id = match &input.entry_id {
-        None => vault.add_entry(&input.path).map_err(|e| e.to_string())?,
+        None => database.add_entry(&input.path).map_err(|e| e.to_string())?,
         Some(existing) => {
             // EntryId's FromStr is infallible.
             let eid = EntryId::from_str(existing).unwrap();
-            update_entry_path(vault, &eid, &input.path)?;
+            update_entry_path(database, &eid, &input.path)?;
             eid
         }
     };
-    set_or_clear(vault, &entry_id, "UserName", &input.username)?;
-    set_or_clear(vault, &entry_id, "Password", &input.password)?;
-    set_or_clear(vault, &entry_id, "URL", &input.url)?;
-    set_or_clear(vault, &entry_id, "Notes", &input.notes)?;
-    set_or_clear(vault, &entry_id, "_TroveType", &input.entry_type)?;
+    set_or_clear(database, &entry_id, "UserName", &input.username)?;
+    set_or_clear(database, &entry_id, "Password", &input.password)?;
+    set_or_clear(database, &entry_id, "URL", &input.url)?;
+    set_or_clear(database, &entry_id, "Notes", &input.notes)?;
+    set_or_clear(database, &entry_id, "_TroveType", &input.entry_type)?;
     if let Some(tags) = &input.tags {
-        vault.set_tags(&entry_id, tags).map_err(|e| e.to_string())?;
+        database
+            .set_tags(&entry_id, tags)
+            .map_err(|e| e.to_string())?;
     }
     if let Some(fields) = &input.fields {
-        apply_attributes(vault, &entry_id, fields)?;
+        apply_attributes(database, &entry_id, fields)?;
     }
     Ok(entry_id)
 }
@@ -1138,8 +1232,12 @@ fn apply_save_entry(vault: &mut Vault, input: &EntryInput) -> Result<EntryId, St
 /// found it, and a reconcile that wrote `foo` would create one key and delete
 /// the other, breaking anything that looks the attribute up by name. Whitespace
 /// only decides whether a row counts as blank.
-fn apply_attributes(vault: &mut Vault, eid: &EntryId, fields: &[KvDto]) -> Result<(), String> {
-    let existing: Vec<String> = vault
+fn apply_attributes(
+    database: &mut Database,
+    eid: &EntryId,
+    fields: &[KvDto],
+) -> Result<(), String> {
+    let existing: Vec<String> = database
         .custom_field_names(eid)
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -1151,14 +1249,16 @@ fn apply_attributes(vault: &mut Vault, eid: &EntryId, fields: &[KvDto]) -> Resul
         if name.trim().is_empty() || !is_user_attribute(name) || is_standard_field(name) {
             continue;
         }
-        vault
+        database
             .set_field(eid, name, &f.v)
             .map_err(|e| e.to_string())?;
         kept.push(name);
     }
     for old in existing {
         if !kept.iter().any(|k| *k == old) {
-            vault.remove_field(eid, &old).map_err(|e| e.to_string())?;
+            database
+                .remove_field(eid, &old)
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -1191,18 +1291,71 @@ fn is_user_attribute(key: &str) -> bool {
     !key.starts_with("_Trove") && !key.starts_with("Materialize.")
 }
 
+fn apply_custom_attribute(
+    database: &mut Database,
+    eid: &EntryId,
+    old_name: Option<&str>,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    if name.trim().is_empty() || !is_user_attribute(name) || is_standard_field(name) {
+        return Err("attribute name is empty or reserved".to_string());
+    }
+    let existing = database
+        .custom_field_names(eid)
+        .map_err(|e| e.to_string())?;
+    if let Some(old) = old_name {
+        if !existing
+            .iter()
+            .any(|field| field == old && is_user_attribute(field))
+        {
+            return Err(format!("custom attribute not found: {old}"));
+        }
+    }
+    if old_name != Some(name) && existing.iter().any(|field| field == name) {
+        return Err(format!("attribute already exists: {name}"));
+    }
+    database
+        .set_field(eid, name, value)
+        .map_err(|e| e.to_string())?;
+    if let Some(old) = old_name.filter(|old| *old != name) {
+        database.remove_field(eid, old).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn apply_remove_custom_attribute(
+    database: &mut Database,
+    eid: &EntryId,
+    name: &str,
+) -> Result<(), String> {
+    let existing = database
+        .custom_field_names(eid)
+        .map_err(|e| e.to_string())?;
+    if !existing
+        .iter()
+        .any(|field| field == name && is_user_attribute(field))
+    {
+        return Err(format!("custom attribute not found: {name}"));
+    }
+    database.remove_field(eid, name).map_err(|e| e.to_string())
+}
+
 /// Non-secret + password detail for a selected entry.
-fn entry_detail(vault: &Vault, eid: &EntryId) -> Result<EntryDetailDto, String> {
-    let notes = vault
+fn entry_detail(database: &Database, eid: &EntryId) -> Result<EntryDetailDto, String> {
+    let notes = database
         .get_field(eid, "Notes")
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    let password = vault
+    let password = database
         .get_field(eid, "Password")
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
     let mut fields = Vec::new();
-    for k in vault.custom_field_names(eid).map_err(|e| e.to_string())? {
+    for k in database
+        .custom_field_names(eid)
+        .map_err(|e| e.to_string())?
+    {
         // custom_field_names already excludes the five standard fields; drop
         // the reserved _Trove* keys too — they are never user attributes.
         //
@@ -1214,7 +1367,7 @@ fn entry_detail(vault: &Vault, eid: &EntryId) -> Result<EntryDetailDto, String> 
         if !is_user_attribute(&k) {
             continue;
         }
-        let v = vault
+        let v = database
             .get_field(eid, &k)
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
@@ -1232,8 +1385,8 @@ fn is_favorite_tag(tag: &str) -> bool {
 }
 
 /// Keep every unrelated tag in order and exactly one canonical Favorite tag.
-fn set_favorite_tag(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), String> {
-    let tags = vault.get_entry_tags(eid).map_err(|e| e.to_string())?;
+fn set_favorite_tag(database: &mut Database, eid: &EntryId, fav: bool) -> Result<(), String> {
+    let tags = database.get_entry_tags(eid).map_err(|e| e.to_string())?;
     let mut updated = Vec::with_capacity(tags.len() + usize::from(fav));
     let mut inserted = false;
     for tag in &tags {
@@ -1250,7 +1403,7 @@ fn set_favorite_tag(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), S
         updated.push(FAVORITE_TAG.to_string());
     }
     if updated != tags {
-        vault
+        database
             .set_entry_tags(eid, updated)
             .map_err(|e| e.to_string())?;
     }
@@ -1258,55 +1411,67 @@ fn set_favorite_tag(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), S
 }
 
 /// Set/clear the native Favorite tag. Saved by the caller.
-fn apply_set_favorite(vault: &mut Vault, eid: &EntryId, fav: bool) -> Result<(), String> {
-    set_favorite_tag(vault, eid, fav)
+fn apply_set_favorite(database: &mut Database, eid: &EntryId, fav: bool) -> Result<(), String> {
+    set_favorite_tag(database, eid, fav)
 }
 
 /// Move an entry to the recycle bin. Saved by the caller.
-fn apply_delete(vault: &mut Vault, eid: &EntryId) -> Result<(), String> {
+fn apply_delete(database: &mut Database, eid: &EntryId) -> Result<(), String> {
     // `recycle_entry` reports whether it recycled or deleted outright; the
     // caller here does not branch on that.
-    vault
+    database
         .recycle_entry(eid, false)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
-// --- commands: vault lifecycle ---------------------------------------------
+// --- commands: database lifecycle ---------------------------------------------
 
-/// All registered vaults whose file still exists on disk. Syncs persisted
+/// All registered databases whose file still exists on disk. Syncs persisted
 /// recents into state (as locked) first, so this is safe to call on startup.
 #[tauri::command]
-pub fn list_vaults(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<VaultDto>, String> {
-    let recents = load_recents(&app);
+pub fn list_databases(
+    app: AppHandle,
+    state: State<'_, DatabaseState>,
+) -> Result<Vec<DatabaseDto>, String> {
     let mut guard = state.lock().map_err(poisoned)?;
+    let recents = load_recents(&app);
     for r in &recents {
         let cpath = canonicalize(&r.path);
         if !cpath.exists() {
             continue;
         }
-        let id = vault_id_for(&cpath);
+        let id = database_id_for(&cpath);
         // Route startup hydration through the same collision check as
         // register/create so the behaviour is consistent. On a genuine
         // (1-in-2^64) FNV id collision with a *different* path there is no id
-        // that can key both vaults, so the newcomer is skipped — but loudly,
+        // that can key both databases, so the newcomer is skipped — but loudly,
         // not silently: startup must stay resilient (one bad recent must never
-        // blank the whole switcher), yet a dropped vault should be diagnosable.
+        // blank the whole switcher), yet a dropped database should be diagnosable.
         match ensure_no_id_collision(&guard, &id, &cpath) {
-            Ok(true) => continue, // already registered under this same path
-            Ok(false) => {
-                guard
-                    .vaults
-                    .insert(id, RegisteredVault::new(cpath, r.name.clone()));
+            Ok(true) => {
+                if let Some(trove_uuid) = &r.trove_uuid {
+                    if let Some(database) = guard.databases.get_mut(&id) {
+                        database.trove_uuid = Some(trove_uuid.clone());
+                    }
+                }
+                continue;
             }
-            Err(e) => eprintln!("trove: skipping recent vault — {e}"),
+            Ok(false) => {
+                guard.databases.insert(id, {
+                    let mut database = RegisteredDatabase::new(cpath, r.name.clone());
+                    database.trove_uuid = r.trove_uuid.clone();
+                    database
+                });
+            }
+            Err(e) => eprintln!("trove: skipping recent database — {e}"),
         }
     }
-    let mut out: Vec<VaultDto> = guard
-        .vaults
+    let mut out: Vec<DatabaseDto> = guard
+        .databases
         .iter()
         .filter(|(_, rv)| rv.path.exists())
-        .map(|(id, rv)| vault_dto(id, rv))
+        .map(|(id, rv)| database_dto(id, rv))
         .collect();
     out.sort_by_key(|v| v.name.to_lowercase());
     Ok(out)
@@ -1315,92 +1480,92 @@ pub fn list_vaults(app: AppHandle, state: State<'_, VaultState>) -> Result<Vec<V
 /// Register an existing `.kdbx` as **locked** (not decrypted) and persist.
 /// Idempotent: returns the existing entry if already registered.
 #[tauri::command]
-pub fn register_vault(
+pub fn register_database(
     path: String,
     app: AppHandle,
-    state: State<'_, VaultState>,
-) -> Result<VaultDto, String> {
+    state: State<'_, DatabaseState>,
+) -> Result<DatabaseDto, String> {
     let cpath = canonicalize(&path);
     if !cpath.exists() {
         return Err(format!("no such file: {}", cpath.display()));
     }
-    let id = vault_id_for(&cpath);
-    let name = vault_name(&cpath);
+    let id = database_id_for(&cpath);
+    let name = database_name(&cpath);
     {
         let mut guard = state.lock().map_err(poisoned)?;
         if ensure_no_id_collision(&guard, &id, &cpath)? {
             // Already registered to this same path — idempotent.
             let rv = guard
-                .vaults
+                .databases
                 .get(&id)
                 .expect("collision check saw it present");
-            return Ok(vault_dto(&id, rv));
+            return Ok(database_dto(&id, rv));
         }
-        guard.vaults.insert(
+        guard.databases.insert(
             id.clone(),
-            RegisteredVault::new(cpath.clone(), name.clone()),
+            RegisteredDatabase::new(cpath.clone(), name.clone()),
         );
     }
-    persist_recent(&app, &cpath, &name)?;
+    persist_recent(&app, &cpath, &name, None)?;
     let guard = state.lock().map_err(poisoned)?;
     let rv = guard
-        .vaults
+        .databases
         .get(&id)
-        .ok_or_else(|| "vault vanished after register".to_string())?;
-    Ok(vault_dto(&id, rv))
+        .ok_or_else(|| "database vanished after register".to_string())?;
+    Ok(database_dto(&id, rv))
 }
 
 /// Create a new `.kdbx` at `path`, register it **unlocked**, persist, return it.
 #[tauri::command]
-pub fn create_vault(
+pub fn create_database(
     path: String,
     password: String,
     app: AppHandle,
-    state: State<'_, VaultState>,
-) -> Result<VaultDto, String> {
+    state: State<'_, DatabaseState>,
+) -> Result<DatabaseDto, String> {
     // The file doesn't exist yet, so resolve to an absolute (un-canonicalized)
-    // path for Vault::create; canonicalize after it exists.
+    // path for Database::create; canonicalize after it exists.
     let target = absolute(Path::new(&path));
-    let vault = Vault::create(&target, &password).map_err(|e| e.to_string())?;
+    let database = Database::create(&target, &password).map_err(|e| e.to_string())?;
     let cpath = std::fs::canonicalize(&target).unwrap_or(target);
-    let id = vault_id_for(&cpath);
-    let name = vault_name(&cpath);
+    let id = database_id_for(&cpath);
+    let name = database_name(&cpath);
     {
         let mut guard = state.lock().map_err(poisoned)?;
-        // Refuse to overwrite a *different* vault that hashes to the same id.
+        // Refuse to overwrite a *different* database that hashes to the same id.
         // (Same path re-creating over itself is fine — it just re-registers.)
         ensure_no_id_collision(&guard, &id, &cpath)?;
-        guard.vaults.insert(id.clone(), {
-            let mut rv = RegisteredVault::new(cpath.clone(), name.clone());
-            rv.vault = Some(vault);
+        guard.databases.insert(id.clone(), {
+            let mut rv = RegisteredDatabase::new(cpath.clone(), name.clone());
+            rv.database = Some(database);
             rv
         });
     }
-    persist_recent(&app, &cpath, &name)?;
+    persist_recent(&app, &cpath, &name, None)?;
     let guard = state.lock().map_err(poisoned)?;
     let rv = guard
-        .vaults
+        .databases
         .get(&id)
-        .ok_or_else(|| "vault vanished after create".to_string())?;
-    Ok(vault_dto(&id, rv))
+        .ok_or_else(|| "database vanished after create".to_string())?;
+    Ok(database_dto(&id, rv))
 }
 
-/// Decrypt a registered vault, store the open `Vault`, return its entry list.
-/// The registered vault's path, or an error naming the id that is not known.
+/// Decrypt a registered database, store the open `Database`, return its entry list.
+/// The registered database's path, or an error naming the id that is not known.
 ///
 /// The lock is taken and released here rather than held across the work that
 /// follows: every command in this file learned that lesson when holding it
 /// across an unlock froze the window.
-fn vault_path(id: &str, state: &State<'_, VaultState>) -> Result<PathBuf, String> {
+fn database_path(id: &str, state: &State<'_, DatabaseState>) -> Result<PathBuf, String> {
     let guard = state.lock().map_err(poisoned)?;
     guard
-        .vaults
+        .databases
         .get(id)
         .map(|v| v.path.clone())
-        .ok_or_else(|| format!("vault is not registered: {id}"))
+        .ok_or_else(|| format!("database is not registered: {id}"))
 }
 
-/// Whether this Mac can do Touch ID at all, and whether THIS vault has a
+/// Whether this Mac can do Touch ID at all, and whether THIS database has a
 /// password stored for it.
 ///
 /// Both are asked at the moment the unlock screen draws, because both change
@@ -1410,9 +1575,9 @@ fn vault_path(id: &str, state: &State<'_, VaultState>) -> Result<PathBuf, String
 #[tauri::command]
 pub async fn biometric_status(
     id: String,
-    state: State<'_, VaultState>,
+    state: State<'_, DatabaseState>,
 ) -> Result<BiometricDto, String> {
-    let path = vault_path(&id, &state)?;
+    let path = database_path(&id, &state)?;
     let enrolled = tauri::async_runtime::spawn_blocking(move || biometric::is_enrolled(&path))
         .await
         .map_err(|e| e.to_string())?
@@ -1432,13 +1597,13 @@ pub async fn biometric_status(
 pub async fn biometric_unlock(
     app: AppHandle,
     id: String,
-    state: State<'_, VaultState>,
+    state: State<'_, DatabaseState>,
 ) -> Result<Option<Vec<EntryDto>>, String> {
-    let path = vault_path(&id, &state)?;
+    let path = database_path(&id, &state)?;
     let name = path
         .file_stem()
         .map(|s: &std::ffi::OsStr| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "your vault".to_string());
+        .unwrap_or_else(|| "your database".to_string());
     let reason = format!("unlock {name}");
 
     // Off the main thread: the prompt blocks until the user answers it, and
@@ -1453,33 +1618,33 @@ pub async fn biometric_unlock(
     let Some(password) = password else {
         return Ok(None);
     };
-    unlock_vault(app, id, password, state).await.map(Some)
+    unlock_database(app, id, password, state).await.map(Some)
 }
 
-/// Remember this vault's password for Touch ID.
+/// Remember this database's password for Touch ID.
 ///
-/// The password is proved against the vault first: an entry that does not open
+/// The password is proved against the database first: an entry that does not open
 /// it is worse than none, because it fails later and somewhere else.
 #[tauri::command]
 pub async fn biometric_enroll(
     id: String,
     password: String,
-    state: State<'_, VaultState>,
+    state: State<'_, DatabaseState>,
 ) -> Result<(), String> {
-    let path = vault_path(&id, &state)?;
+    let path = database_path(&id, &state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        trove_core::Vault::open(&path, &password)
-            .map_err(|e| format!("that password does not open this vault: {e}"))?;
+        trove_core::Database::open(&path, &password)
+            .map_err(|e| format!("that password does not open this database: {e}"))?;
         biometric::enroll(&path, &password).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// Forget this vault's stored password.
+/// Forget this database's stored password.
 #[tauri::command]
-pub async fn biometric_forget(id: String, state: State<'_, VaultState>) -> Result<bool, String> {
-    let path = vault_path(&id, &state)?;
+pub async fn biometric_forget(id: String, state: State<'_, DatabaseState>) -> Result<bool, String> {
+    let path = database_path(&id, &state)?;
     tauri::async_runtime::spawn_blocking(move || biometric::forget(&path))
         .await
         .map_err(|e| e.to_string())?
@@ -1487,11 +1652,11 @@ pub async fn biometric_forget(id: String, state: State<'_, VaultState>) -> Resul
 }
 
 #[tauri::command]
-pub async fn unlock_vault(
+pub async fn unlock_database(
     app: AppHandle,
     id: String,
     password: String,
-    state: State<'_, VaultState>,
+    state: State<'_, DatabaseState>,
 ) -> Result<Vec<EntryDto>, String> {
     // ASYNC ON PURPOSE. A synchronous #[tauri::command] runs on the MAIN
     // thread, and unlock is the heaviest thing this app does: an Argon2 KDF by
@@ -1503,9 +1668,9 @@ pub async fn unlock_vault(
     let path = {
         let guard = state.lock().map_err(poisoned)?;
         guard
-            .vaults
+            .databases
             .get(&id)
-            .ok_or_else(|| "vault is not registered".to_string())?
+            .ok_or_else(|| "database is not registered".to_string())?
             .path
             .clone()
     };
@@ -1513,21 +1678,22 @@ pub async fn unlock_vault(
     step(&app, "open", "pending", "decrypting");
     let open_path = path.clone();
     // Timed, because opening and saving pay the same Argon2 bill: the UI has
-    // no other way to know that a save on THIS vault takes two seconds rather
+    // no other way to know that a save on THIS database takes two seconds rather
     // than fifty milliseconds, and a progress bar that guesses is a lie.
     let started = Instant::now();
-    let vault = tauri::async_runtime::spawn_blocking(move || Vault::open(&open_path, &password))
-        .await
-        .map_err(|e| format!("unlock task panicked: {e}"))?
-        .map_err(|e| {
-            step(&app, "open", "failed", "wrong password");
-            e.to_string()
-        })?;
+    let database =
+        tauri::async_runtime::spawn_blocking(move || Database::open(&open_path, &password))
+            .await
+            .map_err(|e| format!("unlock task panicked: {e}"))?
+            .map_err(|e| {
+                step(&app, "open", "failed", "wrong password");
+                e.to_string()
+            })?;
     let open_ms = started.elapsed().as_millis() as u64;
     step(&app, "open", "done", "");
 
     step(&app, "entries", "pending", "");
-    let entries = build_entry_dtos(&vault);
+    let entries = build_entry_dtos(&database);
     step(
         &app,
         "entries",
@@ -1538,7 +1704,7 @@ pub async fn unlock_vault(
     // Unlocking here does what unlocking in the daemon does: keys into the
     // system agent (the only route to applications and terminals that can't be
     // pointed at our own socket) and materialized files onto disk. Both are
-    // settings-gated and both are undone by `lock_vault`.
+    // settings-gated and both are undone by `lock_database`.
     let settings = load_settings(&app);
 
     if settings.system_agent {
@@ -1546,7 +1712,7 @@ pub async fn unlock_vault(
     } else {
         step(&app, "agent", "skipped", "turned off");
     }
-    let (exported, keys_expire_at) = export_keys(&vault, &settings).await;
+    let (exported, keys_expire_at) = export_keys(&database, &settings).await;
     if settings.system_agent {
         step(
             &app,
@@ -1560,13 +1726,14 @@ pub async fn unlock_vault(
         );
     }
 
+    let trove_uuid = database.database_metadata().trove_uuid;
     let materialized = MaterializedStore::default();
     if settings.materialize {
         step(&app, "files", "pending", "");
     } else {
         step(&app, "files", "skipped", "turned off");
     }
-    materialize_all(&vault, &path, &materialized, &settings);
+    materialize_all(&database, &path, &materialized, &settings);
     if settings.materialize {
         let n = materialized.read().await.len();
         step(&app, "files", "done", format!("{n} written"));
@@ -1575,19 +1742,23 @@ pub async fn unlock_vault(
     {
         let mut guard = state.lock().map_err(poisoned)?;
         let rv = guard
-            .vaults
+            .databases
             .get_mut(&id)
-            .ok_or_else(|| "vault vanished while unlocking".to_string())?;
+            .ok_or_else(|| "database vanished while unlocking".to_string())?;
         rv.exported_keys = exported;
         rv.keys_expire_at = keys_expire_at;
         rv.materialized = materialized;
         rv.write_ms = Some(open_ms);
-        rv.vault = Some(vault);
+        rv.trove_uuid = trove_uuid.clone();
+        rv.database = Some(database);
+    }
+    if let Err(error) = cache_database_uuid(&app, &id, trove_uuid) {
+        eprintln!("trove: failed to cache database link UUID: {error}");
     }
     Ok(entries)
 }
 
-/// Drop the decrypted vault (keep it registered), marking it locked.
+/// Drop the decrypted database (keep it registered), marking it locked.
 #[tauri::command]
 /// `retract_keys` decides whether what trove handed the machine comes back:
 /// keys out of the OS agent, materialized files off disk.
@@ -1596,16 +1767,16 @@ pub async fn unlock_vault(
 /// window left untouched, and revoking machine-wide credentials because nobody
 /// clicked the app for five minutes pulls keys out from under a running
 /// `git push`. Absent ⇒ true, so an older caller keeps the safer behaviour.
-pub async fn lock_vault(
+pub async fn lock_database(
     id: String,
     retract_keys: Option<bool>,
-    state: State<'_, VaultState>,
+    state: State<'_, DatabaseState>,
 ) -> Result<(), String> {
-    // Same reasoning as `unlock_vault`: retracting keys from the OS agent and
+    // Same reasoning as `unlock_database`: retracting keys from the OS agent and
     // wiping files is I/O, and a sync command would do it on the main thread.
-    // Take what has to be undone out under a short lock, drop the vault so it
+    // Take what has to be undone out under a short lock, drop the database so it
     // reads as locked immediately, then do the undoing without the lock held.
-    // One rule, both kinds of handover: an app lock HIDES (window locks, vault
+    // One rule, both kinds of handover: an app lock HIDES (window locks, database
     // forgotten, nothing outside the app is touched); an explicit lock PUTS
     // EVERYTHING BACK (keys retracted, files wiped). Wiping files on an idle
     // timer while leaving keys was the inconsistency — the timer says nobody
@@ -1616,10 +1787,10 @@ pub async fn lock_vault(
     let (exported, materialized) = {
         let mut guard = state.lock().map_err(poisoned)?;
         let rv = guard
-            .vaults
+            .databases
             .get_mut(&id)
-            .ok_or_else(|| "vault is not registered".to_string())?;
-        rv.vault = None;
+            .ok_or_else(|| "database is not registered".to_string())?;
+        rv.database = None;
         if put_back {
             rv.keys_expire_at = None;
             (
@@ -1641,52 +1812,79 @@ pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
 }
 
 /// Persist app settings. Takes effect on the next unlock; already-exported
-/// keys stay in the agent until the vault locks.
+/// keys stay in the agent until the database locks.
 #[tauri::command]
 pub async fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     off_main(app, move |a| save_settings(a, &settings)).await
 }
 
-/// Has this vault's file been written by something else since we read it?
+/// Has this database's file been written by something else since we read it?
 ///
 /// Also true once after a save of ours merged in another writer's changes: the
 /// file then holds entries the window's list does not.
 ///
 /// Polled by the window rather than pushed from a file watcher: it is one
 /// `stat` on a path we already know, it only matters while somebody is looking
-/// at the list, and there is no watcher to leak when a vault closes.
+/// at the list, and there is no watcher to leak when a database closes.
 #[tauri::command]
-pub async fn vault_changed_on_disk(app: AppHandle, id: String) -> Result<bool, String> {
-    on_vault_mut(app, id, |v| {
+pub async fn database_changed_on_disk(app: AppHandle, id: String) -> Result<bool, String> {
+    on_database_mut(app, id, |v| {
         Ok(v.take_merged_on_save().is_some() || v.changed_on_disk())
     })
     .await
 }
 
-/// Re-read a vault whose file was changed by something else, returning the
+/// Re-read a database whose file was changed by something else, returning the
 /// entry list as it now stands.
 ///
 /// Safe to call unprompted because this app writes every change through
 /// immediately — there is no unsaved state to lose, and a list that no longer
 /// matches the file is worse than a list that jumps.
 #[tauri::command]
-pub async fn reload_vault(app: AppHandle, id: String) -> Result<Vec<EntryDto>, String> {
-    on_vault_mut(app, id, |v| {
+pub async fn reload_database(app: AppHandle, id: String) -> Result<Vec<EntryDto>, String> {
+    on_database_mut(app, id, |v| {
         v.reload().map_err(|e| e.to_string())?;
         Ok(build_entry_dtos(v))
     })
     .await
 }
 
-/// Re-read the entry list for an unlocked vault.
+/// Re-read the entry list for an unlocked database.
 #[tauri::command]
 pub async fn list_entries(app: AppHandle, id: String) -> Result<Vec<EntryDto>, String> {
-    on_vault(app, id, |v| Ok(build_entry_dtos(v))).await
+    on_database(app, id, |v| Ok(build_entry_dtos(v))).await
 }
 
 #[tauri::command]
 pub async fn list_groups(app: AppHandle, id: String) -> Result<Vec<GroupDto>, String> {
-    on_vault(app, id, |v| Ok(build_group_dtos(v))).await
+    on_database(app, id, |v| Ok(build_group_dtos(v))).await
+}
+
+#[tauri::command]
+pub async fn get_database_metadata(
+    app: AppHandle,
+    id: String,
+) -> Result<DatabaseMetadataDto, String> {
+    on_database(app, id, |database| Ok(database.database_metadata().into())).await
+}
+
+#[tauri::command]
+pub async fn set_database_metadata(
+    app: AppHandle,
+    id: String,
+    metadata: DatabaseMetadataDto,
+) -> Result<DatabaseMetadataDto, String> {
+    let result: DatabaseMetadataDto = on_database_write(app.clone(), id.clone(), move |database| {
+        database
+            .set_database_metadata(metadata.into())
+            .map_err(|error| error.to_string())?;
+        Ok(database.database_metadata().into())
+    })
+    .await?;
+    if let Err(error) = cache_database_uuid(&app, &id, result.trove_uuid.clone()) {
+        eprintln!("trove: failed to cache database link UUID: {error}");
+    }
+    Ok(result)
 }
 
 // --- commands: reading one entry -------------------------------------------
@@ -1700,7 +1898,7 @@ pub async fn get_field(
     field: String,
 ) -> Result<Option<String>, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault(app, id, move |v| {
+    on_database(app, id, move |v| {
         v.get_field(&eid, &field).map_err(|e| e.to_string())
     })
     .await
@@ -1714,7 +1912,7 @@ pub async fn get_entry_detail(
     entry_id: String,
 ) -> Result<EntryDetailDto, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault(app, id, move |v| entry_detail(v, &eid)).await
+    on_database(app, id, move |v| entry_detail(v, &eid)).await
 }
 
 /// One attachment, with where it lands on disk if it asked to.
@@ -1771,7 +1969,10 @@ struct AttachmentPlan {
 }
 
 /// What each attachment's `<File>` resolves to, by attachment name.
-fn materialize_views(v: &Vault, eid: &EntryId) -> Result<BTreeMap<String, AttachmentPlan>, String> {
+fn materialize_views(
+    v: &Database,
+    eid: &EntryId,
+) -> Result<BTreeMap<String, AttachmentPlan>, String> {
     let mut out = BTreeMap::new();
     let Some(items) = v
         .effective_settings(eid, Capability::Materialize)
@@ -1947,7 +2148,7 @@ pub async fn list_attachments(
     entry_id: String,
 ) -> Result<Vec<AttachmentDto>, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault(app, id, move |v| {
+    on_database(app, id, move |v| {
         let summary = v
             .get_entry(&eid)
             .ok_or_else(|| "entry not found".to_string())?;
@@ -1998,7 +2199,7 @@ pub async fn read_attachment(
     name: String,
 ) -> Result<String, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault(app, id, move |v| {
+    on_database(app, id, move |v| {
         let bytes = v
             .read_binary(&eid, &name)
             .map_err(|e| e.to_string())?
@@ -2023,7 +2224,7 @@ pub struct AttachmentImageDto {
 }
 
 /// The cap on what will be handed to the webview as a data URL. A picture in a
-/// password vault is a scan or a screenshot; anything past this is not
+/// password database is a scan or a screenshot; anything past this is not
 /// something a preview pane should be inflating into a string.
 const MAX_PREVIEW_BYTES: usize = 16 * 1024 * 1024;
 
@@ -2040,7 +2241,7 @@ pub async fn read_attachment_image(
     name: String,
 ) -> Result<AttachmentImageDto, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault(app, id, move |v| {
+    on_database(app, id, move |v| {
         let bytes = v
             .read_binary(&eid, &name)
             .map_err(|e| e.to_string())?
@@ -2074,7 +2275,7 @@ pub async fn save_attachment(
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
     let app2 = app.clone();
     let id2 = id.clone();
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         v.attach_binary(&eid, &name, content.as_bytes())
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -2112,7 +2313,7 @@ pub async fn attach_file(
 
     let app2 = app.clone();
     let id2 = id.clone();
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         v.attach_binary(&eid, &name, &bytes)
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -2134,7 +2335,7 @@ pub async fn delete_attachment(
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
     let app2 = app.clone();
     let id2 = id.clone();
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         v.remove_binary(&eid, &name).map_err(|e| e.to_string())?;
         for setting in ["Target", "Mode", "TTL", "AllowDiskBacked"] {
             let _ = v.remove_field(&eid, &attachment_field(&name, setting));
@@ -2159,7 +2360,7 @@ pub async fn rename_attachment(
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
     let app2 = app.clone();
     let id2 = id.clone();
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         let renamed = v
             .rename_attachment(&eid, &old_name, &new_name)
             .map_err(|e| e.to_string())?;
@@ -2199,7 +2400,7 @@ pub struct MaterializeInput {
 /// Materialize.settings: written, or with no target and no inherited
 /// directory, removed. The document goes when its last file does.
 fn apply_materialize(
-    v: &mut Vault,
+    v: &mut Database,
     eid: &EntryId,
     name: &str,
     input: &MaterializeInput,
@@ -2261,7 +2462,7 @@ pub async fn set_attachment_materialize(
         allow_disk_backed,
         use_dir,
     };
-    on_vault_write(app, id, move |v| apply_materialize(v, &eid, &name, &input)).await?;
+    on_database_write(app, id, move |v| apply_materialize(v, &eid, &name, &input)).await?;
     list_attachments(app2, id2, entry_id).await
 }
 
@@ -2319,7 +2520,7 @@ fn capability(name: &str) -> Result<Capability, String> {
     Capability::from_name(name).ok_or_else(|| format!("unknown capability {name:?}"))
 }
 
-fn capability_dtos(v: &Vault, eid: &EntryId) -> Result<Vec<CapabilityDto>, String> {
+fn capability_dtos(v: &Database, eid: &EntryId) -> Result<Vec<CapabilityDto>, String> {
     let summary = v
         .get_entry(eid)
         .ok_or_else(|| "entry not found".to_string())?;
@@ -2387,7 +2588,7 @@ fn capability_dtos(v: &Vault, eid: &EntryId) -> Result<Vec<CapabilityDto>, Strin
 /// Add or replace one item. Empty values are dropped, so a cleared box
 /// inherits rather than storing an empty string.
 fn apply_capability_item(
-    v: &mut Vault,
+    v: &mut Database,
     eid: &EntryId,
     cap: Capability,
     attrs: &BTreeMap<String, String>,
@@ -2407,7 +2608,7 @@ fn apply_capability_item(
 }
 
 fn drop_capability_item(
-    v: &mut Vault,
+    v: &mut Database,
     eid: &EntryId,
     cap: Capability,
     key: &str,
@@ -2425,7 +2626,7 @@ fn drop_capability_item(
 
 /// Turn a capability on (an empty document) or off (no document).
 fn toggle_capability(
-    v: &mut Vault,
+    v: &mut Database,
     eid: &EntryId,
     cap: Capability,
     on: bool,
@@ -2444,7 +2645,7 @@ fn toggle_capability(
     }
 }
 
-fn group_capability_dtos(v: &Vault, group: &str) -> Result<Vec<GroupCapabilityDto>, String> {
+fn group_capability_dtos(v: &Database, group: &str) -> Result<Vec<GroupCapabilityDto>, String> {
     let mut out = Vec::new();
     for cap in Capability::ALL {
         let doc = v.group_settings(group, cap).map_err(|e| e.to_string())?;
@@ -2466,7 +2667,7 @@ fn group_capability_dtos(v: &Vault, group: &str) -> Result<Vec<GroupCapabilityDt
 /// Set (or with an empty value clear) one default on a group or, with an empty
 /// path, the database. A document left with no defaults is removed.
 fn apply_group_default(
-    v: &mut Vault,
+    v: &mut Database,
     group: &str,
     cap: Capability,
     name: &str,
@@ -2492,7 +2693,7 @@ pub async fn entry_capabilities(
     entry_id: String,
 ) -> Result<Vec<CapabilityDto>, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault(app, id, move |v| capability_dtos(v, &eid)).await
+    on_database(app, id, move |v| capability_dtos(v, &eid)).await
 }
 
 #[tauri::command]
@@ -2505,7 +2706,7 @@ pub async fn set_capability_item(
 ) -> Result<Vec<CapabilityDto>, String> {
     let cap = self::capability(&capability)?;
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         apply_capability_item(v, &eid, cap, &attrs)?;
         capability_dtos(v, &eid)
     })
@@ -2522,7 +2723,7 @@ pub async fn remove_capability_item(
 ) -> Result<Vec<CapabilityDto>, String> {
     let cap = self::capability(&capability)?;
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         drop_capability_item(v, &eid, cap, &key)?;
         capability_dtos(v, &eid)
     })
@@ -2539,7 +2740,7 @@ pub async fn set_capability_on(
 ) -> Result<Vec<CapabilityDto>, String> {
     let cap = self::capability(&capability)?;
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         toggle_capability(v, &eid, cap, on)?;
         capability_dtos(v, &eid)
     })
@@ -2553,7 +2754,7 @@ pub async fn group_capabilities(
     id: String,
     group: String,
 ) -> Result<Vec<GroupCapabilityDto>, String> {
-    on_vault(app, id, move |v| group_capability_dtos(v, &group)).await
+    on_database(app, id, move |v| group_capability_dtos(v, &group)).await
 }
 
 #[tauri::command]
@@ -2566,7 +2767,7 @@ pub async fn set_group_default(
     value: String,
 ) -> Result<Vec<GroupCapabilityDto>, String> {
     let cap = self::capability(&capability)?;
-    on_vault_write(app, id, move |v| {
+    on_database_write(app, id, move |v| {
         apply_group_default(v, &group, cap, &name, &value)?;
         group_capability_dtos(v, &group)
     })
@@ -2575,18 +2776,18 @@ pub async fn set_group_default(
 
 // --- commands: mutations ----------------------------------------------------
 
-/// Create or update an entry, save the vault, return the fresh list + saved id.
+/// Create or update an entry, save the database, return the fresh list + saved id.
 #[tauri::command]
 pub async fn save_entry(
     app: AppHandle,
     id: String,
     input: EntryInput,
 ) -> Result<SaveResult, String> {
-    on_vault_write(app, id, move |vault| {
-        let entry_id = apply_save_entry(vault, &input)?;
+    on_database_write(app, id, move |database| {
+        let entry_id = apply_save_entry(database, &input)?;
         Ok(SaveResult {
-            entries: build_entry_dtos(vault),
-            groups: build_group_dtos(vault),
+            entries: build_entry_dtos(database),
+            groups: build_group_dtos(database),
             id: entry_id.as_str().to_string(),
         })
     })
@@ -2600,11 +2801,59 @@ pub async fn set_group_tags(
     path: String,
     tags: Vec<String>,
 ) -> Result<Vec<GroupDto>, String> {
-    on_vault_write(app, id, move |vault| {
-        vault
+    on_database_write(app, id, move |database| {
+        database
             .set_group_tags(&path, &tags)
             .map_err(|e| e.to_string())?;
-        Ok(build_group_dtos(vault))
+        Ok(build_group_dtos(database))
+    })
+    .await
+}
+
+/// Create an empty group, including any missing parent groups, and save it.
+#[tauri::command]
+pub async fn create_group(
+    app: AppHandle,
+    id: String,
+    path: String,
+) -> Result<Vec<GroupDto>, String> {
+    on_database_write(app, id, move |database| {
+        database.add_group(&path).map_err(|e| e.to_string())?;
+        Ok(build_group_dtos(database))
+    })
+    .await
+}
+
+/// Set or rename one user-defined attribute, then save and return fresh detail.
+#[tauri::command]
+pub async fn set_custom_attribute(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    old_name: Option<String>,
+    name: String,
+    value: String,
+) -> Result<EntryDetailDto, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_database_write(app, id, move |database| {
+        apply_custom_attribute(database, &eid, old_name.as_deref(), &name, &value)?;
+        entry_detail(database, &eid)
+    })
+    .await
+}
+
+/// Remove one user-defined attribute and save.
+#[tauri::command]
+pub async fn remove_custom_attribute(
+    app: AppHandle,
+    id: String,
+    entry_id: String,
+    name: String,
+) -> Result<EntryDetailDto, String> {
+    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+    on_database_write(app, id, move |database| {
+        apply_remove_custom_attribute(database, &eid, &name)?;
+        entry_detail(database, &eid)
     })
     .await
 }
@@ -2620,13 +2869,13 @@ pub async fn delete_group(
     id: String,
     path: String,
 ) -> Result<DeleteGroupResult, String> {
-    on_vault_write(app, id, move |vault| {
-        let recycled = vault
+    on_database_write(app, id, move |database| {
+        let recycled = database
             .remove_group(&path, false, true)
             .map_err(|e| e.to_string())?;
         Ok(DeleteGroupResult {
-            entries: build_entry_dtos(vault),
-            groups: build_group_dtos(vault),
+            entries: build_entry_dtos(database),
+            groups: build_group_dtos(database),
             recycled,
         })
     })
@@ -2644,18 +2893,20 @@ pub async fn drop_entry(
     copy: bool,
 ) -> Result<SaveResult, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_write(app, id, move |vault| {
+    on_database_write(app, id, move |database| {
         let landed = if copy {
-            vault.copy_entry(&eid, &group).map_err(|e| e.to_string())?
+            database
+                .copy_entry(&eid, &group)
+                .map_err(|e| e.to_string())?
         } else {
-            vault
+            database
                 .move_entry_to_path(&eid, &group)
                 .map_err(|e| e.to_string())?;
             eid
         };
         Ok(SaveResult {
-            entries: build_entry_dtos(vault),
-            groups: build_group_dtos(vault),
+            entries: build_entry_dtos(database),
+            groups: build_group_dtos(database),
             id: landed.as_str().to_string(),
         })
     })
@@ -2665,7 +2916,7 @@ pub async fn drop_entry(
 /// Drop a folder into `parent`, moving it (or copying it when `copy` is set),
 /// then record `order` as the new order of `parent`'s children. A drop within
 /// the same parent is a plain reorder. One command so the whole gesture costs
-/// one vault write.
+/// one database write.
 #[tauri::command]
 pub async fn drop_group(
     app: AppHandle,
@@ -2675,22 +2926,22 @@ pub async fn drop_group(
     copy: bool,
     order: Vec<String>,
 ) -> Result<SaveResult, String> {
-    on_vault_write(app, id, move |vault| {
+    on_database_write(app, id, move |database| {
         if copy {
-            vault
+            database
                 .copy_group(&source, &parent, false)
                 .map_err(|e| e.to_string())?;
         } else {
-            vault
+            database
                 .move_group_to_path(&source, &parent)
                 .map_err(|e| e.to_string())?;
         }
-        vault
+        database
             .set_group_order(&parent, &order)
             .map_err(|e| e.to_string())?;
         Ok(SaveResult {
-            entries: build_entry_dtos(vault),
-            groups: build_group_dtos(vault),
+            entries: build_entry_dtos(database),
+            groups: build_group_dtos(database),
             id: String::new(),
         })
     })
@@ -2707,9 +2958,9 @@ pub async fn delete_entry(
     // Not `unwrap`: a malformed id would panic the command, and a panic inside
     // the blocking task surfaces as an unhelpful "task panicked".
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_write(app, id, move |vault| {
-        apply_delete(vault, &eid)?;
-        Ok(build_entry_dtos(vault))
+    on_database_write(app, id, move |database| {
+        apply_delete(database, &eid)?;
+        Ok(build_entry_dtos(database))
     })
     .await
 }
@@ -2723,9 +2974,9 @@ pub async fn set_favorite(
     fav: bool,
 ) -> Result<Vec<EntryDto>, String> {
     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
-    on_vault_write(app, id, move |vault| {
-        apply_set_favorite(vault, &eid, fav)?;
-        Ok(build_entry_dtos(vault))
+    on_database_write(app, id, move |database| {
+        apply_set_favorite(database, &eid, fav)?;
+        Ok(build_entry_dtos(database))
     })
     .await
 }
@@ -2735,7 +2986,7 @@ pub async fn set_favorite(
 /// lock takes it back.
 ///
 /// Writes the same `KeeAgent.settings` bytes KeePassXC reads, so the choice
-/// travels with the vault file and both tools agree. Applies immediately as
+/// travels with the database file and both tools agree. Applies immediately as
 /// well as on the next unlock.
 ///
 /// `lifetime` is seconds, or `null` for "use the app default" — the same
@@ -2759,24 +3010,24 @@ pub async fn set_agent_key(
         remove_at_close: remove_on_close.unwrap_or(true),
     };
 
-    // Phase 1 — vault write, under the lock, on a blocking thread. Returns the
+    // Phase 1 — database write, under the lock, on a blocking thread. Returns the
     // key so the agent work can happen with the lock released.
     let write = {
         let app = app.clone();
         let id = id.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let state = app.state::<VaultState>();
-            with_open_mut(&state, &id, move |vault| {
-                let summary = vault
+            let state = app.state::<DatabaseState>();
+            with_open_mut(&state, &id, move |database| {
+                let summary = database
                     .list_entries()
                     .into_iter()
                     .find(|s| s.id == eid)
                     .ok_or_else(|| "entry not found".to_string())?;
-                let (attachment, _, _) = agent_key_state(vault, &eid, &summary.attachment_names);
+                let (attachment, _, _) = agent_key_state(database, &eid, &summary.attachment_names);
                 if attachment.is_empty() {
                     return Err("this entry has no SSH private key attachment".to_string());
                 }
-                let key_bytes = vault
+                let key_bytes = database
                     .read_binary(&eid, &attachment)
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("attachment '{attachment}' is missing"))?;
@@ -2786,7 +3037,7 @@ pub async fn set_agent_key(
                     .map_err(|e| {
                         format!("attachment '{attachment}' is not a usable SSH key: {e}")
                     })?;
-                vault
+                database
                     .attach_binary(
                         &eid,
                         keeagent::ATTACHMENT_NAME,
@@ -2797,11 +3048,11 @@ pub async fn set_agent_key(
                         ),
                     )
                     .map_err(|e| e.to_string())?;
-                vault.save().map_err(|e| e.to_string())?;
+                database.save().map_err(|e| e.to_string())?;
                 // Re-read so the key carries the policy just written. On
                 // disable the loader no longer returns it, so fall back to the
                 // probe — the agent still has to be told to drop it.
-                let key = troved::handler::load_ssh_keys_from_vault(vault)
+                let key = troved::handler::load_ssh_keys_from_database(database)
                     .into_iter()
                     .find(|k| k.public_blob == probe.public_blob)
                     .unwrap_or(probe);
@@ -2809,7 +3060,7 @@ pub async fn set_agent_key(
             })
         })
         .await
-        .map_err(|e| format!("vault task panicked: {e}"))??
+        .map_err(|e| format!("database task panicked: {e}"))??
     };
 
     // Phase 2 — agent I/O with NO lock held. A round trip per key with its own
@@ -2840,12 +3091,12 @@ pub async fn set_agent_key(
     let blob = write.public_blob.clone();
     let forwarded = ssh_agent::keys_to_unforward(std::slice::from_ref(&write));
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<VaultState>();
+        let state = app.state::<DatabaseState>();
         let mut guard = state.lock().map_err(poisoned)?;
         let rv = guard
-            .vaults
+            .databases
             .get_mut(&id)
-            .ok_or_else(|| "vault is not registered".to_string())?;
+            .ok_or_else(|| "database is not registered".to_string())?;
         if enabled {
             for f in forwarded {
                 if !rv
@@ -2859,14 +3110,14 @@ pub async fn set_agent_key(
         } else {
             rv.exported_keys.retain(|k| k.public_blob != blob);
         }
-        let vault = rv
-            .vault
+        let database = rv
+            .database
             .as_ref()
-            .ok_or_else(|| "vault is locked".to_string())?;
-        Ok(build_entry_dtos(vault))
+            .ok_or_else(|| "database is locked".to_string())?;
+        Ok(build_entry_dtos(database))
     })
     .await
-    .map_err(|e| format!("vault task panicked: {e}"))?
+    .map_err(|e| format!("database task panicked: {e}"))?
 }
 
 // --- tests -----------------------------------------------------------------
@@ -2875,8 +3126,15 @@ pub async fn set_agent_key(
 mod tests {
     use super::*;
 
-    /// Create a throwaway unlocked vault in a unique temp dir.
-    fn temp_vault() -> (Vault, PathBuf) {
+    #[test]
+    fn old_recent_entries_without_cached_database_uuid_still_load() {
+        let recent: RecentEntry =
+            serde_json::from_str(r#"{"path":"/tmp/database.kdbx","name":"database"}"#).unwrap();
+        assert_eq!(recent.trove_uuid, None);
+    }
+
+    /// Create a throwaway unlocked database in a unique temp dir.
+    fn temp_database() -> (Database, PathBuf) {
         // A process-wide counter guarantees a unique dir per test even when two
         // tests start within the same clock tick — otherwise concurrent saves to
         // a shared path race on the atomic write-then-rename (os error 2).
@@ -2894,9 +3152,9 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("vault.kdbx");
-        let vault = Vault::create(&path, "correct horse").unwrap();
-        (vault, path)
+        let path = dir.join("database.kdbx");
+        let database = Database::create(&path, "correct horse").unwrap();
+        (database, path)
     }
 
     fn input(entry_id: Option<String>, path: &str) -> EntryInput {
@@ -2932,22 +3190,59 @@ mod tests {
 
     #[test]
     fn attributes_are_saved_and_come_back_in_the_detail() {
-        let (mut vault, _p) = temp_vault();
+        let (mut database, _p) = temp_database();
         let eid = apply_save_entry(
-            &mut vault,
+            &mut database,
             &input_with_fields(None, "forge/gitea", &[("git.token", "tok_abc")]),
         )
         .unwrap();
-        let d = entry_detail(&vault, &eid).unwrap();
+        let d = entry_detail(&database, &eid).unwrap();
         let got: Vec<(String, String)> = d.fields.into_iter().map(|f| (f.k, f.v)).collect();
         assert_eq!(got, vec![("git.token".to_string(), "tok_abc".to_string())]);
     }
 
     #[test]
-    fn an_attribute_removed_from_the_form_is_removed_from_the_entry() {
-        let (mut vault, _p) = temp_vault();
+    fn custom_attributes_can_be_renamed_duplicated_and_deleted() {
+        let (mut database, _p) = temp_database();
         let eid = apply_save_entry(
-            &mut vault,
+            &mut database,
+            &input_with_fields(None, "forge/gitea", &[("Host", "db.prod")]),
+        )
+        .unwrap();
+        apply_custom_attribute(&mut database, &eid, Some("Host"), "Server", "db.stage").unwrap();
+        apply_custom_attribute(&mut database, &eid, None, "Server(2)", "db.stage").unwrap();
+        apply_remove_custom_attribute(&mut database, &eid, "Server").unwrap();
+
+        let fields: Vec<(String, String)> = entry_detail(&database, &eid)
+            .unwrap()
+            .fields
+            .into_iter()
+            .map(|field| (field.k, field.v))
+            .collect();
+        assert_eq!(
+            fields,
+            vec![("Server(2)".to_string(), "db.stage".to_string())]
+        );
+    }
+
+    #[test]
+    fn empty_nested_group_can_be_created_without_an_entry() {
+        let (mut database, _p) = temp_database();
+        database.add_group("empty/nested").unwrap();
+        let paths: Vec<String> = build_group_dtos(&database)
+            .into_iter()
+            .map(|group| group.path.join("/"))
+            .collect();
+        assert!(paths.contains(&"empty".to_string()));
+        assert!(paths.contains(&"empty/nested".to_string()));
+        assert!(build_entry_dtos(&database).is_empty());
+    }
+
+    #[test]
+    fn an_attribute_removed_from_the_form_is_removed_from_the_entry() {
+        let (mut database, _p) = temp_database();
+        let eid = apply_save_entry(
+            &mut database,
             &input_with_fields(None, "forge/gitea", &[("a", "1"), ("b", "2")]),
         )
         .unwrap();
@@ -2955,11 +3250,11 @@ mod tests {
         // Save again with `b` gone — the form is the whole truth about the
         // attributes it can see, so a row that is no longer there is a delete.
         apply_save_entry(
-            &mut vault,
+            &mut database,
             &input_with_fields(Some(id), "forge/gitea", &[("a", "1")]),
         )
         .unwrap();
-        let names = vault.custom_field_names(&eid).unwrap();
+        let names = database.custom_field_names(&eid).unwrap();
         assert!(names.iter().any(|k| k == "a"));
         assert!(!names.iter().any(|k| k == "b"), "got {names:?}");
     }
@@ -2969,15 +3264,15 @@ mod tests {
     /// save would silently destroy an entry's materialize config.
     #[test]
     fn reserved_keys_survive_a_save_that_never_mentioned_them() {
-        let (mut vault, _p) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
-        vault
+        let (mut database, _p) = temp_database();
+        let eid = apply_save_entry(&mut database, &input(None, "forge/gitea")).unwrap();
+        database
             .set_field(&eid, "Materialize.id.Target", "~/.ssh/id_ed25519")
             .unwrap();
-        vault.set_field(&eid, "_TroveObsolete", "1").unwrap();
+        database.set_field(&eid, "_TroveObsolete", "1").unwrap();
 
         apply_save_entry(
-            &mut vault,
+            &mut database,
             &input_with_fields(
                 Some(eid.as_str().to_string()),
                 "forge/gitea",
@@ -2986,33 +3281,33 @@ mod tests {
         )
         .unwrap();
 
-        let names = vault.custom_field_names(&eid).unwrap();
+        let names = database.custom_field_names(&eid).unwrap();
         assert!(
             names.iter().any(|k| k == "Materialize.id.Target"),
             "materialize config must survive: {names:?}"
         );
         assert!(names.iter().any(|k| k == "_TroveObsolete"), "got {names:?}");
         // And they are still hidden from the form.
-        let d = entry_detail(&vault, &eid).unwrap();
+        let d = entry_detail(&database, &eid).unwrap();
         assert_eq!(d.fields.len(), 1);
         assert_eq!(d.fields[0].k, "git.token");
     }
 
     #[test]
     fn omitting_fields_entirely_leaves_attributes_untouched() {
-        let (mut vault, _p) = temp_vault();
+        let (mut database, _p) = temp_database();
         let eid = apply_save_entry(
-            &mut vault,
+            &mut database,
             &input_with_fields(None, "forge/gitea", &[("keep", "me")]),
         )
         .unwrap();
         // `fields: None` — an older frontend, or any caller that says nothing.
         apply_save_entry(
-            &mut vault,
+            &mut database,
             &input(Some(eid.as_str().to_string()), "forge/gitea"),
         )
         .unwrap();
-        let names = vault.custom_field_names(&eid).unwrap();
+        let names = database.custom_field_names(&eid).unwrap();
         assert!(names.iter().any(|k| k == "keep"), "got {names:?}");
     }
 
@@ -3022,9 +3317,9 @@ mod tests {
     /// nothing on screen to show where it went.
     #[test]
     fn an_attribute_cannot_overwrite_a_standard_field() {
-        let (mut vault, _p) = temp_vault();
+        let (mut database, _p) = temp_database();
         let eid = apply_save_entry(
-            &mut vault,
+            &mut database,
             &input_with_fields(
                 None,
                 "forge/gitea",
@@ -3038,14 +3333,14 @@ mod tests {
         .unwrap();
         // The real password is the one the form's password control sent.
         assert_eq!(
-            vault.get_field(&eid, "Password").unwrap().as_deref(),
+            database.get_field(&eid, "Password").unwrap().as_deref(),
             Some("Gx7$mQ2!vLpZ9wKt")
         );
         assert_eq!(
-            vault.get_field(&eid, "UserName").unwrap().as_deref(),
+            database.get_field(&eid, "UserName").unwrap().as_deref(),
             Some("deploy")
         );
-        let d = entry_detail(&vault, &eid).unwrap();
+        let d = entry_detail(&database, &eid).unwrap();
         assert_eq!(d.fields.len(), 1);
         assert_eq!(d.fields[0].k, "git.token");
     }
@@ -3055,35 +3350,35 @@ mod tests {
     /// renaming an attribute as a side effect of saving something else.
     #[test]
     fn saving_does_not_rename_an_attribute_with_surrounding_whitespace() {
-        let (mut vault, _p) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
-        vault.set_field(&eid, " spaced ", "v").unwrap();
+        let (mut database, _p) = temp_database();
+        let eid = apply_save_entry(&mut database, &input(None, "forge/gitea")).unwrap();
+        database.set_field(&eid, " spaced ", "v").unwrap();
 
         // Round-trip: read what the form would show, save it back unchanged.
-        let d = entry_detail(&vault, &eid).unwrap();
+        let d = entry_detail(&database, &eid).unwrap();
         let same: Vec<(&str, &str)> = d
             .fields
             .iter()
             .map(|f| (f.k.as_str(), f.v.as_str()))
             .collect();
         apply_save_entry(
-            &mut vault,
+            &mut database,
             &input_with_fields(Some(eid.as_str().to_string()), "forge/gitea", &same),
         )
         .unwrap();
 
-        let names = vault.custom_field_names(&eid).unwrap();
+        let names = database.custom_field_names(&eid).unwrap();
         assert!(names.iter().any(|k| k == " spaced "), "got {names:?}");
         assert!(!names.iter().any(|k| k == "spaced"), "got {names:?}");
     }
 
     #[test]
     fn save_then_detail_round_trips_and_hides_secrets() {
-        let (mut vault, _path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "Infra/SSH/build")).unwrap();
+        let (mut database, _path) = temp_database();
+        let eid = apply_save_entry(&mut database, &input(None, "Infra/SSH/build")).unwrap();
 
         // The list DTO carries no secret but does carry strength + length.
-        let dtos = build_entry_dtos(&vault);
+        let dtos = build_entry_dtos(&database);
         assert_eq!(dtos.len(), 1);
         let dto = &dtos[0];
         assert_eq!(dto.title, "build");
@@ -3098,7 +3393,7 @@ mod tests {
         assert!(!dto.modified.is_empty()); // created/modified populated by core
 
         // Detail returns the password + notes; _TroveType is NOT a user field.
-        let detail = entry_detail(&vault, &eid).unwrap();
+        let detail = entry_detail(&database, &eid).unwrap();
         assert_eq!(detail.password, "Gx7$mQ2!vLpZ9wKt");
         assert_eq!(detail.notes, "rotate quarterly");
         assert!(!detail.fields.iter().any(|kv| kv.k.starts_with("_Trove")));
@@ -3106,51 +3401,51 @@ mod tests {
 
     #[test]
     fn update_moves_group_renames_and_clears_empty_fields() {
-        let (mut vault, _path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "Infra/SSH/build")).unwrap();
+        let (mut database, _path) = temp_database();
+        let eid = apply_save_entry(&mut database, &input(None, "Infra/SSH/build")).unwrap();
 
         // Rename + move to a different group, and clear the notes.
         let mut upd = input(Some(eid.as_str().to_string()), "Prod/DB/primary");
         upd.notes = String::new();
         upd.url = "postgres://db.example.io".to_string();
         upd.entry_type = String::new(); // clear _TroveType → derive from URL
-        let saved = apply_save_entry(&mut vault, &upd).unwrap();
+        let saved = apply_save_entry(&mut database, &upd).unwrap();
         assert_eq!(saved.as_str(), eid.as_str()); // same entry id preserved
 
-        let dtos = build_entry_dtos(&vault);
+        let dtos = build_entry_dtos(&database);
         assert_eq!(dtos.len(), 1);
         let dto = &dtos[0];
         assert_eq!(dto.path, "Prod/DB/primary");
         assert_eq!(dto.group, vec!["Prod".to_string(), "DB".to_string()]);
         assert_eq!(dto.entry_type, "db"); // derived from postgres:// URL
 
-        let detail = entry_detail(&vault, &eid).unwrap();
+        let detail = entry_detail(&database, &eid).unwrap();
         assert_eq!(detail.notes, ""); // empty input cleared the field
     }
 
     #[test]
     fn favorite_toggles_and_delete_recycles() {
-        let (mut vault, _path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "Infra/SSH/build")).unwrap();
+        let (mut database, _path) = temp_database();
+        let eid = apply_save_entry(&mut database, &input(None, "Infra/SSH/build")).unwrap();
 
-        vault
+        database
             .set_entry_tags(&eid, vec!["ssh".into(), "work".into()])
             .unwrap();
 
-        apply_set_favorite(&mut vault, &eid, true).unwrap();
-        assert!(build_entry_dtos(&vault)[0].fav);
+        apply_set_favorite(&mut database, &eid, true).unwrap();
+        assert!(build_entry_dtos(&database)[0].fav);
         assert_eq!(
-            vault.get_entry_tags(&eid).unwrap(),
+            database.get_entry_tags(&eid).unwrap(),
             ["ssh", "work", "Favorite"]
         );
-        apply_set_favorite(&mut vault, &eid, true).unwrap();
-        assert_eq!(vault.get_entry_tags(&eid).unwrap().len(), 3);
-        apply_set_favorite(&mut vault, &eid, false).unwrap();
-        assert!(!build_entry_dtos(&vault)[0].fav);
-        assert_eq!(vault.get_entry_tags(&eid).unwrap(), ["ssh", "work"]);
+        apply_set_favorite(&mut database, &eid, true).unwrap();
+        assert_eq!(database.get_entry_tags(&eid).unwrap().len(), 3);
+        apply_set_favorite(&mut database, &eid, false).unwrap();
+        assert!(!build_entry_dtos(&database)[0].fav);
+        assert_eq!(database.get_entry_tags(&eid).unwrap(), ["ssh", "work"]);
         // Delete recycles the entry: it leaves the live listing.
-        apply_delete(&mut vault, &eid).unwrap();
-        let live: Vec<_> = build_entry_dtos(&vault)
+        apply_delete(&mut database, &eid).unwrap();
+        let live: Vec<_> = build_entry_dtos(&database)
             .into_iter()
             .filter(|d| {
                 !d.group
@@ -3163,21 +3458,21 @@ mod tests {
 
     #[test]
     fn native_favorite_tag_is_visible_and_star_removes_all_case_variants() {
-        let (mut vault, path) = temp_vault();
-        let eid = apply_save_entry(&mut vault, &input(None, "forge/gitea")).unwrap();
-        vault
+        let (mut database, path) = temp_database();
+        let eid = apply_save_entry(&mut database, &input(None, "forge/gitea")).unwrap();
+        database
             .set_entry_tags(
                 &eid,
                 vec!["favorite".into(), "git".into(), "FAVORITE".into()],
             )
             .unwrap();
-        vault.save().unwrap();
-        let mut reopened = Vault::open(&path, "correct horse").unwrap();
+        database.save().unwrap();
+        let mut reopened = Database::open(&path, "correct horse").unwrap();
         assert!(build_entry_dtos(&reopened)[0].fav);
 
         apply_set_favorite(&mut reopened, &eid, false).unwrap();
         reopened.save().unwrap();
-        let cleared = Vault::open(&path, "correct horse").unwrap();
+        let cleared = Database::open(&path, "correct horse").unwrap();
         assert!(!build_entry_dtos(&cleared)[0].fav);
         assert_eq!(cleared.get_entry_tags(&eid).unwrap(), ["git"]);
     }
@@ -3220,10 +3515,10 @@ mod tests {
     }
 
     #[test]
-    fn vault_id_is_deterministic_and_path_derived() {
-        let a = vault_id_for(Path::new("/vaults/inpace.kdbx"));
-        let b = vault_id_for(Path::new("/vaults/inpace.kdbx"));
-        let c = vault_id_for(Path::new("/vaults/other.kdbx"));
+    fn database_id_is_deterministic_and_path_derived() {
+        let a = database_id_for(Path::new("/databases/inpace.kdbx"));
+        let b = database_id_for(Path::new("/databases/inpace.kdbx"));
+        let c = database_id_for(Path::new("/databases/other.kdbx"));
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 16);
@@ -3232,29 +3527,29 @@ mod tests {
     #[test]
     fn id_collision_with_a_different_path_is_rejected() {
         let mut state = AppState::default();
-        let id = vault_id_for(Path::new("/vaults/a.kdbx"));
-        state.vaults.insert(
+        let id = database_id_for(Path::new("/databases/a.kdbx"));
+        state.databases.insert(
             id.clone(),
-            RegisteredVault::new(PathBuf::from("/vaults/a.kdbx"), "a".to_string()),
+            RegisteredDatabase::new(PathBuf::from("/databases/a.kdbx"), "a".to_string()),
         );
 
         // Same id + same path → idempotent, no clobber.
         assert_eq!(
-            ensure_no_id_collision(&state, &id, Path::new("/vaults/a.kdbx")),
+            ensure_no_id_collision(&state, &id, Path::new("/databases/a.kdbx")),
             Ok(true)
         );
         // Same id + a *different* path → rejected rather than overwriting.
-        assert!(ensure_no_id_collision(&state, &id, Path::new("/vaults/b.kdbx")).is_err());
+        assert!(ensure_no_id_collision(&state, &id, Path::new("/databases/b.kdbx")).is_err());
         // A free id → Ok(false).
-        let free = vault_id_for(Path::new("/vaults/c.kdbx"));
+        let free = database_id_for(Path::new("/databases/c.kdbx"));
         assert_eq!(
-            ensure_no_id_collision(&state, &free, Path::new("/vaults/c.kdbx")),
+            ensure_no_id_collision(&state, &free, Path::new("/databases/c.kdbx")),
             Ok(false)
         );
     }
 
-    fn settings_vault() -> (Vault, EntryId) {
-        let (mut v, _path) = temp_vault();
+    fn settings_database() -> (Database, EntryId) {
+        let (mut v, _path) = temp_database();
         v.add_group("Apps").unwrap();
         let id = v.add_entry("api").unwrap();
         v.move_entry(&id, "Apps").unwrap();
@@ -3266,7 +3561,7 @@ mod tests {
 
     #[test]
     fn a_capability_item_round_trips_with_its_sources_and_origins() {
-        let (mut v, id) = settings_vault();
+        let (mut v, id) = settings_database();
         let dtos = capability_dtos(&v, &id).unwrap();
         assert!(
             dtos.iter().all(|d| !d.on),
@@ -3306,7 +3601,7 @@ mod tests {
 
     #[test]
     fn group_defaults_are_set_cleared_and_never_grant() {
-        let (mut v, _id) = settings_vault();
+        let (mut v, _id) = settings_database();
         apply_group_default(&mut v, "Apps", Capability::Materialize, "dir", "/tmp/apps").unwrap();
         let dtos = group_capability_dtos(&v, "Apps").unwrap();
         let mat = dtos.iter().find(|d| d.capability == "materialize").unwrap();
@@ -3335,7 +3630,7 @@ mod tests {
 
     #[test]
     fn materialize_follows_the_document_and_inherits_a_directory() {
-        let (mut v, id) = settings_vault();
+        let (mut v, id) = settings_database();
         let input = |target: &str, use_dir: bool| MaterializeInput {
             target: target.to_string(),
             mode: "0640".to_string(),

@@ -55,7 +55,7 @@ This is the gap inventory for the upcoming 0.12.x migration. Cells:
 | AES-256      | ChaCha20     | Argon2d  | GZip        | keyfile (XML v2 / .keyx) | pass   |
 | AES-256      | ChaCha20     | Argon2d  | GZip        | password + raw32 keyfile | pass   |
 
-**Total: 41 valid combos × {minimal-DB always, rich-DB on subset}.** Inner cipher = `Plain` is intentionally excluded (production vaults never write it).
+**Total: 41 valid combos × {minimal-DB always, rich-DB on subset}.** Inner cipher = `Plain` is intentionally excluded (production databases never write it).
 
 ### Rich-database round-trip subset (3 combos)
 

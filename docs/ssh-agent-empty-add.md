@@ -8,7 +8,7 @@ using a private, explicitly populated agent. For the measured OpenSSH protocol o
 ## The incident
 
 On a real bastion, `sshd` allowed six authentication attempts. Trove's agent held nine keys; the
-wanted key was eighth in the list, so SSH disconnected before offering it. After the vault was
+wanted key was eighth in the list, so SSH disconnected before offering it. After the database was
 unlocked again, the same key appeared fifth. Agent order changed, making the failure intermittent
 without any change to the deployment.
 
@@ -23,11 +23,11 @@ authorized client key exists in `authorized_keys` on the server, which cannot be
 connecting.
 
 Pinning `IdentityFile` in SSH configuration can select a key, but it selects by path. A key held
-only in a Trove vault would first have to be materialized as a file.
+only in a Trove database would first have to be materialized as a file.
 
 ## Why a private, explicitly populated socket
 
-A separate socket lets a caller select exactly the vault entries it intends to use without
+A separate socket lets a caller select exactly the database entries it intends to use without
 changing the daemon's shared agent. Independent jobs can populate their own sockets without racing
 over a shared list of keys. One socket can hold several selected keys for a multi-hop deployment.
 An immutable socket per key would need separate agents for the jump host and destination; `ssh -J`

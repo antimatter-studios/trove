@@ -1,10 +1,10 @@
 # trove
 
-A KeePassXC-compatible password manager that does the things upstream won't. **100% `.kdbx` format compatibility** is non-negotiable — you can open the same vault in KeePassXC, KeePassDX, Strongbox, or KeePass2 without losing data. We only extend; we never break.
+A KeePassXC-compatible password manager that does the things upstream won't. **100% `.kdbx` format compatibility** is non-negotiable — you can open the same database in KeePassXC, KeePassDX, Strongbox, or KeePass2 without losing data. We only extend; we never break.
 
 ## Founding idea
 
-Treat the vault as more than passwords. Entries can carry **files** (kubeconfig, SSH keys, GPG keys, `.env`, TLS certs, signing keys) that **materialize to disk on unlock and are wiped on lock** — opt-in per entry, with a clear acknowledgement of the on-disk-exposure risk. Linux verifies tmpfs by default; macOS uses a soft path allowlist, and Windows does not enforce a memory-backed destination. Wiping is best effort on disk-backed filesystems. The vault becomes the source of truth for "the secrets a developer machine needs to function."
+Treat the database as more than passwords. Entries can carry **files** (kubeconfig, SSH keys, GPG keys, `.env`, TLS certs, signing keys) that **materialize to disk on unlock and are wiped on lock** — opt-in per entry, with a clear acknowledgement of the on-disk-exposure risk. Linux verifies tmpfs by default; macOS uses a soft path allowlist, and Windows does not enforce a memory-backed destination. Wiping is best effort on disk-backed filesystems. The database becomes the source of truth for "the secrets a developer machine needs to function."
 
 ## Install
 
@@ -40,7 +40,7 @@ Native Windows is **experimental**: it builds in CI, but hasn't been run on a re
   That puts native `trove` + `troved` on your PATH. The native build uses Windows **named pipes** instead of Unix-domain sockets for its control, ssh-agent and gpg-agent channels, so Windows OpenSSH (and git configured to use it) can use trove's SSH agent. troved serves `\\.\pipe\openssh-ssh-agent` when it's free, which OpenSSH finds with no configuration; otherwise set `SSH_AUTH_SOCK` to what `trove ssh-agent socket` prints. Git for Windows' bundled ssh can't reach a named-pipe agent; point git at the system ssh with `git config --global core.sshCommand C:/Windows/System32/OpenSSH/ssh.exe`. See [docs/windows.md](docs/windows.md). You can also just download `trove-<version>-windows-x86_64.zip` from [Releases](https://github.com/antimatter-studios/trove/releases). (Homebrew is Unix-only, so there's no `brew` path on native Windows.)
 - **WSL2** — run the Linux build inside WSL2 (a real Linux environment): install via Linuxbrew exactly as above, or grab a `linux-*` tarball. Inside WSL everything works as on Linux; bridging the agent to native-Windows clients needs a socket→named-pipe relay such as [npiperelay](https://github.com/jstarks/npiperelay).
 
-The **Trove Desktop** GUI is self-contained — it reads kdbx files directly (embeds `trove-core`), so you don't need the CLI just to browse a vault. Install the CLI when you want your secrets brokered to ssh / git / gpg.
+The **Trove Desktop** GUI is self-contained — it reads kdbx files directly (embeds `trove-core`), so you don't need the CLI just to browse a database. Install the CLI when you want your secrets brokered to ssh / git / gpg.
 
 ### From source (cargo)
 
@@ -74,11 +74,11 @@ trigger it.
 
 Linux + macOS. The daemon (`troved`) is the long-running process; `trove` is a thin CLI client.
 
-### 1. Create a vault and stash some secrets
+### 1. Create a database and stash some secrets
 
-The global `--vault <PATH>` flag selects **offline mode**: the command opens
+The global `--database <PATH>` flag selects **offline mode**: the command opens
 that kdbx file directly, no daemon and no session — what scripts and agents
-want. It works before or after the subcommand. Omit it and the vault commands
+want. It works before or after the subcommand. Omit it and the database commands
 (`add`, `get`, `show`, `edit`, `search`, `rm`, `mv`, `mkdir`, `rmdir`,
 `generate ssh`, `list`) instead talk to the running daemon, gated by the
 `TROVE_SESSION` code (see step 2). Only `init` and `materialize` are
@@ -86,42 +86,42 @@ offline-only.
 
 ```sh
 # Create a fresh kdbx file. Prompts twice for the master password.
-trove --vault my-vault.kdbx init
+trove --database my-database.kdbx init
 
 # Store an SSH private key, addressed by entry path (`group/sub/title`; groups
 # auto-created). The key goes into a real KDBX <Binary> attachment named `id`
 # and the derived public key into `id.pub`, so KeePassXC can read it too. The
 # trailing comment (usually an email) is the label recorded in `id.pub`.
-trove --vault my-vault.kdbx add ssh github.com ~/.ssh/id_ed25519 you@example.com
+trove --database my-database.kdbx add ssh github.com ~/.ssh/id_ed25519 you@example.com
 # …or mint one in-tool, no ssh-keygen needed:
-trove --vault my-vault.kdbx generate ssh github.com
+trove --database my-database.kdbx generate ssh github.com
 
 # Store a GPG secret-key export (binary, NOT armored). A passphrase-protected
 # export stays protected on disk; trove asks for the passphrase and stores the
-# key decrypted inside the vault.
+# key decrypted inside the database.
 gpg --export-secret-keys --output /tmp/sec.gpg <KEYID>
-trove --vault my-vault.kdbx add gpg git-signing --key /tmp/sec.gpg
+trove --database my-database.kdbx add gpg git-signing --key /tmp/sec.gpg
 rm /tmp/sec.gpg
 
 # Stash a config file and tag it for materialization on unlock. The default
 # AllowDiskBacked=false means troved will refuse to write to a non-tmpfs path
 # (Linux) / non-ephemeral path (macOS soft-allowlist).
-trove --vault my-vault.kdbx add file kubeconfig-prod \
+trove --database my-database.kdbx add file kubeconfig-prod \
     --src ./kubeconfig --target /tmp/kubeconfig --mode 0600
 
 # Plain password entries — full KeePassXC-style CRUD:
-trove --vault my-vault.kdbx add password Web/github --username alice --generate
-trove --vault my-vault.kdbx show Web/github          # password stays masked
-trove --vault my-vault.kdbx get password Web/github  # script primitive
-trove --vault my-vault.kdbx edit Web/github --set Env=prod
-trove --vault my-vault.kdbx search github
-trove --vault my-vault.kdbx rm Web/github            # → shared Recycle Bin
+trove --database my-database.kdbx add password Web/github --username alice --generate
+trove --database my-database.kdbx show Web/github          # password stays masked
+trove --database my-database.kdbx get password Web/github  # script primitive
+trove --database my-database.kdbx edit Web/github --set Env=prod
+trove --database my-database.kdbx search github
+trove --database my-database.kdbx rm Web/github            # → shared Recycle Bin
 
-# Inspect what's in the vault (offline — reads the file directly).
-trove --vault my-vault.kdbx list
+# Inspect what's in the database (offline — reads the file directly).
+trove --database my-database.kdbx list
 
 # Read a secret back without a daemon (password via stdin for scripts):
-trove --vault my-vault.kdbx --password-stdin get ssh github.com --out ./id
+trove --database my-database.kdbx --password-stdin get ssh github.com --out ./id
 ```
 
 ### 2. Run the daemon
@@ -136,7 +136,7 @@ troved &
 ```
 
 You rarely need to start it by hand: any `trove` command that needs the daemon
-starts one, and it exits once the last vault is locked. To have it running from
+starts one, and it exits once the last database is locked. To have it running from
 login instead, so `ssh` and `git` find the agent sockets before you've run a
 `trove` command, install it as a service. It runs `troved --resident`, which stays
 up across locks, and is restarted if it dies:
@@ -152,41 +152,41 @@ gpg's socket.
 The daemon also responds to `TROVE_IDLE_TIMEOUT` (env var, seconds; `0` disables auto-lock), `TROVE_SOCK` / `TROVE_SSH_SOCK` / `TROVE_GPG_SOCK` (override socket paths), and `TROVE_SSH_FORWARD=0` (see below).
 
 If something doesn't work, `trove doctor` checks the daemon, where
-`SSH_AUTH_SOCK` and gpg point, and the vault file, and says what to fix.
+`SSH_AUTH_SOCK` and gpg point, and the database file, and says what to fix.
 
 ### 3. Wire up the SSH agent
 
 ```sh
 export SSH_AUTH_SOCK="$(trove ssh-agent socket)"
 
-# Unlock the vault — keys move into daemon memory, no extra config needed.
+# Unlock the database — keys move into daemon memory, no extra config needed.
 # Prompts for the master password; populates SSH keys, GPG keys, and the
 # materialization plan in one shot.
-trove unlock my-vault.kdbx
+trove unlock my-database.kdbx
 
-ssh-add -L          # should list every ed25519/RSA-3072+/ECDSA key in the vault
+ssh-add -L          # should list every ed25519/RSA-3072+/ECDSA key in the database
 ssh github.com      # signs against the daemon
 ```
 
-If the vault contains more keys than a server's authentication-attempt limit
+If the database contains more keys than a server's authentication-attempt limit
 allows, tag the entries you want for a particular workflow and unlock with a
 filter:
 
 ```sh
 trove edit gitlab-deploy --tag gitlab
-trove unlock my-vault.kdbx --filter=gitlab
+trove unlock my-database.kdbx --filter=gitlab
 ```
 
 `--filter` matches KeePass-native tags on entries or any containing group
 (case-insensitively). Only matching entries are exposed through the SSH/GPG
-agents and unlock-time materialization; the vault itself remains unlocked for
+agents and unlock-time materialization; the database itself remains unlocked for
 the normal session-gated commands. Use `trove group list` and `trove group edit`
 to inspect and edit group tags. Without a filter, all entries continue to be
 exposed as before.
 
 Exporting `SSH_AUTH_SOCK` only reaches processes started afterwards, so unlock *also* pushes the keys into whatever agent `$SSH_AUTH_SOCK` already named — the KeePassXC model — and lock asks that agent to drop them again. That's what makes an already-running editor able to push. Per-key behaviour (removal at lock, lifetime and confirm constraints) comes from each entry's `KeeAgent.settings` and is editable in KeePassXC itself; `TROVE_SSH_FORWARD=0` turns the whole thing off. The trade: the private bytes leave the daemon, so lock can only *ask* for them back. `IdentityAgent "$(trove ssh-agent socket)"` in `~/.ssh/config` solves the same reachability problem with nothing leaving troved — see [docs/macos.md](docs/macos.md).
 
-For scripted use, `trove --password-stdin unlock my-vault.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).
+For scripted use, `trove --password-stdin unlock my-database.kdbx` reads the password from stdin instead of prompting. The control protocol is also available raw over the Unix socket if you need to drive the daemon from a non-Rust client; see [docs/cli-reference.md](docs/cli-reference.md).
 
 ### 4. Wire up the GPG agent
 
@@ -195,7 +195,7 @@ For scripted use, `trove --password-stdin unlock my-vault.kdbx` reads the passwo
 ln -sf "$(trove gpg-agent socket)" "$(gpgconf --list-dirs agent-socket)"
 
 # gpg only signs with keys it knows. After `unlock` (above), put the public
-# half of each vault GPG key into your keyring (once per key):
+# half of each database GPG key into your keyring (once per key):
 trove gpg-agent import
 
 # git commit -S now works against an ed25519 or RSA OpenPGP key.
@@ -222,19 +222,19 @@ trove materialize-status
 `backing=memory` only on a Linux tmpfs. macOS has none, so a materialized file
 there is on disk even under `/tmp`, and the wipe on lock is best effort.
 
-`trove status` gives a fuller summary (vault path, idle remaining, key counts). For testing without the daemon, `trove --vault my-vault.kdbx materialize` runs the same plan in-process and wipes everything on Ctrl-C.
+`trove status` gives a fuller summary (database path, idle remaining, key counts). For testing without the daemon, `trove --database my-database.kdbx materialize` runs the same plan in-process and wipes everything on Ctrl-C.
 
 ### 6. Lock
 
 ```sh
-# Manual lock — wipes materialized files, drops vault + SSH/GPG keys from memory.
+# Manual lock — wipes materialized files, drops database + SSH/GPG keys from memory.
 trove lock
 
-# `unlock` is additive: unlock a second vault and both serve at once, with the
-# agents holding the union of their keys. `--vault` then locks just one and
-# leaves the rest serving (see docs/multi-vault.md).
-trove unlock work-vault.kdbx
-trove lock --vault work-vault.kdbx
+# `unlock` is additive: unlock a second database and both serve at once, with the
+# agents holding the union of their keys. `--database` then locks just one and
+# leaves the rest serving (see docs/multi-database.md).
+trove unlock work-database.kdbx
+trove lock --database work-database.kdbx
 
 # Or do nothing — the daemon auto-locks after TROVE_IDLE_TIMEOUT seconds of
 # no activity (default 900s). Activity = any control-RPC except `ping`,
@@ -267,14 +267,14 @@ The [CHANGELOG](CHANGELOG.md) has the detail; in short:
   key choice by the server's host key, `ssh-add -d/-D/-x/-X`, and forwarding
   into an agent that is already running.
 - **GPG agent.** `git commit -S` and `gpg --decrypt` with ed25519/cv25519 and
-  RSA OpenPGP keys from the vault.
+  RSA OpenPGP keys from the database.
 - **File materialization.** Attachments written to a target path on unlock and
   wiped on lock, and `trove exec <scope> -- cmd` for secrets that live only as
   long as one process tree (the `op run` of kdbx).
 - **Headless daemon.** `troved` auto-spawns and serves the CLI, the agents and
-  the desktop app. Several vaults can be unlocked at once, filtered by tag, with
+  the desktop app. Several databases can be unlocked at once, filtered by tag, with
   passwords from `.env.trove.yaml` or the macOS keychain.
-- **Sync.** `trove sync` does a two-way sync with another copy of the vault,
+- **Sync.** `trove sync` does a two-way sync with another copy of the database,
   and saves merge other writers' changes instead of overwriting them.
 - **Scripting.** `--json` on read and status commands, `describe` for agents,
   a `git-credential` helper, and `resolve trove://…` secret references.
@@ -296,7 +296,7 @@ bigger ideas, grouped:
 - **Sync and multi-device:** delta sync (#230), an opt-in self-hosted sync
   server (#236).
 - **Sharing and teams:** member identity keys (#231), sealed fields with group
-  keys (#232), per-entry permissions for company vaults (#233), sending one
+  keys (#232), per-entry permissions for company databases (#233), sending one
   entry to a person (#235), admin audit review (#327), SSO/OIDC unlock (#286).
 - **Automation:** a documented, versioned RPC API for scripts (#309), a browser
   native-messaging host without the GUI (#289).
@@ -332,19 +332,19 @@ For each upstream rejection, is the justification valid? Are we right to ignore 
 
 **Largely valid.** OAuth integrations to Dropbox/GDrive/OneDrive each carry their own auth flows, token refresh, rate-limit quirks, and breakage cycles. "Drop the file in your synced folder" works, doesn't need our code, and doesn't tie users to providers we picked.
 
-**What upstream misses:** the gaps that BYO-sync *cannot* fix — visual 3-way merge, conflict UI, multi-client lock coordination, delta sync for large vaults. These are protocol/UX problems, not adapter problems.
+**What upstream misses:** the gaps that BYO-sync *cannot* fix — visual 3-way merge, conflict UI, multi-client lock coordination, delta sync for large databases. These are protocol/UX problems, not adapter problems.
 
 **Our stance:** don't build OAuth adapters. *Do* build a sync engine that handles conflicts, deltas, and multi-client awareness on top of any backing store (filesystem, WebDAV, S3, our own server). Adapters are commodity; the merge UX is the actual value.
 
-### Per-user keys / shared vault — *upstream technically right, but solving the wrong problem*
+### Per-user keys / shared database — *upstream technically right, but solving the wrong problem*
 
 > "This is not how encryption works." / "Honestly I have near zero appetite for this scheme…" — droidmonkey, [#3597](https://github.com/keepassxreboot/keepassxc/discussions/3597)
 
 **Technically valid.** kdbx rotates the master seed on every save. Layering per-user keys *inside* the kdbx envelope would be a non-standard format change and would break compatibility with every other kdbx client. droidmonkey is correct to refuse that.
 
-**But the user need isn't "modify kdbx." It's "let two people share a vault without sharing one password."** That's solvable with a sidecar: an encrypted key-bundle file (per-user public-key wraps of the vault key) sitting next to the kdbx. The kdbx itself stays standard; the bundle is our extension. Other clients still open the file with the shared key as today.
+**But the user need isn't "modify kdbx." It's "let two people share a database without sharing one password."** That's solvable with a sidecar: an encrypted key-bundle file (per-user public-key wraps of the database key) sitting next to the kdbx. The kdbx itself stays standard; the bundle is our extension. Other clients still open the file with the shared key as today.
 
-**Our stance:** don't touch kdbx internals. Build per-user access as a sidecar (`vault.kdbx` + `vault.access`). Upstream's refusal to bend kdbx is correct; their conclusion that the feature can't exist is wrong.
+**Our stance:** don't touch kdbx internals. Build per-user access as a sidecar (`database.kdbx` + `database.access`). Upstream's refusal to bend kdbx is correct; their conclusion that the feature can't exist is wrong.
 
 ### "We are an individual password manager" — *valid scope, not a valid technical objection*
 
@@ -376,7 +376,7 @@ For each upstream rejection, is the justification valid? Are we right to ignore 
 
 No explicit upstream rejection, but the "keep complexity low / not tied to a provider" line from the cloud-sync FAQ implicitly applies.
 
-**Our stance:** optional, opt-in self-hosted server (#236). Never required. The vault file always works without it. Server adds: presence/lock coordination, delta sync, per-user-key bundle distribution, audit log storage. Not OAuth, not a "cloud."
+**Our stance:** optional, opt-in self-hosted server (#236). Never required. The database file always works without it. Server adds: presence/lock coordination, delta sync, per-user-key bundle distribution, audit log storage. Not OAuth, not a "cloud."
 
 ### `op run` / FUSE / SSO-OIDC / FIDO2-primary — *no upstream rejection; just nobody's done it*
 
@@ -397,13 +397,13 @@ It's tempting to argue file materialization weakens the "encrypted at rest" guar
 
 **The status quo is plaintext-on-disk forever.** `~/.kube/config`, `~/.ssh/id_ed25519`, `~/.aws/credentials`, `~/.gnupg/`, every `.env` file, kubeconfigs for clusters the developer hasn't touched in two years — these sit unencrypted on every developer machine, often syncing to backups, often readable by every process running as that user, often surviving long after the credential should have been rotated. Nobody encrypts them because the friction of decrypt-on-use is too high to bother.
 
-**Time-bounded materialization is a strict reduction.** A secret that exists on disk for 2 minutes during active use, then is wiped, leaks less than the same secret sitting in `~/.config/` for 18 months. Lock-on-idle, lock-on-screensaver, and lock-on-disconnect collapse the exposure window further. The threat-model comparison is not "encrypted vault vs. plaintext file." It's "plaintext file forever vs. plaintext file briefly, with a real chance the developer rotates it because rotation is now cheap."
+**Time-bounded materialization is a strict reduction.** A secret that exists on disk for 2 minutes during active use, then is wiped, leaks less than the same secret sitting in `~/.config/` for 18 months. Lock-on-idle, lock-on-screensaver, and lock-on-disconnect collapse the exposure window further. The threat-model comparison is not "encrypted database vs. plaintext file." It's "plaintext file forever vs. plaintext file briefly, with a real chance the developer rotates it because rotation is now cheap."
 
 **Residual concerns and their mitigations:**
 
 - *Swap and hibernation* — Linux materialization refuses disk-backed paths by default; macOS has only a soft path allowlist, and Windows has no backing-store enforcement. `trove exec` uses the OS temp directory and does not verify its backing store. Prefer a known memory-backed path where available.
 - *Crash dumps and journals* — same: prefer locations the OS doesn't snapshot.
-- *Forgotten unlock sessions* — aggressive auto-lock (idle, lid-close, network event), and materialization TTL independent of vault lock state.
+- *Forgotten unlock sessions* — aggressive auto-lock (idle, lid-close, network event), and materialization TTL independent of database lock state.
 - *Backup tooling capturing the materialized path* — document which paths are unsafe (e.g. `~/Documents` on macOS with iCloud); ship sane defaults.
 - *Process-readable while live* — unavoidable while the process is using it, same as today. Per-entry filesystem ACLs narrow the audience.
 
@@ -430,22 +430,22 @@ Most recent releases; the full history and the pre-1.0 development milestones li
 No changes to trove's behaviour: this release restores the scheduled fuzz run and the KeePassXC 2.8 interoperability tests; otherwise v0.27.0.
 
 ### v0.27.0
-Vault passwords in `.env.trove.yaml` can be selected by path suffix: `homelab/docs/work.kdbx` overrides `work.kdbx` for matching paths, with the longest whole-component match winning. Existing filename keys remain compatible. SSH cryptography dependencies are updated for the `crypto-bigint` and `ctutils` timing advisories.
+Database passwords in `.env.trove.yaml` can be selected by path suffix: `homelab/docs/work.kdbx` overrides `work.kdbx` for matching paths, with the longest whole-component match winning. Existing filename keys remain compatible. SSH cryptography dependencies are updated for the `crypto-bigint` and `ctutils` timing advisories.
 
 ### v0.26.1
 Release assets carry build-provenance attestations, so the Homebrew tap can ship them; otherwise v0.26.0.
 
 ### v0.26.0
-Capability settings documents: `EnvAgent.settings`, `Materialize.settings` and `GpgAgent.settings` say what `trove exec` exports, which files are written and which GPG keys are served, with folder defaults that never grant; no document means off. New `trove env-agent`, `trove materialize add`, `trove gpg-agent enable`, `trove settings`, desktop panels for all of it, Touch ID approval for items marked `confirm`, and `export="shell"` variables set by `trove unlock --export`. `--env` reads `.env.trove.yaml` (passwords under `databases:`, settings under `environment:`); the old `.env.trove` formats are refused with directions to convert. `trove exec` maps several variables per entry and runs against the unlocked daemon. SSH keys load passphrase-protected, from PuTTY `.ppk` and as P-521, and `import-ssh` bootstraps a vault from `~/.ssh`. New `trove doctor`, `trove health` and `analyze --reuse/--weak/--age/--expired`; `troved --resident` with service units; entry expiry and icons.
+Capability settings documents: `EnvAgent.settings`, `Materialize.settings` and `GpgAgent.settings` say what `trove exec` exports, which files are written and which GPG keys are served, with folder defaults that never grant; no document means off. New `trove env-agent`, `trove materialize add`, `trove gpg-agent enable`, `trove settings`, desktop panels for all of it, Touch ID approval for items marked `confirm`, and `export="shell"` variables set by `trove unlock --export`. `--env` reads `.env.trove.yaml` (passwords under `databases:`, settings under `environment:`); the old `.env.trove` formats are refused with directions to convert. `trove exec` maps several variables per entry and runs against the unlocked daemon. SSH keys load passphrase-protected, from PuTTY `.ppk` and as P-521, and `import-ssh` bootstraps a database from `~/.ssh`. New `trove doctor`, `trove health` and `analyze --reuse/--weak/--age/--expired`; `troved --resident` with service units; entry expiry and icons.
 
 ### v0.25.0
-`trove sync <OTHER>` syncs the vault two ways with another copy of it, and saving no longer refuses when another writer changed the file: their changes are merged in. Attachment fixes: removing one no longer mixes up the others, and edits, deletes and `trove merge` handle them correctly. One ssh-keygen ECDSA key in 256 that failed to load now loads. The 1.0 stability promise is written down, `--json` shapes are pinned, `trove-core`'s API is settled for semver, and macOS release artifacts are notarized.
+`trove sync <OTHER>` syncs the database two ways with another copy of it, and saving no longer refuses when another writer changed the file: their changes are merged in. Attachment fixes: removing one no longer mixes up the others, and edits, deletes and `trove merge` handle them correctly. One ssh-keygen ECDSA key in 256 that failed to load now loads. The 1.0 stability promise is written down, `--json` shapes are pinned, `trove-core`'s API is settled for semver, and macOS release artifacts are notarized.
 
 ### v0.24.0
 Drag and drop in the desktop sidebar: reorder folders or move them into another, and drag entries from the list onto a folder. Dragging moves, Option (Ctrl on Windows/Linux) copies, and the carried card turns green or red for whether the drop is taken. Text is selectable only where it is worth copying, and right click no longer opens the webview's page menu. Edits made in trove now keep the replaced value as entry history, as KeePassXC does.
 
 ### v0.23.0
-`trove ssh-agent close [SOCKET]` closes one private socket from `trove ssh-agent empty` (`$SSH_AUTH_SOCK` by default) and leaves the rest alone, so a script run repeatedly against an unlocked vault no longer reaches the 32-socket limit. `trove ssh-agent sockets` lists the open private sockets and the keys on each.
+`trove ssh-agent close [SOCKET]` closes one private socket from `trove ssh-agent empty` (`$SSH_AUTH_SOCK` by default) and leaves the rest alone, so a script run repeatedly against an unlocked database no longer reaches the 32-socket limit. `trove ssh-agent sockets` lists the open private sockets and the keys on each.
 
 ### v0.22.0
 The desktop sidebar pencil opens Edit Folder: tags plus Delete folder, which lists every entry in the tree before you confirm (an empty tree goes without asking). The recycle bin is pinned at the bottom of the sidebar and lists everything in it; folder badges count every entry beneath them once, and clicking a folder opens or closes it. GitHub Actions move to their current major versions.

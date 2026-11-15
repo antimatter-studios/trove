@@ -1,7 +1,7 @@
 # Upstream bugs found via the cross-tool conformance matrix
 
 The conformance matrix in [`crates/keepass-spec-tests`](../crates/keepass-spec-tests/)
-mints `.kdbx` vaults with one tool and reads them back with another, across the
+mints `.kdbx` databases with one tool and reads them back with another, across the
 `keepass` Rust crate (0.12.5 and 0.13.10), `keepassxc-cli`, and the `trove` CLI.
 Several mismatches it surfaced are genuine **upstream bugs** rather than
 expected behavior. Each is recorded in the matrix's `expect()` table as an
@@ -26,7 +26,7 @@ published crates, so its `Xfail` stays until a release carries the fix.
 
 - **Product:** `keepass` crate (keepass-rs)
 - **Affected versions:** 0.12.5 **and** 0.13.10 (current)
-- **Severity:** high — silent data loss / corruption: a vault written by
+- **Severity:** high — silent data loss / corruption: a database written by
   KeePassXC/KeePass2 in KDBX 3.1 with **two or more attachments** loses or
   misreads them when opened with the crate. KDBX 4 (header-stored attachments)
   is unaffected.
@@ -89,7 +89,7 @@ Producer `keepassxc-cli` (writes KDBX 3.1) → consumer `keepass` crate, fixture
 
 ---
 
-## Bug B — KDBX-3.1 reader can't open a vault containing a zero-byte attachment
+## Bug B — KDBX-3.1 reader can't open a database containing a zero-byte attachment
 
 **Status:** fixed on the antimatter-studios/keepass-rs `trove` branch that trove
 pins, and sent upstream as sseemayer/keepass-rs#384. The matrix still links the
@@ -146,12 +146,12 @@ Producer `keepassxc-cli` → consumer `keepass` crate, fixture
 
 - **Product:** `keepass` crate (keepass-rs)
 - **Affected versions:** 0.12.5 (**fixed in 0.13.10**)
-- **Severity:** high (while present) — *no* crate-written vault could be opened
+- **Severity:** high (while present) — *no* crate-written database could be opened
   in KeePassXC at all.
 
 ### Symptom
 KeePassXC refuses any 0.12.5-written `.kdbx` with
-`Error while reading the database: Invalid number value` — even an empty vault.
+`Error while reading the database: Invalid number value` — even an empty database.
 
 ### Root cause
 0.12.5 serializes unset numeric `<Meta>` fields as **empty elements**:
@@ -208,4 +208,4 @@ and **`tags-and-custom`**.
   limitation/feature-gap, not a correctness bug. KeePassXC reads both 4.0 and 4.1.
 - **`keepassxc-cli` cannot write KDBX 4 on import/create.** It always emits KDBX
   3.1, which is why Bugs A and B (3.1-reader bugs) are reachable from a
-  keepassxc-produced vault at all.
+  keepassxc-produced database at all.

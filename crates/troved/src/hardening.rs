@@ -2,7 +2,7 @@
 
 /// Mark the daemon non-dumpable on Linux (`prctl(PR_SET_DUMPABLE, 0)`).
 ///
-/// troved holds decrypted vault material, so a crash must not write it to a
+/// troved holds decrypted database material, so a crash must not write it to a
 /// core file. Being non-dumpable also stops other processes running as the
 /// same user from `ptrace`-attaching to troved or reading `/proc/<pid>/mem`.
 /// macOS gets the equivalent from the hardened runtime on the signed release

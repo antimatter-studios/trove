@@ -136,16 +136,16 @@ fn check(algo: &str, subkey: Option<&str>) {
         Err(ParseError::WrongPassphrase)
     ));
 
-    // Stored as-is in a vault (as KeePassXC users keep it), the entry's
+    // Stored as-is in a database (as KeePassXC users keep it), the entry's
     // Password decrypts it at load; without one it is skipped.
     let dir = tempfile::tempdir().unwrap();
-    let mut v = trove_core::Vault::create(&dir.path().join("v.kdbx"), "pw").unwrap();
+    let mut v = trove_core::Database::create(&dir.path().join("v.kdbx"), "pw").unwrap();
     let with = v.add_entry("with-password").unwrap();
     v.attach_binary(&with, "gpg-priv", &protected).unwrap();
     v.set_field(&with, "Password", PASSPHRASE).unwrap();
     let without = v.add_entry("without-password").unwrap();
     v.attach_binary(&without, "gpg-priv", &protected).unwrap();
-    let loaded = troved::handler::load_gpg_keys_from_vault_filtered(&v, None);
+    let loaded = troved::handler::load_gpg_keys_from_database_filtered(&v, None);
     let mut grips: Vec<String> = loaded.iter().map(|k| k.keygrip_hex()).collect();
     grips.sort();
     assert_eq!(grips, got, "{algo}: only the entry with a Password loads");

@@ -6,14 +6,14 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
-use trove_core::Vault;
+use trove_core::Database;
 
-const VAULT_PASSWORD: &str = "base64-output-test-password";
+const DATABASE_PASSWORD: &str = "base64-output-test-password";
 
-fn run(vault: &str, tail: &[&str]) -> std::process::Output {
+fn run(database: &str, tail: &[&str]) -> std::process::Output {
     let mut args = vec![
-        "--vault".to_string(),
-        vault.to_string(),
+        "--database".to_string(),
+        database.to_string(),
         "--password-stdin".to_string(),
     ];
     args.extend(tail.iter().map(|s| (*s).to_string()));
@@ -28,7 +28,7 @@ fn run(vault: &str, tail: &[&str]) -> std::process::Output {
         .stdin
         .take()
         .unwrap()
-        .write_all(format!("{VAULT_PASSWORD}\n").as_bytes())
+        .write_all(format!("{DATABASE_PASSWORD}\n").as_bytes())
         .unwrap();
     child.wait_with_output().expect("wait for trove")
 }
@@ -37,18 +37,20 @@ fn run(vault: &str, tail: &[&str]) -> std::process::Output {
 fn base64_encodes_password_file_attribute_and_resolved_values_without_pipe_newlines() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.kdbx");
-    let mut vault = Vault::create(&path, VAULT_PASSWORD).unwrap();
-    let id = vault.add_entry("Build/signing").unwrap();
-    vault.set_field(&id, "Password", "entry-secret").unwrap();
-    vault
+    let mut database = Database::create(&path, DATABASE_PASSWORD).unwrap();
+    let id = database.add_entry("Build/signing").unwrap();
+    database.set_field(&id, "Password", "entry-secret").unwrap();
+    database
         .set_field(&id, "Automation.Target", "MACOS_CERTIFICATE")
         .unwrap();
-    vault.set_field(&id, "UserName", "notary-key-id").unwrap();
-    vault
+    database
+        .set_field(&id, "UserName", "notary-key-id")
+        .unwrap();
+    database
         .attach_binary(&id, "developer_id.p12", &[0, 1, 2, 250, 255])
         .unwrap();
-    vault.save().unwrap();
-    let vault = path.display().to_string();
+    database.save().unwrap();
+    let database = path.display().to_string();
 
     for (args, expected) in [
         (
@@ -81,7 +83,7 @@ fn base64_encodes_password_file_attribute_and_resolved_values_without_pipe_newli
             b"bm90YXJ5LWtleS1pZA==".to_vec(),
         ),
     ] {
-        let output = run(&vault, &args);
+        let output = run(&database, &args);
         assert!(
             output.status.success(),
             "args={args:?}, stderr={}",
@@ -93,7 +95,7 @@ fn base64_encodes_password_file_attribute_and_resolved_values_without_pipe_newli
     let out_path = dir.path().join("encoded-file");
     let out_path_string = out_path.display().to_string();
     let output = run(
-        &vault,
+        &database,
         &[
             "get",
             "file",

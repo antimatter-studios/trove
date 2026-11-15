@@ -2,13 +2,13 @@
 //!
 //! These run the **compiled `trove` binary** against a **real Unix socket**
 //! (the daemon loop runs in-process via `handle()`), then assert the resulting
-//! changes in the **vault on disk** — the layer the in-process `handle()` unit
+//! changes in the **database on disk** — the layer the in-process `handle()` unit
 //! tests in `troved/tests/add_ssh_e2e.rs` can't see. This is the path that
 //! actually broke in the field (a CLI speaking a verb the daemon didn't know):
 //! here the CLI serializes the request, it crosses the socket, the daemon
 //! deserializes + handles it, and we re-open the kdbx to confirm the bytes.
 //!
-//! Covers every option: daemon-routed add (`--user`), offline `--vault`,
+//! Covers every option: daemon-routed add (`--user`), offline `--database`,
 //! validate-on-add rejection, the session-code gate, and `get` in its default /
 //! `--public` / `--out` forms. Skips gracefully if the binary isn't built.
 
@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -138,11 +138,11 @@ async fn handle_connection(
     }
 }
 
-/// A running in-process daemon plus an empty vault on disk.
+/// A running in-process daemon plus an empty database on disk.
 struct Daemon {
     _tmp: TempDir,
     sock: PathBuf,
-    vault: PathBuf,
+    database: PathBuf,
     _shutdown: Arc<Notify>,
     _task: tokio::task::JoinHandle<()>,
 }
@@ -150,10 +150,10 @@ struct Daemon {
 async fn start_daemon() -> Daemon {
     let tmp = TempDir::new().expect("tempdir");
     let sock = tmp.path().join("trove.sock");
-    let vault = tmp.path().join("v.kdbx");
-    Vault::create(&vault, PASSWORD).expect("create empty vault");
+    let database = tmp.path().join("v.kdbx");
+    Database::create(&database, PASSWORD).expect("create empty database");
 
-    let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+    let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -186,7 +186,7 @@ async fn start_daemon() -> Daemon {
     Daemon {
         _tmp: tmp,
         sock,
-        vault,
+        database,
         _shutdown: shutdown,
         _task: task,
     }
@@ -232,7 +232,7 @@ async fn run_trove(
     }
 }
 
-/// Unlock the daemon's vault via the CLI (`--export` so it prints the code
+/// Unlock the daemon's database via the CLI (`--export` so it prints the code
 /// rather than spawning a shell) and return the minted session code.
 async fn mint_session(trove: &Path, d: &Daemon) -> String {
     let out = run_trove(
@@ -241,7 +241,7 @@ async fn mint_session(trove: &Path, d: &Daemon) -> String {
         None,
         &[
             "unlock",
-            d.vault.to_str().unwrap(),
+            d.database.to_str().unwrap(),
             "--password-stdin",
             "--export",
         ],
@@ -261,9 +261,9 @@ async fn mint_session(trove: &Path, d: &Daemon) -> String {
         .to_string()
 }
 
-/// Re-open the vault file and return a fresh handle for assertions.
-fn reopen(path: &Path) -> Vault {
-    Vault::open(path, PASSWORD).expect("re-open vault from disk")
+/// Re-open the database file and return a fresh handle for assertions.
+fn reopen(path: &Path) -> Database {
+    Database::open(path, PASSWORD).expect("re-open database from disk")
 }
 
 // --- tests ------------------------------------------------------------------
@@ -280,7 +280,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
     let keyfile = d._tmp.path().join("id_ed25519");
     std::fs::write(&keyfile, KEY).expect("write keyfile");
 
-    // add ssh <entry-path> <keyfile> <comment> --user git  (no vault; via agent)
+    // add ssh <entry-path> <keyfile> <comment> --user git  (no database; via agent)
     let out = run_trove(
         &trove,
         &d.sock,
@@ -305,7 +305,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
 
     // DB assertion: the change is on disk, with the right attachments + field.
     {
-        let v = reopen(&d.vault);
+        let v = reopen(&d.database);
         let id = v
             .find_by_title("svc/github")
             .expect("entry created at svc/github");
@@ -421,7 +421,7 @@ async fn add_ssh_via_daemon_persists_then_get_round_trips_all_forms() {
         String::from_utf8_lossy(&out.stderr)
     );
     {
-        let v = reopen(&d.vault);
+        let v = reopen(&d.database);
         let matches: Vec<_> = v
             .list_entries()
             .into_iter()
@@ -447,7 +447,7 @@ async fn add_ssh_is_refused_without_a_valid_session_code() {
         return;
     };
     let d = start_daemon().await;
-    let _code = mint_session(&trove, &d).await; // vault is now unlocked
+    let _code = mint_session(&trove, &d).await; // database is now unlocked
     let keyfile = d._tmp.path().join("k");
     std::fs::write(&keyfile, KEY).expect("write keyfile");
 
@@ -485,7 +485,7 @@ async fn add_ssh_is_refused_without_a_valid_session_code() {
 
     // Nothing was written.
     assert!(
-        reopen(&d.vault).find_by_title("x/y").is_none(),
+        reopen(&d.database).find_by_title("x/y").is_none(),
         "no entry should have been created"
     );
 }
@@ -523,13 +523,13 @@ async fn add_ssh_validate_rejects_a_public_key_and_writes_nothing() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        reopen(&d.vault).find_by_title("bad/key").is_none(),
+        reopen(&d.database).find_by_title("bad/key").is_none(),
         "a rejected key must not be stored"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn add_ssh_offline_vault_writes_file_without_a_daemon() {
+async fn add_ssh_offline_database_writes_file_without_a_daemon() {
     let Some(trove) = find_trove_binary() else {
         eprintln!("trove binary not built; skipping");
         return;
@@ -537,8 +537,8 @@ async fn add_ssh_offline_vault_writes_file_without_a_daemon() {
     // No daemon needed for offline mode; use a throwaway socket path.
     let tmp = TempDir::new().expect("tempdir");
     let sock = tmp.path().join("unused.sock");
-    let vault = tmp.path().join("offline.kdbx");
-    Vault::create(&vault, PASSWORD).expect("create vault");
+    let database = tmp.path().join("offline.kdbx");
+    Database::create(&database, PASSWORD).expect("create database");
     let keyfile = tmp.path().join("k");
     std::fs::write(&keyfile, KEY).expect("write keyfile");
 
@@ -553,8 +553,8 @@ async fn add_ssh_offline_vault_writes_file_without_a_daemon() {
             "offline/key",
             keyfile.to_str().unwrap(),
             "svc@trove.test",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             "--user",
             "svc",
         ],
@@ -563,11 +563,11 @@ async fn add_ssh_offline_vault_writes_file_without_a_daemon() {
     .await;
     assert!(
         out.status.success(),
-        "offline add --vault failed: {}",
+        "offline add --database failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let v = reopen(&vault);
+    let v = reopen(&database);
     let id = v
         .find_by_title("offline/key")
         .expect("offline entry created");
@@ -585,7 +585,7 @@ async fn add_ssh_offline_vault_writes_file_without_a_daemon() {
     );
 }
 
-/// `generate ssh --vault` mints a fresh ed25519 keypair offline and stores it
+/// `generate ssh --database` mints a fresh ed25519 keypair offline and stores it
 /// like `add ssh`: a parseable private `id`, the derived `id.pub`, and
 /// `KeeAgent.settings` — no ssh-keygen required.
 #[tokio::test]
@@ -596,8 +596,8 @@ async fn generate_ssh_offline_creates_keypair_with_pub_and_keeagent() {
     };
     let tmp = TempDir::new().expect("tempdir");
     let sock = tmp.path().join("unused.sock");
-    let vault = tmp.path().join("gen.kdbx");
-    Vault::create(&vault, PASSWORD).expect("create vault");
+    let database = tmp.path().join("gen.kdbx");
+    Database::create(&database, PASSWORD).expect("create database");
 
     let out = run_trove(
         &trove,
@@ -609,8 +609,8 @@ async fn generate_ssh_offline_creates_keypair_with_pub_and_keeagent() {
             "ssh",
             "Work/gen",
             "me@host",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
         ],
         Some(&format!("{PASSWORD}\n")),
     )
@@ -621,7 +621,7 @@ async fn generate_ssh_offline_creates_keypair_with_pub_and_keeagent() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let v = reopen(&vault);
+    let v = reopen(&database);
     let id = v
         .find_by_title("Work/gen")
         .expect("generated entry created");

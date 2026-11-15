@@ -3,7 +3,7 @@
 //! The regression this guards: KeePassXC writes that attachment as **UTF-16**,
 //! and `str::from_utf8` does not reject those bytes — NUL is a valid UTF-8
 //! character — so a UTF-8-only parser silently gets `"<\0A\0l\0l\0o\0w..."`,
-//! matches no tags, and skips the entry with no error. On a real vault trove
+//! matches no tags, and skips the entry with no error. On a real database trove
 //! served 2 keys where KeePassXC served 5, and the 2 that worked got in through
 //! the content-scan fallback rather than the settings meant to declare them.
 //!
@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use trove_core::Vault;
-use troved::handler::load_ssh_keys_from_vault;
+use trove_core::Database;
+use troved::handler::load_ssh_keys_from_database;
 use troved::ssh_agent::keeagent;
 
 const PASSWORD: &str = "keeagent-interop-pw";
@@ -79,7 +79,7 @@ fn oracle() -> Option<PathBuf> {
     None
 }
 
-/// Run keepassxc-cli with the vault password on stdin.
+/// Run keepassxc-cli with the database password on stdin.
 fn kpxc(bin: &Path, args: &[&str]) -> (bool, String) {
     use std::io::Write as _;
     use std::process::Stdio;
@@ -103,10 +103,10 @@ fn kpxc(bin: &Path, args: &[&str]) -> (bool, String) {
     )
 }
 
-/// A vault holding one SSH key plus whatever `settings` says.
-fn vault_with(dir: &Path, settings: &[u8]) -> PathBuf {
+/// A database holding one SSH key plus whatever `settings` says.
+fn database_with(dir: &Path, settings: &[u8]) -> PathBuf {
     let path = dir.join("v.kdbx");
-    let mut v = Vault::create(&path, PASSWORD).expect("create vault");
+    let mut v = Database::create(&path, PASSWORD).expect("create database");
     let id = v.add_entry(ENTRY).expect("add entry");
     v.attach_binary(&id, KEY_ATTACHMENT, KEY)
         .expect("attach key");
@@ -121,14 +121,14 @@ fn keepassxc_returns_trove_written_settings_unchanged() {
     let Some(bin) = oracle() else { return };
     let tmp = TempDir::new().expect("tempdir");
     let written = keeagent::settings_xml(KEY_ATTACHMENT);
-    let vault = vault_with(tmp.path(), &written);
+    let database = database_with(tmp.path(), &written);
 
     let out_file = tmp.path().join("exported.xml");
     let (ok, log) = kpxc(
         &bin,
         &[
             "attachment-export",
-            vault.to_str().unwrap(),
+            database.to_str().unwrap(),
             ENTRY,
             keeagent::ATTACHMENT_NAME,
             out_file.to_str().unwrap(),
@@ -150,7 +150,7 @@ fn trove_loads_a_key_whose_settings_keepassxc_stored_as_utf16() {
 
     // Start from settings trove would never mis-read anyway, so the assertion
     // below can only be about the UTF-16 ones we swap in.
-    let vault = vault_with(tmp.path(), &keeagent::settings_xml(KEY_ATTACHMENT));
+    let database = database_with(tmp.path(), &keeagent::settings_xml(KEY_ATTACHMENT));
 
     // Exactly what KeePassXC writes: UTF-16LE + BOM, lowercase SelectedType,
     // `...WhenAdding` constraint tags.
@@ -162,7 +162,7 @@ fn trove_loads_a_key_whose_settings_keepassxc_stored_as_utf16() {
         &bin,
         &[
             "attachment-rm",
-            vault.to_str().unwrap(),
+            database.to_str().unwrap(),
             ENTRY,
             keeagent::ATTACHMENT_NAME,
         ],
@@ -172,7 +172,7 @@ fn trove_loads_a_key_whose_settings_keepassxc_stored_as_utf16() {
         &bin,
         &[
             "attachment-import",
-            vault.to_str().unwrap(),
+            database.to_str().unwrap(),
             ENTRY,
             keeagent::ATTACHMENT_NAME,
             staged.to_str().unwrap(),
@@ -185,8 +185,8 @@ fn trove_loads_a_key_whose_settings_keepassxc_stored_as_utf16() {
 
     // The whole point: trove's loader must find the key through settings that
     // went in and came back out of keepassxc's own storage path.
-    let reopened = Vault::open(&vault, PASSWORD).expect("reopen after keepassxc wrote to it");
-    let keys = load_ssh_keys_from_vault(&reopened);
+    let reopened = Database::open(&database, PASSWORD).expect("reopen after keepassxc wrote to it");
+    let keys = load_ssh_keys_from_database(&reopened);
     assert_eq!(
         keys.len(),
         1,
@@ -243,21 +243,21 @@ fn rewriting_the_key_name_keeps_the_rest_of_the_policy() {
 
 /// Major and minor version from a kdbx header.
 fn kdbx_version(path: &Path) -> (u16, u16) {
-    let bytes = std::fs::read(path).expect("read vault");
+    let bytes = std::fs::read(path).expect("read database");
     (
         u16::from_le_bytes([bytes[10], bytes[11]]),
         u16::from_le_bytes([bytes[8], bytes[9]]),
     )
 }
 
-/// KeePassXC's own KDBX 3.1 vaults keep attachments in one pool that entries
+/// KeePassXC's own KDBX 3.1 databases keep attachments in one pool that entries
 /// point into by id, and write an empty attachment as a self-closing element.
 /// keepass-rs used to give every pooled attachment the same id, so only one
-/// survived, and failed to open the vault at all when one was empty. Two SSH
+/// survived, and failed to open the database at all when one was empty. Two SSH
 /// entries share one key file but carry their own settings, alongside an empty
-/// attachment: both keys must load, before and after trove saves the vault.
+/// attachment: both keys must load, before and after trove saves the database.
 #[test]
-fn trove_loads_keys_from_a_keepassxc_kdbx3_vault() {
+fn trove_loads_keys_from_a_keepassxc_kdbx3_database() {
     use base64::Engine as _;
     let Some(bin) = oracle() else { return };
     let tmp = TempDir::new().expect("tempdir");
@@ -292,7 +292,7 @@ fn trove_loads_keys_from_a_keepassxc_kdbx3_vault() {
     );
     let xml_path = tmp.path().join("import.xml");
     std::fs::write(&xml_path, xml).expect("stage xml");
-    let vault = tmp.path().join("v3.kdbx");
+    let database = tmp.path().join("v3.kdbx");
 
     // `import -p` asks for the new password twice.
     let (ok, log) = {
@@ -301,7 +301,7 @@ fn trove_loads_keys_from_a_keepassxc_kdbx3_vault() {
         let mut child = Command::new(&bin)
             .args(["import", "-p"])
             .arg(&xml_path)
-            .arg(&vault)
+            .arg(&database)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -321,14 +321,14 @@ fn trove_loads_keys_from_a_keepassxc_kdbx3_vault() {
     };
     assert!(ok, "keepassxc-cli should import the xml: {log}");
     assert_eq!(
-        kdbx_version(&vault),
+        kdbx_version(&database),
         (3, 1),
         "keepassxc imports to KDBX 3.1"
     );
 
-    let opened = Vault::open(&vault, PASSWORD).expect("trove opens keepassxc's 3.1 vault");
+    let opened = Database::open(&database, PASSWORD).expect("trove opens keepassxc's 3.1 database");
     assert_eq!(
-        load_ssh_keys_from_vault(&opened).len(),
+        load_ssh_keys_from_database(&opened).len(),
         2,
         "both entries' keys load from the 3.1 attachment pool"
     );
@@ -342,9 +342,9 @@ fn trove_loads_keys_from_a_keepassxc_kdbx3_vault() {
     // Saving writes KDBX 4.1, and nothing is lost on the way.
     let mut writable = opened;
     writable.save().expect("save");
-    assert_eq!(kdbx_version(&vault), (4, 1), "trove saves as KDBX 4.1");
-    let reopened = Vault::open(&vault, PASSWORD).expect("reopen");
-    assert_eq!(load_ssh_keys_from_vault(&reopened).len(), 2);
-    let (ok, log) = kpxc(&bin, &["ls", vault.to_str().unwrap()]);
+    assert_eq!(kdbx_version(&database), (4, 1), "trove saves as KDBX 4.1");
+    let reopened = Database::open(&database, PASSWORD).expect("reopen");
+    assert_eq!(load_ssh_keys_from_database(&reopened).len(), 2);
+    let (ok, log) = kpxc(&bin, &["ls", database.to_str().unwrap()]);
     assert!(ok, "keepassxc-cli opens trove's re-save: {log}");
 }

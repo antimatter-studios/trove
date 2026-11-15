@@ -27,7 +27,7 @@ use crate::ssh_agent::{self, KeyStore};
 /// 15 minutes matches the spec ("v0.0.6.0 default").
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
-/// Set by `--resident`: stay up after the last vault locks (explicitly or on
+/// Set by `--resident`: stay up after the last database locks (explicitly or on
 /// idle), so a service manager (launchd, systemd, `brew services`) keeps the
 /// agent sockets available between unlocks. Only an explicit `shutdown` or a
 /// signal stops a resident daemon.
@@ -49,7 +49,7 @@ fn resolve_idle_timeout() -> Duration {
     Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)
 }
 
-/// Build the idle-lock callback: drops the vault, clears both key stores,
+/// Build the idle-lock callback: drops the database, clears both key stores,
 /// and wipes the materialize store. Same set of operations as the explicit
 /// `Lock` RPC, just without the response. We deliberately do NOT touch the
 /// idle tracker from inside the callback (the tracker has already marked
@@ -72,14 +72,14 @@ fn build_lock_callback(
         let session = session.clone();
         let shutdown = shutdown.clone();
         let fut: LockFuture = Box::pin(async move {
-            // Idempotency: if the vault is already locked (e.g. an explicit
+            // Idempotency: if the database is already locked (e.g. an explicit
             // `lock` RPC ran a fraction of a second before us), all of these
             // operations are no-ops. wipe_all takes a write lock and drains;
             // a second drain returns an empty Vec.
             materialize::wipe_all(&mat_store).await;
             {
                 let mut guard = state.lock().await;
-                // Idle-lock is all-or-nothing: every open vault goes.
+                // Idle-lock is all-or-nothing: every open database goes.
                 guard.drain();
             }
             // Take the forwarded copies back out of the user's own ssh-agent
@@ -108,11 +108,11 @@ fn build_lock_callback(
             // Idle-lock just emptied the open set and wiped materialized files.
             // Mirror the explicit `Lock` RPC: with nothing left to serve, the
             // daemon exits so the next `unlock` starts a fresh process. (Same
-            // invariant — stay alive only while a vault is open or materialized
+            // invariant — stay alive only while a database is open or materialized
             // files still need cleanup.)
-            let vault_open = !state.lock().await.is_empty();
+            let database_open = !state.lock().await.is_empty();
             let has_materialized = !mat_store.read().await.is_empty();
-            if !vault_open && !has_materialized && !resident() {
+            if !database_open && !has_materialized && !resident() {
                 shutdown.notify_one();
             }
         });
@@ -229,7 +229,7 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
 
 /// How to run [`serve`].
 pub struct ServeOptions {
-    /// Stay up after the last vault locks, for a service manager to own
+    /// Stay up after the last database locks, for a service manager to own
     /// (`troved --resident`).
     pub resident: bool,
     /// Stop on SIGINT/SIGTERM (Ctrl-C on Windows). A host with its own signal
@@ -274,7 +274,7 @@ pub async fn serve(opts: ServeOptions) -> Result<Served> {
         std::process::id()
     );
 
-    // Before any vault is opened: keep decrypted secrets out of core dumps.
+    // Before any database is opened: keep decrypted secrets out of core dumps.
     if let Err(e) = crate::hardening::disable_core_dumps() {
         eprintln!("troved: warning: could not disable core dumps: {e}");
     }
@@ -328,7 +328,7 @@ pub async fn serve(opts: ServeOptions) -> Result<Served> {
 
     eprintln!("listening on {}", sock_path.display());
 
-    let state: SharedState = Arc::new(Mutex::new(crate::vaults::VaultSet::new()));
+    let state: SharedState = Arc::new(Mutex::new(crate::databases::DatabaseSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let scoped_agents: ScopedAgents = ssh_agent::scoped::new_registry();
@@ -352,7 +352,7 @@ pub async fn serve(opts: ServeOptions) -> Result<Served> {
     );
     let idle: Arc<IdleTracker> = IdleTracker::new(idle_timeout, lock_cb);
     if resident() {
-        eprintln!("resident: staying up after the last vault locks");
+        eprintln!("resident: staying up after the last database locks");
     }
     eprintln!(
         "idle-lock timeout: {} seconds{}",
@@ -365,7 +365,7 @@ pub async fn serve(opts: ServeOptions) -> Result<Served> {
     );
 
     // Spawn the SSH agent listener on its own socket. The agent socket is
-    // bound now (before any vault is unlocked) so clients can connect at any
+    // bound now (before any database is unlocked) so clients can connect at any
     // time; until `unlock` populates the key store, list-identities returns
     // empty and sign-request returns FAILURE — see `ssh_agent::serve_connection`.
     let ssh_sock_path = ssh_agent::resolve_ssh_socket_path();
@@ -469,11 +469,11 @@ pub async fn serve(opts: ServeOptions) -> Result<Served> {
     // process exit and try to fire while we're tearing down.
     idle.cancel();
 
-    // Cleanup: wipe materialized files, drop vault state, drop SSH+GPG keys
+    // Cleanup: wipe materialized files, drop database state, drop SSH+GPG keys
     // (zeroized on drop), remove all socket files. The listener tasks are
     // aborted by dropping their JoinHandles going out of scope at process
-    // exit. We wipe BEFORE dropping the vault — the wipe itself doesn't need
-    // the vault, but ordering this way matches the per-RPC Lock/Shutdown
+    // exit. We wipe BEFORE dropping the database — the wipe itself doesn't need
+    // the database, but ordering this way matches the per-RPC Lock/Shutdown
     // sequence.
     materialize::wipe_all(&mat_store).await;
     {
@@ -534,7 +534,7 @@ mod tests {
         let sock_path = tmp.clone();
         let mut listener = ipc::bind(&sock_path).await.unwrap();
         let server = tokio::spawn(async move {
-            let state: SharedState = Arc::new(Mutex::new(crate::vaults::VaultSet::new()));
+            let state: SharedState = Arc::new(Mutex::new(crate::databases::DatabaseSet::new()));
             let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
             let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
             let scoped_agents: ScopedAgents = ssh_agent::scoped::new_registry();

@@ -39,7 +39,7 @@ fn conformance_matrix() {
 }
 
 /// The headline compatibility proof for trove's extension model: when keepassxc
-/// OPENS AND SAVES a vault, it must preserve the custom string fields, tags and
+/// OPENS AND SAVES a database, it must preserve the custom string fields, tags and
 /// binary attachments it doesn't understand — exactly the `Materialize.*`
 /// instructions and `KeeAgent.settings`-style docs trove relies on. We don't
 /// hand-author expected values; we assert that what the keepass crate reads is

@@ -1,11 +1,11 @@
-//! `trove-core` — kdbx I/O and vault primitives.
+//! `trove-core` — kdbx I/O and database primitives.
 //!
 //! Format compatibility with KeePassXC is non-negotiable: this crate must
-//! round-trip any valid `.kdbx` file. Vaults open with a password master key,
+//! round-trip any valid `.kdbx` file. Databases open with a password master key,
 //! optionally composited with a keyfile (`*_with_key`; any format KeePassXC
-//! accepts). KDBX 3.1 and 4.x vaults both open; saving always writes KDBX 4.1,
-//! so the first write upgrades a 3.1 vault (`db-info` shows the version).
-//! KeePassXC reads 4.1, and the upgrade keeps the vault's KDF, outer cipher
+//! accepts). KDBX 3.1 and 4.x databases both open; saving always writes KDBX 4.1,
+//! so the first write upgrades a 3.1 database (`db-info` shows the version).
+//! KeePassXC reads 4.1, and the upgrade keeps the database's KDF, outer cipher
 //! and compression.
 //!
 //! As of v0.0.10, trove-core depends on the published `keepass = "0.12"` crate
@@ -16,7 +16,7 @@
 //! `EntryRef::attachment_by_name(name)` pair does what we need without any
 //! local patches. The `_SDPM_BIN_*` Protected-string fallback that v0.0.4
 //! introduced for backwards compat is also gone, since no v0.0.1–0.0.3.x
-//! production vaults exist (the project hadn't shipped yet).
+//! production databases exist (the project hadn't shipped yet).
 
 #![forbid(unsafe_code)]
 
@@ -29,6 +29,7 @@ use zeroize::Zeroize;
 
 mod error;
 pub use error::Error;
+pub mod revisions;
 pub mod settings;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -52,7 +53,7 @@ pub const RECYCLE_BIN_GROUP: &str = "Recycle Bin";
 /// the position here instead; KeePassXC preserves unknown custom data.
 const GROUP_POSITION_KEY: &str = "Trove.Position";
 
-/// Stable identifier for an entry within a vault.
+/// Stable identifier for an entry within a database.
 ///
 /// Backed by the kdbx UUID, serialised as a string for wire/disk transport.
 /// We keep our own newtype rather than re-exporting `keepass::db::EntryId`
@@ -100,7 +101,7 @@ pub struct EntrySummary {
     pub inherited_tags: Vec<String>,
     /// Entry creation time as an RFC3339 UTC string (e.g.
     /// `2026-07-21T14:12:00+00:00`), from the kdbx entry's `CreationTime`.
-    /// `None` when the vault does not record it.
+    /// `None` when the database does not record it.
     pub created: Option<String>,
     /// Entry last-modification time as an RFC3339 UTC string, from the kdbx
     /// entry's `LastModificationTime`. `None` when unavailable.
@@ -114,7 +115,7 @@ pub struct EntrySummary {
     pub icon: Option<usize>,
 }
 
-/// Exact field constraint for a vault search. Names compare without case;
+/// Exact field constraint for a database search. Names compare without case;
 /// values compare exactly and only unprotected fields are eligible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -193,7 +194,7 @@ pub struct GroupSummary {
     pub tags: Vec<String>,
     /// Tags inherited from ancestor groups, root → nearest parent.
     pub inherited_tags: Vec<String>,
-    /// Place among its siblings, as set by [`Vault::set_group_order`]. `None`
+    /// Place among its siblings, as set by [`Database::set_group_order`]. `None`
     /// for a group nobody has arranged.
     pub position: Option<u32>,
 }
@@ -265,7 +266,7 @@ impl EntrySummary {
     }
 }
 
-/// Counts from a [`Vault::merge_from`], by merge-event kind.
+/// Counts from a [`Database::merge_from`], by merge-event kind.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MergeSummary {
@@ -296,15 +297,15 @@ impl MergeSummary {
     }
 }
 
-/// What a [`Vault::sync_with`] did in each direction.
+/// What a [`Database::sync_with`] did in each direction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SyncSummary {
-    /// Changes the other copy brought into this vault.
+    /// Changes the other copy brought into this database.
     pub pulled: MergeSummary,
-    /// Changes this vault brought into the other copy.
+    /// Changes this database brought into the other copy.
     pub pushed: MergeSummary,
-    /// The other copy did not exist, and was created from this vault.
+    /// The other copy did not exist, and was created from this database.
     pub created: bool,
     /// The other copy was rewritten. False when it already held everything.
     pub other_written: bool,
@@ -390,17 +391,31 @@ fn steam_code(secret_b32: &str, period: u64, unix_secs: u64) -> Result<String> {
 /// The highest built-in KeePass icon index (KeePass and KeePassXC ship 69).
 pub const MAX_BUILTIN_ICON: usize = 68;
 
-/// An open, in-memory vault.
+/// An open, in-memory database.
 ///
 /// Dropping the value drops the underlying decrypted material. Best-effort
 /// memory zeroing is delegated to the `keepass` crate where supported.
-pub struct Vault {
-    pub(crate) inner: VaultInner,
+pub struct Database {
+    pub(crate) inner: DatabaseInner,
 }
+
+/// The former name of [`Database`], kept so existing callers still build.
+#[deprecated(note = "renamed to `Database`")]
+pub type Vault = Database;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DatabaseMetadata {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub default_username: Option<String>,
+    pub trove_uuid: Option<String>,
+}
+
+const TROVE_DATABASE_UUID_KEY: &str = "Trove.DatabaseUUID";
 
 /// The challenge-response part of a composite key: a YubiKey HMAC-SHA1 slot,
 /// or a software provider holding the same HMAC secret. Both answer the way
-/// KeePassXC does, so a vault set up with one unlocks with the other.
+/// KeePassXC does, so a database set up with one unlocks with the other.
 #[cfg(feature = "yubikey")]
 #[derive(Clone)]
 pub struct ChallengeResponse(keepass::ChallengeResponseKey);
@@ -461,7 +476,7 @@ impl std::fmt::Debug for ChallengeResponse {
     }
 }
 
-/// What a [`Vault::rename_attachment`] moved, so a caller can finish the job.
+/// What a [`Database::rename_attachment`] moved, so a caller can finish the job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RenamedAttachment {
@@ -476,10 +491,10 @@ pub struct RenamedAttachment {
     pub rewritten_settings: Vec<settings::Capability>,
 }
 
-pub(crate) struct VaultInner {
+pub(crate) struct DatabaseInner {
     pub(crate) path: PathBuf,
     pub(crate) password: String,
-    /// Raw keyfile bytes when the vault uses a composite key (password +
+    /// Raw keyfile bytes when the database uses a composite key (password +
     /// keyfile). Kept verbatim so `save()` derives the same composite key;
     /// format interpretation (XML v1/v2, raw-32, hex-64, arbitrary-file
     /// SHA-256) is the `keepass` crate's, matching KeePassXC.
@@ -492,15 +507,15 @@ pub(crate) struct VaultInner {
     pub(crate) challenge_response: Option<ChallengeResponse>,
     /// What the file looked like when we last read or wrote it.
     ///
-    /// A vault is a single file that several programs write — the CLI, the
-    /// desktop app, KeePassXC, and the same vault synced onto another machine.
+    /// A database is a single file that several programs write — the CLI, the
+    /// desktop app, KeePassXC, and the same database synced onto another machine.
     /// Without this, `save()` writes whatever is in memory over whatever is on
     /// disk, and the other side's changes are gone with nothing said. `None`
-    /// only for a vault created in memory that has never touched disk.
+    /// only for a database created in memory that has never touched disk.
     pub(crate) stamp: Option<FileStamp>,
     /// What `save()` merged in from other writers since the caller last asked.
     pub(crate) merged_on_save: MergeSummary,
-    /// The vault settings as the file held them at `stamp`.
+    /// The database settings as the file held them at `stamp`.
     pub(crate) base: DiskBase,
     /// Entries as they were before trove's first change to each since the last
     /// save. `save()` files each one as a history version.
@@ -515,19 +530,20 @@ pub(crate) struct VaultInner {
 /// several calls (`trove edit` sets each flag's field in turn, the desktop form
 /// sets every field), and each call becoming a version would push real history
 /// out of the 10-item cap.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct HistoryTracker {
     before: HashMap<keepass::db::EntryId, EntryBefore>,
     /// Entries created since the last save: they have no earlier version.
     created: HashSet<keepass::db::EntryId>,
 }
 
+#[derive(Clone)]
 struct EntryBefore {
     /// The entry as it was, filed into its history at the first change.
     entry: keepass::db::Entry,
 }
 
-/// A cheap identity for the vault file, used to notice that something else
+/// A cheap identity for the database file, used to notice that something else
 /// wrote it.
 ///
 /// Length, modification time and (on Unix) inode rather than a hash: it costs
@@ -548,7 +564,7 @@ pub(crate) struct FileStamp {
 
 impl FileStamp {
     /// The stamp for `path`, or `None` when it cannot be read — a missing file
-    /// is not a conflict, it is a vault that no longer exists, and `save()`
+    /// is not a conflict, it is a database that no longer exists, and `save()`
     /// recreating it is the reasonable outcome.
     fn read(path: &Path) -> Option<Self> {
         std::fs::metadata(path).ok().map(|meta| Self::of(&meta))
@@ -570,7 +586,7 @@ impl FileStamp {
 /// replacing the file under it, before giving up with [`Error::StaleWrite`].
 const SAVE_ATTEMPTS: usize = 5;
 
-impl Drop for VaultInner {
+impl Drop for DatabaseInner {
     fn drop(&mut self) {
         // Best-effort: wipe the key material we kept in memory.
         // The `keepass::Database` carries its own SecretBox-backed protected
@@ -595,7 +611,7 @@ fn touch_location(entry: &mut keepass::db::EntryMut<'_>) {
     entry.times.location_changed = Some(keepass::db::Times::now());
 }
 
-/// What one version of an entry weighs against the vault's `HistoryMaxSize`:
+/// What one version of an entry weighs against the database's `HistoryMaxSize`:
 /// field names and values and tags, plus its attachments, each identified by a
 /// hash of its data. KeePassXC counts an attachment's data once per history,
 /// and not at all when the entry itself still holds it, so an unchanged key
@@ -639,7 +655,7 @@ fn history_versions(entry: &keepass::db::EntryRef<'_>) -> Vec<(keepass::db::Entr
         .collect()
 }
 
-/// The vault settings a merge of entries and groups leaves alone, as they were
+/// The database settings a merge of entries and groups leaves alone, as they were
 /// in the file this handle last read or wrote: the base for merging another
 /// writer's changes to them.
 #[derive(Clone)]
@@ -657,7 +673,7 @@ impl DiskBase {
     }
 }
 
-/// Three-way merge of vault settings: whatever this handle left as it was in
+/// Three-way merge of database settings: whatever this handle left as it was in
 /// `base` takes the other writer's value; whatever it changed keeps its own.
 fn merge_settings(base: &DiskBase, ours: &mut keepass::Database, theirs: &keepass::Database) {
     macro_rules! take_if_unchanged {
@@ -735,11 +751,11 @@ fn adopt_deletions(ours: &mut keepass::Database, theirs: &keepass::Database) {
     }
 }
 
-/// Settings of another copy of the vault that `sync_with` keeps, though this
-/// vault is authoritative for settings: there is no common base to tell which
+/// Settings of another copy of the database that `sync_with` keeps, though this
+/// database is authoritative for settings: there is no common base to tell which
 /// side changed what, so nothing the other copy has is dropped. Custom data
-/// keys this vault lacks are added (the newer item wins where both have one),
-/// and its recycle bin and name are taken when this vault has none.
+/// keys this database lacks are added (the newer item wins where both have one),
+/// and its recycle bin and name are taken when this database has none.
 fn adopt_other_settings(ours: &mut keepass::Database, theirs: &keepass::Database) {
     for (key, item) in &theirs.meta.custom_data {
         match ours.meta.custom_data.get(key) {
@@ -783,12 +799,12 @@ fn write_temp_file(
         .ok_or_else(|| {
             Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "vault path has no file name",
+                "database path has no file name",
             ))
         })?
         .to_owned();
 
-    // Unique per save, not just per process: two handles on one vault in one
+    // Unique per save, not just per process: two handles on one database in one
     // process (the desktop hosting the daemon, say) must not share it.
     static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -796,11 +812,14 @@ fn write_temp_file(
     tmp_name.push(format!(".tmp.{}.{n}", std::process::id()));
     let tmp_path = dir.join(&tmp_name);
 
+    let mut encrypted = Vec::new();
+    db.save(&mut encrypted, key).map_err(save_err_to_error)?;
+
     // Scope the file handle so it is closed (and thus fully flushed by the OS)
     // before the rename. We also fsync explicitly for crash-safety on POSIX.
     let written = (|| {
         let mut tmp = std::fs::File::create(&tmp_path)?;
-        db.save(&mut tmp, key).map_err(save_err_to_error)?;
+        std::io::Write::write_all(&mut tmp, &encrypted)?;
         tmp.sync_all()?;
         Ok(FileStamp::of(&tmp.metadata()?))
     })();
@@ -825,7 +844,94 @@ fn database_key(password: &str, keyfile: Option<&[u8]>) -> Result<keepass::Datab
     Ok(key)
 }
 
-impl Vault {
+impl Database {
+    pub fn generate_trove_uuid() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    pub fn database_metadata(&self) -> DatabaseMetadata {
+        use keepass::db::CustomDataValue;
+
+        let meta = &self.inner.db.meta;
+        let trove_uuid = meta
+            .custom_data
+            .get(TROVE_DATABASE_UUID_KEY)
+            .and_then(|item| item.value.as_ref())
+            .and_then(|value| match value {
+                CustomDataValue::String(value) => Some(value.clone()),
+                CustomDataValue::Binary(_) => None,
+            });
+
+        DatabaseMetadata {
+            name: meta.database_name.clone(),
+            description: meta.database_description.clone(),
+            default_username: meta.default_username.clone(),
+            trove_uuid,
+        }
+    }
+
+    pub fn set_database_metadata(&mut self, metadata: DatabaseMetadata) -> Result<()> {
+        use keepass::db::{CustomDataItem, CustomDataValue};
+
+        let trove_uuid = metadata
+            .trove_uuid
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                uuid::Uuid::parse_str(value)
+                    .map(|uuid| uuid.to_string())
+                    .map_err(|_| Error::InvalidDatabaseUuid(value.to_string()))
+            })
+            .transpose()?;
+        let now = chrono::Utc::now().naive_utc();
+        let meta = &mut self.inner.db.meta;
+        let mut changed = false;
+        if meta.database_name != metadata.name {
+            meta.database_name = metadata.name;
+            meta.database_name_changed = Some(now);
+            changed = true;
+        }
+        if meta.database_description != metadata.description {
+            meta.database_description = metadata.description;
+            meta.database_description_changed = Some(now);
+            changed = true;
+        }
+        if meta.default_username != metadata.default_username {
+            meta.default_username = metadata.default_username;
+            meta.default_username_changed = Some(now);
+            changed = true;
+        }
+
+        match trove_uuid {
+            Some(value) => {
+                let current = meta
+                    .custom_data
+                    .get(TROVE_DATABASE_UUID_KEY)
+                    .and_then(|item| item.value.as_ref())
+                    .and_then(|value| match value {
+                        CustomDataValue::String(value) => Some(value.as_str()),
+                        CustomDataValue::Binary(_) => None,
+                    });
+                if current != Some(value.as_str()) {
+                    let item = CustomDataItem {
+                        value: Some(CustomDataValue::String(value)),
+                        last_modification_time: Some(now),
+                    };
+                    meta.custom_data
+                        .insert(TROVE_DATABASE_UUID_KEY.to_string(), item);
+                    changed = true;
+                }
+            }
+            None => {
+                changed |= meta.custom_data.remove(TROVE_DATABASE_UUID_KEY).is_some();
+            }
+        }
+        if changed {
+            meta.settings_changed = Some(now);
+        }
+        Ok(())
+    }
+
     /// Create a new kdbx file at `path`, encrypted with `password`.
     /// Errors if the file already exists.
     pub fn create(path: &Path, password: &str) -> Result<Self> {
@@ -844,8 +950,8 @@ impl Vault {
         // + GZip + ChaCha20 (inner stream) + Argon2d. KeePassXC reads this fine.
         let db = keepass::Database::new();
 
-        let mut vault = Vault {
-            inner: VaultInner {
+        let mut database = Database {
+            inner: DatabaseInner {
                 path: path.to_path_buf(),
                 stamp: FileStamp::read(path),
                 merged_on_save: MergeSummary::default(),
@@ -858,14 +964,14 @@ impl Vault {
                 db,
             },
         };
-        vault.save()?;
-        Ok(vault)
+        database.save()?;
+        Ok(database)
     }
 
     /// Create a new kdbx file additionally locked by a challenge-response
     /// key (a YubiKey HMAC-SHA1 slot or the software provider),
     /// composited with the password and optional keyfile — KeePassXC's
-    /// scheme, so the same vault unlocks there with the same device.
+    /// scheme, so the same database unlocks there with the same device.
     #[cfg(feature = "yubikey")]
     pub fn create_with_challenge_response(
         path: &Path,
@@ -877,8 +983,8 @@ impl Vault {
             return Err(Error::AlreadyExists(path.to_path_buf()));
         }
         let db = keepass::Database::new();
-        let mut vault = Vault {
-            inner: VaultInner {
+        let mut database = Database {
+            inner: DatabaseInner {
                 path: path.to_path_buf(),
                 stamp: FileStamp::read(path),
                 merged_on_save: MergeSummary::default(),
@@ -890,12 +996,12 @@ impl Vault {
                 db,
             },
         };
-        vault.save()?;
-        Ok(vault)
+        database.save()?;
+        Ok(database)
     }
 
-    /// Open a challenge-response-locked vault. The provider is held for the
-    /// vault's lifetime: every later save re-answers the fresh challenge
+    /// Open a challenge-response-locked database. The provider is held for the
+    /// database's lifetime: every later save re-answers the fresh challenge
     /// (kdbx rotates the master seed per save), so a hardware key must stay
     /// reachable while writing.
     #[cfg(feature = "yubikey")]
@@ -915,8 +1021,8 @@ impl Vault {
         let key =
             database_key(password, keyfile)?.with_challenge_response_key(challenge_response.key());
         let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
-        Ok(Vault {
-            inner: VaultInner {
+        Ok(Database {
+            inner: DatabaseInner {
                 path: path.to_path_buf(),
                 stamp,
                 merged_on_save: MergeSummary::default(),
@@ -951,8 +1057,8 @@ impl Vault {
         save_race_tests::run_hook(&save_race_tests::OPENED, path);
         let key = database_key(password, keyfile)?;
         let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
-        Ok(Vault {
-            inner: VaultInner {
+        Ok(Database {
+            inner: DatabaseInner {
                 path: path.to_path_buf(),
                 stamp,
                 merged_on_save: MergeSummary::default(),
@@ -967,7 +1073,7 @@ impl Vault {
         })
     }
 
-    /// Re-read the vault from disk, discarding whatever this handle held.
+    /// Re-read the database from disk, discarding whatever this handle held.
     ///
     /// For a caller that has noticed [`changed_on_disk`](Self::changed_on_disk)
     /// and has nothing of its own to lose — a GUI showing a list it did not
@@ -995,7 +1101,7 @@ impl Vault {
             &self.inner.password,
             self.inner.keyfile.as_deref(),
         )?;
-        // Swap rather than move: `VaultInner` implements `Drop` to wipe key
+        // Swap rather than move: `DatabaseInner` implements `Drop` to wipe key
         // material, so its fields cannot be moved out. `fresh` then carries our
         // old database away and zeroizes on the way.
         std::mem::swap(&mut self.inner.db, &mut fresh.inner.db);
@@ -1008,14 +1114,14 @@ impl Vault {
         Ok(())
     }
 
-    /// Has the vault file changed since this handle read it?
+    /// Has the database file changed since this handle read it?
     ///
-    /// For a caller showing the vault — a GUI reloading quietly when nothing
+    /// For a caller showing the database — a GUI reloading quietly when nothing
     /// local is dirty, say. `save()` does not need it: it merges whatever
     /// changed.
     pub fn changed_on_disk(&self) -> bool {
         match &self.inner.stamp {
-            // A vault we have never seen on disk cannot have been changed by
+            // A database we have never seen on disk cannot have been changed by
             // anyone else; the first save creates it.
             None => false,
             Some(known) => {
@@ -1025,7 +1131,7 @@ impl Vault {
     }
 
     /// What `save()` merged in from other writers since the last call, or
-    /// `None` when it merged nothing. For a caller showing the vault: entries
+    /// `None` when it merged nothing. For a caller showing the database: entries
     /// it did not create may now be in memory, so its lists need refreshing.
     pub fn take_merged_on_save(&mut self) -> Option<MergeSummary> {
         let merged = std::mem::take(&mut self.inner.merged_on_save);
@@ -1034,7 +1140,7 @@ impl Vault {
 
     /// Remember an entry as it is now, before trove's first change to it since
     /// the last save, and file it into the entry's history right away: the
-    /// attachments it points at then stay in the vault while the entry
+    /// attachments it points at then stay in the database while the entry
     /// changes. Later calls for the same entry keep the first state.
     fn remember_before_edit(&mut self, id: keepass::db::EntryId) {
         let inner = &mut self.inner;
@@ -1052,7 +1158,7 @@ impl Vault {
 
     /// Settle the history of every entry trove changed since the last save:
     /// the version filed at the first change becomes the newest, and the
-    /// history is trimmed to the vault's `HistoryMaxItems` / `HistoryMaxSize`
+    /// history is trimmed to the database's `HistoryMaxItems` / `HistoryMaxSize`
     /// — what KeePassXC does on each edit. An entry that ends up unchanged
     /// gets no version.
     fn record_history(&mut self) {
@@ -1093,7 +1199,7 @@ impl Vault {
     }
 
     /// Write an entry's history the way KeePassXC keeps it: oldest-first,
-    /// and with `trim`, trimmed from the front to the vault's
+    /// and with `trim`, trimmed from the front to the database's
     /// `HistoryMaxItems` / `HistoryMaxSize`. keepass-rs inserts new versions
     /// at the front and its merge leaves histories newest-first, so the
     /// versions are ordered by modification time (ties keep file order), with
@@ -1141,7 +1247,7 @@ impl Vault {
         }
         // `kept` is newest-first; `add_entry` inserts at the front, so adding
         // in this order leaves the history oldest-first. A file only a trimmed
-        // version used leaves the vault with it.
+        // version used leaves the database with it.
         let mut ordered = keepass::db::History::default();
         for version in kept {
             ordered.add_entry(version);
@@ -1152,7 +1258,7 @@ impl Vault {
 
     /// Put the histories a merge rewrote back in KeePassXC's order: the merge
     /// leaves them newest-first, which KeePassXC would trim from the wrong end.
-    /// Entries the merge changed are also trimmed to the vault's limits, as
+    /// Entries the merge changed are also trimmed to the database's limits, as
     /// KeePassXC does when it merges; the others are only reordered.
     fn settle_merged_histories(&mut self, log: &keepass::db::merge::MergeLog) {
         use keepass::db::merge::MergeEventTarget;
@@ -1185,7 +1291,7 @@ impl Vault {
         }
     }
 
-    /// Does the vault file open with this handle's key?
+    /// Does the database file open with this handle's key?
     fn file_opens_with_current_key(&self) -> bool {
         let Ok(key) = self.current_key() else {
             return false;
@@ -1195,7 +1301,7 @@ impl Vault {
             .is_some_and(|mut file| keepass::Database::open(&mut file, key).is_ok())
     }
 
-    /// The key the vault file is written with: password, keyfile, and the
+    /// The key the database file is written with: password, keyfile, and the
     /// challenge-response provider when there is one.
     fn current_key(&self) -> Result<keepass::DatabaseKey> {
         #[allow(unused_mut)]
@@ -1207,12 +1313,12 @@ impl Vault {
         Ok(key)
     }
 
-    /// The vault file as another writer left it, when it changed since this
+    /// The database file as another writer left it, when it changed since this
     /// handle last read or wrote it. `None` when it did not change, or is gone
     /// (`save()` recreating it is the reasonable outcome).
     ///
     /// Fails with [`Error::StaleWrite`] when the file cannot be merged: it
-    /// opens with other credentials, is not a copy of this vault, or cannot
+    /// opens with other credentials, is not a copy of this database, or cannot
     /// be read.
     fn read_disk_copy(&self) -> Result<Option<(keepass::Database, FileStamp)>> {
         let Some(known) = &self.inner.stamp else {
@@ -1240,18 +1346,18 @@ impl Vault {
                 _ => stale(),
             }
         })?;
-        // The KDBX merge reconciles diverged copies of one vault; a different
-        // vault written to the same path is not one.
+        // The KDBX merge reconciles diverged copies of one database; a different
+        // database written to the same path is not one.
         if other.root().id() != self.inner.db.root().id() {
             return Err(stale());
         }
         Ok(Some((other, stamp)))
     }
 
-    /// Merge another writer's copy of the vault into this one: the newer
+    /// Merge another writer's copy of the database into this one: the newer
     /// change to each entry wins, and the other goes into its history.
     ///
-    /// Vault settings, which the KDBX merge leaves alone, are merged against
+    /// Database settings, which the KDBX merge leaves alone, are merged against
     /// the file as this handle last saw it: the other writer's changes are
     /// taken wherever this handle made none. `other` becomes that base.
     fn merge_disk_copy(&mut self, other: &keepass::Database) -> Result<()> {
@@ -1291,20 +1397,20 @@ impl Vault {
     /// merge, since the other writer's file may lack it.
     fn prepare_for_write(&mut self) {
         // trove only ever writes KDBX 4.1. Force the version before serializing
-        // so re-saving a legacy 4.0 vault (written by keepass 0.12.5) succeeds:
+        // so re-saving a legacy 4.0 database (written by keepass 0.12.5) succeeds:
         // the 0.13.10 writer emits only 4.1 and would otherwise reject KDB4(0)
         // with "Unsupported database version". The re-serialize also drops
         // 0.12.5's empty numeric <Meta> elements that made KeePassXC reject the
         // file with "Invalid number value".
         self.inner.db.config.version = DatabaseVersion::KDB4(1);
         // Pin the optional <Meta> policy fields to KeePassXC's own defaults so a
-        // trove vault behaves identically in any reader. Backfill-only — a value
+        // trove database behaves identically in any reader. Backfill-only — a value
         // already set (by KeePassXC, or a future trove setting) is left as-is.
         apply_default_meta_policy(&mut self.inner.db.meta);
         // Give the top-level group a name if it has none, so other clients
         // (KeePassXC et al.) show a proper "Root" folder instead of a blank
-        // one. Backfills freshly created vaults (create() calls save()) and
-        // any legacy vault on its next write. trove addresses entries by the
+        // one. Backfills freshly created databases (create() calls save()) and
+        // any legacy database on its next write. trove addresses entries by the
         // group chain *below* the root (`build_group_path` excludes it
         // structurally), so naming it is invisible to our own paths.
         if self.inner.db.root().name.is_empty() {
@@ -1315,16 +1421,16 @@ impl Vault {
         }
     }
 
-    /// Serialize the vault into a temporary file next to it, returning the
+    /// Serialize the database into a temporary file next to it, returning the
     /// temporary path and its stamp — which the rename carries over to the
-    /// vault path.
+    /// database path.
     fn write_temp(&self) -> Result<(PathBuf, FileStamp)> {
         write_temp_file(&self.inner.db, &self.inner.path, self.current_key()?)
     }
 
     /// Persist in-memory state back to the original path (atomic replace).
     ///
-    /// A vault is one file with several writers: the CLI, the desktop app,
+    /// A database is one file with several writers: the CLI, the desktop app,
     /// KeePassXC, and the same file synced onto another machine. When the file
     /// changed since this handle read it, the other writer's changes are
     /// merged in first (the KDBX merge: the newer change to an entry wins, the
@@ -1334,7 +1440,7 @@ impl Vault {
     /// machines through Dropbox or Google Drive anyway.
     ///
     /// Fails with [`Error::StaleWrite`] when the file on disk cannot be
-    /// merged: it opens with other credentials, is not a copy of this vault,
+    /// merged: it opens with other credentials, is not a copy of this database,
     /// cannot be read, or keeps changing through every round.
     pub fn save(&mut self) -> Result<()> {
         // Read what another writer saved before touching our own state, so a
@@ -1450,7 +1556,7 @@ impl Vault {
         Ok(EntryId(id.uuid().to_string()))
     }
 
-    /// List all entries in the vault (recursively across all groups).
+    /// List all entries in the database (recursively across all groups).
     pub fn list_entries(&self) -> Vec<EntrySummary> {
         self.inner
             .db
@@ -1544,7 +1650,7 @@ impl Vault {
         groups
     }
 
-    /// Path of the recycle-bin group, root → bin, if the vault has one.
+    /// Path of the recycle-bin group, root → bin, if the database has one.
     /// Located by `Meta/RecycleBinUUID`, not by name.
     pub fn recycle_bin_path(&self) -> Option<Vec<String>> {
         self.inner
@@ -1901,7 +2007,7 @@ impl Vault {
     /// settings describing something that no longer exists. Those move too.
     ///
     /// `KeeAgent.settings` also names its key attachment, but it does so inside
-    /// an XML document this layer does not parse — [`crate::Vault`] knows
+    /// an XML document this layer does not parse — [`crate::Database`] knows
     /// nothing about SSH. Callers that deal in agent keys rewrite it after
     /// this, which is why the returned value says whether one is present.
     ///
@@ -2071,7 +2177,7 @@ impl Vault {
 
     /// Resolve a `/`-separated group path to its `GroupId`. The empty string
     /// or a bare/leading `Root` (case-insensitive) names the root group,
-    /// mirroring [`Vault::add_entry`] path semantics. Group navigation is
+    /// mirroring [`Database::add_entry`] path semantics. Group navigation is
     /// case-insensitive.
     fn resolve_group(&self, path: &str) -> Result<keepass::db::GroupId> {
         let segs = parse_group_path(path)?;
@@ -2089,7 +2195,7 @@ impl Vault {
 
     /// Move an entry to an existing group. The target must already exist —
     /// a typo'd destination should error, not silently grow a new hierarchy
-    /// (use [`Vault::add_group`] first to create one).
+    /// (use [`Database::add_group`] first to create one).
     pub fn move_entry(&mut self, id: &EntryId, group_path: &str) -> Result<()> {
         let target = self.resolve_group(group_path)?;
         let entry_id = self.lookup_entry_id(id)?;
@@ -2123,7 +2229,7 @@ impl Vault {
     ///     and the leaf becomes the new title (moving and renaming at once).
     ///
     /// The parent is never created implicitly, so a typo still fails — which
-    /// is the whole reason [`Vault::move_entry`] refuses to `mkdir -p`. The
+    /// is the whole reason [`Database::move_entry`] refuses to `mkdir -p`. The
     /// ambiguous-looking case, a leaf that happens to be an existing group,
     /// resolves as "move into it" like Unix: it cannot be a typo, because the
     /// group demonstrably exists.
@@ -2397,7 +2503,7 @@ impl Vault {
     /// Two names for one key is the *transitional* state; rotating them apart
     /// afterwards is the point.
     ///
-    /// Same destination rules as [`Vault::move_entry_to_path`]: the parent
+    /// Same destination rules as [`Database::move_entry_to_path`]: the parent
     /// group must already exist, and an existing entry at `dst` is refused
     /// rather than overwritten.
     pub fn copy_entry(&mut self, src: &EntryId, dst: &str) -> Result<EntryId> {
@@ -2855,7 +2961,7 @@ impl Vault {
     }
 
     /// Set an entry's `otp` field from an `otpauth://` URI, validating it
-    /// parses as a TOTP spec first so garbage never lands in the vault. The
+    /// parses as a TOTP spec first so garbage never lands in the database. The
     /// field is stored Protected (KeePassXC's own treatment).
     pub fn set_totp_uri(&mut self, id: &EntryId, uri: &str) -> Result<()> {
         refuse_hotp(uri)?;
@@ -2864,10 +2970,10 @@ impl Vault {
         self.set_field(id, "otp", uri)
     }
 
-    /// Merge another vault into this one (KDBX-standard three-way semantics:
+    /// Merge another database into this one (KDBX-standard three-way semantics:
     /// last-write-wins by modification time, histories preserved — the same
     /// algorithm KeePassXC applies). The source is opened with its own
-    /// credentials; this vault is saved afterwards.
+    /// credentials; this database is saved afterwards.
     pub fn merge_from(
         &mut self,
         source: &Path,
@@ -2880,13 +2986,13 @@ impl Vault {
         let mut file = std::fs::File::open(source)?;
         let key = database_key(source_password, source_keyfile)?;
         let other = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
-        // The KDBX merge algorithm reconciles DIVERGED COPIES of one vault
-        // (shared UUIDs). Two unrelated vaults have different root UUIDs and
+        // The KDBX merge algorithm reconciles DIVERGED COPIES of one database
+        // (shared UUIDs). Two unrelated databases have different root UUIDs and
         // the upstream merge panics on them — refuse cleanly instead.
         if other.root().id() != self.inner.db.root().id() {
             return Err(Error::Kdbx(
-                "source is not a copy of this vault (different root UUID); merge \
-                 reconciles diverged copies — to combine unrelated vaults, import \
+                "source is not a copy of this database (different root UUID); merge \
+                 reconciles diverged copies — to combine unrelated databases, import \
                  entries explicitly"
                     .to_string(),
             ));
@@ -2903,21 +3009,21 @@ impl Vault {
         Ok(summary)
     }
 
-    /// Two-way sync with another copy of this vault: one in a synced folder,
+    /// Two-way sync with another copy of this database: one in a synced folder,
     /// on a USB stick, on a network share. The other copy is merged into this
     /// one, which is saved (merging this file's own writers, as
     /// [`save`](Self::save) does); the result then replaces the other copy, so
     /// both end equal. Unsaved edits are saved first.
     ///
-    /// This vault is authoritative for vault settings such as the KDF, which
+    /// This database is authoritative for database settings such as the KDF, which
     /// the other copy takes over; what the other copy has that this one lacks
-    /// (custom data, a recycle bin, deletions) is kept. A vault with a
+    /// (custom data, a recycle bin, deletions) is kept. A database with a
     /// challenge-response key uses it for the other copy too.
     ///
     /// The other copy is replaced atomically and checked before and after the
-    /// rename, like this vault's own file: a write that lands there in between
+    /// rename, like this database's own file: a write that lands there in between
     /// is merged in on another round. A missing copy is created. A copy that
-    /// already holds everything is left untouched, and this vault is only
+    /// already holds everything is left untouched, and this database is only
     /// saved when the other copy brought something.
     pub fn sync_with(
         &mut self,
@@ -2948,8 +3054,8 @@ impl Vault {
                         .map_err(open_err_to_error)?;
                     if theirs.root().id() != self.inner.db.root().id() {
                         return Err(Error::Kdbx(
-                            "the other file is not a copy of this vault (different root \
-                             UUID); sync reconciles copies of one vault"
+                            "the other file is not a copy of this database (different root \
+                             UUID); sync reconciles copies of one database"
                                 .to_string(),
                         ));
                     }
@@ -3008,7 +3114,7 @@ impl Vault {
             #[cfg(test)]
             save_race_tests::run_hook(&save_race_tests::AFTER_RENAME, other);
             // And afterwards: a writer that renamed over it in the same instant
-            // never saw this vault's changes. The next round reads it again,
+            // never saw this database's changes. The next round reads it again,
             // and ends there if it holds everything.
             if FileStamp::read(other) == Some(written) {
                 return Ok(summary);
@@ -3020,20 +3126,20 @@ impl Vault {
         )))
     }
 
-    /// The password this vault was opened/created with. For rekey flows that
+    /// The password this database was opened/created with. For rekey flows that
     /// change only one credential (e.g. adding a keyfile, keeping the
-    /// password) — the caller already presented it to open the vault.
+    /// password) — the caller already presented it to open the database.
     pub fn current_password(&self) -> &str {
         &self.inner.password
     }
 
-    /// The keyfile bytes this vault was opened/created with, if any.
+    /// The keyfile bytes this database was opened/created with, if any.
     pub fn current_keyfile(&self) -> Option<&[u8]> {
         self.inner.keyfile.as_deref()
     }
 
-    /// Change the vault's credentials: a new password and/or keyfile. Takes
-    /// effect immediately (the vault is re-saved under the new composite key).
+    /// Change the database's credentials: a new password and/or keyfile. Takes
+    /// effect immediately (the database is re-saved under the new composite key).
     pub fn rekey(&mut self, new_password: &str, new_keyfile: Option<&[u8]>) -> Result<()> {
         // Another writer's changes can only be read with the key the file has
         // now, so take them in before switching.
@@ -3063,8 +3169,8 @@ impl Vault {
     }
 
     /// Tune the Argon2 KDF (memory in KiB, iterations, parallelism). Applies
-    /// on save. Errors if the vault uses a non-Argon2 KDF (retune those by
-    /// opening in KeePassXC — trove only writes Argon2 vaults itself).
+    /// on save. Errors if the database uses a non-Argon2 KDF (retune those by
+    /// opening in KeePassXC — trove only writes Argon2 databases itself).
     pub fn set_argon2_params(
         &mut self,
         memory_kib: Option<u64>,
@@ -3113,7 +3219,7 @@ impl Vault {
                 self.save()
             }
             other => Err(Error::Kdbx(format!(
-                "vault uses a non-Argon2 KDF ({other:?}); retune it in KeePassXC"
+                "database uses a non-Argon2 KDF ({other:?}); retune it in KeePassXC"
             ))),
         }
     }
@@ -3441,7 +3547,7 @@ fn save_err_to_error(e: keepass::error::DatabaseSaveError) -> Error {
 /// trove never sets these itself, so left alone every reader substitutes its
 /// own defaults and the effective policy depends on whichever tool last wrote
 /// the file. Pinning them to the values `keepassxc-cli db-create` writes makes
-/// a trove vault behave identically anywhere (and keeps the cross-tool
+/// a trove database behave identically anywhere (and keeps the cross-tool
 /// conformance matrix deterministic):
 ///   * 365-day maintenance-history window,
 ///   * master-key-change recommend/force both off (`-1`, the KeePass
@@ -3458,6 +3564,51 @@ fn apply_default_meta_policy(meta: &mut keepass::db::Meta) {
     meta.history_max_items.get_or_insert(10);
     meta.history_max_size.get_or_insert(6 * 1024 * 1024);
     meta.recyclebin_enabled.get_or_insert(true);
+}
+
+#[cfg(test)]
+mod save_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn serialization_finishes_before_opening_a_temporary_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("missing-parent/database.kdbx");
+        let database = keepass::Database::new();
+
+        let result = write_temp_file(&database, &path, keepass::DatabaseKey::new());
+
+        assert!(matches!(result, Err(Error::Kdbx(_))), "{result:?}");
+        assert_eq!(
+            std::fs::read_dir(directory.path()).expect("list").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn temporary_file_contains_a_complete_database_before_replacement() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("database.kdbx");
+        let original = b"original database remains untouched";
+        std::fs::write(&path, original).expect("original file");
+        let database = keepass::Database::new();
+        let password = "temporary-database-test";
+
+        let (temporary, _) = write_temp_file(
+            &database,
+            &path,
+            keepass::DatabaseKey::new().with_password(password),
+        )
+        .expect("serialize database");
+
+        let mut file = std::fs::File::open(&temporary).expect("temporary file");
+        keepass::Database::open(
+            &mut file,
+            keepass::DatabaseKey::new().with_password(password),
+        )
+        .expect("complete encrypted database");
+        assert_eq!(std::fs::read(&path).expect("original file"), original);
+    }
 }
 
 /// Writers landing inside `save()`'s own windows: while it serializes, and
@@ -3502,7 +3653,7 @@ mod save_race_tests {
     const PW: &str = "pw";
 
     fn titles(path: &Path) -> Vec<String> {
-        let mut titles: Vec<String> = Vault::open(path, PW)
+        let mut titles: Vec<String> = Database::open(path, PW)
             .expect("reopen")
             .list_entries()
             .into_iter()
@@ -3518,9 +3669,9 @@ mod save_race_tests {
     fn a_write_landing_during_serialization_is_merged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v.kdbx");
-        Vault::create(&path, PW).expect("create");
-        let mut app = Vault::open(&path, PW).expect("open");
-        let mut cli = Vault::open(&path, PW).expect("open");
+        Database::create(&path, PW).expect("create");
+        let mut app = Database::open(&path, PW).expect("open");
+        let mut cli = Database::open(&path, PW).expect("open");
         cli.add_entry("from-the-cli").expect("add");
         set_hook(&BEFORE_RENAME, move |_| cli.save().expect("cli saves"));
 
@@ -3537,10 +3688,10 @@ mod save_race_tests {
     fn a_write_landing_while_opening_is_merged_on_save() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v.kdbx");
-        Vault::create(&path, PW).expect("create");
+        Database::create(&path, PW).expect("create");
         let theirs = dir.path().join("theirs.kdbx");
         std::fs::copy(&path, &theirs).expect("copy");
-        let mut cli = Vault::open(&theirs, PW).expect("open");
+        let mut cli = Database::open(&theirs, PW).expect("open");
         cli.add_entry("from-the-cli").expect("add");
         cli.save().expect("save");
         drop(cli);
@@ -3548,7 +3699,7 @@ mod save_race_tests {
             std::fs::rename(&theirs, path).expect("replace");
         });
 
-        let mut app = Vault::open(&path, PW).expect("open");
+        let mut app = Database::open(&path, PW).expect("open");
         assert!(
             app.find_by_title("from-the-cli").is_none(),
             "read the old file"
@@ -3561,16 +3712,16 @@ mod save_race_tests {
 
     /// A writer still on the old key replaces the file right after rekey's
     /// write. The file opens with the old key again, so the handle must keep
-    /// the old key: with the new one it could never read or save the vault.
+    /// the old key: with the new one it could never read or save the database.
     #[test]
     fn rekey_keeps_the_key_the_file_opens_with() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v.kdbx");
-        Vault::create(&path, PW).expect("create");
-        let mut app = Vault::open(&path, PW).expect("open");
+        Database::create(&path, PW).expect("create");
+        let mut app = Database::open(&path, PW).expect("open");
         let theirs = dir.path().join("theirs.kdbx");
         std::fs::copy(&path, &theirs).expect("copy");
-        let mut cli = Vault::open(&theirs, PW).expect("open");
+        let mut cli = Database::open(&theirs, PW).expect("open");
         cli.add_entry("from-the-cli").expect("add");
         cli.save().expect("save");
         drop(cli);
@@ -3593,12 +3744,12 @@ mod save_race_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v.kdbx");
         let copy = dir.path().join("copy.kdbx");
-        Vault::create(&path, PW).expect("create");
+        Database::create(&path, PW).expect("create");
         std::fs::copy(&path, &copy).expect("copy");
-        let mut app = Vault::open(&path, PW).expect("open");
+        let mut app = Database::open(&path, PW).expect("open");
         app.add_entry("from-the-app").expect("add");
         app.save().expect("save");
-        let mut other = Vault::open(&copy, PW).expect("open copy");
+        let mut other = Database::open(&copy, PW).expect("open copy");
         other.add_entry("landed-on-the-copy").expect("add");
         set_hook_for(&BEFORE_RENAME, &copy, move |_| {
             other.save().expect("other saves")
@@ -3618,15 +3769,15 @@ mod save_race_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v.kdbx");
         let copy = dir.path().join("copy.kdbx");
-        Vault::create(&path, PW).expect("create");
+        Database::create(&path, PW).expect("create");
         std::fs::copy(&path, &copy).expect("copy");
         let theirs = dir.path().join("theirs.kdbx");
         std::fs::copy(&copy, &theirs).expect("copy");
-        let mut other = Vault::open(&theirs, PW).expect("open");
+        let mut other = Database::open(&theirs, PW).expect("open");
         other.add_entry("replaced-the-copy").expect("add");
         other.save().expect("save");
         drop(other);
-        let mut app = Vault::open(&path, PW).expect("open");
+        let mut app = Database::open(&path, PW).expect("open");
         app.add_entry("from-the-app").expect("add");
         app.save().expect("save");
         set_hook_for(&AFTER_RENAME, &copy, move |copy| {
@@ -3647,13 +3798,13 @@ mod save_race_tests {
     fn a_write_replacing_ours_right_after_the_rename_is_merged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v.kdbx");
-        Vault::create(&path, PW).expect("create");
-        let mut app = Vault::open(&path, PW).expect("open");
+        Database::create(&path, PW).expect("create");
+        let mut app = Database::open(&path, PW).expect("open");
 
         // The other writer's file, made from the state before the app's save.
         let theirs = dir.path().join("theirs.kdbx");
         std::fs::copy(&path, &theirs).expect("copy");
-        let mut cli = Vault::open(&theirs, PW).expect("open");
+        let mut cli = Database::open(&theirs, PW).expect("open");
         cli.add_entry("from-the-cli").expect("add");
         cli.save().expect("save");
         drop(cli);
@@ -3674,9 +3825,9 @@ mod save_race_tests {
     fn a_write_that_already_holds_ours_is_adopted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v.kdbx");
-        Vault::create(&path, PW).expect("create");
-        let mut app = Vault::open(&path, PW).expect("open");
-        let mut cli = Vault::open(&path, PW).expect("open");
+        Database::create(&path, PW).expect("create");
+        let mut app = Database::open(&path, PW).expect("open");
+        let mut cli = Database::open(&path, PW).expect("open");
         cli.add_entry("from-the-cli").expect("add");
         // The cli's own save sees the app's write and merges it.
         let cli_write = std::rc::Rc::new(RefCell::new(Vec::new()));
@@ -3708,27 +3859,27 @@ mod description_tests {
     fn describe_returns_unprotected_about_fields_and_attachment_sizes_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("describe.kdbx");
-        let mut vault = Vault::create(&path, "test password").unwrap();
-        let id = vault.add_entry("Apple/signing").unwrap();
-        vault.set_field(&id, "UserName", "team-id").unwrap();
-        vault
+        let mut database = Database::create(&path, "test password").unwrap();
+        let id = database.add_entry("Apple/signing").unwrap();
+        database.set_field(&id, "UserName", "team-id").unwrap();
+        database
             .set_field(&id, "Password", "private-password")
             .unwrap();
-        vault
+        database
             .set_field(&id, "About.Kind", "certificate bundle")
             .unwrap();
-        let raw_id = vault.lookup_entry_id(&id).unwrap();
-        vault
+        let raw_id = database.lookup_entry_id(&id).unwrap();
+        database
             .inner
             .db
             .entry_mut(raw_id)
             .unwrap()
             .set_protected("About.Private", "must-not-appear");
-        vault
+        database
             .attach_binary(&id, "signing.p12", &[1, 2, 3, 4])
             .unwrap();
 
-        let descriptions = vault.describe("Apple").unwrap();
+        let descriptions = database.describe("Apple").unwrap();
         assert_eq!(descriptions.len(), 1);
         let description = &descriptions[0];
         assert_eq!(description.path, "Apple/signing");

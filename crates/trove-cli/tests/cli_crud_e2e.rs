@@ -1,6 +1,6 @@
 //! Black-box CLI tests for the daemon-routed CRUD commands: `add password`,
 //! `get password`, `show`, `edit`, `search`, `mkdir`, `mv`, `rm`, `rmdir` —
-//! all WITHOUT `--vault`, so the request crosses a real Unix socket into
+//! all WITHOUT `--database`, so the request crosses a real Unix socket into
 //! `handle()` and we re-open the kdbx from disk to confirm what landed.
 //!
 //! Same harness shape as cli_ssh_e2e.rs / cli_status_e2e.rs: the compiled
@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -123,7 +123,7 @@ async fn handle_connection(
 struct Daemon {
     _tmp: TempDir,
     sock: PathBuf,
-    vault: PathBuf,
+    database: PathBuf,
     _shutdown: Arc<Notify>,
     _task: tokio::task::JoinHandle<()>,
 }
@@ -131,10 +131,10 @@ struct Daemon {
 async fn start_daemon() -> Daemon {
     let tmp = TempDir::new().expect("tempdir");
     let sock = tmp.path().join("trove.sock");
-    let vault = tmp.path().join("v.kdbx");
-    Vault::create(&vault, PASSWORD).expect("create empty vault");
+    let database = tmp.path().join("v.kdbx");
+    Database::create(&database, PASSWORD).expect("create empty database");
 
-    let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+    let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -167,7 +167,7 @@ async fn start_daemon() -> Daemon {
     Daemon {
         _tmp: tmp,
         sock,
-        vault,
+        database,
         _shutdown: shutdown,
         _task: task,
     }
@@ -218,7 +218,7 @@ async fn mint_session(trove: &Path, d: &Daemon) -> String {
         None,
         &[
             "unlock",
-            d.vault.to_str().unwrap(),
+            d.database.to_str().unwrap(),
             "--password-stdin",
             "--export",
         ],
@@ -238,8 +238,8 @@ async fn mint_session(trove: &Path, d: &Daemon) -> String {
         .to_string()
 }
 
-fn reopen(path: &Path) -> Vault {
-    Vault::open(path, PASSWORD).expect("re-open vault from disk")
+fn reopen(path: &Path) -> Database {
+    Database::open(path, PASSWORD).expect("re-open database from disk")
 }
 
 fn ok(out: &std::process::Output, what: &str) -> String {
@@ -263,7 +263,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     let d = start_daemon().await;
     let code = mint_session(&trove, &d).await;
 
-    // add password (secret on stdin; no vault password needed in daemon mode).
+    // add password (secret on stdin; no database password needed in daemon mode).
     let out = run_trove(
         &trove,
         &d.sock,
@@ -478,7 +478,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
         "daemon edit --unset existing field",
     );
     {
-        let v = reopen(&d.vault);
+        let v = reopen(&d.database);
         let id = v
             .find_by_title("Work/Infra/github")
             .expect("moved entry on disk");
@@ -541,7 +541,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     .await;
     assert!(ok(&out, "recursive copy dry run").contains("would copy"));
     assert_eq!(
-        reopen(&d.vault).find_by_title("Source.Backup/sub/token"),
+        reopen(&d.database).find_by_title("Source.Backup/sub/token"),
         None
     );
     let out = run_trove(
@@ -558,7 +558,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
         String::from_utf8_lossy(&out.stdout)
     );
     {
-        let v = reopen(&d.vault);
+        let v = reopen(&d.database);
         let copied = v.find_by_title("Source.Backup/sub/token").unwrap();
         assert_eq!(
             v.get_field(&copied, "Materialize.backup.Target").unwrap(),
@@ -580,7 +580,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
         .await,
         "recursive move",
     );
-    assert!(reopen(&d.vault)
+    assert!(reopen(&d.database)
         .find_by_title("Archive/Source.Backup/sub/token")
         .is_some());
     let out = run_trove(
@@ -604,7 +604,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
         "error should name missing field: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let v = reopen(&d.vault);
+    let v = reopen(&d.database);
     let id = v.find_by_title("Work/Infra/github").unwrap();
     assert_eq!(v.get_field(&id, "Env").unwrap().as_deref(), Some("prod"));
 
@@ -621,7 +621,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     let out = run_trove(&trove, &d.sock, Some(&code), &["rmdir", "Work"], None).await;
     assert!(ok(&out, "daemon rmdir").contains("recycle bin"));
     {
-        let v = reopen(&d.vault);
+        let v = reopen(&d.database);
         let paths: Vec<String> = v.list_entries().iter().map(|e| e.display_path()).collect();
         assert!(
             paths.iter().any(|p| p == "Recycle Bin/github"),
@@ -640,7 +640,7 @@ async fn daemon_routed_crud_lifecycle_persists_to_disk() {
     .await;
     assert!(ok(&out, "daemon rm --permanent").contains("permanently deleted"));
     {
-        let v = reopen(&d.vault);
+        let v = reopen(&d.database);
         assert!(
             v.find_by_title("Recycle Bin/github").is_none(),
             "entry must be destroyed on disk"

@@ -1,21 +1,21 @@
 # trove-core
 
-kdbx-compatible vault primitives: opening, saving, and editing KeePass `.kdbx`
+kdbx-compatible database primitives: opening, saving, and editing KeePass `.kdbx`
 databases, with format compatibility with KeePassXC as a hard requirement.
 
-The crate exposes a small, synchronous API over an open vault:
+The crate exposes a small, synchronous API over an open database:
 
 ```rust
-use trove_core::Vault;
+use trove_core::Database;
 
-let mut vault = Vault::open("vault.kdbx".as_ref(), "correct horse")?;
-for entry in vault.list_entries() {
+let mut database = Database::open("database.kdbx".as_ref(), "correct horse")?;
+for entry in database.list_entries() {
     println!("{}", entry.display_path());
 }
 # Ok::<(), trove_core::Error>(())
 ```
 
-- `Vault::open` / `Vault::create` / `save`
+- `Database::open` / `Database::create` / `save`
 - `list_entries` / `get_entry` / `find_by_title` — non-secret summaries
 - `get_field` / `set_field` — read or write a single field on demand
 - `add_entry` / `delete_entry`

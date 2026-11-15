@@ -26,7 +26,7 @@ format or in KeePassXC — it's a gap in trove.
 - [`set_field`](../crates/trove-core/src/lib.rs#L505-L520) then mutates through
   plain `entry_mut()` and overwrites the old value in place. No snapshot.
 
-So every trove edit destroys the previous value, in a vault that advertises a
+So every trove edit destroys the previous value, in a database that advertises a
 10-item history. KeePassXC-written history *is* preserved across a trove save
 (keepass-rs round-trips the element) — trove just never adds to it.
 
@@ -40,7 +40,7 @@ from `edit`/`entry_mut` to the tracking variant is the bulk of it.
 Two things the library won't do for us:
 
 - **Pruning.** `History::add_entry` just `insert(0, …)` — it never enforces
-  `HistoryMaxItems`/`HistoryMaxSize`. trove has to prune, or vaults grow without
+  `HistoryMaxItems`/`HistoryMaxSize`. trove has to prune, or databases grow without
   bound and KeePassXC's caps get quietly violated.
 - **Orphaned attachments.** Attachment back-references are keyed
   `(entry_id, history_index)`, so a versioned attachment's old blob stays alive
@@ -64,26 +64,26 @@ out-of-band store (that's roadmap #28, a separate problem).
 
 ---
 
-## 2. Sync one vault against another (laptop copy ↔ Google Drive copy)
+## 2. Sync one database against another (laptop copy ↔ Google Drive copy)
 
 **Half of this already ships.** `trove merge <SOURCE>` exists today:
 
 - CLI: [main.rs:444](../crates/trove-cli/src/main.rs#L444), handler
   [`cmd_merge`](../crates/trove-cli/src/main.rs#L3348)
-- Core: [`Vault::merge_from`](../crates/trove-core/src/lib.rs#L917) — KDBX
+- Core: [`Database::merge_from`](../crates/trove-core/src/lib.rs#L917) — KDBX
   standard three-way semantics, last-write-wins by modification time, the same
   algorithm `keepassxc-cli merge` applies, so either tool can reconcile the same
-  pair. It refuses two unrelated vaults (different root UUID) instead of
+  pair. It refuses two unrelated databases (different root UUID) instead of
   panicking, and reports created/updated/relocated/deleted counts.
 
 **What's missing for what the colleague is describing:**
 
-- It's one-directional: source is read-only, only `--vault` is written. No
+- It's one-directional: source is read-only, only `--database` is written. No
   push-back, so "sync between them" is two manual invocations plus a file copy.
 - No `trove sync` verb, no lock coordination, no conflict *detail* (just counts).
 - Cloud caveat: Google Drive syncs the encrypted `.kdbx` as an opaque blob, so
   simultaneous edits produce Drive "conflicted copy" files rather than anything
-  mergeable at the storage layer. The workable shape is: local vault is
+  mergeable at the storage layer. The workable shape is: local database is
   authoritative, `trove sync <remote.kdbx>` merges remote→local, then writes
   local→remote atomically, with a sidecar lock to serialize clients.
 
@@ -105,10 +105,10 @@ roadmap, not because it's user-visible, but because it's load-bearing.
 
 **Correction to an earlier version of this doc.** I first wrote that ACLs can
 only ever be advisory in a KDBX file. That's wrong, and the objection only holds
-for a vault where everything is encrypted under the single master key. Add a
+for a database where everything is encrypted under the single master key. Add a
 *second* encryption layer inside the field values, keyed per ACL group, and read
 access becomes cryptographically enforced. This is the 1Password / Bitwarden
-shape (per-vault or per-organization keys, wrapped to each member's public key)
+shape (per-database or per-organization keys, wrapped to each member's public key)
 and it works on top of KDBX.
 
 ### The scheme, made concrete
@@ -147,13 +147,13 @@ These are design constraints to write down, not reasons to avoid it:
    new group key, re-seal every value in the group, re-wrap to the remaining
    members. Alice still holds the old group key and any copy of the file she
    kept, so every secret she could read must be rotated *at the source* — change
-   the AWS password, not just the vault. 1Password has exactly this property. The
+   the AWS password, not just the database. 1Password has exactly this property. The
    docs need to say so, or "remove user" reads as more than it is.
 3. **Metadata stays readable to anyone with file access.** Entry titles, the
    group tree, usernames, URLs, timestamps, and which fields are sealed to which
    group all remain under the single master key. Everyone sees that
    `prod/aws-root` exists and when it last changed. Sealing titles too is
-   possible, but then KeePassXC shows a vault of opaque garbage names and the
+   possible, but then KeePassXC shows a database of opaque garbage names and the
    interop story dies — 1Password doesn't have this problem only because it
    doesn't need to produce a KeePass-readable file.
 4. **Read auditing is still impossible offline.** This part of the original
@@ -174,7 +174,7 @@ A sealed field is opaque to KeePassXC *even for a member*, because KeePassXC
 doesn't know the scheme. So sealing an entry makes it trove-only in practice, and
 disables KeePassXC's password-health reports, HIBP checks, browser autofill, and
 TOTP on those fields. That argues for sealing per-field and per-entry rather than
-vault-wide, and for being loud in the UI about what's sealed.
+database-wide, and for being loud in the UI about what's sealed.
 
 ### Interactions with #1 and #2
 
@@ -210,9 +210,9 @@ costs little once the seam exists.
 
 - **All 33 `keepass::` references live in one file**,
   [trove-core/src/lib.rs](../crates/trove-core/src/lib.rs). trove-cli, troved and
-  trove-desktop contain zero — they already talk only to `Vault`'s public methods.
-  Extracting a `VaultBackend` trait is a refactor of one file, not a rewrite.
-- [`VaultInner`](../crates/trove-core/src/lib.rs#L154-L169) — path, password,
+  trove-desktop contain zero — they already talk only to `Database`'s public methods.
+  Extracting a `DatabaseBackend` trait is a refactor of one file, not a rewrite.
+- [`DatabaseInner`](../crates/trove-core/src/lib.rs#L154-L169) — path, password,
   keyfile, challenge-response, `keepass::Database` — is the entire KDBX-shaped
   state, and it's already `pub(crate)`. That struct becomes the KDBX backend.
 - The shared types generalise cleanly:
@@ -224,12 +224,12 @@ costs little once the seam exists.
 
 This mirrors what the project already decided one level up for key operations —
 [agent-routing.md](agent-routing.md) frames trove as a *router* over plural
-backends, and [multi-vault.md](multi-vault.md) notes that "which vault owns this
+backends, and [multi-database.md](multi-database.md) notes that "which database owns this
 key" generalises to "which *backend* owns this key". Storage format is the same
 pattern on a third axis: format (kdbx4 / native), backing store (file / S3 / git,
-roadmap #14), key-operation backend (vault / smartcard / platform agent).
+roadmap #14), key-operation backend (database / smartcard / platform agent).
 
-Note this is a different axis from **multi-vault**, which already ships phase 1:
+Note this is a different axis from **multi-database**, which already ships phase 1:
 that's several kdbx *files* unlocked at once, not several formats.
 
 ### Capabilities, not a lowest common denominator
@@ -237,7 +237,7 @@ that's several kdbx *files* unlocked at once, not several formats.
 The one design rule that decides whether this is worth doing. If the trait is the
 *intersection* of what both formats support, the native format buys nothing and
 KDBX's limits become trove's limits everywhere. So the trait carries a capability
-query, and commands needing an absent capability **fail loudly** — "this vault is
+query, and commands needing an absent capability **fail loudly** — "this database is
 kdbx4; per-field history needs the trove format, see `trove convert`" — rather
 than silently degrading to something weaker. Silent degradation in a secrets tool
 is how people end up believing a value is sealed when it isn't.
@@ -299,7 +299,7 @@ re-deriving them is how you introduce subtle merge bugs:
 
 ### A path that isn't a big bang
 
-1. **Extract `VaultBackend` + `Caps`, KDBX as the only impl.** Pure refactor, no
+1. **Extract `DatabaseBackend` + `Caps`, KDBX as the only impl.** Pure refactor, no
    behaviour change, provable by the existing test suite. Everything below then
    happens without touching the CLI, daemon or desktop again.
 2. **Ship entry history on the KDBX backend** (§1 — nearly free, keepass-rs
@@ -313,7 +313,7 @@ re-deriving them is how you introduce subtle merge bugs:
 
 ### Decided: kdbx4 stays the default, `trvdb1` is opt-in
 
-**kdbx4 remains the default format.** You move a vault to the native format —
+**kdbx4 remains the default format.** You move a database to the native format —
 working name `trvdb1` — when, and only when, you want a feature kdbx4 can't
 express. This keeps the no-lock-in promise as the *default experience* rather
 than a fallback, and it means most users never meet the second format at all.
@@ -321,8 +321,8 @@ than a fallback, and it means most users never meet the second format at all.
 Four consequences that follow directly:
 
 **1. Never auto-convert. Refuse and name the command.** The moment someone uses a
-trvdb1-only feature on a kdbx4 vault, the tempting behaviour is to silently
-upgrade the file. That would break KeePassXC's ability to open a vault the user
+trvdb1-only feature on a kdbx4 database, the tempting behaviour is to silently
+upgrade the file. That would break KeePassXC's ability to open a database the user
 may be sharing with colleagues, possibly mid-sync, without consent — the exact
 promise the default is protecting. So: refuse, and say what to run.
 
@@ -331,14 +331,14 @@ most users meet trvdb1 for the first time *via an error*. `Error::Unsupported`
 therefore has to carry the capability, the current format, and the exact command:
 
 ```
-per-field history needs the trvdb1 format; this vault is kdbx4.
-  convert with:  trove convert ~/vault.kdbx --to trvdb1
+per-field history needs the trvdb1 format; this database is kdbx4.
+  convert with:  trove convert ~/database.kdbx --to trvdb1
   what you lose: KeePassXC can no longer open it (trove convert --to kdbx4 reverses this)
 ```
 
 **3. Conversion must be reversible, and lossiness stated before it happens.**
 "No lock-in" survives as: *you can always get back to a standard file, and we
-tell you what that costs.* So `trove convert --to kdbx4` from a trvdb1 vault
+tell you what that costs.* So `trove convert --to kdbx4` from a trvdb1 database
 reports what it will drop — per-field history collapsed to entry snapshots,
 sealed metadata unsealed or dropped, signed log discarded — and asks, rather than
 discovering it halfway through. Dry-run by default is worth considering.
@@ -381,7 +381,7 @@ is what lets a reader make an informed refusal instead of guessing.
 the part that goes beyond kdbx, and it comes straight from trove's own scar:
 [lib.rs:327-333](../crates/trove-core/src/lib.rs#L327-L333) force-writes KDBX 4.1
 because the 0.13 writer *only* emits 4.1 and would reject a 4.0 file outright. If
-trvdb writes "newest I know" unconditionally, a vault using no v1.3 features
+trvdb writes "newest I know" unconditionally, a database using no v1.3 features
 becomes unreadable to a v1.2 reader for no reason. Emitting the minimum needed is
 what makes new versions genuinely encapsulated rather than merely documented.
 
@@ -398,7 +398,7 @@ Both matter, for different reasons. **Critical** is the security-relevant one: a
 future "this field is sealed" marker must *not* be skippable, or an old reader
 displays ciphertext as if it were the value — or worse, overwrites a sealed field
 it couldn't read. **Preserve** stops an older trove from silently destroying data
-it didn't understand when it opens, edits and saves a newer vault. PNG's
+it didn't understand when it opens, edits and saves a newer database. PNG's
 critical/ancillary + copy-safe bits and TLS's extension model are the precedents;
 the four combinations are all meaningful.
 
@@ -416,7 +416,7 @@ retrofit.
 **Refusal has to be actionable.** Today `UnsupportedVersion` maps to the bare
 string "unsupported kdbx version"
 ([lib.rs:1189-1190](../crates/trove-core/src/lib.rs#L1189-L1190)). The trvdb
-version should say: this vault is trvdb 2.x, this build reads up to 1.x, upgrade
+version should say: this database is trvdb 2.x, this build reads up to 1.x, upgrade
 to trove ≥ X.
 
 **How to test forward-compatibility before the future exists.**
@@ -497,7 +497,7 @@ Two cheap fixes, the first being the high-value one:
 The two fuzzed parsers are the ones trove hand-wrote, which is the right
 instinct, but they aren't the only things eating attacker-controlled bytes:
 
-- **kdbx parsing.** Upstream's code, but trove ships it, and a vault handed to
+- **kdbx parsing.** Upstream's code, but trove ships it, and a database handed to
   you, a merge source, or a file synced down from Drive is untrusted input.
   `broken_files.rs` covers a curated set — that's not the same as fuzzing.
 - **Keyfile parsing** — XML v1/v2, raw-32, hex-64, arbitrary-file SHA-256. Four
@@ -561,8 +561,8 @@ allowlists, not just advisories.
 
 ## Design sketch: the backend trait
 
-There is already precedent in-repo. [`VaultLike`](../crates/troved/src/vaults.rs#L26-L40)
-with generic `VaultSet<V = Vault>` and a `FakeVault` double is the same pattern
+There is already precedent in-repo. [`DatabaseLike`](../crates/troved/src/databases.rs#L26-L40)
+with generic `DatabaseSet<V = Database>` and a `FakeDatabase` double is the same pattern
 at narrower scope — introduced for testability (routing tests shouldn't run
 Argon2), but the shape is right.
 
@@ -578,21 +578,21 @@ its own internal representation.
 
 ### Object safety decides the shape
 
-troved holds a heterogeneous set of unlocked vaults, so it needs
-`Box<dyn VaultBackend>`. That rules out generic methods and RPITIT, and — the
+troved holds a heterogeneous set of unlocked databases, so it needs
+`Box<dyn DatabaseBackend>`. That rules out generic methods and RPITIT, and — the
 part that's easy to miss — **constructors can't live on the trait**, since
 `open`/`create` return `Self`. They go on a small separate registry.
 
 ```rust
 // Object-safe. One impl per format.
-pub(crate) trait VaultBackend: Send {
+pub(crate) trait DatabaseBackend: Send {
     fn path(&self) -> &Path;
     fn save(&mut self) -> Result<()>;
     fn caps(&self) -> Caps;
     fn info(&self) -> DbInfo;
 
     // Core CRUD — every backend implements these. Shapes unchanged from
-    // today's `Vault`, so the CLI/daemon/desktop call sites don't move.
+    // today's `Database`, so the CLI/daemon/desktop call sites don't move.
     fn add_entry(&mut self, title: &str) -> Result<EntryId>;
     fn list_entries(&self) -> Vec<EntrySummary>;
     fn find_by_title(&self, title: &str) -> Option<EntryId>;
@@ -611,10 +611,10 @@ pub(crate) trait VaultBackend: Send {
 }
 
 // Not object-safe, and doesn't need to be — a static registry.
-pub(crate) trait VaultFormat {
+pub(crate) trait DatabaseFormat {
     fn sniff(header: &[u8]) -> bool;
-    fn open(path: &Path, cred: &Credential) -> Result<Box<dyn VaultBackend>>;
-    fn create(path: &Path, cred: &Credential) -> Result<Box<dyn VaultBackend>>;
+    fn open(path: &Path, cred: &Credential) -> Result<Box<dyn DatabaseBackend>>;
+    fn create(path: &Path, cred: &Credential) -> Result<Box<dyn DatabaseBackend>>;
 }
 ```
 
@@ -636,7 +636,7 @@ trove-owned type that retires the `pub use keepass::ChallengeResponseKey` leak a
 ### Keep the trait private until there are two implementations
 
 `trove-core` is published to crates.io, and its description is currently
-"kdbx-compatible vault library" — so making `VaultBackend` public is a semver
+"kdbx-compatible database library" — so making `DatabaseBackend` public is a semver
 commitment to a shape derived from exactly one implementation. Abstractions
 written against a single example bake in that example's assumptions. Keep the
 trait crate-private until the native backend exists and has stress-tested it;
@@ -677,7 +677,7 @@ Three candidates, in order of how well they survive contact with sync:
 - **Timestamp** — `--at 2026-08-01T14:22:03Z`, the snapshot's
   `last_modification`. Canonical: it's what the merge algorithm keys on, it's
   stable under pruning, and it names the same version on both copies of a synced
-  vault. Verbose to type.
+  database. Verbose to type.
 - **Relative index** — `--version 1` (0 = current, 1 = previous). Ergonomic, but
   shifts on every write, and shifts *differently* on two copies that have
   diverged. Fine as interactive sugar if it resolves to a timestamp immediately
@@ -739,10 +739,10 @@ unverifiable anyway since any keyholder can write any name into it.
 
 ---
 
-## 6. `send to` — moving entries between vaults as objects
+## 6. `send to` — moving entries between databases as objects
 
 **The codebase already names this gap.** `merge_from`'s own refusal text says:
-*"merge reconciles diverged copies — to combine unrelated vaults, import entries
+*"merge reconciles diverged copies — to combine unrelated databases, import entries
 explicitly"*
 ([lib.rs:930-937](../crates/trove-core/src/lib.rs#L930-L937)). That explicit
 import doesn't exist. So this isn't a merge variant, it's the operation merge
@@ -750,15 +750,15 @@ points at:
 
 | | Reconciles | Identity |
 | --- | --- | --- |
-| **merge** | diverged copies of *one* vault | refuses different root UUIDs |
-| **send** | one entry between *unrelated* vaults | crosses identity spaces |
+| **merge** | diverged copies of *one* database | refuses different root UUIDs |
+| **send** | one entry between *unrelated* databases | crosses identity spaces |
 
-### Multi-vault already provides the good path
+### Multi-database already provides the good path
 
-Phase 1 multi-vault ships today — the daemon holds a `VaultSet` of unlocked
-vaults. When source and target are both unlocked, `send` is a purely in-memory
+Phase 1 multi-database ships today — the daemon holds a `DatabaseSet` of unlocked
+databases. When source and target are both unlocked, `send` is a purely in-memory
 transfer with **no second password prompt**. That makes it arguably the first
-genuinely new user-facing capability multi-vault unlocks. Fallback: target not
+genuinely new user-facing capability multi-database unlocks. Fallback: target not
 unlocked → prompt for its credentials. Source and target must never be required
 to share credentials.
 
@@ -768,7 +768,7 @@ An entry's UUID is its merge identity. Preserving it on send would put one
 identity in two identity spaces, which confuses any later merge. Minting a fresh
 one loses the "same secret" link and makes re-sending create duplicates.
 
-Take both: **mint a new UUID**, and record source UUID + source vault id in
+Take both: **mint a new UUID**, and record source UUID + source database id in
 `CustomData` as provenance. Re-sending then finds the prior copy by provenance and
 updates it instead of duplicating — idempotent, without polluting the merge
 identity space. Same mechanism §3 uses for the group keyring.
@@ -788,7 +788,7 @@ permanent. Default is copy; `--move` is explicit.
 ### What travels with the entry
 
 - **Attachments** — copied into the target's binary pool under fresh ref ids.
-- **History** — carrying it carries *old secrets* into another vault, possibly
+- **History** — carrying it carries *old secrets* into another database, possibly
   another trust domain. The safe default is to **flatten**, with `--with-history`
   as opt-in. Capability-checked: kdbx4 can hold entry history, trvdb can hold
   per-field history, so what survives depends on the target.
@@ -819,13 +819,13 @@ auditing that's actually credible offline.
 "Keys as objects" implies a second kind of destination. Sending to a **file**
 requires that file's credentials. Sending to a **person** doesn't: encrypt the
 entry to a recipient's public key and hand them an envelope they import. That
-reuses §3's key-wrapping machinery exactly, needs no access to your vault at all,
+reuses §3's key-wrapping machinery exactly, needs no access to your database at all,
 and answers a question with no good answer today — *how do I give a colleague one
 credential* — where the status quo is pasting it into a chat window.
 
 ### Cheap, and available now
 
-`send` needs neither trvdb nor the backend trait. It needs multi-vault, which
+`send` needs neither trvdb nor the backend trait. It needs multi-database, which
 ships. It *interacts* with history and sealing, so build it capability-checked
 from the start rather than retrofitting later.
 
@@ -841,16 +841,16 @@ makes them the right place to start.
 2. **Sketch the native format's data model on paper** — *before* the trait, not
    after. It's cheap, and it's the only way the trait gets shaped by two formats
    instead of one. The full spec can come later; the model can't.
-3. **Extract `VaultBackend` + `Caps`** — pure refactor of one file, kdbx4 as the
+3. **Extract `DatabaseBackend` + `Caps`** — pure refactor of one file, kdbx4 as the
    sole implementation, kept crate-private, existing 306 tests prove it.
-4. **`trove send <entry> --to <vault>`** — the missing cross-vault operation
-   `merge_from` already points at. Needs only multi-vault (shipped), so it lands
+4. **`trove send <entry> --to <database>`** — the missing cross-database operation
+   `merge_from` already points at. Needs only multi-database (shipped), so it lands
    early and cheaply. Copy-then-verify-then-recycle; resolve `{REF:…}` on the way
    out; flatten history by default.
 5. **`trove sync`** — two-way merge + atomic write-back + sidecar lock, on top of
    the existing `merge_from`. Still whole-file; delta sync needs the native
    format.
-6. **Per-user identity** — member keypairs registered in the vault, reusing the
+6. **Per-user identity** — member keypairs registered in the database, reusing the
    OpenPGP keys trove already serves. Prerequisite for everything below.
 7. **Native format spec, then implementation** — per-field history, sealed
    metadata, record-oriented encryption for delta sync, signed write log. Plus
@@ -858,7 +858,7 @@ makes them the right place to start.
 8. **Sealed fields + group keyring** — real read-ACLs, no server. On kdbx4 via
    `CustomData` (interop-visible as opaque tokens); native gets sealed metadata
    too. Ships with an honest README about rotation-on-revoke. Unlocks *send to a
-   person* — an entry sealed to a recipient's public key, no shared vault needed.
+   person* — an entry sealed to a recipient's public key, no shared database needed.
 9. **Read auditing and write *prevention*** — only alongside #15. These are the
    two pieces that genuinely require a mediator; scope them as server features
    rather than approximating them locally.

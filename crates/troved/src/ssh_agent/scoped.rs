@@ -9,7 +9,7 @@
 //! whenever the key it wants sits past the sixth — and from the fourth offer
 //! onward `sshd` logs auth failures, which is what `fail2ban` reads.
 //!
-//! The daemon's main agent serves every key in every unlocked vault, which is
+//! The daemon's main agent serves every key in every unlocked database, which is
 //! the right default for a person at a terminal and the wrong one for a
 //! deployment tool that knows exactly which keys it needs. So this module hands
 //! such a caller its own socket, empty, to fill deliberately:
@@ -35,7 +35,7 @@
 //! and the daemon's main agent.
 //!
 //! Key material never leaves `troved`: a scoped agent is served by the same
-//! [`super::serve`] loop as the main one, so `add` moves a key from the vault
+//! [`super::serve`] loop as the main one, so `add` moves a key from the database
 //! into daemon memory, not out of it.
 //!
 //! # Lifecycle
@@ -236,8 +236,8 @@ pub async fn close(agents: &ScopedAgents, socket: &Path) -> Result<usize, CloseE
 
 /// Drop from every scoped agent any key the daemon no longer holds.
 ///
-/// `lock --vault <path>` closes one vault while others stay open, and a scoped
-/// agent built earlier may be serving a key that vault owned. Without this it
+/// `lock --database <path>` closes one database while others stay open, and a scoped
+/// agent built earlier may be serving a key that database owned. Without this it
 /// would keep serving it after the lock, which is exactly the leak the main
 /// key store's rebuild exists to prevent.
 pub async fn retain(agents: &ScopedAgents, still_served: &[Vec<u8>]) {

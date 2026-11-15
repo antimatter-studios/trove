@@ -7,8 +7,8 @@
 //! Their public APIs are identical for everything we touch, so a single
 //! `macro_rules!` generates the per-version module; we invoke it twice. Each
 //! module exposes:
-//!   - `produce(spec: &VaultSpec) -> Vec<u8>`  — mint a `.kdbx` from a logical spec.
-//!   - `consume(bytes: &[u8], spec: &VaultSpec) -> Result<VaultRepr, String>` — open
+//!   - `produce(spec: &DatabaseSpec) -> Vec<u8>`  — mint a `.kdbx` from a logical spec.
+//!   - `consume(bytes: &[u8], spec: &DatabaseSpec) -> Result<DatabaseRepr, String>` — open
 //!     a `.kdbx` (using `spec`'s credentials) and recover its content into the
 //!     normalized comparison repr.
 #![allow(missing_docs)]
@@ -22,7 +22,7 @@ macro_rules! crate_impl {
     ($mod:ident, $kp:ident) => {
         pub mod $mod {
             use crate::matrix::{
-                Compression, Config, EntryRepr, Kdf, OuterCipher, VaultRepr, VaultSpec,
+                Compression, Config, EntryRepr, Kdf, OuterCipher, DatabaseRepr, DatabaseSpec,
             };
 
             use $kp::{
@@ -107,7 +107,7 @@ macro_rules! crate_impl {
             /// Build the `DatabaseKey` for `spec`: always password-based, plus a
             /// keyfile when the credential axis is composite. Shared by `produce`
             /// and `consume` so mint and open use identical key material.
-            fn db_key(spec: &VaultSpec) -> Result<DatabaseKey, String> {
+            fn db_key(spec: &DatabaseSpec) -> Result<DatabaseKey, String> {
                 let mut k = DatabaseKey::new().with_password(spec.password);
                 if let Some(kf) = spec.key.keyfile() {
                     k = k
@@ -117,7 +117,7 @@ macro_rules! crate_impl {
                 Ok(k)
             }
 
-            pub fn produce(spec: &VaultSpec) -> Result<Vec<u8>, String> {
+            pub fn produce(spec: &DatabaseSpec) -> Result<Vec<u8>, String> {
                 let mut db = Database::with_config(database_config(&spec.config));
 
                 for e in &spec.entries {
@@ -160,12 +160,12 @@ macro_rules! crate_impl {
                 Ok(buf)
             }
 
-            pub fn consume(bytes: &[u8], spec: &VaultSpec) -> Result<VaultRepr, String> {
+            pub fn consume(bytes: &[u8], spec: &DatabaseSpec) -> Result<DatabaseRepr, String> {
                 let key = db_key(spec)?;
                 let mut cursor = std::io::Cursor::new(bytes);
                 let db = Database::open(&mut cursor, key).map_err(|e| e.to_string())?;
 
-                let mut out = VaultRepr::new();
+                let mut out = DatabaseRepr::new();
                 walk(&db.root(), &mut Vec::new(), &mut out);
                 Ok(out)
             }
@@ -174,7 +174,7 @@ macro_rules! crate_impl {
             /// declares, in the matrix's own terms. `kdbx4_minor` is always
             /// `Some`, since a file on disk has a concrete version. KDF
             /// parameters are not compared: only which KDF it is.
-            pub fn read_config(bytes: &[u8], spec: &VaultSpec) -> Result<Config, String> {
+            pub fn read_config(bytes: &[u8], spec: &DatabaseSpec) -> Result<Config, String> {
                 let key = db_key(spec)?;
                 let mut cursor = std::io::Cursor::new(bytes);
                 let db = Database::open(&mut cursor, key).map_err(|e| e.to_string())?;
@@ -212,7 +212,7 @@ macro_rules! crate_impl {
             /// names EXCLUDING root; an entry's path is
             /// `prefix.join("/") + "/" + title` (no leading slash; a root entry
             /// => bare title).
-            fn walk(group: &GroupRef<'_>, prefix: &mut Vec<String>, out: &mut VaultRepr) {
+            fn walk(group: &GroupRef<'_>, prefix: &mut Vec<String>, out: &mut DatabaseRepr) {
                 for e in group.entries() {
                     let title = e.get(fields::TITLE).unwrap_or("");
                     let mut path = prefix.join("/");

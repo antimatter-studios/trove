@@ -2,7 +2,7 @@
 //! from a shared in-memory key store.
 //!
 //! Lifecycle (see daemon-level docs):
-//!   * The socket is bound at troved startup, before any vault is unlocked.
+//!   * The socket is bound at troved startup, before any database is unlocked.
 //!   * The `KeyStore` is initially empty; `RequestIdentities` returns an
 //!     empty list and `SignRequest` returns `SSH_AGENT_FAILURE`.
 //!   * `unlock` populates it; `lock` / shutdown clears it.
@@ -151,7 +151,7 @@ pub fn start_lifetimes(keys: &mut [LoadedKey], now: Instant) {
 }
 
 /// Keep the running lifetimes of keys `old` already served when `new` replaces
-/// it. Rebuilding the store after a write to any vault must not hand an
+/// it. Rebuilding the store after a write to any database must not hand an
 /// expired key back, or restart the clock on the others. Keys that are new, or
 /// whose lifetime setting changed, start from `now`.
 pub fn carry_lifetimes(old: &[LoadedKey], new: &mut [LoadedKey], now: Instant) {
@@ -312,9 +312,9 @@ async fn serve_with_lock(
 /// agent only ever needs to answer "is this the same secret again?", so there
 /// is no reason to hold the plaintext.
 ///
-/// This is deliberately **independent of vault lock**. It is a property of the
+/// This is deliberately **independent of database lock**. It is a property of the
 /// agent, matching OpenSSH semantics — locking the agent doesn't lock your
-/// vault, and unlocking your vault doesn't unlock the agent.
+/// database, and unlocking your database doesn't unlock the agent.
 pub type AgentLock = Arc<tokio::sync::RwLock<Option<[u8; 32]>>>;
 
 /// Constant-time comparison of two 32-byte digests, so a wrong passphrase
@@ -394,7 +394,7 @@ async fn serve_connection(
                     guard.retain(|k| k.public_blob != key_blob);
                     before != guard.len()
                 };
-                // Removing here drops the key from the agent only — the vault
+                // Removing here drops the key from the agent only — the database
                 // still holds it, and the next unlock re-serves it.
                 let ty = if removed {
                     SSH_AGENT_SUCCESS
@@ -610,7 +610,7 @@ mod tests {
         let mut old = vec![key("kept", Some(60)), key("changed", Some(60))];
         start_lifetimes(&mut old, then);
 
-        // The same keys reloaded from the vault, plus one that is new; the
+        // The same keys reloaded from the database, plus one that is new; the
         // second entry's lifetime was edited in between.
         let pem_of = |k: &LoadedKey| k.public_blob.clone();
         let mut new = vec![key("new", Some(60))];

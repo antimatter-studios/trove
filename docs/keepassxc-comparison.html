@@ -206,7 +206,7 @@
       <div class="vcard edge">
         <span class="tag">The shape of the difference</span>
         <h3>Editor vs runtime</h3>
-        <p>keepassxc-cli is a vault <em>editor</em>: you query a file. trove is a secrets <em>runtime</em>: agents, sessions, and process-scoped injection let your machine <em>authenticate with</em> the vault — which upstream refused to build headless.</p>
+        <p>keepassxc-cli is a database <em>editor</em>: you query a file. trove is a secrets <em>runtime</em>: agents, sessions, and process-scoped injection let your machine <em>authenticate with</em> the database — which upstream refused to build headless.</p>
       </div>
     </div>
   </section>
@@ -250,7 +250,7 @@
             <td><span class="yes">Yes<span class="cmd">clip --timeout (hash-guarded wipe)</span></span></td>
           </tr>
           <tr>
-            <td class="feat">Vault ops<small>merge / export / rekey / info</small></td>
+            <td class="feat">Database ops<small>merge / export / rekey / info</small></td>
             <td class="has">merge / import / export / db-edit</td>
             <td><span class="partial">Yes*<span class="cmd" style="color:var(--faint)">merge · export · db-edit · db-info (import: no)</span></span></td>
           </tr>
@@ -282,7 +282,7 @@
         <ul class="pts">
           <li><b>Maturity</b> — years of audits, packaging everywhere, a large user base. trove is months old.</li>
           <li><b>XML / CSV import</b> — trove exports both but only imports via keepassxc (no public XML parser upstream in the kdbx crate).</li>
-          <li><b>The GUI</b> — browser integration, autofill, deep visual editing. trove-desktop now opens real .kdbx vaults with a system tray and resizable panes, but it's young next to KeePassXC's mature desktop.</li>
+          <li><b>The GUI</b> — browser integration, autofill, deep visual editing. trove-desktop now opens real .kdbx databases with a system tray and resizable panes, but it's young next to KeePassXC's mature desktop.</li>
           <li><b>Ubiquity of the hardware path</b> — keepassxc's YubiKey support is cross-platform and battle-tested; trove's is Linux-only and hardware-unverified so far.</li>
         </ul>
       </div>
@@ -306,7 +306,7 @@
       <div class="stat"><div class="num fern">both ways</div><div class="lbl">keepassxc-cli interop</div></div>
       <div class="stat"><div class="num">100%</div><div class="lbl">kdbx-compatible</div></div>
     </div>
-    <p class="lead" style="color:var(--dim)">Interop isn't a smoke test: trove-authored vaults are read back field-for-field by keepassxc-cli (including merge-result equivalence and re-imported XML), and keepassxc-authored vaults round-trip through every trove command — TOTP codes matching in the same 30-second window, composite keys opening on both sides. A missing keepassxc binary fails CI rather than skipping.</p>
+    <p class="lead" style="color:var(--dim)">Interop isn't a smoke test: trove-authored databases are read back field-for-field by keepassxc-cli (including merge-result equivalence and re-imported XML), and keepassxc-authored databases round-trip through every trove command — TOTP codes matching in the same 30-second window, composite keys opening on both sides. A missing keepassxc binary fails CI rather than skipping.</p>
   </section>
 
   <footer>

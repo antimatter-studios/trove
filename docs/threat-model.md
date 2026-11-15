@@ -14,7 +14,7 @@ In rough order of who we care about most.
 
 ## Assets
 
-What's actually in the vault that matters? In practice:
+What's actually in the database that matters? In practice:
 
 - **SSH private keys** for git forges, production servers, internal infrastructure. Lateral-movement gold; rotation is painful.
 - **GPG secret keys** for signed commits and encrypted archives. Identity-binding; can authorize releases.
@@ -30,7 +30,7 @@ The shared property: each of these is a *capability bearer* — possession of th
 
 Where could secrets leak from each delivery surface? One section per surface.
 
-### Vault file (kdbx)
+### Database file (kdbx)
 
 - **At rest.** Encrypted with the master key (Argon2-derived). Reading the file off a stolen laptop without the password gets the attacker bytes that take real compute to crack. Status quo is "mostly fine" for this surface.
 - **Sync targets.** kdbx files often live in Dropbox / iCloud / Git. The encryption survives sync; the attack surface is "wherever the cloud copy lives." trove doesn't introduce a new surface here — the user's existing sync-folder choice is already in scope. (We are explicit about not building OAuth sync adapters; "drop the file in your sync folder" is the user's call.)
@@ -38,7 +38,7 @@ Where could secrets leak from each delivery surface? One section per surface.
 
 ### Daemon process memory
 
-- **While unlocked.** Decrypted vault, parsed SSH keys, parsed GPG secret-key scalars, materialized-file bookkeeping. Process memory; we use `Zeroize`-on-drop where the underlying crate supports it (`secstr` for strings, `ZeroizeOnDrop` on `ssh_key::SigningKey`). Best-effort, not a guarantee.
+- **While unlocked.** Decrypted database, parsed SSH keys, parsed GPG secret-key scalars, materialized-file bookkeeping. Process memory; we use `Zeroize`-on-drop where the underlying crate supports it (`secstr` for strings, `ZeroizeOnDrop` on `ssh_key::SigningKey`). Best-effort, not a guarantee.
 - **Crash dumps.** OS crash reporting could capture secret state. On Linux, troved sets `prctl(PR_SET_DUMPABLE, 0)` at startup, so it writes no core file and same-user processes can't `ptrace` it or read `/proc/<pid>/mem`. On macOS the hardened runtime of the signed release binaries covers `ptrace`; system crash reports are still possible. Windows has no equivalent set yet.
 - **Swap.** Linux swap and macOS swap can hit disk. We don't `mlock` decrypted regions today. Real concern; partially mitigated by tmpfs-only materialization defaults on Linux.
 - **Hibernation.** Same family as swap. Disable hibernation on machines that hold long-lived troved unlocks if you care.
@@ -108,9 +108,9 @@ unlock-once is already safe there.)
 
 The honest baseline — every developer machine today has plaintext keys and tokens scattered across `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, `~/.kube/`, every project's `.env`. Most of those secrets sit there for months or years. Backups vacuum them up; sync tools vacuum them up; a process running as the user can read all of them anyway, and they survive long after the credential should have been rotated.
 
-Time-bounded materialization is a *strict* reduction. A secret on disk for 2 minutes during a `kubectl apply` then wiped leaks less than the same secret sitting in `~/.kube/config` for 18 months. The threat-model comparison is not "encrypted vault vs. plaintext file." It's "plaintext file forever vs. plaintext file briefly, with a real chance the developer rotates it because rotation is now cheap." trove aims for the second.
+Time-bounded materialization is a *strict* reduction. A secret on disk for 2 minutes during a `kubectl apply` then wiped leaks less than the same secret sitting in `~/.kube/config` for 18 months. The threat-model comparison is not "encrypted database vs. plaintext file." It's "plaintext file forever vs. plaintext file briefly, with a real chance the developer rotates it because rotation is now cheap." trove aims for the second.
 
-The same goes for SSH and GPG. With ssh-agent + troved, the private key bytes never hit disk after the initial vault import. With `~/.ssh/id_ed25519` plain on disk, every backup, every cloud-sync directory, every misconfigured `chmod 644` is a credential leak.
+The same goes for SSH and GPG. With ssh-agent + troved, the private key bytes never hit disk after the initial database import. With `~/.ssh/id_ed25519` plain on disk, every backup, every cloud-sync directory, every misconfigured `chmod 644` is a credential leak.
 
 ### vs. KeePassXC
 
@@ -119,7 +119,7 @@ KeePassXC is the upstream we fork from. We take its kdbx format, its security mo
 - **Headless-first.** KeePassXC needs a GUI. droidmonkey: "Likely not possible unless you modify the code." We modified the code. The daemon is the source of truth; the GUI is a future client.
 - **File materialization.** KeePassXC will not write secrets to disk on unlock; the upstream stance is "encrypted at rest is the only acceptable state." Our argument is in the README: that stance loses against the actual adversary, which is plaintext sitting around forever. We add file materialization with explicit risk acknowledgement (`AllowDiskBacked` opt-in, TTL, tmpfs default) — *less* secure than KeePassXC for the in-window period, *more* secure for the longer 95-th-percentile case.
 - **Plugins.** Out of scope today; will eventually be sandboxed-only (WASM or subprocess-isolated). KeePassXC's "no plugins ever" is a maintenance-cost decision dressed up as a security decision; we think you can have safe extensibility if you commit to actual sandboxing. Until we can ship that, we ship no plugins.
-- **First-class agent integration.** KeePassXC has narrow SSH-agent support. Our SSH agent serves any kdbx entry with an `id` attachment, supports four algorithms, and has a sibling GPG agent that does signing + ECDH decrypt. The daemon is one process; both agents pull from the same vault unlock.
+- **First-class agent integration.** KeePassXC has narrow SSH-agent support. Our SSH agent serves any kdbx entry with an `id` attachment, supports four algorithms, and has a sibling GPG agent that does signing + ECDH decrypt. The daemon is one process; both agents pull from the same database unlock.
 
 Where we agree with upstream:
 

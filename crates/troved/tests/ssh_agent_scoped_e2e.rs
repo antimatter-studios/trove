@@ -4,7 +4,7 @@
 //! `sshd`'s `MaxAuthTries` defaults to 6, counted per connection, and every key
 //! an agent lists is offered and counted against it even though the publickey
 //! query phase carries no signature. The daemon's main agent serves every key
-//! in every unlocked vault, so a large vault locks you out of a server whenever
+//! in every unlocked database, so a large database locks you out of a server whenever
 //! the key it wants sits past the sixth. These tests prove the escape hatch:
 //!
 //!   1. `empty` returns a live socket serving nothing.
@@ -35,7 +35,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -88,18 +88,18 @@ fn generate_key(dir: &Path, name: &str) -> Vec<u8> {
     std::fs::read(&path).expect("read private key")
 }
 
-/// A vault holding one entry per name, each with an `id` attachment that is a
+/// A database holding one entry per name, each with an `id` attachment that is a
 /// real ed25519 private key.
-fn make_vault(dir: &Path, titles: &[&str]) -> PathBuf {
-    let vault_path = dir.join("vault.kdbx");
-    let mut vault = Vault::create(&vault_path, PASSWORD).expect("create vault");
+fn make_database(dir: &Path, titles: &[&str]) -> PathBuf {
+    let database_path = dir.join("database.kdbx");
+    let mut database = Database::create(&database_path, PASSWORD).expect("create database");
     for (i, title) in titles.iter().enumerate() {
         let key = generate_key(dir, &format!("k{i}"));
-        let id = vault.add_entry(title).expect("add entry");
-        vault.attach_binary(&id, "id", &key).expect("attach id");
+        let id = database.add_entry(title).expect("add entry");
+        database.attach_binary(&id, "id", &key).expect("attach id");
     }
-    vault.save().expect("save vault");
-    vault_path
+    database.save().expect("save database");
+    database_path
 }
 
 struct Harness {
@@ -117,7 +117,7 @@ impl Harness {
         redirect_agent_dir();
         let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
         Self {
-            state: Arc::new(Mutex::new(troved::vaults::VaultSet::new())),
+            state: Arc::new(Mutex::new(troved::databases::DatabaseSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
             scoped_agents: troved::ssh_agent::scoped::new_registry(),
@@ -144,10 +144,10 @@ impl Harness {
         serde_json::to_value(&resp).expect("serialize response")
     }
 
-    async fn unlock(&self, vault_path: &Path) {
+    async fn unlock(&self, database_path: &Path) {
         let resp = self
             .send(Request::Unlock {
-                path: vault_path.to_string_lossy().into_owned(),
+                path: database_path.to_string_lossy().into_owned(),
                 password: PASSWORD.to_string(),
                 timeout: None,
                 keyfile: None,
@@ -253,11 +253,11 @@ async fn empty_serves_nothing_and_add_serves_exactly_what_was_named() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1", "homelab"]);
+    let database = make_database(tmp.path(), &["s1", "homelab"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
 
-    // The main agent serves the whole vault — that's the behaviour being
+    // The main agent serves the whole database — that's the behaviour being
     // escaped, so assert it rather than assume it.
     assert_eq!(h.key_store.read().await.len(), 2);
 
@@ -302,9 +302,9 @@ async fn each_empty_is_private_to_its_caller() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1"]);
+    let database = make_database(tmp.path(), &["s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
 
     let a = h.empty().await;
     let b = h.empty().await;
@@ -327,9 +327,9 @@ async fn adding_the_same_key_twice_refreshes_rather_than_duplicates() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1"]);
+    let database = make_database(tmp.path(), &["s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     let socket = h.empty().await;
 
     let first = h.add(&socket, "s1").await;
@@ -352,9 +352,9 @@ async fn a_socket_the_daemon_did_not_create_is_refused() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1"]);
+    let database = make_database(tmp.path(), &["s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
 
     let stranger = tmp.path().join("someone-elses.sock");
     let resp = h.add(&stranger, "s1").await;
@@ -373,9 +373,9 @@ async fn naming_an_entry_that_is_not_there_is_an_error() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1"]);
+    let database = make_database(tmp.path(), &["s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     let socket = h.empty().await;
 
     let resp = h.add(&socket, "nope").await;
@@ -385,7 +385,7 @@ async fn naming_an_entry_that_is_not_there_is_an_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn add_without_an_unlocked_vault_says_so() {
+async fn add_without_an_unlocked_database_says_so() {
     let h = Harness::new();
     let socket = h.empty().await;
     let resp = h.add(&socket, "s1").await;
@@ -396,7 +396,7 @@ async fn add_without_an_unlocked_vault_says_so() {
     assert!(resp["error"]
         .as_str()
         .expect("error text")
-        .contains("no vault is unlocked"));
+        .contains("no database is unlocked"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -407,9 +407,9 @@ async fn crossing_max_auth_tries_warns() {
     }
     let tmp = TempDir::new().expect("tempdir");
     let titles = ["k1", "k2", "k3", "k4", "k5", "k6", "k7"];
-    let vault = make_vault(tmp.path(), &titles);
+    let database = make_database(tmp.path(), &titles);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     let socket = h.empty().await;
 
     // Six is the limit itself, so six is still silent.
@@ -443,9 +443,9 @@ async fn removing_the_entry_takes_the_key_off_every_scoped_agent() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1", "s2"]);
+    let database = make_database(tmp.path(), &["s1", "s2"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     let socket = h.empty().await;
     assert_eq!(h.add(&socket, "s1").await["status"], "ok");
     assert!(ssh_add_list(&socket).contains("s1"));
@@ -484,9 +484,9 @@ async fn the_number_of_private_sockets_is_capped() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1"]);
+    let database = make_database(tmp.path(), &["s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
 
     let limit = troved::ssh_agent::scoped::MAX_SCOPED_AGENTS;
     for i in 0..limit {
@@ -514,15 +514,15 @@ async fn lock_tears_down_every_scoped_socket() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1"]);
+    let database = make_database(tmp.path(), &["s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
 
     let a = h.empty().await;
     let b = h.empty().await;
     assert_eq!(h.add(&a, "s1").await["status"], "ok");
 
-    let resp = h.send(Request::Lock { vault: None }).await;
+    let resp = h.send(Request::Lock { database: None }).await;
     assert_eq!(resp["status"], "ok", "lock failed: {resp}");
 
     assert!(
@@ -540,9 +540,9 @@ async fn close_tears_down_one_socket_and_leaves_the_rest() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["s1"]);
+    let database = make_database(tmp.path(), &["s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
 
     let a = h.empty().await;
     let b = h.empty().await;
@@ -625,9 +625,9 @@ async fn add_matching_fills_a_socket_from_a_glob() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["Infra/s1", "Infra/db/s2", "Web/site"]);
+    let database = make_database(tmp.path(), &["Infra/s1", "Infra/db/s2", "Web/site"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     let socket = h.empty().await;
 
     let resp = h.add_matching(&socket, Some("Infra/*"), None).await;
@@ -662,9 +662,9 @@ async fn add_matching_fills_a_socket_from_a_tag() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("tagged.kdbx");
+    let database_path = tmp.path().join("tagged.kdbx");
     {
-        let mut v = Vault::create(&vault_path, PASSWORD).expect("create vault");
+        let mut v = Database::create(&database_path, PASSWORD).expect("create database");
         for (i, (title, tagged)) in [("Infra/s1", true), ("Infra/s2", false), ("Web/site", true)]
             .into_iter()
             .enumerate()
@@ -676,10 +676,10 @@ async fn add_matching_fills_a_socket_from_a_tag() {
                 v.set_tags(&id, &["gitlab".to_string()]).expect("tag");
             }
         }
-        v.save().expect("save vault");
+        v.save().expect("save database");
     }
     let h = Harness::new();
-    h.unlock(&vault_path).await;
+    h.unlock(&database_path).await;
 
     let socket = h.empty().await;
     let resp = h.add_matching(&socket, None, Some("gitlab")).await;
@@ -701,9 +701,9 @@ async fn add_matching_refuses_nothing_to_match_and_foreign_sockets() {
         return;
     }
     let tmp = TempDir::new().expect("tempdir");
-    let vault = make_vault(tmp.path(), &["Infra/s1"]);
+    let database = make_database(tmp.path(), &["Infra/s1"]);
     let h = Harness::new();
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     let socket = h.empty().await;
 
     let resp = h.add_matching(&socket, Some("Nope/*"), None).await;

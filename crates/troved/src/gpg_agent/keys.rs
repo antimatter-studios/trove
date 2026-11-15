@@ -62,7 +62,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha1::{Digest, Sha1};
 use zeroize::Zeroizing;
 
-/// One loaded GPG identity loaded from a vault attachment. Either the primary
+/// One loaded GPG identity loaded from a database attachment. Either the primary
 /// EdDSA signing key, or an ECDH-on-Curve25519 encryption subkey. We use a
 /// flat enum (rather than separate stores) so the existing
 /// `Arc<RwLock<Vec<LoadedGpgKey>>>` plumbing keeps working — every grip is
@@ -90,7 +90,7 @@ pub struct LoadedEd25519Key {
     pub keygrip: [u8; 20],
     /// 32-byte raw ed25519 public key (Q without the 0x40 prefix).
     pub public_q: [u8; 32],
-    /// User-facing label — typically the vault entry's title.
+    /// User-facing label — typically the database entry's title.
     pub comment: String,
     signing_key: SigningKey,
 }
@@ -111,7 +111,7 @@ pub struct LoadedRsaKey {
     pub n: Vec<u8>,
     /// Public exponent.
     pub e: Vec<u8>,
-    /// User-facing label — typically the vault entry's title.
+    /// User-facing label — typically the database entry's title.
     pub comment: String,
     /// Private exponent.
     d: Zeroizing<Vec<u8>>,
@@ -138,7 +138,7 @@ pub struct LoadedCv25519Key {
     /// KDF symmetric algorithm id used for AES Key Wrap of the session key
     /// (7 = AES-128, 8 = AES-192, 9 = AES-256).
     pub kdf_sym_algo: u8,
-    /// User-facing label — typically the vault entry's title.
+    /// User-facing label — typically the database entry's title.
     pub comment: String,
     /// 32-byte Curve25519 scalar in little-endian order (the form
     /// `x25519-dalek`'s `StaticSecret::from([u8; 32])` expects). The bytes
@@ -664,7 +664,7 @@ fn read_mpi<'a>(body: &'a [u8], p: usize, what: &str) -> Result<(&'a [u8], usize
 /// Layout per RFC 4880 §5.5.3, confirmed against `gpg --list-packets` output:
 /// public `n, e`, then the S2K usage byte, then secret `d, p, q, u`, then a
 /// 2-byte checksum. Only the unencrypted form (usage byte 0) is supported —
-/// trove's own vault is the encryption boundary, so a passphrase-protected
+/// trove's own database is the encryption boundary, so a passphrase-protected
 /// export is skipped with a warning rather than silently half-loaded.
 fn parse_rsa_secret_key_body(
     body: &[u8],

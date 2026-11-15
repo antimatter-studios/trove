@@ -24,7 +24,7 @@ const ENTRIES = [
   e(['Recycle Bin']),
 ];
 const GROUPS = [{ path: ['Recycle Bin'], tags: [], inheritedTags: [], recycleBin: true }];
-const VAULT = { id: 'v1', name: 'Test', locked: false };
+const DATABASE = { id: 'v1', name: 'Test', locked: false };
 
 const inBin = (x) => x.groupPath === 'Recycle Bin' || x.groupPath.startsWith('Recycle Bin/');
 const expected = (path) => path === '__root'
@@ -42,10 +42,14 @@ const checkBadges = (c) => {
 describe('sidebar folder badges', () => {
   it('match the entries under each folder after every open and close', () => {
     const { container: c } = render(
-      <Sidebar tree={buildTree(ENTRIES, GROUPS)} total={ENTRIES.length} favCount={0}
-        selectedGroup="__all" onSelectGroup={() => {}} onEditGroupTags={() => {}}
-        vault={VAULT} onSwitcher={() => {}} onNew={() => {}} onDataLock={() => {}} />,
+      <Sidebar tree={buildTree(ENTRIES, GROUPS)}
+        selectedGroup="__root" onSelectGroup={() => {}} onEditGroupTags={() => {}}
+        database={DATABASE} onSwitcher={() => {}} onEditMetadata={() => {}} onNew={() => {}} onDataLock={() => {}} />,
     );
+    expect(c.textContent).not.toContain('Library');
+    expect(c.textContent).not.toContain('All entries');
+    expect(c.textContent).not.toContain('Favorites');
+    expect(c.textContent).toContain('Database metadata');
     checkBadges(c);
     // Open everything, top to bottom, then close it all again.
     for (let pass = 0; pass < 2; pass++) {

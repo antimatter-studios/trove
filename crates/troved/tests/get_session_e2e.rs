@@ -5,7 +5,7 @@
 //! exercise the SO_PEERCRED branch (a real socket would always report the test
 //! process's own uid). They prove:
 //!
-//!   1. `Get` is refused while the vault is locked.
+//!   1. `Get` is refused while the database is locked.
 //!   2. `Unlock` mints a session code; `Get` with that code + the unlocking uid
 //!      returns the requested attachment, base64-encoded.
 //!   3. A wrong code, or the right code from a different uid, is refused.
@@ -21,7 +21,7 @@ use base64::Engine;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -49,7 +49,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+        let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -88,11 +88,11 @@ impl Harness {
     }
 }
 
-fn create_vault(path: &Path) {
-    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+fn create_database(path: &Path) {
+    let mut v = Database::create(path, PASSWORD).expect("create database");
     let id = v.add_entry(ENTRY).expect("add entry");
     v.attach_binary(&id, "id", KEY_BYTES).expect("attach key");
-    v.save().expect("save vault");
+    v.save().expect("save database");
 }
 
 fn unlock(path: &Path) -> Request {
@@ -117,8 +117,8 @@ fn get(code: &str, attachment: &str, title: &str) -> Request {
 #[tokio::test]
 async fn get_requires_session_code_and_unlocking_uid() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault = tmp.path().join("v.kdbx");
-    create_vault(&vault);
+    let database = tmp.path().join("v.kdbx");
+    create_database(&database);
     let h = Harness::new();
 
     // Locked: refused even with a fabricated code.
@@ -126,7 +126,7 @@ async fn get_requires_session_code_and_unlocking_uid() {
     assert_eq!(b["status"], "err", "get must be refused while locked: {b}");
 
     // Unlock as OWNER → mint the session code.
-    let b = h.handle_as(unlock(&vault), OWNER).await;
+    let b = h.handle_as(unlock(&database), OWNER).await;
     assert_eq!(b["status"], "ok", "unlock should succeed: {b}");
     let code = b["code"]
         .as_str()
@@ -171,10 +171,10 @@ async fn get_requires_session_code_and_unlocking_uid() {
 }
 
 #[tokio::test]
-async fn git_credentials_require_the_session_and_match_unlocked_vaults() {
+async fn git_credentials_require_the_session_and_match_unlocked_databases() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault = tmp.path().join("git-credential.kdbx");
-    let mut db = Vault::create(&vault, PASSWORD).expect("create vault");
+    let database = tmp.path().join("git-credential.kdbx");
+    let mut db = Database::create(&database, PASSWORD).expect("create database");
     let id = db.add_entry("Git/work").expect("add entry");
     db.set_field(&id, "URL", "https://GitHub.com/work").unwrap();
     db.set_field(&id, "UserName", "work-bot").unwrap();
@@ -183,7 +183,7 @@ async fn git_credentials_require_the_session_and_match_unlocked_vaults() {
     db.save().unwrap();
     let h = Harness::new();
 
-    let unlocked = h.handle_as(unlock(&vault), OWNER).await;
+    let unlocked = h.handle_as(unlock(&database), OWNER).await;
     let code = unlocked["code"].as_str().expect("session code");
     let response = h
         .handle_as(
@@ -214,11 +214,11 @@ async fn git_credentials_require_the_session_and_match_unlocked_vaults() {
 #[tokio::test]
 async fn lock_invalidates_then_reunlock_rotates_code() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault = tmp.path().join("v.kdbx");
-    create_vault(&vault);
+    let database = tmp.path().join("v.kdbx");
+    create_database(&database);
     let h = Harness::new();
 
-    let b = h.handle_as(unlock(&vault), OWNER).await;
+    let b = h.handle_as(unlock(&database), OWNER).await;
     let code1 = b["code"].as_str().expect("code1").to_string();
 
     // Works before lock.
@@ -226,13 +226,13 @@ async fn lock_invalidates_then_reunlock_rotates_code() {
     assert_eq!(b["status"], "ok", "get should work before lock: {b}");
 
     // Lock invalidates the code.
-    let b = h.handle_as(Request::Lock { vault: None }, OWNER).await;
+    let b = h.handle_as(Request::Lock { database: None }, OWNER).await;
     assert_eq!(b["status"], "ok");
     let b = h.handle_as(get(&code1, "id", ENTRY), OWNER).await;
     assert_eq!(b["status"], "err", "code must be dead after lock: {b}");
 
     // Re-unlock rotates to a fresh code; the old one stays dead.
-    let b = h.handle_as(unlock(&vault), OWNER).await;
+    let b = h.handle_as(unlock(&database), OWNER).await;
     let code2 = b["code"].as_str().expect("code2").to_string();
     assert_ne!(code1, code2, "re-unlock must rotate the session code");
 
@@ -259,11 +259,11 @@ fn unlock_detached(path: &Path) -> Request {
 #[tokio::test]
 async fn detached_unlock_mints_no_code_and_extraction_stays_refused() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault = tmp.path().join("v.kdbx");
-    create_vault(&vault);
+    let database = tmp.path().join("v.kdbx");
+    create_database(&database);
     let h = Harness::new();
 
-    let b = h.handle_as(unlock_detached(&vault), OWNER).await;
+    let b = h.handle_as(unlock_detached(&database), OWNER).await;
     assert_eq!(b["status"], "ok", "detached unlock should succeed: {b}");
 
     // Absent, not empty. An empty string would still be a capability the CLI
@@ -273,11 +273,11 @@ async fn detached_unlock_mints_no_code_and_extraction_stays_refused() {
         "detached unlock must return no session code: {b}"
     );
 
-    // The vault IS unlocked — this is not a failed unlock being asserted on.
+    // The database IS unlocked — this is not a failed unlock being asserted on.
     let b = h.handle_as(Request::List, OWNER).await;
     assert_eq!(
         b["status"], "ok",
-        "vault should be unlocked and listable: {b}"
+        "database should be unlocked and listable: {b}"
     );
 
     // ...but with no code minted, nothing can extract, by the unlocking uid or
@@ -293,15 +293,15 @@ async fn detached_unlock_leaves_an_existing_session_alone() {
     let tmp = TempDir::new().expect("tempdir");
     let first = tmp.path().join("first.kdbx");
     let second = tmp.path().join("second.kdbx");
-    create_vault(&first);
-    // A DIFFERENT entry title: with both vaults unlocked, a title present in
+    create_database(&first);
+    // A DIFFERENT entry title: with both databases unlocked, a title present in
     // two of them is refused as ambiguous, which would mask what this test is
     // actually asking about.
     {
-        let mut v = Vault::create(&second, PASSWORD).expect("create second vault");
+        let mut v = Database::create(&second, PASSWORD).expect("create second database");
         let id = v.add_entry("other/customer").expect("add entry");
         v.attach_binary(&id, "id", KEY_BYTES).expect("attach key");
-        v.save().expect("save vault");
+        v.save().expect("save database");
     }
     let h = Harness::new();
 
@@ -310,7 +310,7 @@ async fn detached_unlock_leaves_an_existing_session_alone() {
     assert_eq!(b["status"], "ok", "first unlock should succeed: {b}");
     let code = b["code"].as_str().expect("session code").to_string();
 
-    // Detaching a SECOND vault must not revoke it. Unlock is additive, so
+    // Detaching a SECOND database must not revoke it. Unlock is additive, so
     // overwriting the session here would silently log out a shell that is
     // still working — the detached unlock has no business touching it.
     let b = h.handle_as(unlock_detached(&second), OWNER).await;

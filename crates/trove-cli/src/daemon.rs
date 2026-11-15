@@ -96,7 +96,7 @@ fn version_mismatch_error(daemon_version: Option<&str>, raw: &str) -> Option<Str
     Some(format!(
         "the running daemon is {daemon}, which does not understand this request from \
          trove {cli}. Restart it to load the current version: {RESTART_DAEMON}, then re-run \
-         the command (vaults it had unlocked need unlocking again). Daemon said: {raw}"
+         the command (databases it had unlocked need unlocking again). Daemon said: {raw}"
     ))
 }
 
@@ -148,7 +148,7 @@ fn send_raw(req: &Request) -> Result<Value> {
 }
 
 /// True if `err` came from `send` failing because the daemon isn't running.
-/// The caller uses this to map to exit code 1 (user error) vs. 2 (vault
+/// The caller uses this to map to exit code 1 (user error) vs. 2 (database
 /// error) vs. surfacing the raw daemon message.
 pub fn is_daemon_not_running(err: &anyhow::Error) -> bool {
     err.to_string().contains("troved is not running")
@@ -532,7 +532,7 @@ mod tests {
 
         let reply = serde_json::json!({
             "status": "ok",
-            "vault_path": null,
+            "database_path": null,
             "idle_timeout_secs": 900,
             "idle_remaining_secs": null,
             "ssh_keys": 0,
@@ -544,7 +544,7 @@ mod tests {
 
         let resp = send(&Request::Status).expect("send");
         assert_eq!(resp["status"], "ok");
-        assert!(resp["vault_path"].is_null());
+        assert!(resp["database_path"].is_null());
         assert_eq!(resp["idle_timeout_secs"], 900);
 
         // Server should have received our Status request.
@@ -790,7 +790,7 @@ mod tests {
         assert!(should_version_check(&Request::List));
         assert!(should_version_check(&Request::Status));
         assert!(!should_version_check(&Request::GetVersion));
-        assert!(!should_version_check(&Request::Lock { vault: None }));
+        assert!(!should_version_check(&Request::Lock { database: None }));
         assert!(!should_version_check(&Request::Shutdown));
     }
 }

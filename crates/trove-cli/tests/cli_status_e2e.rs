@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -130,22 +130,22 @@ async fn trove_status_round_trip_against_real_daemon() {
 
     let tmp = TempDir::new().expect("tempdir");
     let sock = tmp.path().join("trove.sock");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     {
         // Pre-populate two entries: one at the root and one nested under
         // `Work/SSH/`. The list assertions below check that both paths
         // surface correctly.
-        let mut v = Vault::create(&vault_path, PASSWORD).expect("create vault");
+        let mut v = Database::create(&database_path, PASSWORD).expect("create database");
         let id = v.add_entry("e2e-entry").expect("add root entry");
         v.attach_binary(&id, "blob", b"payload")
             .expect("attach blob");
         let _nested = v.add_entry("Work/SSH/github").expect("add nested entry");
-        v.save().expect("save vault");
+        v.save().expect("save database");
     }
 
     // Stand up the daemon. Use a 60s timeout so `status` reports a
     // non-trivial idle timer when unlocked.
-    let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+    let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -177,7 +177,7 @@ async fn trove_status_round_trip_against_real_daemon() {
     }
     assert!(sock.exists(), "daemon socket never appeared");
 
-    // trove list (no vault path, no vault unlocked yet) — should exit 1
+    // trove list (no database path, no database unlocked yet) — should exit 1
     // with a friendly hint pointing the user at `trove unlock`.
     let out = tokio::process::Command::new(&trove)
         .arg("list")
@@ -185,18 +185,18 @@ async fn trove_status_round_trip_against_real_daemon() {
         .env("TROVE_NO_AUTOSPAWN", "1")
         .output()
         .await
-        .expect("run trove list (no vault unlocked)");
+        .expect("run trove list (no database unlocked)");
     assert!(
         !out.status.success(),
         "trove list should fail when nothing is unlocked"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no vault") && stderr.contains("trove unlock"),
+        stderr.contains("no database") && stderr.contains("trove unlock"),
         "expected hint pointing at `trove unlock`; got: {stderr}"
     );
 
-    // trove status (vault locked) — expect "no vault unlocked".
+    // trove status (database locked) — expect "no database unlocked".
     let out = tokio::process::Command::new(&trove)
         .arg("status")
         .env("TROVE_SOCK", &sock)
@@ -206,8 +206,8 @@ async fn trove_status_round_trip_against_real_daemon() {
     assert!(out.status.success(), "trove status failed: {:?}", out);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("Vault:") && stdout.contains("no vault unlocked"),
-        "expected 'no vault unlocked' in output:\n{stdout}"
+        stdout.contains("Database:") && stdout.contains("no database unlocked"),
+        "expected 'no database unlocked' in output:\n{stdout}"
     );
     assert!(
         stdout.contains("Idle timeout:"),
@@ -221,7 +221,7 @@ async fn trove_status_round_trip_against_real_daemon() {
     // trove unlock — supply password via stdin.
     let unlock_out = tokio::process::Command::new(&trove)
         .arg("unlock")
-        .arg(&vault_path)
+        .arg(&database_path)
         .arg("--password-stdin")
         .env("TROVE_SOCK", &sock)
         .stdin(std::process::Stdio::piped())
@@ -257,8 +257,8 @@ async fn trove_status_round_trip_against_real_daemon() {
         "expected unlock notice on stderr:\n{stderr}"
     );
 
-    // trove list (no vault path) — now succeeds, hits the daemon's unlocked
-    // vault, and prints the pre-populated entry.
+    // trove list (no database path) — now succeeds, hits the daemon's unlocked
+    // database, and prints the pre-populated entry.
     let out = tokio::process::Command::new(&trove)
         .arg("list")
         .env("TROVE_SOCK", &sock)
@@ -287,7 +287,7 @@ async fn trove_status_round_trip_against_real_daemon() {
         "expected the nested entry to render with its full group path:\n{stdout}"
     );
 
-    // trove status (vault unlocked) — expect the vault path AND remaining time.
+    // trove status (database unlocked) — expect the database path AND remaining time.
     let out = tokio::process::Command::new(&trove)
         .arg("status")
         .env("TROVE_SOCK", &sock)
@@ -297,8 +297,8 @@ async fn trove_status_round_trip_against_real_daemon() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains(&*vault_path.to_string_lossy()),
-        "expected vault path in status output:\n{stdout}"
+        stdout.contains(&*database_path.to_string_lossy()),
+        "expected database path in status output:\n{stdout}"
     );
     assert!(
         stdout.contains("Idle remaining:"),
@@ -314,9 +314,9 @@ async fn trove_status_round_trip_against_real_daemon() {
     assert!(out.status.success());
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status JSON");
     assert_eq!(value["daemon_running"], true);
-    assert!(value["vault_paths"][0]
+    assert!(value["database_paths"][0]
         .as_str()
-        .expect("vault path string")
+        .expect("database path string")
         .ends_with("/v.kdbx"));
     assert!(value["idle_timeout_seconds"].as_u64().is_some());
     assert!(value["ssh_key_count"].as_u64().is_some());
@@ -351,11 +351,11 @@ async fn trove_status_round_trip_against_real_daemon() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("vault locked"),
-        "expected 'vault locked' in output:\n{stdout}"
+        stdout.contains("database locked"),
+        "expected 'database locked' in output:\n{stdout}"
     );
 
-    // After lock, status should report no vault again.
+    // After lock, status should report no database again.
     let out = tokio::process::Command::new(&trove)
         .arg("status")
         .env("TROVE_SOCK", &sock)
@@ -363,7 +363,7 @@ async fn trove_status_round_trip_against_real_daemon() {
         .await
         .expect("run trove status (post-lock)");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("no vault unlocked"));
+    assert!(stdout.contains("no database unlocked"));
 
     // Tear down.
     shutdown.notify_one();
@@ -400,8 +400,8 @@ async fn trove_status_against_no_daemon_reports_locked() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("no vault unlocked"),
-        "expected 'no vault unlocked' in output:\n{stdout}"
+        stdout.contains("no database unlocked"),
+        "expected 'no database unlocked' in output:\n{stdout}"
     );
     assert!(
         stdout.contains("not running"),
@@ -417,7 +417,7 @@ async fn trove_status_against_no_daemon_reports_locked() {
         .expect("run JSON status without daemon");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("locked status JSON");
     assert_eq!(value["daemon_running"], false);
-    assert_eq!(value["vault_paths"], serde_json::json!([]));
+    assert_eq!(value["database_paths"], serde_json::json!([]));
     assert_eq!(value["ssh_key_count"], 0);
 
     for command in [

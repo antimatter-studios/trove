@@ -3,7 +3,7 @@
 //! defaults`, `trove gpg-agent enable|disable`, `trove ssh-agent
 //! enable|disable` and `trove settings show|edit|validate|migrate`.
 //!
-//! Each runs the real `trove` binary against a vault file, and the last runs
+//! Each runs the real `trove` binary against a database file, and the last runs
 //! it through a real `troved`, so the offline and daemon paths are both
 //! covered. A missing binary fails the test rather than skipping it.
 
@@ -15,7 +15,7 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use trove_core::settings::Capability;
-use trove_core::Vault;
+use trove_core::Database;
 
 const PW: &str = "settings-e2e-pw";
 
@@ -29,7 +29,7 @@ fn run(env: &[(&str, &str)], args: &[&str], stdin: &str) -> Output {
     let mut cmd = Command::new(trove());
     cmd.args(args)
         .env_remove("TROVE_SESSION")
-        .env_remove("TROVE_VAULT")
+        .env_remove("TROVE_DATABASE")
         .env_remove("SSH_AUTH_SOCK")
         .env("TROVE_NO_AUTOSPAWN", "1")
         .env("TROVE_NO_VERSION_WARN", "1")
@@ -51,9 +51,9 @@ fn run(env: &[(&str, &str)], args: &[&str], stdin: &str) -> Output {
     child.wait_with_output().expect("wait trove")
 }
 
-/// `trove --vault <v> --password-stdin <args>`, which must succeed.
-fn ok(vault: &Path, args: &[&str]) -> String {
-    let out = offline(vault, args);
+/// `trove --database <v> --password-stdin <args>`, which must succeed.
+fn ok(database: &Path, args: &[&str]) -> String {
+    let out = offline(database, args);
     assert!(
         out.status.success(),
         "trove {args:?} failed:\n{}",
@@ -62,22 +62,22 @@ fn ok(vault: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn offline(vault: &Path, args: &[&str]) -> Output {
-    let mut full = vec!["--vault", vault.to_str().unwrap(), "--password-stdin"];
+fn offline(database: &Path, args: &[&str]) -> Output {
+    let mut full = vec!["--database", database.to_str().unwrap(), "--password-stdin"];
     full.extend_from_slice(args);
     run(&[], &full, &format!("{PW}\n"))
 }
 
-fn fails(vault: &Path, args: &[&str]) -> String {
-    let out = offline(vault, args);
+fn fails(database: &Path, args: &[&str]) -> String {
+    let out = offline(database, args);
     assert!(!out.status.success(), "trove {args:?} should fail");
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// A vault with the gitea entry from the motivating case.
-fn gitea_vault(dir: &Path) -> PathBuf {
+/// A database with the gitea entry from the motivating case.
+fn gitea_database(dir: &Path) -> PathBuf {
     let path = dir.join("v.kdbx");
-    let mut v = Vault::create(&path, PW).unwrap();
+    let mut v = Database::create(&path, PW).unwrap();
     v.add_group("antimatter-studios").unwrap();
     let id = v.add_entry("gitea").unwrap();
     v.move_entry(&id, "antimatter-studios").unwrap();
@@ -90,14 +90,14 @@ fn gitea_vault(dir: &Path) -> PathBuf {
     path
 }
 
-fn reopen(path: &Path) -> Vault {
-    Vault::open(path, PW).unwrap()
+fn reopen(path: &Path) -> Database {
+    Database::open(path, PW).unwrap()
 }
 
 #[test]
 fn env_agent_add_turns_exec_on_and_disable_turns_it_off() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let entry = "antimatter-studios/gitea";
 
     let err = fails(&v, &["exec", "--entry", entry, "--", "true"]);
@@ -128,9 +128,9 @@ fn env_agent_add_turns_exec_on_and_disable_turns_it_off() {
     );
     assert_eq!(out, "tok-e2e-123");
 
-    let vault = reopen(&v);
-    let id = vault.find_by_title(entry).unwrap();
-    let doc = vault
+    let database = reopen(&v);
+    let id = database.find_by_title(entry).unwrap();
+    let doc = database
         .settings_document(&id, Capability::EnvAgent)
         .unwrap()
         .expect("the document exists");
@@ -152,10 +152,12 @@ fn env_agent_add_turns_exec_on_and_disable_turns_it_off() {
         ],
     );
     ok(&v, &["env-agent", "disable", entry]);
-    let vault = reopen(&v);
-    let id = vault.find_by_title(entry).unwrap();
+    let database = reopen(&v);
+    let id = database.find_by_title(entry).unwrap();
     assert_eq!(
-        vault.settings_document(&id, Capability::EnvAgent).unwrap(),
+        database
+            .settings_document(&id, Capability::EnvAgent)
+            .unwrap(),
         None
     );
     fails(&v, &["exec", "--entry", entry, "--", "true"]);
@@ -164,7 +166,7 @@ fn env_agent_add_turns_exec_on_and_disable_turns_it_off() {
 #[test]
 fn env_agent_refuses_bad_names_and_sources() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let err = fails(
         &v,
         &[
@@ -187,7 +189,7 @@ fn env_agent_refuses_bad_names_and_sources() {
 #[test]
 fn adding_to_an_entry_with_legacy_fields_keeps_and_replaces_them() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let entry = "antimatter-studios/gitea";
     ok(&v, &["edit", entry, "--set", "Exec.GITEA_USER=UserName"]);
     ok(
@@ -201,9 +203,9 @@ fn adding_to_an_entry_with_legacy_fields_keeps_and_replaces_them() {
             "gitea-token",
         ],
     );
-    let vault = reopen(&v);
-    let id = vault.find_by_title(entry).unwrap();
-    let doc = vault
+    let database = reopen(&v);
+    let id = database.find_by_title(entry).unwrap();
+    let doc = database
         .settings_document(&id, Capability::EnvAgent)
         .unwrap()
         .unwrap();
@@ -212,7 +214,7 @@ fn adding_to_an_entry_with_legacy_fields_keeps_and_replaces_them() {
         "the legacy mapping carried over"
     );
     assert!(
-        vault
+        database
             .legacy_settings_fields(&id, Capability::EnvAgent)
             .unwrap()
             .is_empty(),
@@ -223,7 +225,7 @@ fn adding_to_an_entry_with_legacy_fields_keeps_and_replaces_them() {
 #[test]
 fn materialize_add_and_group_defaults_resolve_together() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let entry = "antimatter-studios/gitea";
     let dir = tmp.path().join("secrets");
     ok(
@@ -292,9 +294,9 @@ fn materialize_add_and_group_defaults_resolve_together() {
             "allowDiskBacked",
         ],
     );
-    let vault = reopen(&v);
+    let database = reopen(&v);
     assert_eq!(
-        vault
+        database
             .group_settings("antimatter-studios", Capability::Materialize)
             .unwrap(),
         None,
@@ -307,8 +309,8 @@ fn materialize_add_and_group_defaults_resolve_together() {
 #[test]
 fn database_defaults_need_no_group() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
-    ok(&v, &["env-agent", "defaults", "--database", "--confirm"]);
+    let v = gitea_database(tmp.path());
+    ok(&v, &["env-agent", "defaults", "--at-database", "--confirm"]);
     ok(
         &v,
         &[
@@ -334,7 +336,7 @@ fn database_defaults_need_no_group() {
 #[test]
 fn a_group_can_never_hold_an_item() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let editor = tmp.path().join("editor.sh");
     std::fs::write(
         &editor,
@@ -346,7 +348,7 @@ fn a_group_can_never_hold_an_item() {
     let out = run(
         &[("EDITOR", editor.to_str().unwrap())],
         &[
-            "--vault",
+            "--database",
             v.to_str().unwrap(),
             "--password-stdin",
             "settings",
@@ -368,7 +370,7 @@ fn a_group_can_never_hold_an_item() {
 #[test]
 fn settings_edit_validates_before_saving() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let entry = "antimatter-studios/gitea";
     let bad = tmp.path().join("bad.sh");
     std::fs::write(&bad, "#!/bin/sh\nprintf '<EnvAgentSettings>' > \"$1\"\n").unwrap();
@@ -376,7 +378,7 @@ fn settings_edit_validates_before_saving() {
     let out = run(
         &[("EDITOR", bad.to_str().unwrap())],
         &[
-            "--vault",
+            "--database",
             v.to_str().unwrap(),
             "--password-stdin",
             "settings",
@@ -387,10 +389,12 @@ fn settings_edit_validates_before_saving() {
         &format!("{PW}\n"),
     );
     assert!(!out.status.success(), "an invalid edit is not saved");
-    let vault = reopen(&v);
-    let id = vault.find_by_title(entry).unwrap();
+    let database = reopen(&v);
+    let id = database.find_by_title(entry).unwrap();
     assert_eq!(
-        vault.settings_document(&id, Capability::EnvAgent).unwrap(),
+        database
+            .settings_document(&id, Capability::EnvAgent)
+            .unwrap(),
         None
     );
 
@@ -405,7 +409,7 @@ fn settings_edit_validates_before_saving() {
     let out = run(
         &[("EDITOR", good.to_str().unwrap())],
         &[
-            "--vault",
+            "--database",
             v.to_str().unwrap(),
             "--password-stdin",
             "settings",
@@ -438,7 +442,7 @@ fn settings_edit_validates_before_saving() {
 #[test]
 fn validate_finds_a_broken_document_and_migrate_converts_legacy_fields() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     ok(&v, &["settings", "validate"]);
     ok(
         &v,
@@ -452,24 +456,24 @@ fn validate_finds_a_broken_document_and_migrate_converts_legacy_fields() {
     let dry = ok(&v, &["settings", "migrate", "--dry-run"]);
     assert!(dry.contains("would convert 1"), "{dry}");
     ok(&v, &["settings", "migrate"]);
-    let vault = reopen(&v);
-    let id = vault.find_by_title("antimatter-studios/gitea").unwrap();
-    assert!(vault
+    let database = reopen(&v);
+    let id = database.find_by_title("antimatter-studios/gitea").unwrap();
+    assert!(database
         .settings_document(&id, Capability::EnvAgent)
         .unwrap()
         .is_some());
-    assert!(vault
+    assert!(database
         .legacy_settings_fields(&id, Capability::EnvAgent)
         .unwrap()
         .is_empty());
-    drop(vault);
+    drop(database);
 
-    let mut vault = reopen(&v);
-    vault
+    let mut database = reopen(&v);
+    database
         .attach_binary(&id, "Materialize.settings", b"<MaterializeSettings")
         .unwrap();
-    vault.save().unwrap();
-    drop(vault);
+    database.save().unwrap();
+    drop(database);
     let err = fails(&v, &["settings", "validate"]);
     assert!(err.contains("Materialize.settings"), "{err}");
 }
@@ -477,16 +481,16 @@ fn validate_finds_a_broken_document_and_migrate_converts_legacy_fields() {
 #[test]
 fn gpg_agent_disable_keeps_a_legacy_key_off() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
-    let mut vault = reopen(&v);
-    let id = vault.add_entry("signing").unwrap();
-    vault.attach_binary(&id, "gpg-priv", b"x").unwrap();
-    vault.save().unwrap();
-    drop(vault);
+    let v = gitea_database(tmp.path());
+    let mut database = reopen(&v);
+    let id = database.add_entry("signing").unwrap();
+    database.attach_binary(&id, "gpg-priv", b"x").unwrap();
+    database.save().unwrap();
+    drop(database);
     ok(&v, &["gpg-agent", "disable", "signing"]);
-    let vault = reopen(&v);
-    let id = vault.find_by_title("signing").unwrap();
-    let doc = vault
+    let database = reopen(&v);
+    let id = database.find_by_title("signing").unwrap();
+    let doc = database
         .entry_settings(&id, Capability::GpgAgent)
         .unwrap()
         .unwrap();
@@ -494,10 +498,10 @@ fn gpg_agent_disable_keeps_a_legacy_key_off() {
         doc.items().is_empty(),
         "an empty document keeps gpg-priv unserved"
     );
-    drop(vault);
+    drop(database);
     ok(&v, &["gpg-agent", "enable", "signing", "--uses", "sign"]);
-    let vault = reopen(&v);
-    let doc = vault
+    let database = reopen(&v);
+    let doc = database
         .settings_document(&id, Capability::GpgAgent)
         .unwrap()
         .unwrap();
@@ -507,7 +511,7 @@ fn gpg_agent_disable_keeps_a_legacy_key_off() {
 #[test]
 fn ssh_agent_disable_writes_a_document_that_says_no() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let entry = "antimatter-studios/gitea";
     let err = fails(&v, &["ssh-agent", "enable", entry]);
     assert!(err.contains("--key"), "{err}");
@@ -557,17 +561,21 @@ impl Drop for Troved {
 }
 
 /// A real `troved` on sockets in `dir`, answering approval prompts with
-/// `approver` (debug builds only), with `vault` unlocked. Returns the daemon
+/// `approver` (debug builds only), with `database` unlocked. Returns the daemon
 /// and its socket path and session code.
 #[cfg(unix)]
-fn daemon(dir: &Path, vault: &Path, approver: &str) -> (Troved, String, String) {
-    let (guard, sock, code, _stdout) = daemon_unlocked(dir, vault, approver);
+fn daemon(dir: &Path, database: &Path, approver: &str) -> (Troved, String, String) {
+    let (guard, sock, code, _stdout) = daemon_unlocked(dir, database, approver);
     (guard, sock, code)
 }
 
 /// [`daemon`], also returning what `trove unlock --export` printed.
 #[cfg(unix)]
-fn daemon_unlocked(dir: &Path, vault: &Path, approver: &str) -> (Troved, String, String, String) {
+fn daemon_unlocked(
+    dir: &Path,
+    database: &Path,
+    approver: &str,
+) -> (Troved, String, String, String) {
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
     let troved = trove().parent().unwrap().join("troved");
@@ -601,7 +609,7 @@ fn daemon_unlocked(dir: &Path, vault: &Path, approver: &str) -> (Troved, String,
         &[("TROVE_SOCK", &sock_s)],
         &[
             "unlock",
-            vault.to_str().unwrap(),
+            database.to_str().unwrap(),
             "--password-stdin",
             "--export",
         ],
@@ -627,7 +635,7 @@ fn daemon_unlocked(dir: &Path, vault: &Path, approver: &str) -> (Troved, String,
 #[test]
 fn a_confirm_flagged_variable_waits_for_the_daemons_approval() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let entry = "antimatter-studios/gitea";
     ok(
         &v,
@@ -689,7 +697,7 @@ fn a_confirm_flagged_variable_waits_for_the_daemons_approval() {
 #[test]
 fn unlock_exports_the_variables_that_ask_for_the_shell() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = gitea_vault(tmp.path());
+    let v = gitea_database(tmp.path());
     let entry = "antimatter-studios/gitea";
     ok(
         &v,
@@ -746,13 +754,13 @@ fn unlock_exports_the_variables_that_ask_for_the_shell() {
 }
 
 /// The motivating case through a real daemon: the agent's shell has only
-/// `TROVE_SESSION`, never the vault password.
+/// `TROVE_SESSION`, never the database password.
 #[cfg(unix)]
 #[test]
 fn env_agent_add_and_exec_through_the_daemon() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let v = gitea_vault(dir);
+    let v = gitea_database(dir);
     let (_d, sock, code) = daemon(dir, &v, "none");
     let sock_s = sock.as_str();
     let env = [("TROVE_SOCK", sock_s), ("TROVE_SESSION", code.as_str())];

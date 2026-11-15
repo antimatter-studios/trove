@@ -48,14 +48,14 @@ TROVED="$REPO_ROOT/target/debug/troved"
 # Unix socket paths cap at ~104 bytes on macOS, so the runtime dir must be
 # short — the repo path alone can blow the limit.
 WORK="$(mktemp -d /tmp/trv-acc.XXXXXX)"
-VAULT="$WORK/v.kdbx"
+DATABASE="$WORK/v.kdbx"
 PASSWORD="acceptance-test-pw"
 export TROVE_SOCK="$WORK/c.sock"
 export TROVE_SSH_SOCK="$WORK/s.sock"
 export TROVE_GPG_SOCK="$WORK/g.sock"
 export TROVE_NO_AUTOSPAWN=1   # we start troved ourselves, deliberately
 
-# Unlock now forwards the vault's SSH keys into whatever agent $SSH_AUTH_SOCK
+# Unlock now forwards the database's SSH keys into whatever agent $SSH_AUTH_SOCK
 # names. Left alone, that would be the operator's own live agent — this script
 # would push a throwaway key into it. So give the run a private ssh-agent and
 # point at that: the forwarding path still executes for real (which is the point
@@ -74,25 +74,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-step "1. Create a vault"
-OUT="$(printf '%s\n' "$PASSWORD" | "$TROVE" --vault "$VAULT" --password-stdin init 2>&1)"
-if [[ -f "$VAULT" ]]; then ok "vault file created"; else bad "vault not created: $OUT"; fi
+step "1. Create a database"
+OUT="$(printf '%s\n' "$PASSWORD" | "$TROVE" --database "$DATABASE" --password-stdin init 2>&1)"
+if [[ -f "$DATABASE" ]]; then ok "database file created"; else bad "database not created: $OUT"; fi
 
 step "2. Open it and add entries"
 # An SSH key, minted in-tool so no fixture is needed.
-if printf '%s\n' "$PASSWORD" | "$TROVE" --vault "$VAULT" --password-stdin \
+if printf '%s\n' "$PASSWORD" | "$TROVE" --database "$DATABASE" --password-stdin \
      generate ssh acceptance/github.com >"$WORK/o" 2>&1
 then ok "ssh key generated"; else bad "generate ssh: $(cat "$WORK/o")"; fi
 
 # A password entry.
-if printf '%s\n' "$PASSWORD" | "$TROVE" --vault "$VAULT" --password-stdin \
+if printf '%s\n' "$PASSWORD" | "$TROVE" --database "$DATABASE" --password-stdin \
      add password Web/example --username alice --generate >"$WORK/o" 2>&1
 then ok "password entry added"; else bad "add password: $(cat "$WORK/o")"; fi
 
 # A file that materializes on unlock. /tmp is the macOS soft-allowlist.
 TARGET="$WORK/materialized.conf"
 echo "acceptance payload" > "$WORK/src.conf"
-if printf '%s\n' "$PASSWORD" | "$TROVE" --vault "$VAULT" --password-stdin \
+if printf '%s\n' "$PASSWORD" | "$TROVE" --database "$DATABASE" --password-stdin \
      add file acceptance-conf --src "$WORK/src.conf" --target "$TARGET" --mode 0600 >"$WORK/o" 2>&1
 then ok "file entry added"; else bad "add file: $(cat "$WORK/o")"; fi
 
@@ -104,7 +104,7 @@ if have gpg; then
          --quick-generate-key "acceptance@trove" ed25519 sign >/dev/null 2>&1; then
     gpg --batch --pinentry-mode loopback --passphrase '' \
         --export-secret-keys --output "$WORK/sec.gpg" >/dev/null 2>&1
-    if printf '%s\n' "$PASSWORD" | "$TROVE" --vault "$VAULT" --password-stdin \
+    if printf '%s\n' "$PASSWORD" | "$TROVE" --database "$DATABASE" --password-stdin \
          add gpg acceptance-gpg --key "$WORK/sec.gpg" >"$WORK/o" 2>&1
     then ok "gpg key added"; GPG_ADDED=1; else bad "add gpg: $(cat "$WORK/o")"; fi
   else
@@ -115,7 +115,7 @@ else
 fi
 
 step "3. List entries (offline)"
-OUT="$(printf '%s\n' "$PASSWORD" | "$TROVE" --vault "$VAULT" --password-stdin list 2>&1)"
+OUT="$(printf '%s\n' "$PASSWORD" | "$TROVE" --database "$DATABASE" --password-stdin list 2>&1)"
 check "list shows the ssh entry"      "github.com"      "$OUT"
 check "list shows the password entry" "example"         "$OUT"
 check "list shows the file entry"     "acceptance-conf" "$OUT"
@@ -127,7 +127,7 @@ for _ in $(seq 1 100); do [[ -S "$TROVE_SOCK" ]] && break; sleep 0.1; done
 if [[ -S "$TROVE_SOCK" ]]; then ok "daemon listening"; else bad "daemon never bound $TROVE_SOCK"; cat "$WORK/daemon.log"; fi
 
 step "5. Unlock"
-UNLOCK_OUT="$(printf '%s\n' "$PASSWORD" | "$TROVE" --password-stdin unlock "$VAULT" --export 2>&1)"
+UNLOCK_OUT="$(printf '%s\n' "$PASSWORD" | "$TROVE" --password-stdin unlock "$DATABASE" --export 2>&1)"
 SESSION="$(sed -n 's/^export TROVE_SESSION=//p' <<<"$UNLOCK_OUT" | tr -d '"')"
 if [[ -n "$SESSION" ]]; then ok "unlock minted a session code"; else bad "no session code: $UNLOCK_OUT"; fi
 export TROVE_SESSION="$SESSION"
@@ -135,7 +135,7 @@ export TROVE_SESSION="$SESSION"
 step "6. SSH keys are served by the agent"
 if have ssh-add; then
   OUT="$(SSH_AUTH_SOCK="$TROVE_SSH_SOCK" ssh-add -l 2>&1)"
-  check "ssh-add -l lists the vault key" "github.com" "$OUT"
+  check "ssh-add -l lists the database key" "github.com" "$OUT"
   OUT="$(SSH_AUTH_SOCK="$TROVE_SSH_SOCK" ssh-add -L 2>&1)"
   check "ssh-add -L emits a public key" "ssh-ed25519" "$OUT"
 else
@@ -178,9 +178,9 @@ then ok "get password returned a secret"; else bad "get password: $OUT"; fi
 OUT="$(env -u TROVE_SESSION "$TROVE" get password Web/example 2>&1)"
 check "refused without the session code" "session code required" "$OUT"
 
-step "10. Status reports the unlocked vault"
+step "10. Status reports the unlocked database"
 OUT="$("$TROVE" status 2>&1)"
-check "status shows the vault path" "v.kdbx" "$OUT"
+check "status shows the database path" "v.kdbx" "$OUT"
 check "status shows ssh keys"       "SSH keys"  "$OUT"
 
 step "11. Lock tears everything down"
@@ -189,7 +189,7 @@ check "lock reports success" "locked" "$OUT"
 [[ ! -f "$TARGET" ]] && ok "materialized file wiped" || bad "materialized file survived lock"
 if have ssh-add; then
   OUT="$(SSH_AUTH_SOCK="$TROVE_SSH_SOCK" ssh-add -l 2>&1)"
-  # Locking the last vault also shuts the daemon down (nothing left to serve),
+  # Locking the last database also shuts the daemon down (nothing left to serve),
   # so a vanished socket is as correct as an empty listing.
   if [[ "$OUT" == *"no identities"* || "$OUT" == *"Error connecting"* ]]; then
     ok "agent serves no keys after lock"

@@ -14,7 +14,7 @@ import { baseGroup, displayEntryPath, resolveEntryPath } from './tree.js';
 const MIN_STEP_MS = 220;
 
 const UNLOCK_STEPS = [
-  { step: "open", label: "Decrypting the vault" },
+  { step: "open", label: "Decrypting the database" },
   { step: "entries", label: "Reading entries" },
   { step: "agent", label: "Adding keys to the system agent" },
   { step: "files", label: "Writing materialized files" },
@@ -44,9 +44,9 @@ function UnlockProgress({ progress }) {
   );
 }
 
-function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
+function Unlock({ database, onUnlock, onReady, onChange, onTouchId, onRemember }) {
   const [pw, setPw] = React.useState("");
-  // { available, enrolled } — asked per vault, and again whenever this screen
+  // { available, enrolled } — asked per database, and again whenever this screen
   // is shown, because both halves change without the app being told.
   const [bio, setBio] = React.useState({ available: false, enrolled: false });
   // Ticked before typing the password: enrolment needs a password that is
@@ -108,12 +108,12 @@ function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
   );
   React.useEffect(() => {
     let dead = false;
-    api.biometricStatus(vault.id).then((b) => { if (!dead) setBio(b); });
+    api.biometricStatus(database.id).then((b) => { if (!dead) setBio(b); });
     return () => { dead = true; };
-  }, [vault.id]);
-  React.useEffect(() => { ref.current && ref.current.focus(); }, [vault.id]);
-  // Reset transient state when the target vault changes.
-  React.useEffect(() => { setPw(""); setErr(false); setBusy(false); }, [vault.id]);
+  }, [database.id]);
+  React.useEffect(() => { ref.current && ref.current.focus(); }, [database.id]);
+  // Reset transient state when the target database changes.
+  React.useEffect(() => { setPw(""); setErr(false); setBusy(false); }, [database.id]);
 
   const submit = async (e) => {
     e && e.preventDefault();
@@ -126,13 +126,13 @@ function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
     setBusy(true); setErr(false); setProgress({});
     queue.current = []; draining.current = false;
     try {
-      // onUnlock decrypts the vault and RESOLVES WITH THE ENTRY LIST — it does
+      // onUnlock decrypts the database and RESOLVES WITH THE ENTRY LIST — it does
       // not flip the parent itself. Deliberate: the backend has finished by the
       // time it resolves, but the checklist may still be draining, and an
       // immediate unmount would bin the last few ticks.
       const list = await onUnlock(password);
-      // Enrol only now, with a password the vault has just accepted. Failing
-      // here must not fail the unlock — the vault is open either way, and the
+      // Enrol only now, with a password the database has just accepted. Failing
+      // here must not fail the unlock — the database is open either way, and the
       // worst case is that the offer comes back next time.
       if (remember && bio.available && !bio.enrolled) {
         try {
@@ -173,8 +173,8 @@ function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
 
   // Split the path so the chip truncates the *directory* (ellipsis) while
   // always keeping the filename visible — right-truncating the whole path
-  // would hide the .kdbx name, which is the part that identifies the vault.
-  const fullPath = vault.path || vault.file || "";
+  // would hide the .kdbx name, which is the part that identifies the database.
+  const fullPath = database.path || database.file || "";
   const lastSlash = fullPath.lastIndexOf("/");
   const pathDir = lastSlash > 0 ? fullPath.slice(0, lastSlash) : "";
   const pathFile = lastSlash >= 0 ? fullPath.slice(lastSlash) : fullPath;
@@ -187,7 +187,7 @@ function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
       <div className="unlock-desk embed">
         <div className="unlock-card">
           <div className="ul-lock working"><Icon name="unlock" size={28} /></div>
-          <div className="ul-h">Unlocking {vault.name}</div>
+          <div className="ul-h">Unlocking {database.name}</div>
           <div className="ul-sub">Decrypting and handing your keys to the machine.</div>
           <UnlockProgress progress={progress} />
         </div>
@@ -199,13 +199,13 @@ function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
     <div className="unlock-desk embed">
       <form className="unlock-card" onSubmit={submit}>
         <div className="ul-lock"><Icon name="lock" size={28} /></div>
-        <div className="ul-h">Unlock {vault.name}</div>
-        <div className="ul-sub">Enter your master password to decrypt the vault.</div>
+        <div className="ul-h">Unlock {database.name}</div>
+        <div className="ul-sub">Enter your master password to decrypt the database.</div>
 
-        <div className="vault-chip">
+        <div className="database-chip">
           <div className="vc-ic"><Icon name="file" size={17} /></div>
           <div className="vc-meta">
-            <div className="vc-name">{vault.name}</div>
+            <div className="vc-name">{database.name}</div>
             <div className="vc-path" title={fullPath}>
               {pathDir && <span className="vc-dir">{pathDir}</span>}
               <span className="vc-file">{pathFile}</span>
@@ -365,8 +365,9 @@ function TagEditor({ tags, onChange, placeholder }) {
     </div>
   );
 }
-function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
+function EntryForm({ entry, detail, group, onClose, onSave, onCreateFolder, onDelete }) {
   const editing = !!entry;
+  const [itemType, setItemType] = React.useState("entry");
   // The list DTO carries no secrets; the current password + notes for an existing
   // entry are fetched (get_entry_detail) and handed in via `detail` to prefill.
   const [f, setF] = React.useState(() => entry ? {
@@ -386,6 +387,7 @@ function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
   // the field covers the other case in one click.
   const [show, setShow] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState("");
   const set = (k, v) => setF((o) => ({ ...o, [k]: v }));
   const setField = (i, part, v) =>
     setF((o) => ({ ...o, fields: o.fields.map((x, j) => (j === i ? { ...x, [part]: v } : x)) }));
@@ -398,9 +400,15 @@ function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
     if (busy) return;
     setBusy(true);
     try {
-      // onSave persists via the backend and (on success) closes the form.
-      await onSave(f, entry);
+      if (itemType === "folder") {
+        const path = resolveEntryPath(f.path, group).trim();
+        if (!path) throw new Error("Folder name is required");
+        await onCreateFolder(path);
+      } else {
+        await onSave(f, entry);
+      }
     } catch (e) {
+      setErr(String(e));
       setBusy(false);
     }
   };
@@ -411,12 +419,27 @@ function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
         <div className="modal-head">
           <div className="mh-badge"><Icon name={editing ? "edit" : "plus"} size={19} /></div>
           <div>
-            <h2>{editing ? "Edit entry" : "New entry"}</h2>
-            <p>{editing ? entry.path : "Add a credential to your vault"}</p>
+            <h2>{editing ? "Edit entry" : itemType === "folder" ? "New folder" : "New entry"}</h2>
+            <p>{editing ? entry.path : "Add an entry or an empty folder"}</p>
           </div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
         <div className="modal-body">
+          {!editing && (
+            <div className="pw-row" role="group" aria-label="Item type" style={{ marginBottom: 14 }}>
+              <button className={"btn-ghost" + (itemType === "entry" ? " active" : "")} onClick={() => { setItemType("entry"); setErr(""); }}>Entry</button>
+              <button className={"btn-ghost" + (itemType === "folder" ? " active" : "")} onClick={() => { setItemType("folder"); setErr(""); }}>Folder</button>
+            </div>
+          )}
+          {itemType === "folder" && !editing ? (
+            <div className="fld">
+              <label>Folder path <span style={{ color: "var(--text-ghost)", fontWeight: 400 }}>— create an empty folder</span></label>
+              <input ref={ref} className="inp mono" value={f.path} onChange={(e) => { set("path", e.target.value); setErr(""); }} placeholder={baseGroup(group) ? `name or subgroup/name (inside ${baseGroup(group)})` : "group/subgroup"} />
+              {f.path.trim() && <div style={{ marginTop: 4, fontSize: 12, color: "var(--text-ghost)", fontFamily: "var(--font-mono)" }}>→ {resolveEntryPath(f.path, group)}</div>}
+              {err && <div className="att-err">{err}</div>}
+            </div>
+          ) : (
+            <>
           <div className="fld">
             <label>
               Path{" "}
@@ -491,19 +514,21 @@ function EntryForm({ entry, detail, group, onClose, onSave, onDelete }) {
               Add attribute
             </button>
           </div>
+            </>
+          )}
         </div>
         <div className="modal-foot">
           {editing && <button className="btn-danger" onClick={() => onDelete(entry)}><Icon name="trash" size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 5 }} />Delete</button>}
           <div className="grow" />
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={save} disabled={busy}>{editing ? "Save changes" : "Add entry"}</button>
+          <button className="btn-primary" onClick={save} disabled={busy}>{editing ? "Save changes" : itemType === "folder" ? "Create folder" : "Add entry"}</button>
         </div>
       </div>
     </div>
   );
 }
 
-/// What a folder (or, at Root, the whole vault) gives the entries under it:
+/// What a folder (or, at Root, the whole database) gives the entries under it:
 /// defaults only. A folder never turns a capability on for its entries — each
 /// entry still needs its own — so these fill in what an entry leaves out, and a
 /// constraint set here (Touch ID, a lifetime) cannot be loosened below it.
@@ -517,18 +542,18 @@ const FOLDER_DEFAULTS = [
   ["gpg-agent", "confirm", "Touch ID for GPG keys", "bool"],
 ];
 
-function FolderDefaults({ vaultId, path }) {
+function FolderDefaults({ databaseId, path }) {
   const [caps, setCaps] = React.useState(null);
   const [draft, setDraft] = React.useState({});
   const [err, setErr] = React.useState("");
   React.useEffect(() => {
-    if (!vaultId) return;
+    if (!databaseId) return;
     (async () => {
-      try { setCaps((await api.groupCapabilities(vaultId, path)) || []); }
+      try { setCaps((await api.groupCapabilities(databaseId, path)) || []); }
       catch (e) { setErr(String(e)); }
     })();
-  }, [vaultId, path]);
-  if (!vaultId) return null;
+  }, [databaseId, path]);
+  if (!databaseId) return null;
   const value = (cap, name) => {
     const k = cap + "." + name;
     if (k in draft) return draft[k];
@@ -536,14 +561,14 @@ function FolderDefaults({ vaultId, path }) {
   };
   const write = async (cap, name, v) => {
     try {
-      setCaps((await api.setGroupDefault(vaultId, path, cap, name, v)) || []);
+      setCaps((await api.setGroupDefault(databaseId, path, cap, name, v)) || []);
       setErr("");
       setDraft((d) => { const n = { ...d }; delete n[cap + "." + name]; return n; });
     } catch (e) { setErr(String(e)); }
   };
   return (
     <div className="fld">
-      <label>{path ? "Defaults for entries in this folder" : "Defaults for the whole vault"}</label>
+      <label>{path ? "Defaults for entries in this folder" : "Defaults for the whole database"}</label>
       <div className="folder-defaults">
         {FOLDER_DEFAULTS.map(([cap, name, label, kind, extra]) => (
           <div className="fd-row" key={cap + name}>
@@ -567,7 +592,7 @@ function FolderDefaults({ vaultId, path }) {
   );
 }
 
-function EditFolderModal({ group, entries, onClose, onSave, onDelete, vaultId }) {
+function EditFolderModal({ group, entries, onClose, onSave, onDelete, databaseId }) {
   const [tags, setTags] = React.useState(group.tags || []);
   const [busy, setBusy] = React.useState(false);
   const [confirming, setConfirming] = React.useState(false);
@@ -617,7 +642,7 @@ function EditFolderModal({ group, entries, onClose, onSave, onDelete, vaultId })
               <TagEditor tags={tags} onChange={setTags} placeholder="Add a folder tag" />
             </div>
             {group.inheritedTags?.length > 0 && <div className="tag-inherited"><span>Inherited</span> {group.inheritedTags.join(", ")}</div>}
-            {!inBin && <FolderDefaults vaultId={vaultId} path={path} />}
+            {!inBin && <FolderDefaults databaseId={databaseId} path={path} />}
           </div>
         )}
         {confirming ? (
@@ -648,7 +673,7 @@ function ConfirmDelete({ entry, onCancel, onConfirm }) {
           <div><h2>Delete entry?</h2><p>This moves it to the recycle bin.</p></div>
         </div>
         <div className="modal-body"><div style={{ fontSize: 13.5, color: "var(--text-dim)", lineHeight: 1.6 }}>
-          <span style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{entry.path}</span> will be removed from the vault. You can restore it later from the recycle bin.
+          <span style={{ fontFamily: "var(--font-mono)", color: "var(--text)" }}>{entry.path}</span> will be removed from the database. You can restore it later from the recycle bin.
         </div></div>
         <div className="modal-foot"><div className="grow" />
           <button className="btn-ghost" onClick={onCancel}>Cancel</button>
@@ -669,9 +694,9 @@ const SHORTCUTS = [
   { l: "Reveal password", k: ["R"] },
   { l: "New entry", k: ["⌘", "N"] },
   { l: "Edit entry", k: ["E"] },
-  { l: "Switch vault", k: ["⌘", "1–9"] },
-  { l: "Open vault", k: ["⌘", "O"] },
-  { l: "Lock vault", k: ["⌘", "L"] },
+  { l: "Switch database", k: ["⌘", "1–9"] },
+  { l: "Open database", k: ["⌘", "O"] },
+  { l: "Lock database", k: ["⌘", "L"] },
   { l: "Toggle theme", k: ["⌘", "J"] },
   { l: "Shortcuts", k: ["?"] },
   { l: "Close / clear", k: ["esc"] },
@@ -700,10 +725,10 @@ function HelpModal({ onClose }) {
   );
 }
 
-/* ============ NEW VAULT ============ */
-// Second half of "create a vault": the file has been chosen, now set the master
+/* ============ NEW DATABASE ============ */
+// Second half of "create a database": the file has been chosen, now set the master
 // password. There is no recovery for a forgotten one, so it is confirmed.
-function NewVaultModal({ path, onCreate, onClose }) {
+function NewDatabaseModal({ path, onCreate, onClose }) {
   const [pw, setPw] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
   const [show, setShow] = React.useState(false);
@@ -723,7 +748,7 @@ function NewVaultModal({ path, onCreate, onClose }) {
       await onCreate(path, pw);
     } catch (e2) {
       setBusy(false);
-      setErr(String(e2 && e2.message ? e2.message : e2) || "Couldn't create the vault.");
+      setErr(String(e2 && e2.message ? e2.message : e2) || "Couldn't create the database.");
     }
   };
 
@@ -732,7 +757,7 @@ function NewVaultModal({ path, onCreate, onClose }) {
       <div className="modal" style={{ width: "min(460px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="mh-badge"><Icon name="plus" size={18} /></div>
-          <div><h2>New vault</h2><p>{file}</p></div>
+          <div><h2>New database</h2><p>{file}</p></div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
         <form onSubmit={submit}>
@@ -760,7 +785,7 @@ function NewVaultModal({ path, onCreate, onClose }) {
           <div className="modal-foot">
             <div className="grow" />
             <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn-primary" disabled={busy}>{busy ? "Creating…" : "Create vault"}</button>
+            <button type="submit" className="btn-primary" disabled={busy}>{busy ? "Creating…" : "Create database"}</button>
           </div>
         </form>
       </div>
@@ -804,7 +829,7 @@ function SettingsModal({ settings, onChange, onClose }) {
       <div className="modal" style={{ width: "min(560px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="mh-badge"><Icon name="gear" size={18} /></div>
-          <div><h2>Settings</h2><p>What unlocking a vault does to the rest of your machine.</p></div>
+          <div><h2>Settings</h2><p>What unlocking a database does to the rest of your machine.</p></div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
 
@@ -812,7 +837,7 @@ function SettingsModal({ settings, onChange, onClose }) {
           {/* The one rule worth stating outright, because two different locks
               with two different scopes is exactly what confused this before. */}
           <p className="set-note" style={{ margin: "0 2px 4px" }}>
-            <b>App lock</b> locks this window and forgets the decrypted vault.
+            <b>App lock</b> locks this window and forgets the decrypted database.
             Your data stays where it is. <b>Data lock</b> is the padlock button:
             it removes the keys from the system agent and dematerializes the
             files.
@@ -843,7 +868,7 @@ function SettingsModal({ settings, onChange, onClose }) {
             <div className="set-group-head"><div className="sgt">App lock</div></div>
             <SetRow
               title="Lock the app after"
-              desc="Minutes of no interaction before the window locks and the decrypted vault is forgotten. Keys and materialized files are left alone — they expire on their own clocks. 0 never locks.">
+              desc="Minutes of no interaction before the window locks and the decrypted database is forgotten. Keys and materialized files are left alone — they expire on their own clocks. 0 never locks.">
               <span className="set-num">
                 <input className="inp" type="number" min="0" step="1"
                        value={settings.idleLockMinutes ?? 5}
@@ -938,55 +963,190 @@ function ThemeMenu({ theme, accent, onTheme, onAccent, onClose }) {
   );
 }
 
-/* ============ VAULT SWITCHER ============ */
-function VaultSwitcher({ vaults, activeId, onSwitch, onOpenNew, onNewVault, onClose }) {
+function DatabaseMetadataModal({ databaseId, databaseName, onClose, onSaved }) {
+  const [metadata, setMetadata] = React.useState(null);
+  const [error, setError] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    api.getDatabaseMetadata(databaseId)
+      .then((value) => { if (active) setMetadata({
+        name: value.name || "",
+        description: value.description || "",
+        defaultUsername: value.defaultUsername || "",
+        troveUuid: value.troveUuid || "",
+      }); })
+      .catch((reason) => { if (active) setError(String(reason)); });
+    return () => { active = false; };
+  }, [databaseId]);
+
+  const update = (key, value) => setMetadata((current) => ({ ...current, [key]: value }));
+  const saveMetadata = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const saved = await api.setDatabaseMetadata(databaseId, {
+        name: metadata.name || null,
+        description: metadata.description || null,
+        defaultUsername: metadata.defaultUsername || null,
+        troveUuid: metadata.troveUuid || null,
+      });
+      onSaved?.(saved);
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="scrim center" onMouseDown={onClose}>
+      <form className="modal" style={{ width: "min(560px, 94%)" }} onMouseDown={(event) => event.stopPropagation()} onSubmit={saveMetadata}>
+        <div className="modal-head">
+          <div className="mh-badge"><Icon name="gear" size={18} /></div>
+          <div><h2>Database metadata</h2><p>{databaseName}</p></div>
+          <button type="button" className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose} aria-label="Close"><Icon name="x" size={18} /></button>
+        </div>
+        {!metadata ? (
+          <div className="modal-body">{error || "Loading metadata…"}</div>
+        ) : (
+          <div className="modal-body">
+            <div className="fld"><label htmlFor="database-name">Name</label><input id="database-name" className="inp" value={metadata.name} onChange={(event) => update("name", event.target.value)} /></div>
+            <div className="fld"><label htmlFor="database-description">Description</label><textarea id="database-description" className="inp" rows="3" value={metadata.description} onChange={(event) => update("description", event.target.value)} /></div>
+            <div className="fld"><label htmlFor="database-default-username">Default username</label><input id="database-default-username" className="inp" value={metadata.defaultUsername} onChange={(event) => update("defaultUsername", event.target.value)} /></div>
+            <div className="fld"><label htmlFor="database-trove-uuid">Trove database UUID</label>
+              <div className="pw-row"><input id="database-trove-uuid" className="inp mono" value={metadata.troveUuid} onChange={(event) => update("troveUuid", event.target.value)} placeholder="Not linked" spellCheck="false" />
+                <button type="button" className="btn-ghost" onClick={() => update("troveUuid", crypto.randomUUID())}>Generate</button>
+              </div>
+              <small>Use the same UUID on database copies you want Trove to recognize as linked.</small>
+            </div>
+            {error && <div role="alert" className="form-error">{error}</div>}
+          </div>
+        )}
+        <div className="modal-foot">
+          <div className="grow" />
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={!metadata || saving}>{saving ? "Saving…" : "Save metadata"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ============ DATABASE SWITCHER ============ */
+function DatabaseSwitcher({ databases, activeId, onSwitch, onSave, onRemove, onOpenNew, onNewDatabase, onClose }) {
+  const [pending, setPending] = React.useState(null);
+  const [error, setError] = React.useState("");
+  const busy = React.useRef(false);
+  const runAction = async (action, database) => {
+    if (busy.current) return;
+    busy.current = true;
+    setPending({ action, id: database.id });
+    setError("");
+    try {
+      await (action === "save" ? onSave : onRemove)(database.id);
+    } catch (error) {
+      setError(`${action === "save" ? "Save" : "Remove"} failed for ${database.path || database.file}: ${String(error)}`);
+    } finally {
+      busy.current = false;
+      setPending(null);
+    }
+  };
+  const linked = new Map();
+  const unlinked = [];
+  for (const database of databases) {
+    const uuid = database.troveUuid?.trim().toLowerCase();
+    if (!uuid) {
+      unlinked.push(database);
+      continue;
+    }
+    const copies = linked.get(uuid) || [];
+    copies.push(database);
+    linked.set(uuid, copies);
+  }
+  const compareDatabases = (left, right) =>
+    left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
+    (left.path || left.file).localeCompare(right.path || right.file, undefined, { sensitivity: "base" });
+  const linkedGroups = [...linked.entries()].map(([uuid, copies]) => ({
+    uuid,
+    copies: copies.sort(compareDatabases),
+  })).sort((left, right) => compareDatabases(left.copies[0], right.copies[0]));
+  unlinked.sort(compareDatabases);
+  const ordered = [...linkedGroups.flatMap((group) => group.copies), ...unlinked];
+  const shortcutIndex = new Map(ordered.map((database, index) => [database.id, index + 1]));
+  const renderDatabase = (database) => (
+    <div key={database.id} role="group" aria-label={"Database " + (database.path || database.file)} className={"vrow database-option" + (database.id === activeId ? " on" : "")}>
+      <button className="database-option-select" disabled={!!pending} onClick={() => { onSwitch(database.id); onClose(); }}>
+        <span className={"vdot " + (database.readOnly ? "read-only" : database.locked ? "locked" : "unlocked")} title={database.readOnly ? "Read only" : database.locked ? "Locked" : "Unlocked"} />
+        <span className="database-option-copy">
+          <span className="vrn">{database.name}</span>
+          <span className="vrf" title={database.path || database.file}>{database.path || database.file}</span>
+        </span>
+        <span className="kbd">⌘{shortcutIndex.get(database.id)}</span>
+      </button>
+      <div className="database-option-actions">
+        <button className="icon-btn database-action-btn" aria-label={"Save database " + (database.path || database.file)} aria-busy={pending?.id === database.id && pending.action === "save"} disabled={!!pending || database.locked || database.readOnly} title={database.locked ? "Unlock this database to save" : database.readOnly ? "Read-only database" : "Save database to disk"} onClick={() => runAction("save", database)}><Icon name={pending?.id === database.id && pending.action === "save" ? "clock" : "save"} size={16} /></button>
+        <button className="icon-btn database-action-btn" aria-label={"Remove database " + (database.path || database.file)} aria-busy={pending?.id === database.id && pending.action === "remove"} disabled={!!pending} title="Close and remove from Trove; the database file is kept" onClick={() => runAction("remove", database)}><Icon name={pending?.id === database.id && pending.action === "remove" ? "clock" : "x"} size={16} /></button>
+      </div>
+    </div>
+  );
+
   return (
     <React.Fragment>
       <div className="pop-scrim" onMouseDown={onClose} />
       <div className="popover vsw" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="pop-sec" style={{ marginTop: 2 }}>Open vaults</div>
-        {vaults.map((v, i) => (
-          <button key={v.id} className={"vrow" + (v.id === activeId ? " on" : "")} onClick={() => { onSwitch(v.id); onClose(); }}>
-            <span className={"vdot " + (v.locked ? "locked" : "unlocked")} title={v.locked ? "Locked" : "Unlocked"} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="vrn">{v.name}</div>
-              <div className="vrf">{v.file}{v.locked ? " · locked" : ""}</div>
+        <div className="pop-sec" style={{ marginTop: 2 }}>Open databases</div>
+        {error && <p role="alert" className="database-action-error">{error}</p>}
+        {linkedGroups.map((group) => (
+          <section className="database-link-group" key={group.uuid}>
+            <div className="database-group-heading">
+              <Icon name="link" size={13} />
+              <span>Linked copies</span>
+              <span className="database-group-count">{group.copies.length} open</span>
             </div>
-            <span className="kbd">⌘{i + 1}</span>
-          </button>
+            <div className="database-group-items">{group.copies.map(renderDatabase)}</div>
+          </section>
         ))}
+        {unlinked.length > 0 && (
+          <>
+            {linkedGroups.length > 0 && <div className="database-group-heading other-databases-heading">Other databases</div>}
+            {unlinked.map(renderDatabase)}
+          </>
+        )}
         <div className="pop-div" />
-        <button className="vrow" onClick={() => { onClose(); onOpenNew(); }}>
+        <button className="vrow" disabled={!!pending} onClick={() => { onClose(); onOpenNew(); }}>
           <span className="vdot add"><Icon name="folder" size={13} /></span>
-          <div style={{ flex: 1 }}><div className="vrn" style={{ fontWeight: 500 }}>Open vault…</div></div>
+          <div style={{ flex: 1 }}><div className="vrn" style={{ fontWeight: 500 }}>Open database…</div></div>
           <span className="kbd">⌘O</span>
         </button>
-        <button className="vrow" onClick={() => { onClose(); onNewVault(); }}>
+        <button className="vrow" disabled={!!pending} onClick={() => { onClose(); onNewDatabase(); }}>
           <span className="vdot add"><Icon name="plus" size={13} /></span>
-          <div style={{ flex: 1 }}><div className="vrn" style={{ fontWeight: 500 }}>New vault…</div></div>
+          <div style={{ flex: 1 }}><div className="vrn" style={{ fontWeight: 500 }}>New database…</div></div>
         </button>
       </div>
     </React.Fragment>
   );
 }
 
-/* ============ OPEN VAULT MODAL ============ */
-// Lists the persisted "recent" vaults (from list_vaults) so one click switches
+/* ============ OPEN DATABASE MODAL ============ */
+// Lists the persisted "recent" databases (from list_databases) so one click switches
 // to it; "Browse…" opens the native file dialog to register a new .kdbx.
-function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
+function OpenDatabaseModal({ recents, activeId, onPick, onBrowse, onClose }) {
   const list = recents || [];
   return (
     <div className="scrim center" onMouseDown={onClose}>
       <div className="modal" style={{ width: "min(440px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="mh-badge"><Icon name="file" size={18} /></div>
-          <div><h2>Open vault</h2><p>Recent vaults</p></div>
+          <div><h2>Open database</h2><p>Recent databases</p></div>
           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
         </div>
         <div className="modal-body" style={{ gap: 4 }}>
           {list.length === 0 && (
             <div style={{ padding: "18px 6px", textAlign: "center", color: "var(--text-faint)", fontSize: 13 }}>
-              No recent vaults yet — browse to open one.
+              No recent databases yet — browse to open one.
             </div>
           )}
           {list.map((v) => (
@@ -1010,4 +1170,4 @@ function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
   );
 }
 
-export { Unlock, CommandPalette, EntryForm, EditFolderModal, FolderDefaults, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };
+export { Unlock, CommandPalette, EntryForm, EditFolderModal, FolderDefaults, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, DatabaseSwitcher, DatabaseMetadataModal, OpenDatabaseModal, SettingsModal, NewDatabaseModal, UnlockProgress, Switch };

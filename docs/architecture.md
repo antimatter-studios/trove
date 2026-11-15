@@ -7,23 +7,23 @@ A practical guide for someone reading the trove codebase for the first time. Aim
 ```
 trove/
 ├── crates/
-│   ├── trove-core/             vault library (kdbx I/O, no networking)
+│   ├── trove-core/             database library (kdbx I/O, no networking)
 │   ├── trove-cli/              `trove` binary — thin CLI client
 │   ├── troved/                 `troved` binary + library — headless daemon
 │   └── keepass-spec-tests/    clean-room kdbx spec test suite
 ```
 
-**[crates/trove-core](../crates/trove-core/)** — the vault library. Pure data layer. One public type, [Vault](../crates/trove-core/src/lib.rs), with sync methods (`open`, `save`, `add_entry`, `attach_binary`, `read_binary`, `set_field`, `get_field`, `list_entries`, ...). No async. No sockets. No process-level state. Knows nothing about SSH or GPG. The CLI and the daemon both depend on it; nothing depends on the CLI or the daemon.
+**[crates/trove-core](../crates/trove-core/)** — the database library. Pure data layer. One public type, [Database](../crates/trove-core/src/lib.rs), with sync methods (`open`, `save`, `add_entry`, `attach_binary`, `read_binary`, `set_field`, `get_field`, `list_entries`, ...). No async. No sockets. No process-level state. Knows nothing about SSH or GPG. The CLI and the daemon both depend on it; nothing depends on the CLI or the daemon.
 
-**[crates/trove-cli](../crates/trove-cli/)** — the `trove` binary. Clap-driven. For most commands it opens the vault directly via `trove-core` and exits — the daemon is not required. Only the `agent socket` / `gpg-agent socket` helpers and the `materialize` command interact with daemon-shaped code at all. (The `materialize` command imports `troved::materialize` as a library, sharing the same plan-and-write logic as the daemon, but it does not connect to a running `troved`.)
+**[crates/trove-cli](../crates/trove-cli/)** — the `trove` binary. Clap-driven. For most commands it opens the database directly via `trove-core` and exits — the daemon is not required. Only the `agent socket` / `gpg-agent socket` helpers and the `materialize` command interact with daemon-shaped code at all. (The `materialize` command imports `troved::materialize` as a library, sharing the same plan-and-write logic as the daemon, but it does not connect to a running `troved`.)
 
-**[crates/troved](../crates/troved/)** — the headless daemon. This is where secrets live in memory while the vault is unlocked. Owns three Unix sockets, four secret stores, and an idle-lock timer. Compiled both as a binary (`troved`) and as a library (`troved::*`) so the CLI and integration tests can import its modules.
+**[crates/troved](../crates/troved/)** — the headless daemon. This is where secrets live in memory while the database is unlocked. Owns three Unix sockets, four secret stores, and an idle-lock timer. Compiled both as a binary (`troved`) and as a library (`troved::*`) so the CLI and integration tests can import its modules.
 
 **[crates/keepass-spec-tests](../crates/keepass-spec-tests/)** — clean-room test suite for the upstream `keepass = "0.12"` crate (spec round-trip, broken-file rejection, keyfile formats, binary pool, cross-tool interop). Programmatically generated fixtures, no GPL imports. Intended to be contributed upstream; lives in the workspace today so `cargo test --workspace` covers it.
 
 The kdbx parser is the [keepass](https://crates.io/crates/keepass) crate, built from the fork at https://github.com/antimatter-studios/keepass-rs (branch `trove`, pinned by commit in `[patch.crates-io]` in the root `Cargo.toml` and `trove-desktop/src-tauri/Cargo.toml`). The fork carries fixes that are proposed upstream but not yet released, and is synced by merging upstream release tags. crates.io ignores `[patch]`, so the published trove-core still depends on the crates.io keepass.
 
-**Several writers, one file.** The CLI, the desktop app, the daemon, KeePassXC and sync services all write the same vault file, so `Vault::save` never writes over a change it has not seen. If the file changed since the handle read it, save opens it and merges it in first with the KDBX merge: the newer change to an entry wins and the other goes into the entry's history. Vault settings (Meta, KDF), which the KDBX merge leaves alone, are merged against the file as the handle last saw it: the other writer's change wins wherever this handle made none. Save writes to a temporary file, checks the file once more before renaming over it, and checks again afterwards. A write found by either check is merged and written over, unless it already holds everything this handle has (a writer that merged first). That leaves only the instant between the last check and the rename unguarded. There is no lock file, because Dropbox and Google Drive don't carry locks between machines. Save refuses with `Error::StaleWrite` only when the file can't be merged: it opens with other credentials, isn't a copy of this vault, can't be read, or keeps changing through five rounds. Permanent deletes record the entry in `DeletedObjects`, so a merge deletes it from the other copy instead of bringing it back.
+**Several writers, one file.** The CLI, the desktop app, the daemon, KeePassXC and sync services all write the same database file, so `Database::save` never writes over a change it has not seen. If the file changed since the handle read it, save opens it and merges it in first with the KDBX merge: the newer change to an entry wins and the other goes into the entry's history. Database settings (Meta, KDF), which the KDBX merge leaves alone, are merged against the file as the handle last saw it: the other writer's change wins wherever this handle made none. Save writes to a temporary file, checks the file once more before renaming over it, and checks again afterwards. A write found by either check is merged and written over, unless it already holds everything this handle has (a writer that merged first). That leaves only the instant between the last check and the rename unguarded. There is no lock file, because Dropbox and Google Drive don't carry locks between machines. Save refuses with `Error::StaleWrite` only when the file can't be merged: it opens with other credentials, isn't a copy of this database, can't be read, or keeps changing through five rounds. Permanent deletes record the entry in `DeletedObjects`, so a merge deletes it from the other copy instead of bringing it back.
 
 Why split it three ways at all? The daemon is a security-critical surface — it owns decrypted material in process memory. Keeping the cryptographic data path (trove-core) free of async, networking, and listener code makes it easier to audit. Keeping the CLI off the daemon's hot path (most subcommands open the kdbx directly) makes one-off operations work even if `troved` is not running.
 
@@ -61,7 +61,7 @@ Why split it three ways at all? The daemon is a security-critical surface — it
                                        ▼
                        ┌───────────────────────────────┐
                        │ in-memory secret stores       │
-                       │  - vault (Vault)              │
+                       │  - database (Database)              │
                        │  - SSH KeyStore               │
                        │  - GPG GpgKeyStore            │
                        │  - MaterializedStore          │
@@ -77,20 +77,20 @@ Three sockets, three protocols, one shared state machine.
 | SSH agent | `TROVE_SSH_SOCK` / `$XDG_RUNTIME_DIR/trove-ssh.sock` | OpenSSH agent protocol | binary (length-prefixed) | [crates/troved/src/ssh_agent/](../crates/troved/src/ssh_agent/) |
 | GPG agent | `TROVE_GPG_SOCK` / `$XDG_RUNTIME_DIR/trove-gpg.sock` | Assuan | ASCII line-oriented | [crates/troved/src/gpg_agent/](../crates/troved/src/gpg_agent/) |
 
-The CLI is a thin client *for the parts that talk to the daemon*. For everything else (`init`, `list`, `add`, `get`, in-process `materialize`) the CLI opens the kdbx file directly via trove-core and never connects to `troved`. This is deliberate: a developer who wants to add a single SSH key to a vault should not have to start a daemon to do it.
+The CLI is a thin client *for the parts that talk to the daemon*. For everything else (`init`, `list`, `add`, `get`, in-process `materialize`) the CLI opens the kdbx file directly via trove-core and never connects to `troved`. This is deliberate: a developer who wants to add a single SSH key to a database should not have to start a daemon to do it.
 
 ## State machine
 
-There are two states — **vault locked** and **vault unlocked**. They flip on a single set of operations:
+There are two states — **database locked** and **database unlocked**. They flip on a single set of operations:
 
 - `unlock` (control RPC): parse kdbx, populate stores, arm idle timer, return `ok`.
-- `lock` (control RPC): wipe materialized files, drop vault, clear key stores, cancel idle timer.
+- `lock` (control RPC): wipe materialized files, drop database, clear key stores, cancel idle timer.
 - `shutdown` (control RPC): same as lock + tell main loop to exit.
 - Idle timer fires: same set of operations as `lock`, no response. See [crates/troved/src/server.rs](../crates/troved/src/server.rs) `build_lock_callback`.
 
 What's loaded into daemon memory on **unlock**:
 
-1. Parsed `Vault` (a `keepass::Database` plus its master password). Lives behind `Arc<Mutex<Option<Vault>>>`.
+1. Parsed `Database` (a `keepass::Database` plus its master password). Lives behind `Arc<Mutex<Option<Database>>>`.
 2. SSH `LoadedKey` list — one per entry whose `id` attachment parses as a supported OpenSSH private key. ed25519, RSA >= 2048, ECDSA P-256, ECDSA P-384. Encrypted, weak, or unsupported keys are skipped with a warning.
 3. GPG `LoadedGpgKey` list — one per ed25519 secret key found in any `gpg-priv` attachment. Other algorithms and encrypted secret keys are skipped.
 4. `MaterializedFile` list — one per entry whose `Materialize.*` fields validate, with the bytes already on disk by the time `unlock` returns `ok`.
@@ -98,7 +98,7 @@ What's loaded into daemon memory on **unlock**:
 What's cleared on **lock** / **idle expiry** / **shutdown**:
 
 - Materialized files are unlinked from disk before any other state changes (so a subsequent error during memory teardown still leaves the disk clean).
-- Vault dropped (its `VaultInner::Drop` zeroes the cached password).
+- Database dropped (its `DatabaseInner::Drop` zeroes the cached password).
 - SSH key vec cleared (`ssh_key::SigningKey` is `ZeroizeOnDrop`).
 - GPG key vec cleared (cv25519 / ed25519 secret scalars zero on drop).
 - Idle timer cancelled (atomics reset to "not running").
@@ -107,7 +107,7 @@ The `lock` and `shutdown` paths intentionally use the same wipe-then-drop sequen
 
 ## The four delivery surfaces
 
-Different secrets need different "shape of escape from the vault." Each surface has a different threat-model trade-off; pick whichever one your secret tolerates.
+Different secrets need different "shape of escape from the database." Each surface has a different threat-model trade-off; pick whichever one your secret tolerates.
 
 1. **File materialization** — write secret bytes to a path on the local filesystem. Used for kubeconfigs, `.env` files, TLS certs, and anything a downstream tool wants to `open(2)` by path. Wins big on compatibility (every tool reads files); loses on residue (disk artifacts can outlive the process). Mitigations: tmpfs-by-default on Linux, soft-allowlist on macOS, optional TTL, atomic wipe on lock. See [crates/troved/src/materialize/](../crates/troved/src/materialize/).
 
@@ -115,26 +115,26 @@ Different secrets need different "shape of escape from the vault." Each surface 
 
 3. **GPG agent** — same shape as SSH agent, Assuan instead of OpenSSH binary protocol. Sign + ECDH-decrypt in daemon memory. Currently ed25519-only for sign, Curve25519-only for decrypt; partial cipher coverage on PKDECRYPT (AES-KW). RSA, NIST curves, Ed448 are out of scope.
 
-4. **CLI direct retrieval** (`trove get ssh|gpg|file`) — open vault, read attachment, write to `--out` (or stdout). One-shot, no daemon involvement. Useful for scripted workflows that can't use any of the above. Same disk-residue risk as full materialization but without TTL or wipe-on-lock — the user is on their own to clean up.
+4. **CLI direct retrieval** (`trove get ssh|gpg|file`) — open database, read attachment, write to `--out` (or stdout). One-shot, no daemon involvement. Useful for scripted workflows that can't use any of the above. Same disk-residue risk as full materialization but without TTL or wipe-on-lock — the user is on their own to clean up.
 
 The honest spectrum: SSH/GPG agents > materialization (with tmpfs + TTL) > materialization (disk-backed) > `trove get`. Use the leftmost option your tool will accept.
 
 ## kdbx format compatibility
 
-`100% .kdbx format compatibility` is the project's hard constraint — you can open the same vault in KeePassXC or any other kdbx client without losing data. We extend; we never break.
+`100% .kdbx format compatibility` is the project's hard constraint — you can open the same database in KeePassXC or any other kdbx client without losing data. We extend; we never break.
 
 **(Historical: v0.0.4–v0.0.9 vendored a fork of `keepass` 0.7.33 in `vendor/keepass/`. The fork had three patches because upstream 0.7.33 had two real bugs in our use case:
 
 1. `<Binary Ref="..."/>` references inside entries are parsed but discarded on read.
 2. Saving a `Value::Bytes` whose contents aren't valid UTF-8 panics in the XML serializer.
 
-Without (1), every binary attachment we write is dropped on the next `save`. Without (2), saving any vault containing a binary key causes a crash. The fork resolves both: real attachments are kept on the inner-header binary pool, references survive round-trip, and `Value::Bytes` is base64-encoded into the XML.
+Without (1), every binary attachment we write is dropped on the next `save`. Without (2), saving any database containing a binary key causes a crash. The fork resolves both: real attachments are kept on the inner-header binary pool, references survive round-trip, and `Value::Bytes` is base64-encoded into the XML.
 
 As of v0.0.10.0 the fork is gone: upstream's PR #294 already restructured attachments as first-class Database-owned objects, and the new `EntryMut::add_attachment(name, Value::Unprotected(bytes))` does what our patches were trying to enable. We now depend on `keepass = "0.12"` from crates.io directly. The fork's `trove-patches-v0.7.33` branch on https://github.com/antimatter-studios/keepass-rs is a holding place for upstream-contribution PRs.)**
 
 The kdbx test suite lives in [crates/keepass-spec-tests](../crates/keepass-spec-tests/) — a workspace member that depends on the published `keepass = "0.12"` crate and exercises it directly with no trove-core involvement. `tests/` contains `spec_round_trip.rs`, `broken_files.rs`, `keyfile_formats.rs`, `binary_pool.rs`, and `cross_tool.rs`, plus a `common/` fixture-generation module seeded from `StdRng::seed_from_u64(0xdead_beef_cafe_f00d)`. Every `.kdbx` fixture is regenerated programmatically per test run from the seed — no on-disk corpus, no GPL'd inputs, MIT-licensable so the suite can be upstreamed to keepass-rs as a dedicated PR.
 
-**(Historical: v0.0.4–v0.0.9 carried a `_SDPM_BIN_<name>` string-field fallback for vaults written by trove v0.0.1 through v0.0.3.x; v0.0.10.0 dropped it because no production vaults of that vintage exist — the project hadn't shipped before v0.0.10.)**
+**(Historical: v0.0.4–v0.0.9 carried a `_SDPM_BIN_<name>` string-field fallback for databases written by trove v0.0.1 through v0.0.3.x; v0.0.10.0 dropped it because no production databases of that vintage exist — the project hadn't shipped before v0.0.10.)**
 
 ## Threat model
 
@@ -142,9 +142,9 @@ Quick version (full version: [docs/threat-model.md](threat-model.md)).
 
 **What we defend against:**
 
-- The idle developer machine. Vault state + materialized files vanish after `TROVE_IDLE_TIMEOUT` (default 900s) of no activity.
+- The idle developer machine. Database state + materialized files vanish after `TROVE_IDLE_TIMEOUT` (default 900s) of no activity.
 - Casual local attackers. Sockets are `0600`; secret files default to `0600`; tmpfs-only target paths on Linux unless explicitly overridden.
-- Accidental check-ins of secrets. The vault is the source of truth; tools read from materialized paths or from the agents, not from secrets sitting in the repo.
+- Accidental check-ins of secrets. The database is the source of truth; tools read from materialized paths or from the agents, not from secrets sitting in the repo.
 - Lost laptops (cold). Encrypted-at-rest kdbx, password-derived KDF.
 
 **What we do NOT defend against:**
@@ -163,8 +163,8 @@ Implications:
 
 - **Scriptable.** A CI runner can `unlock` once, run a series of `kubectl` / `git` / `ssh` invocations, and `lock`. No pinentry prompt, no GUI dependency.
 - **Automatable.** A laptop-lid-close handler can fire a `lock` RPC; a screensaver hook can fire `set-idle-timeout 60`. The daemon does not need to be aware of any specific desktop environment.
-- **Headless-server-friendly.** Run the daemon on a build machine over SSH. The vault file lives on disk; `unlock` over the (daemon-local) control socket; SSH-forward `TROVE_SSH_SOCK` if you really want to (and you've thought about it).
-- **GUI is a future client.** When we do build a GUI, it will speak the same control protocol as everything else. No special "GUI knows about the vault" code path; no second source of truth.
+- **Headless-server-friendly.** Run the daemon on a build machine over SSH. The database file lives on disk; `unlock` over the (daemon-local) control socket; SSH-forward `TROVE_SSH_SOCK` if you really want to (and you've thought about it).
+- **GUI is a future client.** When we do build a GUI, it will speak the same control protocol as everything else. No special "GUI knows about the database" code path; no second source of truth.
 
 This is the part of the spec where we explicitly diverge from upstream. droidmonkey on the KeePassXC tracker: "Likely not possible unless you modify the code." Modifying the code is exactly what we did.
 
@@ -186,9 +186,9 @@ What counts as activity:
 | GPG agent message received | yes |
 | Idle (nothing happens) | no |
 
-Configuration: `TROVE_IDLE_TIMEOUT` (env, seconds, `0` disables) or `set-idle-timeout` RPC. Default 900s. Reading the current state at runtime: `get-idle-timeout` RPC, returns `seconds` (configured) and `remaining` (countdown if a vault is unlocked, else `null`).
+Configuration: `TROVE_IDLE_TIMEOUT` (env, seconds, `0` disables) or `set-idle-timeout` RPC. Default 900s. Reading the current state at runtime: `get-idle-timeout` RPC, returns `seconds` (configured) and `remaining` (countdown if a database is unlocked, else `null`).
 
-When the timer fires, the `IdleTracker` invokes the same `LockCallback` that the explicit `lock` RPC uses — wipe materialized files, drop vault, clear SSH+GPG stores. `eprintln!("idle lock after {N} seconds")` is the only signal.
+When the timer fires, the `IdleTracker` invokes the same `LockCallback` that the explicit `lock` RPC uses — wipe materialized files, drop database, clear SSH+GPG stores. `eprintln!("idle lock after {N} seconds")` is the only signal.
 
 ## What's missing / known limitations
 
@@ -197,9 +197,9 @@ Honest list. None of these are show-stoppers; all of them are real.
 - **`keepass-rs` upstream contribution.** v0.0.10.0 dropped the local fork; we now depend on the published `keepass = "0.12"` from crates.io. The clean-room spec test suite in [crates/keepass-spec-tests](../crates/keepass-spec-tests/) is what we plan to contribute upstream.
 - **macOS file materialization.** APFS has no tmpfs. The "tmpfs-or-refuse" guarantee Linux gives users with `AllowDiskBacked=false` becomes a soft allowlist on macOS. Documented in the error path; users should know.
 - **Partial GPG decrypt cipher coverage.** PKDECRYPT works for ed25519+cv25519 keys produced by gpg 2.5.x with default ciphers (AES-128/192/256-KW). RSA, NIST-curve ECDH, Ed448, and other AEAD modes are out of scope and cleanly error out — but `gpg --decrypt` for a message encrypted with a non-supported scheme will fail.
-- **No keyfile / hardware-token vault unlock.** Password only. KeePassXC supports both; we will eventually.
-- **No KDBX 3 read.** KDBX 4 only. KDBX 3 vaults must be migrated by KeePassXC first.
-- **No re-materialize on `add`-while-unlocked.** Adding a `file` entry to an open vault doesn't materialize it; you have to lock and unlock. Easy follow-up.
+- **No keyfile / hardware-token database unlock.** Password only. KeePassXC supports both; we will eventually.
+- **No KDBX 3 read.** KDBX 4 only. KDBX 3 databases must be migrated by KeePassXC first.
+- **No re-materialize on `add`-while-unlocked.** Adding a `file` entry to an open database doesn't materialize it; you have to lock and unlock. Easy follow-up.
 - **No GUI.** Daemon-only project today.
 - **No sync, no per-user key sidecar.** Both are explicitly on the spec; neither is built.
 - **No browser native messaging.** The headless-daemon design supports it; nothing implemented yet.

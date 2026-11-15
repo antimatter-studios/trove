@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::materialize;
@@ -41,7 +41,7 @@ struct Daemon {
 
 impl Daemon {
     fn new() -> Self {
-        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+        let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
         let key_store: troved::ssh_agent::KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: troved::gpg_agent::GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -80,26 +80,26 @@ impl Daemon {
     }
 }
 
-fn create_vault(path: &Path) -> Vault {
-    Vault::create(path, PASSWORD).expect("create vault")
+fn create_database(path: &Path) -> Database {
+    Database::create(path, PASSWORD).expect("create database")
 }
 
 /// Build an entry that opts in to materialization.
 fn add_materialize_entry(
-    vault: &mut Vault,
+    database: &mut Database,
     title: &str,
     bytes: &[u8],
     target: &Path,
     mode: Option<&str>,
     ttl_seconds: Option<u64>,
 ) {
-    let id = vault.add_entry(title).expect("add entry");
-    vault
+    let id = database.add_entry(title).expect("add entry");
+    database
         .attach_binary(&id, "blob", bytes)
         .expect("attach binary");
     // Fields are keyed by attachment name, so one entry can describe several
     // files rather than the single one an entry-level target allowed.
-    vault
+    database
         .set_field(
             &id,
             "Materialize.blob.Target",
@@ -107,17 +107,17 @@ fn add_materialize_entry(
         )
         .expect("set Target");
     if let Some(m) = mode {
-        vault
+        database
             .set_field(&id, "Materialize.blob.Mode", m)
             .expect("set Mode");
     }
     if let Some(t) = ttl_seconds {
-        vault
+        database
             .set_field(&id, "Materialize.blob.TTL", &t.to_string())
             .expect("set TTL");
     }
     // Tempdirs aren't tmpfs on either macOS or Linux CI, so opt in explicitly.
-    vault
+    database
         .set_field(&id, "Materialize.blob.AllowDiskBacked", "true")
         .expect("set AllowDiskBacked");
 }
@@ -145,12 +145,12 @@ fn unlock_warnings(resp: &Response) -> Vec<String> {
 #[tokio::test]
 async fn unlock_writes_file_lock_wipes_it() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("kubeconfig");
     let payload = b"contents of kubeconfig\nfor cluster prod\n".to_vec();
 
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(
             &mut v,
             "prod-kubeconfig",
@@ -167,7 +167,7 @@ async fn unlock_writes_file_lock_wipes_it() {
     // Unlock — file should appear with the right mode and bytes.
     let resp = d
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -190,7 +190,7 @@ async fn unlock_writes_file_lock_wipes_it() {
     assert_eq!(arr[0]["exists"], true);
 
     // Lock — file must vanish.
-    let resp = d.handle(Request::Lock { vault: None }).await;
+    let resp = d.handle(Request::Lock { database: None }).await;
     assert!(matches!(resp, Response::Ok(_)), "lock failed: {resp:?}");
     assert!(!target.exists(), "target file should be wiped on lock");
 
@@ -202,14 +202,14 @@ async fn unlock_writes_file_lock_wipes_it() {
 }
 
 #[tokio::test]
-async fn ttl_wipes_file_while_vault_remains_unlocked() {
+async fn ttl_wipes_file_while_database_remains_unlocked() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("ttl-secret");
     let payload = b"short-lived\n".to_vec();
 
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(&mut v, "ttl-entry", &payload, &target, None, Some(1));
         v.save().expect("save");
     }
@@ -217,7 +217,7 @@ async fn ttl_wipes_file_while_vault_remains_unlocked() {
     let d = Daemon::new();
     let resp = d
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -231,27 +231,27 @@ async fn ttl_wipes_file_while_vault_remains_unlocked() {
     // Wait past the TTL.
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
-    // File should be gone, vault still unlocked.
+    // File should be gone, database still unlocked.
     assert!(!target.exists(), "TTL should have wiped the file");
 
-    // Vault still unlocked → list should succeed.
+    // Database still unlocked → list should succeed.
     let resp = d.handle(Request::List).await;
     assert!(matches!(resp, Response::Ok(_)), "list after ttl: {resp:?}");
 
     // Lock to clean up.
-    let _ = d.handle(Request::Lock { vault: None }).await;
+    let _ = d.handle(Request::Lock { database: None }).await;
 }
 
 #[tokio::test]
 async fn multi_file_unlock_and_lock() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let t1 = tmp.path().join("a");
     let t2 = tmp.path().join("b");
     let t3 = tmp.path().join("c");
 
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(&mut v, "a", b"alpha", &t1, None, None);
         add_materialize_entry(&mut v, "b", b"bravo", &t2, Some("600"), None);
         add_materialize_entry(&mut v, "c", b"charlie", &t3, Some("0644"), None);
@@ -261,7 +261,7 @@ async fn multi_file_unlock_and_lock() {
     let d = Daemon::new();
     let resp = d
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -277,7 +277,7 @@ async fn multi_file_unlock_and_lock() {
     assert_eq!(file_mode(&t2), 0o600);
     assert_eq!(file_mode(&t3), 0o644);
 
-    let resp = d.handle(Request::Lock { vault: None }).await;
+    let resp = d.handle(Request::Lock { database: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
     for p in [&t1, &t2, &t3] {
         assert!(!p.exists(), "{} should be wiped", p.display());
@@ -289,11 +289,11 @@ async fn one_bad_entry_does_not_block_others() {
     // Spec: "Failures of individual entries should NOT fail the unlock —
     // log per-entry, continue."
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let good = tmp.path().join("good");
 
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         // Good entry.
         add_materialize_entry(&mut v, "good", b"ok\n", &good, None, None);
         // Bad entry: target with `..` segment — must be rejected by validation.
@@ -313,7 +313,7 @@ async fn one_bad_entry_does_not_block_others() {
     let d = Daemon::new();
     let resp = d
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -324,7 +324,7 @@ async fn one_bad_entry_does_not_block_others() {
     assert!(matches!(resp, Response::Ok(_)), "unlock should still ok");
     assert!(good.exists(), "good entry should still materialize");
 
-    let _ = d.handle(Request::Lock { vault: None }).await;
+    let _ = d.handle(Request::Lock { database: None }).await;
 }
 
 #[tokio::test]
@@ -333,7 +333,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
     // trove creates the missing chain (mode 0700), writes the file, and wipes
     // both on lock. It must NOT silently succeed-without-writing.
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     // Two missing levels: <tmp>/a/b/secret — neither `a` nor `a/b` exist yet.
     let level1 = tmp.path().join("a");
     let level2 = level1.join("b");
@@ -341,7 +341,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
     let payload = b"secret in a missing dir\n".to_vec();
 
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(&mut v, "deep", &payload, &target, Some("600"), None);
         v.save().expect("save");
     }
@@ -349,7 +349,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
     let d = Daemon::new();
     let resp = d
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -381,7 +381,7 @@ async fn missing_parent_dir_is_created_and_file_materializes() {
     assert_eq!(arr.len(), 1, "one materialized file");
 
     // Lock: file gone AND trove's own dirs removed (they're now empty).
-    let resp = d.handle(Request::Lock { vault: None }).await;
+    let resp = d.handle(Request::Lock { database: None }).await;
     assert!(matches!(resp, Response::Ok(_)), "lock failed: {resp:?}");
     assert!(!target.exists(), "target wiped on lock");
     assert!(!level2.exists(), "trove-created dir b removed on lock");
@@ -399,7 +399,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
 
     // A directory we own but strip our own write bit from (0500).
     let locked = tmp.path().join("locked");
@@ -411,7 +411,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
     let good = tmp.path().join("good");
 
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(&mut v, "good", b"ok\n", &good, None, None);
         add_materialize_entry(&mut v, "unwritable", b"nope", &target, None, None);
         v.save().expect("save");
@@ -422,7 +422,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
     let d = Daemon::new();
     let resp = d
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -431,7 +431,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
         })
         .await;
 
-    // Unlock still ok (per spec: one bad entry doesn't break the vault) ...
+    // Unlock still ok (per spec: one bad entry doesn't break the database) ...
     assert!(matches!(resp, Response::Ok(_)), "unlock: {resp:?}");
     // ... but the failure is REFLECTED, not swallowed.
     let warnings = unlock_warnings(&resp);
@@ -446,7 +446,7 @@ async fn unwritable_target_fails_loudly_not_silently() {
     // Restore write so TempDir cleanup can remove `locked`.
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
         .expect("restore perms");
-    let _ = d.handle(Request::Lock { vault: None }).await;
+    let _ = d.handle(Request::Lock { database: None }).await;
 }
 
 #[tokio::test]
@@ -454,14 +454,14 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
     // The dir-cleanup on lock must ONLY remove dirs trove created — a
     // pre-existing directory is never touched.
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     // `existing` already exists; target sits directly in it (no dir creation).
     let existing = tmp.path().join("existing");
     std::fs::create_dir(&existing).expect("mkdir existing");
     let target = existing.join("secret");
 
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(&mut v, "e", b"payload", &target, None, None);
         v.save().expect("save");
     }
@@ -469,7 +469,7 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
     let d = Daemon::new();
     let resp = d
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -480,7 +480,7 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
     assert!(matches!(resp, Response::Ok(_)));
     assert!(target.exists());
 
-    let resp = d.handle(Request::Lock { vault: None }).await;
+    let resp = d.handle(Request::Lock { database: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
     assert!(!target.exists(), "target wiped");
     assert!(
@@ -493,9 +493,9 @@ async fn pre_existing_parent_dir_is_not_removed_on_lock() {
 async fn relock_after_lock_is_idempotent() {
     // Lock with nothing materialized must not error.
     let d = Daemon::new();
-    let resp = d.handle(Request::Lock { vault: None }).await;
+    let resp = d.handle(Request::Lock { database: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
-    let resp = d.handle(Request::Lock { vault: None }).await;
+    let resp = d.handle(Request::Lock { database: None }).await;
     assert!(matches!(resp, Response::Ok(_)));
 }
 
@@ -508,12 +508,12 @@ async fn relock_after_lock_is_idempotent() {
 #[test]
 fn one_entry_materializes_every_attachment_that_asks() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault_path = dir.path().join("multi.kdbx");
+    let database_path = dir.path().join("multi.kdbx");
     let key_target = dir.path().join("out/id_ed25519");
     let pub_target = dir.path().join("out/id_ed25519.pub");
 
     {
-        let mut v = Vault::create(&vault_path, PASSWORD).expect("create");
+        let mut v = Database::create(&database_path, PASSWORD).expect("create");
         let id = v.add_entry("Work/server").expect("add entry");
         v.attach_binary(&id, "id_ed25519", b"PRIVATE")
             .expect("attach");
@@ -538,14 +538,14 @@ fn one_entry_materializes_every_attachment_that_asks() {
         v.save().expect("save");
     }
 
-    let v = Vault::open(&vault_path, PASSWORD).expect("open");
+    let v = Database::open(&database_path, PASSWORD).expect("open");
     let (plans, errors) = materialize::build_plans(&v);
     assert!(errors.is_empty(), "no plan errors: {errors:?}");
     assert_eq!(plans.len(), 2, "one plan per attachment that asked");
 
     let store = materialize::MaterializedStore::default();
     for p in &plans {
-        materialize::materialize_one(&v, &vault_path, p, store.clone()).expect("write");
+        materialize::materialize_one(&v, &database_path, p, store.clone()).expect("write");
     }
 
     assert_eq!(std::fs::read(&key_target).expect("private"), b"PRIVATE");
@@ -564,9 +564,9 @@ fn one_entry_materializes_every_attachment_that_asks() {
 #[test]
 fn the_removed_entry_level_form_is_reported() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault_path = dir.path().join("legacy.kdbx");
+    let database_path = dir.path().join("legacy.kdbx");
     {
-        let mut v = Vault::create(&vault_path, PASSWORD).expect("create");
+        let mut v = Database::create(&database_path, PASSWORD).expect("create");
         let id = v.add_entry("Old/style").expect("add entry");
         v.attach_binary(&id, "blob", b"x").expect("attach");
         v.set_field(&id, "Materialize.Source", "blob").expect("set");
@@ -574,7 +574,7 @@ fn the_removed_entry_level_form_is_reported() {
             .expect("set");
         v.save().expect("save");
     }
-    let v = Vault::open(&vault_path, PASSWORD).expect("open");
+    let v = Database::open(&database_path, PASSWORD).expect("open");
     let (plans, errors) = materialize::build_plans(&v);
     assert!(plans.is_empty(), "nothing should be written");
     assert_eq!(errors.len(), 1, "and the entry must be named: {errors:?}");
@@ -586,10 +586,10 @@ fn the_removed_entry_level_form_is_reported() {
 }
 
 impl Daemon {
-    async fn unlock(&self, vault: &Path) {
+    async fn unlock(&self, database: &Path) {
         let resp = self
             .handle(Request::Unlock {
-                path: vault.to_string_lossy().into_owned(),
+                path: database.to_string_lossy().into_owned(),
                 password: PASSWORD.to_string(),
                 timeout: None,
                 keyfile: None,
@@ -639,17 +639,17 @@ fn inode(path: &Path) -> u64 {
 #[tokio::test]
 async fn materialize_edits_while_unlocked_take_effect_at_once() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let first = tmp.path().join("first.conf");
     let second = tmp.path().join("second.conf");
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         let id = v.add_entry("app").unwrap();
         v.attach_binary(&id, "blob", b"app config\n").unwrap();
         v.save().unwrap();
     }
     let d = Daemon::new();
-    d.unlock(&vault_path).await;
+    d.unlock(&database_path).await;
     assert!(!first.exists());
 
     // Opting in while unlocked writes the file straight away.
@@ -690,21 +690,21 @@ async fn materialize_edits_while_unlocked_take_effect_at_once() {
         body["materialized"].as_array().unwrap().is_empty(),
         "{body}"
     );
-    let _ = d.handle(Request::Lock { vault: None }).await;
+    let _ = d.handle(Request::Lock { database: None }).await;
 }
 
 #[tokio::test]
 async fn removing_a_materialized_entry_wipes_its_file() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("gone.conf");
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(&mut v, "doomed", b"x\n", &target, None, None);
         v.save().unwrap();
     }
     let d = Daemon::new();
-    d.unlock(&vault_path).await;
+    d.unlock(&database_path).await;
     assert!(target.exists());
     let resp = d
         .handle(Request::RemoveEntry {
@@ -715,18 +715,18 @@ async fn removing_a_materialized_entry_wipes_its_file() {
         .await;
     assert!(matches!(resp, Response::Ok(_)), "remove failed: {resp:?}");
     assert!(!target.exists(), "a removed entry's file must be wiped");
-    let _ = d.handle(Request::Lock { vault: None }).await;
+    let _ = d.handle(Request::Lock { database: None }).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn unrelated_writes_leave_live_and_expired_files_alone() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let live = tmp.path().join("live.conf");
     let brief = tmp.path().join("brief.conf");
     {
-        let mut v = create_vault(&vault_path);
+        let mut v = create_database(&database_path);
         add_materialize_entry(&mut v, "live", b"live\n", &live, None, None);
         add_materialize_entry(&mut v, "brief", b"brief\n", &brief, None, Some(1));
         let id = v.add_entry("other").unwrap();
@@ -734,7 +734,7 @@ async fn unrelated_writes_leave_live_and_expired_files_alone() {
         v.save().unwrap();
     }
     let d = Daemon::new();
-    d.unlock(&vault_path).await;
+    d.unlock(&database_path).await;
     let before = inode(&live);
     // Let the TTL wipe `brief`.
     for _ in 0..50 {
@@ -755,5 +755,5 @@ async fn unrelated_writes_leave_live_and_expired_files_alone() {
         !brief.exists(),
         "an unrelated edit must not bring back an expired file"
     );
-    let _ = d.handle(Request::Lock { vault: None }).await;
+    let _ = d.handle(Request::Lock { database: None }).await;
 }

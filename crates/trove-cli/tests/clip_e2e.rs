@@ -46,18 +46,22 @@ fn clip_resolves_values_and_reports() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("c.kdbx");
-    let vault = vault.to_str().unwrap();
+    let database = dir.path().join("c.kdbx");
+    let database = database.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
     let two = format!("{PASSWORD}\nclip-secret-value\n");
 
-    let out = run_trove(&trove, &["--vault", vault, "--password-stdin", "init"], &pw);
+    let out = run_trove(
+        &trove,
+        &["--database", database, "--password-stdin", "init"],
+        &pw,
+    );
     assert!(out.status.success());
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "add",
             "password",
@@ -73,15 +77,15 @@ fn clip_resolves_values_and_reports() {
     // Missing entry / missing attr fail cleanly regardless of clipboard.
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "clip", "nope"],
+        &["--database", database, "--password-stdin", "clip", "nope"],
         &pw,
     );
     assert!(!out.status.success(), "missing entry must fail");
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "clip",
             "svc",
@@ -96,8 +100,8 @@ fn clip_resolves_values_and_reports() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "clip",
             "svc",
@@ -117,8 +121,8 @@ fn clip_resolves_values_and_reports() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "clip",
             "svc",
@@ -139,8 +143,8 @@ fn clip_resolves_values_and_reports() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "clip",
             "svc",
@@ -169,19 +173,23 @@ fn detached_clearer_wipes_after_timeout() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("t.kdbx");
-    let vault = vault.to_str().unwrap();
+    let database = dir.path().join("t.kdbx");
+    let database = database.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
     let unique = format!("clearer-e2e-{}", std::process::id());
     let two = format!("{PASSWORD}\n{unique}\n");
 
-    let out = run_trove(&trove, &["--vault", vault, "--password-stdin", "init"], &pw);
+    let out = run_trove(
+        &trove,
+        &["--database", database, "--password-stdin", "init"],
+        &pw,
+    );
     assert!(out.status.success());
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "add",
             "password",
@@ -195,8 +203,8 @@ fn detached_clearer_wipes_after_timeout() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "clip",
             "wipe-me",

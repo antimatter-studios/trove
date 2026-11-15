@@ -2,7 +2,7 @@
 # Code-sign macOS binaries with a Developer ID certificate and the hardened
 # runtime.
 #
-# WHY THIS MATTERS BEYOND GATEKEEPER. troved holds decrypted vault material in
+# WHY THIS MATTERS BEYOND GATEKEEPER. troved holds decrypted database material in
 # process memory, and (with the system-agent integration on) hands SSH keys to
 # the OS agent. An *unsigned* troved can be attached to by any process running
 # as the same user — `task_for_pid` succeeds, so its memory is readable.

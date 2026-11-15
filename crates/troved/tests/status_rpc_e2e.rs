@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -36,7 +36,7 @@ struct Harness {
 
 impl Harness {
     fn new(timeout: Duration) -> Self {
-        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+        let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -73,12 +73,12 @@ impl Harness {
     }
 }
 
-fn create_simple_vault(path: &Path) {
-    let _v = Vault::create(path, PASSWORD).expect("create vault");
+fn create_simple_database(path: &Path) {
+    let _v = Database::create(path, PASSWORD).expect("create database");
 }
 
-fn create_materialize_vault(vault_path: &Path, target: &Path) {
-    let mut v = Vault::create(vault_path, PASSWORD).expect("create vault");
+fn create_materialize_database(database_path: &Path, target: &Path) {
+    let mut v = Database::create(database_path, PASSWORD).expect("create database");
     let id = v.add_entry("status-test-entry").expect("add entry");
     v.attach_binary(&id, "blob", b"status-test-payload\n")
         .expect("attach");
@@ -90,19 +90,19 @@ fn create_materialize_vault(vault_path: &Path, target: &Path) {
 }
 
 #[tokio::test]
-async fn status_when_locked_reports_no_vault_and_zero_counts() {
+async fn status_when_locked_reports_no_database_and_zero_counts() {
     let h = Harness::new(Duration::from_secs(900));
     let resp = h.handle(Request::Status).await;
     let body = serde_json::to_value(&resp).unwrap();
 
     assert_eq!(body["status"], "ok");
-    // vault_path is null when no vault is unlocked.
+    // database_path is null when no database is unlocked.
     assert!(
-        body["vault_path"].is_null(),
-        "vault_path should be null when locked: {body}"
+        body["database_path"].is_null(),
+        "database_path should be null when locked: {body}"
     );
     assert_eq!(body["idle_timeout_secs"], 900);
-    // No vault unlocked -> no remaining time.
+    // No database unlocked -> no remaining time.
     assert!(body["idle_remaining_secs"].is_null());
     assert_eq!(body["ssh_keys"], 0);
     assert_eq!(body["gpg_keys"], 0);
@@ -110,18 +110,18 @@ async fn status_when_locked_reports_no_vault_and_zero_counts() {
 }
 
 #[tokio::test]
-async fn status_when_unlocked_reports_vault_path_and_counts() {
+async fn status_when_unlocked_reports_database_path_and_counts() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("materialized");
-    create_materialize_vault(&vault_path, &target);
+    create_materialize_database(&database_path, &target);
 
     // 60s timeout; we only need a non-zero value to assert remaining is set.
     let h = Harness::new(Duration::from_secs(60));
 
     let resp = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -137,13 +137,13 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
 
     assert_eq!(body["status"], "ok");
     // The daemon canonicalises the path — it keys the unlocked set by it, so
-    // two spellings of one file must not become two vaults. On macOS the
+    // two spellings of one file must not become two databases. On macOS the
     // tempdir lives under /var, a symlink to /private/var, so comparing
     // against the raw path would fail there and nowhere else.
     assert_eq!(
-        body["vault_path"].as_str().unwrap(),
-        std::fs::canonicalize(&vault_path)
-            .expect("vault path canonicalises")
+        body["database_path"].as_str().unwrap(),
+        std::fs::canonicalize(&database_path)
+            .expect("database path canonicalises")
             .to_string_lossy()
     );
     assert_eq!(body["idle_timeout_secs"], 60);
@@ -151,7 +151,7 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
         body["idle_remaining_secs"].is_number(),
         "remaining should be present while unlocked: {body}"
     );
-    assert_eq!(body["ssh_keys"], 0); // no `id` attachments in this vault
+    assert_eq!(body["ssh_keys"], 0); // no `id` attachments in this database
     assert_eq!(body["gpg_keys"], 0); // no `gpg-priv` attachments either
     assert_eq!(body["materialized"], 1);
 }
@@ -159,13 +159,13 @@ async fn status_when_unlocked_reports_vault_path_and_counts() {
 #[tokio::test]
 async fn status_with_disabled_idle_reports_zero_timeout() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
-    create_simple_vault(&vault_path);
+    let database_path = tmp.path().join("v.kdbx");
+    create_simple_database(&database_path);
 
     let h = Harness::new(Duration::from_secs(0));
     let _ = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -185,15 +185,15 @@ async fn status_with_disabled_idle_reports_zero_timeout() {
 async fn status_request_does_not_bump_idle_timer() {
     // Status is a passive observation — polling it (e.g. `watch -n1 trove
     // status`) MUST NOT defeat auto-lock. To prove it: arm a 1s timeout,
-    // send status every 200ms for 1.6s, then verify the vault has been
+    // send status every 200ms for 1.6s, then verify the database has been
     // dropped (the timer must have fired despite the status traffic).
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
-    create_simple_vault(&vault_path);
+    let database_path = tmp.path().join("v.kdbx");
+    create_simple_database(&database_path);
 
-    // Use the "real" callback that drops the vault when it fires, so we can
+    // Use the "real" callback that drops the database when it fires, so we can
     // assert via List / direct state read.
-    let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+    let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
     let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
     let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
     let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -211,7 +211,7 @@ async fn status_request_does_not_bump_idle_timer() {
     let idle = IdleTracker::new(Duration::from_secs(1), cb);
 
     let req_unlock = Request::Unlock {
-        path: vault_path.to_string_lossy().into_owned(),
+        path: database_path.to_string_lossy().into_owned(),
         password: PASSWORD.to_string(),
         timeout: None,
         keyfile: None,
@@ -248,7 +248,7 @@ async fn status_request_does_not_bump_idle_timer() {
         .await;
     }
 
-    // Vault should be locked: status did NOT bump.
+    // Database should be locked: status did NOT bump.
     assert!(
         state.lock().await.is_empty(),
         "status must not keep the idle timer alive"
@@ -256,7 +256,7 @@ async fn status_request_does_not_bump_idle_timer() {
 }
 
 /// After unlocking, an explicit `Lock` must signal daemon shutdown: the last
-/// vault is now locked and nothing is materialized, so the daemon has no reason
+/// database is now locked and nothing is materialized, so the daemon has no reason
 /// to live (the connection loop turns `shutdown: true` into a clean exit, and
 /// the next `unlock` autospawns a fresh process). Guards the core
 /// "daemon lifetime = lifetime of the open set" invariant. The `Harness::handle`
@@ -264,13 +264,13 @@ async fn status_request_does_not_bump_idle_timer() {
 #[tokio::test]
 async fn lock_signals_daemon_shutdown_when_open_set_empties() {
     let dir = TempDir::new().expect("tempdir");
-    let vault = dir.path().join("v.kdbx");
-    create_simple_vault(&vault);
+    let database = dir.path().join("v.kdbx");
+    create_simple_database(&database);
 
     let h = Harness::new(Duration::from_secs(900));
     let resp = h
         .handle(Request::Unlock {
-            path: vault.to_string_lossy().into_owned(),
+            path: database.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -281,7 +281,7 @@ async fn lock_signals_daemon_shutdown_when_open_set_empties() {
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
 
     let handled = handle(
-        Request::Lock { vault: None },
+        Request::Lock { database: None },
         &h.state,
         &h.key_store,
         &h.gpg_store,
@@ -294,20 +294,20 @@ async fn lock_signals_daemon_shutdown_when_open_set_empties() {
     .await;
     assert!(
         handled.shutdown,
-        "Lock must signal shutdown once no vault is open and nothing is materialized"
+        "Lock must signal shutdown once no database is open and nothing is materialized"
     );
 }
 
-/// Build a vault with one SSH key entry (`id` + `KeeAgent.settings`) so an
+/// Build a database with one SSH key entry (`id` + `KeeAgent.settings`) so an
 /// unlock loads it into the agent key store. The key is minted with trove's own
 /// generator.
-fn create_ssh_vault(path: &Path) {
+fn create_ssh_database(path: &Path) {
     let key_pem = troved::ssh_agent::keys::generate_private_key(
         troved::ssh_agent::keys::KeyType::Ed25519,
         "agent@test",
     )
     .expect("generate key");
-    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+    let mut v = Database::create(path, PASSWORD).expect("create database");
     let id = v.add_entry("server").expect("add entry");
     v.attach_binary(&id, "id", &key_pem).expect("attach id");
     let settings = troved::ssh_agent::keeagent::settings_xml("id");
@@ -321,13 +321,13 @@ fn create_ssh_vault(path: &Path) {
 #[tokio::test]
 async fn ssh_agent_list_returns_served_keys() {
     let dir = TempDir::new().expect("tempdir");
-    let vault = dir.path().join("v.kdbx");
-    create_ssh_vault(&vault);
+    let database = dir.path().join("v.kdbx");
+    create_ssh_database(&database);
 
     let h = Harness::new(Duration::from_secs(900));
     let resp = h
         .handle(Request::Unlock {
-            path: vault.to_string_lossy().into_owned(),
+            path: database.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -350,7 +350,7 @@ async fn ssh_agent_list_returns_served_keys() {
 }
 
 /// `GetVersion` reports the daemon's build version (the drift-check handshake),
-/// and works even while locked — no vault required.
+/// and works even while locked — no database required.
 #[tokio::test]
 async fn get_version_reports_build_version_while_locked() {
     let h = Harness::new(Duration::from_secs(900));
@@ -369,7 +369,7 @@ async fn get_version_reports_build_version_while_locked() {
 }
 
 /// `GpgAgentList` returns an empty list when no GPG keys are loaded (locked, or
-/// a vault without `gpg-priv` attachments) — never an error.
+/// a database without `gpg-priv` attachments) — never an error.
 #[tokio::test]
 async fn gpg_agent_list_empty_when_no_keys() {
     let h = Harness::new(Duration::from_secs(900));

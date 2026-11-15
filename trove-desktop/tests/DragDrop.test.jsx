@@ -30,14 +30,15 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('../src/api.js', () => ({
   entryCapabilities: vi.fn(() => Promise.resolve([])),
   groupCapabilities: vi.fn(() => Promise.resolve([])),
-  listVaults: vi.fn(),
-  registerVault: vi.fn(),
-  createVault: vi.fn(),
-  unlockVault: vi.fn(),
-  lockVault: vi.fn(),
+  listDatabases: vi.fn(),
+  registerDatabase: vi.fn(),
+  createDatabase: vi.fn(),
+  unlockDatabase: vi.fn(),
+  lockDatabase: vi.fn(),
   listEntries: vi.fn(),
   listGroups: vi.fn(),
   setGroupTags: vi.fn(),
+  getDatabaseMetadata: vi.fn(() => Promise.resolve({ troveUuid: null })),
   getField: vi.fn(),
   getEntryDetail: vi.fn(),
   saveEntry: vi.fn(),
@@ -47,8 +48,8 @@ vi.mock('../src/api.js', () => ({
   buildInfo: vi.fn(),
   setAgentKey: vi.fn(),
   setSettings: vi.fn(),
-  vaultChangedOnDisk: vi.fn(),
-  reloadVault: vi.fn(),
+  databaseChangedOnDisk: vi.fn(),
+  reloadDatabase: vi.fn(),
   biometricStatus: vi.fn(),
   biometricUnlock: vi.fn(),
   biometricEnroll: vi.fn(),
@@ -81,9 +82,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.buildInfo.mockResolvedValue({ version: '0.8.0' });
   api.getSettings.mockResolvedValue({});
-  api.vaultChangedOnDisk.mockResolvedValue(false);
+  api.databaseChangedOnDisk.mockResolvedValue(false);
   api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
-  api.listVaults.mockResolvedValue([{ id: 'v1', name: 'P', file: 'p.kdbx', path: '/p.kdbx', locked: false }]);
+  api.listDatabases.mockResolvedValue([{ id: 'v1', name: 'P', file: 'p.kdbx', path: '/p.kdbx', locked: false }]);
   api.listEntries.mockResolvedValue(ENTRIES);
   api.listGroups.mockResolvedValue(GROUPS);
   api.getEntryDetail.mockResolvedValue({ notes: '', fields: [], password: '' });
@@ -93,7 +94,10 @@ beforeEach(() => {
 
 async function openApp() {
   const view = render(<App />);
-  await waitFor(() => expect(view.container.querySelectorAll('.erow').length).toBe(2));
+  // A database opens in the folder of its first entry (there is no All
+  // entries view since the Library section went), so mail in Alpha is listed.
+  await waitFor(() => expect(view.container.querySelectorAll('.erow').length).toBe(1));
+  expect(view.container.querySelector('.erow').textContent).toContain('mail');
   return view;
 }
 const startDrag = (el, init = {}) => fireEvent.pointerDown(el, { button: 0, clientX: 500, clientY: 500, ...init });

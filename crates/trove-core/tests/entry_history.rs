@@ -1,7 +1,7 @@
 //! Entry history on trove's own writes.
 //!
 //! KeePassXC files the previous state of an entry as a history version on
-//! every edit. trove must do the same, or a vault shared between the two loses
+//! every edit. trove must do the same, or a database shared between the two loses
 //! the value each trove edit replaces. Every test saves, then reads the file
 //! back with the `keepass` crate directly, so what is checked is what landed on
 //! disk.
@@ -12,12 +12,12 @@ use std::path::Path;
 
 use keepass::db::fields;
 use tempfile::TempDir;
-use trove_core::Vault;
+use trove_core::Database;
 
 const PW: &str = "test password";
 
 fn open_raw(path: &Path) -> keepass::Database {
-    let mut file = std::fs::File::open(path).expect("open vault file");
+    let mut file = std::fs::File::open(path).expect("open database file");
     keepass::Database::open(&mut file, keepass::DatabaseKey::new().with_password(PW))
         .expect("keepass opens trove's file")
 }
@@ -55,23 +55,23 @@ fn users(history: &[Version]) -> Vec<&str> {
     history.iter().map(|(u, _)| u.as_str()).collect()
 }
 
-fn vault_with_entry(dir: &TempDir) -> (std::path::PathBuf, Vault, trove_core::EntryId) {
+fn database_with_entry(dir: &TempDir) -> (std::path::PathBuf, Database, trove_core::EntryId) {
     let path = dir.path().join("t.kdbx");
-    let mut vault = Vault::create(&path, PW).expect("create");
-    let id = vault.add_entry("e").expect("add");
-    vault.set_field(&id, "UserName", "alice").expect("set");
-    vault.save().expect("save");
-    (path, vault, id)
+    let mut database = Database::create(&path, PW).expect("create");
+    let id = database.add_entry("e").expect("add");
+    database.set_field(&id, "UserName", "alice").expect("set");
+    database.save().expect("save");
+    (path, database, id)
 }
 
 #[test]
 fn an_edit_files_the_previous_state_as_history() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.set_field(&id, "UserName", "bob").unwrap();
-    vault.save().unwrap();
-    vault.set_field(&id, "UserName", "carol").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.set_field(&id, "UserName", "bob").unwrap();
+    database.save().unwrap();
+    database.set_field(&id, "UserName", "carol").unwrap();
+    database.save().unwrap();
 
     assert_eq!(users(&history_of(&path, "e")), ["alice", "bob"]);
 }
@@ -79,18 +79,20 @@ fn an_edit_files_the_previous_state_as_history() {
 #[test]
 fn a_new_entry_has_no_history() {
     let dir = TempDir::new().unwrap();
-    let (path, _vault, _id) = vault_with_entry(&dir);
+    let (path, _database, _id) = database_with_entry(&dir);
     assert!(history_of(&path, "e").is_empty());
 }
 
 #[test]
 fn several_changes_in_one_save_are_one_version() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.set_field(&id, "UserName", "bob").unwrap();
-    vault.set_field(&id, "URL", "https://example.test").unwrap();
-    vault.set_field(&id, "Notes", "n").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.set_field(&id, "UserName", "bob").unwrap();
+    database
+        .set_field(&id, "URL", "https://example.test")
+        .unwrap();
+    database.set_field(&id, "Notes", "n").unwrap();
+    database.save().unwrap();
 
     assert_eq!(users(&history_of(&path, "e")), ["alice"]);
 }
@@ -98,20 +100,22 @@ fn several_changes_in_one_save_are_one_version() {
 #[test]
 fn rewriting_the_same_value_files_nothing() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.set_field(&id, "UserName", "alice").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.set_field(&id, "UserName", "alice").unwrap();
+    database.save().unwrap();
 
     assert!(history_of(&path, "e").is_empty());
 }
 
 #[test]
-fn history_is_capped_at_the_vault_limit() {
+fn history_is_capped_at_the_database_limit() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
+    let (path, mut database, id) = database_with_entry(&dir);
     for n in 0..15 {
-        vault.set_field(&id, "UserName", &format!("u{n}")).unwrap();
-        vault.save().unwrap();
+        database
+            .set_field(&id, "UserName", &format!("u{n}"))
+            .unwrap();
+        database.save().unwrap();
     }
 
     // KeePassXC's default (and trove's backfilled) HistoryMaxItems is 10;
@@ -125,9 +129,9 @@ fn history_is_capped_at_the_vault_limit() {
 #[test]
 fn removing_a_field_is_a_change() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.remove_field(&id, "UserName").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.remove_field(&id, "UserName").unwrap();
+    database.save().unwrap();
 
     assert_eq!(users(&history_of(&path, "e")), ["alice"]);
 }
@@ -135,17 +139,17 @@ fn removing_a_field_is_a_change() {
 #[test]
 fn a_version_never_points_at_the_wrong_attachment() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.attach_binary(&id, "key", b"old key").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.attach_binary(&id, "key", b"old key").unwrap();
+    database.save().unwrap();
 
     // Replacing an attachment frees the old bytes and reuses their id for
     // the new ones. A version pointing at that id would claim the new key
     // was the old one. The field change makes the entry differ, so a
     // version is considered at all.
-    vault.attach_binary(&id, "key", b"new key").unwrap();
-    vault.set_field(&id, "UserName", "bob").unwrap();
-    vault.save().unwrap();
+    database.attach_binary(&id, "key", b"new key").unwrap();
+    database.set_field(&id, "UserName", "bob").unwrap();
+    database.save().unwrap();
 
     for (_, attachments) in history_of(&path, "e") {
         for (name, bytes) in attachments {
@@ -155,7 +159,7 @@ fn a_version_never_points_at_the_wrong_attachment() {
             );
         }
     }
-    let reopened = Vault::open(&path, PW).unwrap();
+    let reopened = Database::open(&path, PW).unwrap();
     let id = reopened.find_by_title("e").unwrap();
     assert_eq!(
         reopened.read_binary(&id, "key").unwrap().as_deref(),
@@ -166,11 +170,11 @@ fn a_version_never_points_at_the_wrong_attachment() {
 #[test]
 fn field_edits_keep_attachments_in_history() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.attach_binary(&id, "key", b"key bytes").unwrap();
-    vault.save().unwrap();
-    vault.set_field(&id, "UserName", "bob").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.attach_binary(&id, "key", b"key bytes").unwrap();
+    database.save().unwrap();
+    database.set_field(&id, "UserName", "bob").unwrap();
+    database.save().unwrap();
 
     // Oldest first: alice before the attachment, then alice with it.
     let history = history_of(&path, "e");
@@ -185,18 +189,18 @@ fn field_edits_keep_attachments_in_history() {
 #[test]
 fn replacing_an_attachment_keeps_the_old_one_in_history() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.attach_binary(&id, "key", b"old key").unwrap();
-    vault.save().unwrap();
-    vault.attach_binary(&id, "key", b"new key").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.attach_binary(&id, "key", b"old key").unwrap();
+    database.save().unwrap();
+    database.attach_binary(&id, "key", b"new key").unwrap();
+    database.save().unwrap();
 
     let history = history_of(&path, "e");
     assert_eq!(
         history.last().unwrap().1,
         vec![("key".to_string(), b"old key".to_vec())]
     );
-    let reopened = Vault::open(&path, PW).unwrap();
+    let reopened = Database::open(&path, PW).unwrap();
     assert_eq!(
         reopened.read_binary(&id, "key").unwrap().as_deref(),
         Some(&b"new key"[..])
@@ -206,37 +210,37 @@ fn replacing_an_attachment_keeps_the_old_one_in_history() {
 #[test]
 fn removing_an_attachment_keeps_it_in_history() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.attach_binary(&id, "key", b"old key").unwrap();
-    vault.save().unwrap();
-    vault.remove_binary(&id, "key").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.attach_binary(&id, "key", b"old key").unwrap();
+    database.save().unwrap();
+    database.remove_binary(&id, "key").unwrap();
+    database.save().unwrap();
 
     let history = history_of(&path, "e");
     assert_eq!(
         history.last().unwrap().1,
         vec![("key".to_string(), b"old key".to_vec())]
     );
-    let reopened = Vault::open(&path, PW).unwrap();
+    let reopened = Database::open(&path, PW).unwrap();
     assert_eq!(reopened.read_binary(&id, "key").unwrap(), None);
 }
 
 #[test]
 fn an_attachment_only_trimmed_history_used_leaves_the_file() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
-    vault.attach_binary(&id, "key", b"old key").unwrap();
-    vault.save().unwrap();
-    vault.remove_binary(&id, "key").unwrap();
-    vault.save().unwrap();
+    let (path, mut database, id) = database_with_entry(&dir);
+    database.attach_binary(&id, "key", b"old key").unwrap();
+    database.save().unwrap();
+    database.remove_binary(&id, "key").unwrap();
+    database.save().unwrap();
     assert_eq!(open_raw(&path).num_attachments(), 1);
 
     // The default cap is 10 versions: enough edits push the one with the key out.
     for i in 0..12 {
-        vault
+        database
             .set_field(&id, "UserName", &format!("user{i}"))
             .unwrap();
-        vault.save().unwrap();
+        database.save().unwrap();
     }
     assert!(history_of(&path, "e").iter().all(|(_, a)| a.is_empty()));
     assert_eq!(open_raw(&path).num_attachments(), 0);
@@ -247,12 +251,14 @@ fn an_attachment_only_trimmed_history_used_leaves_the_file() {
 /// edit, and the current version no longer has it. trove's own removal drops
 /// the history's reference too, so the file is rewritten with the crate.
 fn entry_with_key_only_in_history(dir: &TempDir) -> (std::path::PathBuf, trove_core::EntryId) {
-    let (path, mut vault, id) = vault_with_entry(dir);
-    vault.attach_binary(&id, "key", b"old private key").unwrap();
-    vault.save().unwrap();
-    vault.set_field(&id, "UserName", "bob").unwrap();
-    vault.save().unwrap();
-    drop(vault);
+    let (path, mut database, id) = database_with_entry(dir);
+    database
+        .attach_binary(&id, "key", b"old private key")
+        .unwrap();
+    database.save().unwrap();
+    database.set_field(&id, "UserName", "bob").unwrap();
+    database.save().unwrap();
+    drop(database);
 
     let mut db = open_raw(&path);
     let entry_id = db
@@ -281,9 +287,9 @@ fn entry_with_key_only_in_history(dir: &TempDir) -> (std::path::PathBuf, trove_c
 fn a_destroyed_entry_takes_its_history_attachments_with_it() {
     let dir = TempDir::new().unwrap();
     let (path, id) = entry_with_key_only_in_history(&dir);
-    let mut vault = Vault::open(&path, PW).unwrap();
-    assert!(!vault.recycle_entry(&id, true).unwrap());
-    vault.save().unwrap();
+    let mut database = Database::open(&path, PW).unwrap();
+    assert!(!database.recycle_entry(&id, true).unwrap());
+    database.save().unwrap();
 
     assert_eq!(open_raw(&path).num_attachments(), 0);
 }
@@ -292,12 +298,12 @@ fn a_destroyed_entry_takes_its_history_attachments_with_it() {
 fn a_destroyed_group_takes_its_entries_history_attachments_with_it() {
     let dir = TempDir::new().unwrap();
     let (path, id) = entry_with_key_only_in_history(&dir);
-    let mut vault = Vault::open(&path, PW).unwrap();
-    vault.add_group("g").unwrap();
-    vault.move_entry(&id, "g").unwrap();
-    vault.save().unwrap();
-    assert!(!vault.remove_group("g", true, true).unwrap());
-    vault.save().unwrap();
+    let mut database = Database::open(&path, PW).unwrap();
+    database.add_group("g").unwrap();
+    database.move_entry(&id, "g").unwrap();
+    database.save().unwrap();
+    assert!(!database.remove_group("g", true, true).unwrap());
+    database.save().unwrap();
 
     assert_eq!(open_raw(&path).num_attachments(), 0);
 }
@@ -309,13 +315,13 @@ fn a_destroyed_group_takes_its_entries_history_attachments_with_it() {
 #[test]
 fn an_unchanged_attachment_does_not_use_up_the_history_size() {
     let dir = TempDir::new().unwrap();
-    let (path, mut vault, id) = vault_with_entry(&dir);
+    let (path, mut database, id) = database_with_entry(&dir);
     let key_file: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
-    vault.attach_binary(&id, "key", &key_file).unwrap();
-    vault.save().unwrap();
+    database.attach_binary(&id, "key", &key_file).unwrap();
+    database.save().unwrap();
     for user in ["bob", "carol", "dave", "erin", "frank"] {
-        vault.set_field(&id, "UserName", user).unwrap();
-        vault.save().unwrap();
+        database.set_field(&id, "UserName", user).unwrap();
+        database.save().unwrap();
     }
 
     assert_eq!(

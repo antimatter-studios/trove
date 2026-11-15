@@ -1,5 +1,5 @@
 //! GPG agent socket: speaks the Assuan protocol against an in-memory
-//! ed25519 key store loaded from vault attachments named `gpg-priv`.
+//! ed25519 key store loaded from database attachments named `gpg-priv`.
 //!
 //! ## Scope
 //!
@@ -9,7 +9,7 @@
 //!   * GENKEY / IMPORT_KEY (key generation/import);
 //!   * PASSWD (passphrase change);
 //!   * pinentry interaction (we never prompt — keys are unlocked when the
-//!     vault is unlocked, and that's it);
+//!     database is unlocked, and that's it);
 //!   * smartcard daemon proxying.
 //!
 //! Anything else returns a clear `ERR` so the client surfaces a meaningful
@@ -18,7 +18,7 @@
 //! ## Lifecycle
 //!
 //! Mirrors the SSH agent: socket bound at troved startup, key store empty
-//! until vault unlock populates it, cleared on lock or shutdown.
+//! until database unlock populates it, cleared on lock or shutdown.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -192,7 +192,7 @@ async fn handle_command(
         }
 
         // `gpgconf --kill gpg-agent` sends KILLAGENT. A real gpg-agent exits;
-        // troved also serves the vault and the SSH agent, so it only closes
+        // troved also serves the database and the SSH agent, so it only closes
         // this connection. `trove lock` is what drops the keys.
         "KILLAGENT" => {
             let _ = write_ok_with(w, "closing connection").await;
@@ -280,7 +280,7 @@ async fn handle_command(
             let keys = store.read().await;
             // Field 6 is the protection status: `P` = needs a passphrase,
             // `C` = stored in the clear, `-` = unknown. Our keys are held
-            // unprotected in memory (the vault is the encryption boundary), so
+            // unprotected in memory (the database is the encryption boundary), so
             // `C` is the truthful answer. Reporting `P` made gpg expect a
             // pinentry exchange that never comes, and it gave up with the
             // deeply unhelpful "No secret key" — see `gpg_rsa_signing_e2e`.

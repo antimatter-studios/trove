@@ -3,7 +3,7 @@
 
 //! TOTP interop against the `keepassxc-cli` oracle: an `otp` field trove
 //! writes must yield the SAME code in keepassxc (`show --totp`) within the
-//! same 30-second window, and vice versa for a keepassxc-authored vault.
+//! same 30-second window, and vice versa for a keepassxc-authored database.
 //!
 //! Window-roll handling: the two tools are invoked one after another, so a
 //! code boundary can fall between them. Each comparison retries once — two
@@ -15,7 +15,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use matrix::{keepassxc_party, trove_party, Config, EntrySpec, KeyMaterial, VaultSpec};
+use matrix::{keepassxc_party, trove_party, Config, EntrySpec, KeyMaterial, DatabaseSpec};
 
 const PASSWORD: &str = "interop-totp-pw";
 const SECRET_B32: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -65,7 +65,7 @@ fn oracles() -> Vec<keepassxc_party::Oracle> {
 fn trove_code(trove: &Path, db: &str, entry: &str, pw: &str) -> String {
     run_ok(
         trove,
-        &["--vault", db, "--password-stdin", "show", entry, "--totp"],
+        &["--database", db, "--password-stdin", "show", entry, "--totp"],
         pw,
     )
     .trim_end()
@@ -104,11 +104,11 @@ fn trove_totp_matches_keepassxc() {
     let dbs = db.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
 
-    run_ok(&trove, &["--vault", dbs, "--password-stdin", "init"], &pw);
+    run_ok(&trove, &["--database", dbs, "--password-stdin", "init"], &pw);
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             dbs,
             "--password-stdin",
             "add",
@@ -129,7 +129,7 @@ fn trove_totp_matches_keepassxc() {
     }
 }
 
-/// keepassxc-authored vault carrying an otp field → trove computes the same
+/// keepassxc-authored database carrying an otp field → trove computes the same
 /// code keepassxc does.
 #[test]
 fn keepassxc_totp_matches_trove() {
@@ -138,7 +138,7 @@ fn keepassxc_totp_matches_trove() {
     let uri = format!("otpauth://totp/kpxc:2fa?secret={SECRET_B32}&period=30&digits=6");
 
     for oracle in oracles() {
-        let spec = VaultSpec {
+        let spec = DatabaseSpec {
             name: "interop-totp".to_string(),
             password: PASSWORD,
             key: KeyMaterial::Password,
@@ -159,7 +159,7 @@ fn keepassxc_totp_matches_trove() {
             .unwrap_or_else(|e| panic!("keepassxc produce: {e}"));
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("kpxc.kdbx");
-        std::fs::write(&db, &bytes).expect("write vault");
+        std::fs::write(&db, &bytes).expect("write database");
         let dbs = db.to_str().unwrap();
 
         assert_same_code(

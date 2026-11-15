@@ -8,12 +8,12 @@
 //!   1. trove's output is a valid KDBX carrying its extension fields
 //!      (`Materialize.*`, `KeeAgent.settings`, attachments) — readable by the
 //!      keepass crate.
-//!   2. trove can OPEN a keepass-crate-produced vault and enumerate the right
+//!   2. trove can OPEN a keepass-crate-produced database and enumerate the right
 //!      entries/groups.
 //!   3. trove's output is openable by keepassxc, and its extension fields
 //!      survive a keepassxc open+save (trove now writes KDBX 4.1 with the empty
 //!      numeric `<Meta>` defect gone).
-//!   4. trove HEALS a legacy keepass-0.12.5 KDBX 4.0 vault on re-save: it bumps
+//!   4. trove HEALS a legacy keepass-0.12.5 KDBX 4.0 database on re-save: it bumps
 //!      the file to 4.1 and re-emits `<Meta>` without the empty numerics that
 //!      made keepassxc reject it ("Invalid number value").
 //!
@@ -23,16 +23,16 @@
 mod matrix;
 
 use matrix::{crate_party, fixtures, keepassxc_party, trove_party};
-use matrix::{EntrySpec, VaultSpec};
+use matrix::{EntrySpec, DatabaseSpec};
 use trove_party::{Trove, TroveAdd};
 
 const PW: &str = "demopass";
 
-/// A minimal password-only [`VaultSpec`] for the credential-bearing calls
-/// (`consume` / `resave`) against a trove-produced vault — trove is
+/// A minimal password-only [`DatabaseSpec`] for the credential-bearing calls
+/// (`consume` / `resave`) against a trove-produced database — trove is
 /// password-only, and these calls only read `password` + the (absent) keyfile.
-fn pw_spec() -> VaultSpec {
-    VaultSpec {
+fn pw_spec() -> DatabaseSpec {
+    DatabaseSpec {
         name: "trove-output".to_string(),
         password: PW,
         key: matrix::KeyMaterial::Password,
@@ -64,7 +64,7 @@ QFBgc=
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-/// The shared two-entry trove vault used by tests 1 and 3: one SSH entry and one
+/// The shared two-entry trove database used by tests 1 and 3: one SSH entry and one
 /// materialize-file entry, exercising both attachment kinds and trove's two
 /// extension-field families.
 fn sample_adds() -> Vec<TroveAdd> {
@@ -95,7 +95,7 @@ fn trove_output_is_readable_by_keepass_crate() {
     let trove = require_trove();
 
     let bytes =
-        trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a vault");
+        trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a database");
 
     // The keepass crate (0.13.13) reads everything back with full fidelity.
     let repr = crate_party::kp013::consume(&bytes, &pw_spec())
@@ -159,16 +159,16 @@ fn trove_output_is_readable_by_keepass_crate() {
     }
 }
 
-/// 2. trove can OPEN a keepass-crate-produced vault and enumerate the right
-///    entries/groups. We mint the `nested-groups` fixture with kp013 (a vault
+/// 2. trove can OPEN a keepass-crate-produced database and enumerate the right
+///    entries/groups. We mint the `nested-groups` fixture with kp013 (a database
 ///    trove's 0.12.5 reader handles fine — the Meta bug is a *write* defect, not
 ///    a read one), then `trove list` it and assert the recovered entry PATHS
 ///    match the fixture's expected set.
 #[test]
-fn trove_can_read_crate_produced_vault() {
+fn trove_can_read_crate_produced_database() {
     let trove = require_trove();
 
-    let spec: VaultSpec = fixtures::all()
+    let spec: DatabaseSpec = fixtures::all()
         .into_iter()
         .find(|s| s.name == "nested-groups")
         .expect("the `nested-groups` fixture should exist");
@@ -177,7 +177,7 @@ fn trove_can_read_crate_produced_vault() {
         .expect("keepass crate should produce the nested-groups fixture");
 
     let repr = trove_party::consume(&trove, &bytes, spec.password)
-        .expect("trove should open and list a keepass-crate vault");
+        .expect("trove should open and list a keepass-crate database");
 
     // trove list reports paths (+ attachment names); compare the PATH SET.
     let got: std::collections::BTreeSet<String> = repr.keys().cloned().collect();
@@ -193,10 +193,10 @@ fn trove_can_read_crate_produced_vault() {
 /// 3. trove's output is READABLE by keepassxc, and trove's extension fields
 ///    survive a keepassxc open-and-save. This is the product-level proof that
 ///    finding F1 is fixed: before the keepass 0.12.5 → 0.13.13 upgrade, keepassxc
-///    rejected every trove vault with "Invalid number value" (empty numeric
+///    rejected every trove database with "Invalid number value" (empty numeric
 ///    `<Meta>` elements); 0.13.13 omits unset numerics and trove now writes
 ///    KDBX 4.1, which keepassxc opens. We then have keepassxc OPEN AND SAVE the
-///    vault and confirm trove's `Materialize.*` instructions, `KeeAgent.settings`
+///    database and confirm trove's `Materialize.*` instructions, `KeeAgent.settings`
 ///    and `id` attachments come back byte-for-byte — mirroring
 ///    `keepassxc_preserves_extensions_across_open_and_save` in
 ///    `conformance_matrix.rs`, but driven by the real trove binary.
@@ -218,17 +218,17 @@ fn trove_output_is_readable_by_keepassxc_and_survives_open_and_save() {
     );
 
     let bytes =
-        trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a vault");
+        trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a database");
 
-    // What the keepass crate sees in trove's vault before keepassxc touches it.
+    // What the keepass crate sees in trove's database before keepassxc touches it.
     let before = crate_party::kp013::consume(&bytes, &pw_spec())
         .expect("keepass crate should open trove's output");
 
     for oracle in &oracles {
-        // keepassxc must OPEN trove's KDBX 4.1 vault and SAVE it back — the F1 fix.
+        // keepassxc must OPEN trove's KDBX 4.1 database and SAVE it back — the F1 fix.
         let resaved = keepassxc_party::resave(oracle, &bytes, &pw_spec()).unwrap_or_else(|e| {
             panic!(
-                "keepassxc@{} should open trove's KDBX 4.1 vault and save it, but failed: {e}\n\
+                "keepassxc@{} should open trove's KDBX 4.1 database and save it, but failed: {e}\n\
                  (a 'number' error here means trove regressed to empty numeric <Meta> elements)",
                 oracle.version
             )
@@ -237,7 +237,7 @@ fn trove_output_is_readable_by_keepassxc_and_survives_open_and_save() {
         // trove's instruction data (Materialize.*, KeeAgent.settings, id) must
         // survive keepassxc's open+save untouched.
         let after = crate_party::kp013::consume(&resaved, &pw_spec())
-            .expect("keepass crate should re-open the keepassxc-resaved vault");
+            .expect("keepass crate should re-open the keepassxc-resaved database");
         assert_eq!(
             before, after,
             "keepassxc@{} must preserve trove's Materialize.*/KeeAgent.settings/attachments across open+save",
@@ -259,16 +259,16 @@ fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
         "no keepassxc-cli found — this oracle test must not be skipped"
     );
     let bytes =
-        trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a vault");
+        trove_party::produce(&trove, PW, &sample_adds()).expect("trove should produce a database");
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("v.kdbx");
-    std::fs::write(&vault, &bytes).expect("write vault");
+    let database = dir.path().join("v.kdbx");
+    std::fs::write(&database, &bytes).expect("write database");
 
     let t = |args: &[&str]| -> String {
         use std::io::Write;
         let mut child = std::process::Command::new(&trove.path)
-            .arg("--vault")
-            .arg(&vault)
+            .arg("--database")
+            .arg(&database)
             .arg("--password-stdin")
             .args(args)
             .env("TROVE_NO_AUTOSPAWN", "1")
@@ -305,7 +305,7 @@ fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
     t(&[
         "env-agent",
         "defaults",
-        "--database",
+        "--at-database",
         "--confirm",
         "--lifetime",
         "600",
@@ -319,7 +319,7 @@ fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
                 "--group",
                 "--json",
             ]),
-            t(&["settings", "show", "--database", "--json"]),
+            t(&["settings", "show", "--at-database", "--json"]),
         )
     };
     let before = show();
@@ -328,11 +328,11 @@ fn keepassxc_preserves_group_and_database_settings_across_open_and_save() {
 
     // Every oracle starts from trove's own file. `resave` adds a fixed group, so
     // feeding one oracle's output to the next would fail with "already exists".
-    let trove_written = std::fs::read(&vault).expect("read vault");
+    let trove_written = std::fs::read(&database).expect("read database");
     for oracle in &oracles {
         let resaved = keepassxc_party::resave(oracle, &trove_written, &pw_spec())
             .unwrap_or_else(|e| panic!("keepassxc@{} open+save failed: {e}", oracle.version));
-        std::fs::write(&vault, &resaved).expect("write resaved vault");
+        std::fs::write(&database, &resaved).expect("write resaved database");
         assert_eq!(
             show(),
             before,
@@ -354,18 +354,18 @@ fn kdbx4_minor(bytes: &[u8]) -> u16 {
     u16::from_le_bytes([bytes[8], bytes[9]])
 }
 
-/// 4. trove HEALS a legacy KDBX 4.0 vault on re-save. A vault written by keepass
+/// 4. trove HEALS a legacy KDBX 4.0 database on re-save. A database written by keepass
 ///    0.12.5 (KDBX 4.0, with empty numeric `<Meta>` elements) is rejected by
 ///    keepassxc with "Invalid number value". Current trove (keepass 0.13.13)
 ///    opens it, and on save (a) bumps the version to KDBX 4.1 and (b) re-emits
 ///    `<Meta>` without the empty numerics — so keepassxc then opens it cleanly.
 ///
-///    This guards the `Vault::save()` fix: the version bump (otherwise the
+///    This guards the `Database::save()` fix: the version bump (otherwise the
 ///    0.13.13 writer rejects KDB4(0) with "Unsupported database version") and
 ///    the Meta default-policy backfill.
 ///
 ///    REGRESSION WATCH: a failure at the `resave_with_added_ssh` step means
-///    trove can no longer rewrite a legacy 4.0 vault (version bump dropped); a
+///    trove can no longer rewrite a legacy 4.0 database (version bump dropped); a
 ///    failure at the final keepassxc read means the empty-`<Meta>` defect is
 ///    back, or trove stopped writing 4.1.
 #[test]
@@ -380,12 +380,12 @@ fn trove_resave_heals_legacy_kdbx4_0_for_keepassxc() {
          TROVE_KEEPASSXC_CLI / TROVE_KEEPASSXC_CLIS (colon-separated paths)."
     );
 
-    // A legacy vault as old trove wrote it: keepass 0.12.5, KDBX 4.0 (minor 0
+    // A legacy database as old trove wrote it: keepass 0.12.5, KDBX 4.0 (minor 0
     // forced explicitly rather than relying on 0.12.5's native default).
     let mut legacy_spec = pw_spec();
     legacy_spec.config.kdbx4_minor = Some(0);
     let legacy = crate_party::kp012::produce(&legacy_spec)
-        .expect("keepass 0.12.5 should produce a legacy vault");
+        .expect("keepass 0.12.5 should produce a legacy database");
 
     // Precondition: it really is 4.0, and keepassxc really rejects it with the
     // documented numeric-<Meta> error. (If this stops holding, the bug or the
@@ -393,15 +393,15 @@ fn trove_resave_heals_legacy_kdbx4_0_for_keepassxc() {
     assert_eq!(kdbx4_minor(&legacy), 0, "legacy fixture must be KDBX 4.0");
     for oracle in &oracles {
         let err = keepassxc_party::consume(oracle, &legacy, &pw_spec())
-            .expect_err("keepassxc must reject the legacy 0.12.5 4.0 vault");
+            .expect_err("keepassxc must reject the legacy 0.12.5 4.0 database");
         assert!(
             err.to_lowercase().contains("number"),
-            "keepassxc@{} should reject the legacy vault with a numeric-<Meta> error, got: {err}",
+            "keepassxc@{} should reject the legacy database with a numeric-<Meta> error, got: {err}",
             oracle.version
         );
     }
 
-    // trove opens the legacy 4.0 vault and re-saves it (adding one SSH entry to
+    // trove opens the legacy 4.0 database and re-saves it (adding one SSH entry to
     // force the write). This must succeed — pre-fix it failed with
     // "Unsupported database version".
     let healed = trove_party::resave_with_added_ssh(
@@ -411,18 +411,18 @@ fn trove_resave_heals_legacy_kdbx4_0_for_keepassxc() {
         "github.com",
         TEST_ED25519_KEY.as_bytes(),
     )
-    .expect("trove should open and re-save a legacy KDBX 4.0 vault");
+    .expect("trove should open and re-save a legacy KDBX 4.0 database");
 
     // The rewrite is KDBX 4.1, and keepassxc now opens it cleanly.
     assert_eq!(
         kdbx4_minor(&healed),
         1,
-        "trove must rewrite the vault as KDBX 4.1"
+        "trove must rewrite the database as KDBX 4.1"
     );
     for oracle in &oracles {
         keepassxc_party::consume(oracle, &healed, &pw_spec()).unwrap_or_else(|e| {
             panic!(
-                "keepassxc@{} should open the trove-healed vault, but failed: {e}\n\
+                "keepassxc@{} should open the trove-healed database, but failed: {e}\n\
                  (the empty-<Meta> defect is back, or trove stopped writing KDBX 4.1)",
                 oracle.version
             )
@@ -430,16 +430,16 @@ fn trove_resave_heals_legacy_kdbx4_0_for_keepassxc() {
     }
 }
 
-/// 5. trove keeps a vault's crypto settings through its own write path, for
+/// 5. trove keeps a database's crypto settings through its own write path, for
 ///    every KDF (Argon2d, Argon2id, AES-KDF) x outer cipher (AES-256, ChaCha20,
-///    Twofish) x compression x KDBX 4 minor in the config fixtures. Each vault
+///    Twofish) x compression x KDBX 4 minor in the config fixtures. Each database
 ///    is minted by the keepass crate (0.12.5 for forced 4.0, which 0.13.13
 ///    can't write), re-saved by `trove add ssh`, then checked two ways: the
 ///    header still declares the same KDF, cipher and compression (save only
 ///    forces the version to 4.1), and keepassxc opens it and finds both the
 ///    original entry and trove's.
 ///
-///    trove doesn't write AES-KDF vaults of its own or retune them (`db-edit`
+///    trove doesn't write AES-KDF databases of its own or retune them (`db-edit`
 ///    refuses), but it must not silently convert one to Argon2 on save either.
 #[test]
 fn trove_resave_preserves_every_cipher_and_kdf() {
@@ -453,7 +453,7 @@ fn trove_resave_preserves_every_cipher_and_kdf() {
          TROVE_KEEPASSXC_CLI / TROVE_KEEPASSXC_CLIS (colon-separated paths)."
     );
 
-    let specs: Vec<VaultSpec> = fixtures::all()
+    let specs: Vec<DatabaseSpec> = fixtures::all()
         .into_iter()
         .filter(|s| s.name.starts_with("cfg-"))
         .collect();

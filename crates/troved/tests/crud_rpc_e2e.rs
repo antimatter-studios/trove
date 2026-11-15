@@ -9,7 +9,7 @@
 //!      without a code, and are refused while locked.
 //!   2. `GetField` (the only way a Password value leaves the daemon) and every
 //!      write are code-gated: refused with a wrong code or wrong uid.
-//!   3. Writes persist to disk — the vault reopens with the change in place.
+//!   3. Writes persist to disk — the database reopens with the change in place.
 //!   4. `RemoveEntry`/`Rmdir` report recycle-vs-destroy truthfully.
 
 #![allow(missing_docs)]
@@ -21,7 +21,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -46,7 +46,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+        let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -82,12 +82,12 @@ impl Harness {
         serde_json::to_value(&resp).expect("serialize response")
     }
 
-    /// Unlock `vault_path` as OWNER and return the minted session code.
-    async fn unlock(&self, vault_path: &Path) -> String {
+    /// Unlock `database_path` as OWNER and return the minted session code.
+    async fn unlock(&self, database_path: &Path) -> String {
         let resp = self
             .handle_as(
                 Request::Unlock {
-                    path: vault_path.to_str().expect("utf8").to_string(),
+                    path: database_path.to_str().expect("utf8").to_string(),
                     password: PASSWORD.to_string(),
                     timeout: None,
                     keyfile: None,
@@ -102,10 +102,10 @@ impl Harness {
     }
 }
 
-/// Mint a vault on disk with one password entry, ready to unlock.
-fn seed_vault(dir: &TempDir) -> std::path::PathBuf {
+/// Mint a database on disk with one password entry, ready to unlock.
+fn seed_database(dir: &TempDir) -> std::path::PathBuf {
     let path = dir.path().join("crud.kdbx");
-    let mut v = Vault::create(&path, PASSWORD).expect("create vault");
+    let mut v = Database::create(&path, PASSWORD).expect("create database");
     let id = v.add_entry("Web/github").expect("add entry");
     v.set_field(&id, "UserName", "alice").unwrap();
     v.set_field(&id, "Password", "hunter2").unwrap();
@@ -126,7 +126,7 @@ fn is_err(resp: &Value) -> bool {
 #[tokio::test]
 async fn ungated_reads_work_unlocked_and_refuse_locked() {
     let dir = TempDir::new().unwrap();
-    let path = seed_vault(&dir);
+    let path = seed_database(&dir);
     let h = Harness::new();
 
     // Locked: both reads refuse.
@@ -231,7 +231,7 @@ async fn ungated_reads_work_unlocked_and_refuse_locked() {
 #[tokio::test]
 async fn get_field_is_code_gated() {
     let dir = TempDir::new().unwrap();
-    let path = seed_vault(&dir);
+    let path = seed_database(&dir);
     let h = Harness::new();
     let code = h.unlock(&path).await;
 
@@ -263,7 +263,7 @@ async fn get_field_is_code_gated() {
 #[tokio::test]
 async fn writes_are_gated_and_persist() {
     let dir = TempDir::new().unwrap();
-    let path = seed_vault(&dir);
+    let path = seed_database(&dir);
     let h = Harness::new();
     let code = h.unlock(&path).await;
 
@@ -329,7 +329,7 @@ async fn writes_are_gated_and_persist() {
     assert!(is_err(&resp), "duplicate add must refuse: {resp}");
 
     // Everything persisted: reopen from disk and verify.
-    let v = Vault::open(&path, PASSWORD).expect("reopen");
+    let v = Database::open(&path, PASSWORD).expect("reopen");
     let id = v.find_by_title("Work/stripe").expect("moved entry");
     assert_eq!(
         v.get_field(&id, "Password").unwrap().as_deref(),
@@ -347,7 +347,7 @@ async fn writes_are_gated_and_persist() {
 #[tokio::test]
 async fn copy_and_move_resolve_destinations_and_persist() {
     let dir = TempDir::new().unwrap();
-    let path = seed_vault(&dir);
+    let path = seed_database(&dir);
     let h = Harness::new();
     let code = h.unlock(&path).await;
 
@@ -410,7 +410,7 @@ async fn copy_and_move_resolve_destinations_and_persist() {
         .await;
     assert!(is_err(&resp), "a missing parent group must refuse: {resp}");
 
-    let v = Vault::open(&path, PASSWORD).expect("reopen");
+    let v = Database::open(&path, PASSWORD).expect("reopen");
     let moved = v.find_by_title("Work/billing").expect("moved + renamed");
     let copy = v
         .find_by_title("Work/billing-standby")
@@ -430,7 +430,7 @@ async fn copy_and_move_resolve_destinations_and_persist() {
 #[tokio::test]
 async fn remove_and_rmdir_report_recycle_state_and_persist() {
     let dir = TempDir::new().unwrap();
-    let path = seed_vault(&dir);
+    let path = seed_database(&dir);
     let h = Harness::new();
     let code = h.unlock(&path).await;
 
@@ -484,6 +484,6 @@ async fn remove_and_rmdir_report_recycle_state_and_persist() {
         .await;
     assert_eq!(resp["recycled"], false, "{resp}");
 
-    let v = Vault::open(&path, PASSWORD).expect("reopen");
+    let v = Database::open(&path, PASSWORD).expect("reopen");
     assert!(v.list_entries().is_empty(), "all entries destroyed");
 }

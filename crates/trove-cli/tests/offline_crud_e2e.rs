@@ -1,5 +1,5 @@
 //! End-to-end tests for the generic entry-CRUD commands in offline mode
-//! (`--vault <PATH>`, `--password-stdin`): add password / get password /
+//! (`--database <PATH>`, `--password-stdin`): add password / get password /
 //! show / edit / search / mkdir / mv / rm / rmdir. Each command is a fresh
 //! process, exactly how scripts drive trove.
 //!
@@ -14,7 +14,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use trove_core::Vault;
+use trove_core::Database;
 
 const PASSWORD: &str = "correct horse battery staple";
 const SECRET: &str = "hunter2-but-longer";
@@ -76,13 +76,13 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("search.kdbx");
-    let vault_arg = vault.to_str().expect("utf8 path");
+    let database = dir.path().join("search.kdbx");
+    let database_arg = database.to_str().expect("utf8 path");
     let pw_line = format!("{PASSWORD}\n");
     assert_ok(
         &run_trove(
             &trove,
-            &["--vault", vault_arg, "--password-stdin", "init"],
+            &["--database", database_arg, "--password-stdin", "init"],
             &pw_line,
         ),
         "init",
@@ -91,8 +91,8 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault_arg,
+                "--database",
+                database_arg,
                 "--password-stdin",
                 "add",
                 "password",
@@ -107,8 +107,8 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault_arg,
+                "--database",
+                database_arg,
                 "--password-stdin",
                 "edit",
                 "Apple/signing-cert",
@@ -127,8 +127,8 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault_arg,
+                "--database",
+                database_arg,
                 "--password-stdin",
                 "add",
                 "file",
@@ -148,8 +148,8 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault_arg,
+            "--database",
+            database_arg,
             "--password-stdin",
             "search",
             "Developer ID",
@@ -168,8 +168,8 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault_arg,
+            "--database",
+            database_arg,
             "--password-stdin",
             "search",
             "--field",
@@ -189,8 +189,8 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault_arg,
+            "--database",
+            database_arg,
             "--password-stdin",
             "search",
             "hunter2-secret",
@@ -206,8 +206,8 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault_arg,
+            "--database",
+            database_arg,
             "--password-stdin",
             "search",
             "--field",
@@ -224,7 +224,7 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
 
     let out = run_trove(
         &trove,
-        &["--vault", vault_arg, "--password-stdin", "search"],
+        &["--database", database_arg, "--password-stdin", "search"],
         &pw_line,
     );
     assert!(
@@ -233,7 +233,7 @@ fn search_finds_unprotected_metadata_and_exact_filters() {
     );
 }
 
-/// The whole CRUD lifecycle against one vault file, one process per step.
+/// The whole CRUD lifecycle against one database file, one process per step.
 #[test]
 fn offline_crud_lifecycle() {
     let Some(trove) = find_trove() else {
@@ -241,15 +241,15 @@ fn offline_crud_lifecycle() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("crud.kdbx");
-    let vault = vault.to_str().expect("utf8 path");
+    let database = dir.path().join("crud.kdbx");
+    let database = database.to_str().expect("utf8 path");
     let pw_line = format!("{PASSWORD}\n");
 
     // init
     assert_ok(
         &run_trove(
             &trove,
-            &["--vault", vault, "--password-stdin", "init"],
+            &["--database", database, "--password-stdin", "init"],
             &pw_line,
         ),
         "init",
@@ -261,8 +261,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "password",
@@ -283,8 +283,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "password",
@@ -300,8 +300,8 @@ fn offline_crud_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "get",
             "password",
@@ -315,7 +315,13 @@ fn offline_crud_lifecycle() {
     // show masks the password by default…
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "show", "Web/github"],
+        &[
+            "--database",
+            database,
+            "--password-stdin",
+            "show",
+            "Web/github",
+        ],
         &pw_line,
     );
     assert_ok(&out, "show");
@@ -333,8 +339,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "show",
                 "Web/github",
@@ -350,8 +356,8 @@ fn offline_crud_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "show",
             "Web/github",
@@ -369,8 +375,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "edit",
                 "Web/github",
@@ -391,8 +397,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "edit",
                 "Web/github",
@@ -404,15 +410,15 @@ fn offline_crud_lifecycle() {
         "edit --unset existing field",
     );
     {
-        let v = Vault::open(std::path::Path::new(vault), PASSWORD).unwrap();
+        let v = Database::open(std::path::Path::new(database), PASSWORD).unwrap();
         let id = v.find_by_title("Web/github").unwrap();
         assert_eq!(v.get_field(&id, "RemoveMe").unwrap(), None);
     }
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "show",
             "Web/github",
@@ -429,8 +435,8 @@ fn offline_crud_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "describe",
             "Web/github",
@@ -450,8 +456,8 @@ fn offline_crud_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "edit",
             "Web/github",
@@ -464,7 +470,7 @@ fn offline_crud_lifecycle() {
     );
     assert_fails(&out, "edit with missing --unset field");
     assert!(String::from_utf8_lossy(&out.stderr).contains("NoSuchField"));
-    let v = Vault::open(std::path::Path::new(vault), PASSWORD).unwrap();
+    let v = Database::open(std::path::Path::new(database), PASSWORD).unwrap();
     let id = v.find_by_title("Web/github").unwrap();
     assert_eq!(v.get_field(&id, "Env").unwrap().as_deref(), Some("prod"));
 
@@ -472,7 +478,13 @@ fn offline_crud_lifecycle() {
     assert_fails(
         &run_trove(
             &trove,
-            &["--vault", vault, "--password-stdin", "edit", "Web/github"],
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "edit",
+                "Web/github",
+            ],
             &pw_line,
         ),
         "edit with no changes",
@@ -481,14 +493,20 @@ fn offline_crud_lifecycle() {
     // search: title hit, username hit, secret never matches.
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "search", "github"],
+        &[
+            "--database",
+            database,
+            "--password-stdin",
+            "search",
+            "github",
+        ],
         &pw_line,
     );
     assert_ok(&out, "search title");
     assert!(stdout_str(&out).contains("Web/github"));
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "search", SECRET],
+        &["--database", database, "--password-stdin", "search", SECRET],
         &pw_line,
     );
     assert_ok(&out, "search secret");
@@ -502,7 +520,13 @@ fn offline_crud_lifecycle() {
     assert_ok(
         &run_trove(
             &trove,
-            &["--vault", vault, "--password-stdin", "mkdir", "Work/Infra"],
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "mkdir",
+                "Work/Infra",
+            ],
             &pw_line,
         ),
         "mkdir",
@@ -510,7 +534,13 @@ fn offline_crud_lifecycle() {
     assert_fails(
         &run_trove(
             &trove,
-            &["--vault", vault, "--password-stdin", "mkdir", "Work/Infra"],
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "mkdir",
+                "Work/Infra",
+            ],
             &pw_line,
         ),
         "duplicate mkdir",
@@ -519,8 +549,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "mv",
                 "Web/github",
@@ -534,8 +564,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "mv",
                 "Web/github",
@@ -547,7 +577,7 @@ fn offline_crud_lifecycle() {
     );
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "list"],
+        &["--database", database, "--password-stdin", "list"],
         &pw_line,
     );
     assert_ok(&out, "list after mv");
@@ -557,8 +587,8 @@ fn offline_crud_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "rm",
             "Work/Infra/github",
@@ -569,15 +599,15 @@ fn offline_crud_lifecycle() {
     assert!(stdout_str(&out).contains("recycle bin"));
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "list"],
+        &["--database", database, "--password-stdin", "list"],
         &pw_line,
     );
     assert!(stdout_str(&out).contains("Recycle Bin/github"));
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "rm",
             "Recycle Bin/github",
@@ -588,7 +618,7 @@ fn offline_crud_lifecycle() {
     assert!(stdout_str(&out).contains("permanently deleted"));
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "list"],
+        &["--database", database, "--password-stdin", "list"],
         &pw_line,
     );
     assert!(
@@ -603,8 +633,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "password",
@@ -619,8 +649,8 @@ fn offline_crud_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "rmdir",
                 "Old",
@@ -632,13 +662,13 @@ fn offline_crud_lifecycle() {
     );
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "rmdir", "Old"],
+        &["--database", database, "--password-stdin", "rmdir", "Old"],
         &pw_line,
     );
     assert_ok(&out, "rmdir (recycle)");
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "list"],
+        &["--database", database, "--password-stdin", "list"],
         &pw_line,
     );
     assert!(stdout_str(&out).contains("Recycle Bin/Old/Project/token"));
@@ -647,8 +677,8 @@ fn offline_crud_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "add",
             "password",
@@ -666,8 +696,8 @@ fn offline_crud_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "get",
             "password",
@@ -679,7 +709,7 @@ fn offline_crud_lifecycle() {
     assert_eq!(stdout_str(&out).trim_end(), minted);
 }
 
-/// Daemon-mode contract: without `--vault`, the write/read CRUD commands are
+/// Daemon-mode contract: without `--database`, the write/read CRUD commands are
 /// gated on `TROVE_SESSION` and refuse cleanly when it is absent.
 #[test]
 fn daemon_mode_requires_session_code() {
@@ -725,15 +755,15 @@ fn show_json_is_structured_and_hides_protected_values() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("json.kdbx");
-    let vault = vault.to_str().expect("utf8 path");
+    let database = dir.path().join("json.kdbx");
+    let database = database.to_str().expect("utf8 path");
     let pw_line = format!("{PASSWORD}\n");
     let two_lines = format!("{PASSWORD}\n{SECRET}\n");
 
     assert_ok(
         &run_trove(
             &trove,
-            &["--vault", vault, "--password-stdin", "init"],
+            &["--database", database, "--password-stdin", "init"],
             &pw_line,
         ),
         "init",
@@ -742,8 +772,8 @@ fn show_json_is_structured_and_hides_protected_values() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "password",
@@ -766,8 +796,8 @@ fn show_json_is_structured_and_hides_protected_values() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "file",
@@ -787,8 +817,8 @@ fn show_json_is_structured_and_hides_protected_values() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "show",
             "--json",
@@ -824,8 +854,8 @@ fn show_json_is_structured_and_hides_protected_values() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "show",
             "--json",
@@ -849,15 +879,15 @@ fn list_sorts_and_hides_the_uuid() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("list.kdbx");
-    let vault = vault.to_str().expect("utf8 path");
+    let database = dir.path().join("list.kdbx");
+    let database = database.to_str().expect("utf8 path");
     let pw_line = format!("{PASSWORD}\n");
     let two_lines = format!("{PASSWORD}\n{SECRET}\n");
 
     assert_ok(
         &run_trove(
             &trove,
-            &["--vault", vault, "--password-stdin", "init"],
+            &["--database", database, "--password-stdin", "init"],
             &pw_line,
         ),
         "init",
@@ -868,8 +898,8 @@ fn list_sorts_and_hides_the_uuid() {
             &run_trove(
                 &trove,
                 &[
-                    "--vault",
-                    vault,
+                    "--database",
+                    database,
                     "--password-stdin",
                     "add",
                     "password",
@@ -884,7 +914,7 @@ fn list_sorts_and_hides_the_uuid() {
 
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "list"],
+        &["--database", database, "--password-stdin", "list"],
         &pw_line,
     );
     assert_ok(&out, "list");
@@ -917,7 +947,13 @@ fn list_sorts_and_hides_the_uuid() {
     // The id is still available when explicitly asked for.
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "list", "--show-id"],
+        &[
+            "--database",
+            database,
+            "--password-stdin",
+            "list",
+            "--show-id",
+        ],
         &pw_line,
     );
     assert_ok(&out, "list --show-id");
@@ -937,14 +973,14 @@ fn list_names_the_ssh_key_and_ignores_keeagent_settings() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("keys.kdbx");
-    let vault = vault.to_str().expect("utf8 path");
+    let database = dir.path().join("keys.kdbx");
+    let database = database.to_str().expect("utf8 path");
     let pw_line = format!("{PASSWORD}\n");
 
     assert_ok(
         &run_trove(
             &trove,
-            &["--vault", vault, "--password-stdin", "init"],
+            &["--database", database, "--password-stdin", "init"],
             &pw_line,
         ),
         "init",
@@ -967,8 +1003,8 @@ fn list_names_the_ssh_key_and_ignores_keeagent_settings() {
             &run_trove(
                 &trove,
                 &[
-                    "--vault",
-                    vault,
+                    "--database",
+                    database,
                     "--password-stdin",
                     "add",
                     "file",
@@ -988,7 +1024,7 @@ fn list_names_the_ssh_key_and_ignores_keeagent_settings() {
 
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "list"],
+        &["--database", database, "--password-stdin", "list"],
         &pw_line,
     );
     assert_ok(&out, "list");
@@ -1014,14 +1050,14 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("expiry.kdbx");
-    let v = vault.to_str().unwrap();
+    let database = dir.path().join("expiry.kdbx");
+    let v = database.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
-    let mut vault_obj = Vault::create(&vault, PASSWORD).unwrap();
-    vault_obj.add_entry("Web/old").unwrap();
-    vault_obj.add_entry("Web/new").unwrap();
-    vault_obj.save().unwrap();
-    drop(vault_obj);
+    let mut database_obj = Database::create(&database, PASSWORD).unwrap();
+    database_obj.add_entry("Web/old").unwrap();
+    database_obj.add_entry("Web/new").unwrap();
+    database_obj.save().unwrap();
+    drop(database_obj);
 
     for (entry, when) in [
         ("Web/old", "2001-02-03"),
@@ -1031,7 +1067,7 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
             &run_trove(
                 &trove,
                 &[
-                    "--vault",
+                    "--database",
                     v,
                     "--password-stdin",
                     "edit",
@@ -1046,7 +1082,7 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
     }
     let old = stdout_str(&run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "show", "Web/old"],
+        &["--database", v, "--password-stdin", "show", "Web/old"],
         &pw,
     ));
     assert!(
@@ -1055,7 +1091,7 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
     );
     let new = stdout_str(&run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "show", "Web/new"],
+        &["--database", v, "--password-stdin", "show", "Web/new"],
         &pw,
     ));
     assert!(
@@ -1065,7 +1101,7 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
     let json = stdout_str(&run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             v,
             "--password-stdin",
             "show",
@@ -1081,7 +1117,7 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "edit",
@@ -1094,7 +1130,7 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
     );
     let new = stdout_str(&run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "show", "Web/new"],
+        &["--database", v, "--password-stdin", "show", "Web/new"],
         &pw,
     ));
     assert!(!new.contains("Expires"), "{new}");
@@ -1103,7 +1139,7 @@ fn edit_sets_and_clears_expiry_and_show_reports_it() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "edit",
@@ -1124,17 +1160,17 @@ fn edit_sets_and_clears_the_icon() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("icon.kdbx");
-    let v = vault.to_str().unwrap();
+    let database = dir.path().join("icon.kdbx");
+    let v = database.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
-    let mut vault_obj = Vault::create(&vault, PASSWORD).unwrap();
-    vault_obj.add_entry("Web/site").unwrap();
-    vault_obj.save().unwrap();
-    drop(vault_obj);
+    let mut database_obj = Database::create(&database, PASSWORD).unwrap();
+    database_obj.add_entry("Web/site").unwrap();
+    database_obj.save().unwrap();
+    drop(database_obj);
 
     let fresh = stdout_str(&run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "show", "Web/site"],
+        &["--database", v, "--password-stdin", "show", "Web/site"],
         &pw,
     ));
     assert!(!fresh.contains("Icon:"), "a new entry has no icon: {fresh}");
@@ -1143,7 +1179,7 @@ fn edit_sets_and_clears_the_icon() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "edit",
@@ -1157,14 +1193,14 @@ fn edit_sets_and_clears_the_icon() {
     );
     let shown = stdout_str(&run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "show", "Web/site"],
+        &["--database", v, "--password-stdin", "show", "Web/site"],
         &pw,
     ));
     assert!(shown.contains("Icon: 12"), "{shown}");
     let json = stdout_str(&run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             v,
             "--password-stdin",
             "show",
@@ -1180,7 +1216,7 @@ fn edit_sets_and_clears_the_icon() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "edit",
@@ -1193,7 +1229,7 @@ fn edit_sets_and_clears_the_icon() {
     );
     let cleared = stdout_str(&run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "show", "Web/site"],
+        &["--database", v, "--password-stdin", "show", "Web/site"],
         &pw,
     ));
     assert!(!cleared.contains("Icon:"), "{cleared}");
@@ -1202,7 +1238,7 @@ fn edit_sets_and_clears_the_icon() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "edit",

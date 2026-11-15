@@ -9,7 +9,7 @@
 //! constraint tags spelled `...WhenAdding`. Reading only UTF-8, matching
 //! `Attachment` case-sensitively, or looking for `...WhenSigning` all cause a
 //! marked entry to be silently skipped — verified against a real KeePassXC
-//! vault where trove served 2 keys and KeePassXC served 5.
+//! database where trove served 2 keys and KeePassXC served 5.
 //!
 //! Rules:
 //!   * Settings present, AllowUseOfSshKey=true, AddAtDatabaseOpen=true,
@@ -17,7 +17,7 @@
 //!   * Settings present but opts-out (either bool false, or SelectedType≠Attachment)
 //!     → skip the entry entirely; respect the user's explicit choice.
 //!   * Settings absent → fall back to content scan (trove's existing behaviour
-//!     for vaults not configured with KeeAgent).
+//!     for databases not configured with KeeAgent).
 //!
 //! Beyond that yes/no, the blob also carries three knobs that only mean anything
 //! once a key has been handed to an agent trove does not own (see
@@ -40,7 +40,7 @@ pub fn settings_xml(key_attachment: &str) -> Vec<u8> {
 /// [`settings_xml`] with the opt-in switched either way.
 ///
 /// Writing `false` is how a key is withdrawn from agent loading: the attachment
-/// stays, the declaration says no. There is no "remove attachment" in the vault
+/// stays, the declaration says no. There is no "remove attachment" in the database
 /// API, and an explicit no is clearer than a missing blob anyway — a missing
 /// blob means "content-scan me", which is not the same thing.
 pub fn settings_xml_with(key_attachment: &str, allow: bool) -> Vec<u8> {
@@ -55,7 +55,7 @@ pub enum Encoding {
     /// What trove writes by default: valid XML, and readable by eye.
     Utf8,
     /// Byte-for-byte what KeePassXC produces: UTF-16 little-endian with a BOM.
-    /// Use when a vault must look native to KeePassXC.
+    /// Use when a database must look native to KeePassXC.
     Utf16Le,
 }
 
@@ -157,7 +157,7 @@ fn settings_xml_body(key_attachment: &str, policy: AgentPolicy, declared: &str) 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardPolicy {
     /// `RemoveAtDatabaseClose` — send `SSH_AGENTC_REMOVE_IDENTITY` to the
-    /// external agent when the vault locks.
+    /// external agent when the database locks.
     ///
     /// This applies ONLY to the forwarding path. It is deliberately *not*
     /// honoured for trove's own agent: `lock` always drops the whole in-memory
@@ -212,7 +212,7 @@ pub enum Decision {
 /// leaves KeePassXC and trove both looking for a file that is gone. Re-emitted
 /// rather than string-replaced so the result is a document this module wrote:
 /// the encoding stays whatever the original declared, since KeePassXC writes
-/// UTF-16 and a vault that round-trips between the two should not flip about.
+/// UTF-16 and a database that round-trips between the two should not flip about.
 ///
 /// `None` when the bytes are not settings we understand, or say not to load —
 /// there is then no key name in them to update.
@@ -335,15 +335,15 @@ pub fn parse(bytes: &[u8]) -> Decision {
             ),
         },
         // KeeAgent's "external file" option: the entry stores a path, not the
-        // key. That file is outside the vault's protection, and trove only
-        // serves keys the vault holds.
+        // key. That file is outside the database's protection, and trove only
+        // serves keys the database holds.
         Some("file") => Decision::Unusable(match str_tag(xml, "FileName") {
             Some(path) if !path.is_empty() => format!(
                 "KeeAgent.settings points at the external key file {path}; trove only \
-                 loads keys stored in the vault, so add it with `trove add ssh`"
+                 loads keys stored in the database, so add it with `trove add ssh`"
             ),
             _ => "KeeAgent.settings points at an external key file; trove only loads keys \
-                  stored in the vault, so add it with `trove add ssh`"
+                  stored in the database, so add it with `trove add ssh`"
                 .into(),
         }),
         Some(other) => Decision::Unusable(format!(
@@ -385,7 +385,7 @@ mod tests {
 
     /// Exactly what KeePassXC 2.7 writes: UTF-16LE with a BOM, `SelectedType`
     /// lowercased, and the constraint tags spelled `...WhenAdding`. Taken from
-    /// a real vault — trove skipped every entry like this, silently, because
+    /// a real database — trove skipped every entry like this, silently, because
     /// `str::from_utf8` accepts UTF-16LE ASCII (NUL is a valid UTF-8 char) and
     /// then no tag ever matches.
     fn keepassxc_utf16(attachment: &str) -> Vec<u8> {

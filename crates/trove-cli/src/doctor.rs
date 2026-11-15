@@ -1,5 +1,5 @@
 //! `trove doctor` — pre-flight checks for the setup around trove: the daemon,
-//! the agent sockets clients are pointed at, the vault file and the env file.
+//! the agent sockets clients are pointed at, the database file and the env file.
 //!
 //! Every check is read-only and never starts a daemon. A check that finds
 //! something broken is a `fail` and makes the command exit non-zero; one that
@@ -70,9 +70,9 @@ impl Check {
     }
 }
 
-/// Run every check. `vault` is the vault the command line or `TROVE_VAULT`
+/// Run every check. `database` is the database the command line or `TROVE_DATABASE`
 /// names, if any.
-pub fn run_checks(vault: Option<&Path>) -> Vec<Check> {
+pub fn run_checks(database: Option<&Path>) -> Vec<Check> {
     let mut checks = Vec::new();
     let status = daemon::send(&daemon::Request::Status);
     let running = status.is_ok();
@@ -91,8 +91,8 @@ pub fn run_checks(vault: Option<&Path>) -> Vec<Check> {
     checks.push(daemons_check());
     checks.push(ssh_check(running));
     checks.push(gpg_check());
-    checks.push(vault_check(vault));
-    checks.extend(env_file_checks(vault));
+    checks.push(database_check(database));
+    checks.extend(env_file_checks(database));
     checks
 }
 
@@ -102,8 +102,8 @@ fn daemon_check(status: &anyhow::Result<Value>) -> Check {
             if let Some(msg) = daemon::response_error(resp) {
                 return Check::new("daemon", Level::Fail, format!("troved answered: {msg}"));
             }
-            let vaults = resp
-                .get("vault_paths")
+            let databases = resp
+                .get("database_paths")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
             let keys = resp.get("ssh_keys").and_then(Value::as_u64).unwrap_or(0);
@@ -111,7 +111,7 @@ fn daemon_check(status: &anyhow::Result<Value>) -> Check {
                 "daemon",
                 Level::Ok,
                 format!(
-                    "running on {}; {vaults} vault(s) unlocked, {keys} SSH key(s) served",
+                    "running on {}; {databases} database(s) unlocked, {keys} SSH key(s) served",
                     daemon::control_socket_path().display()
                 ),
             )
@@ -133,7 +133,7 @@ fn daemon_check(status: &anyhow::Result<Value>) -> Check {
     }
 }
 
-/// Keys in the unlocked vaults that the agents couldn't load, and why.
+/// Keys in the unlocked databases that the agents couldn't load, and why.
 fn skipped_keys_check(status: &Value) -> Check {
     let skipped: Vec<String> = status
         .get("skipped_keys")
@@ -152,7 +152,11 @@ fn skipped_keys_check(status: &Value) -> Check {
         })
         .collect();
     if skipped.is_empty() {
-        return Check::new("keys", Level::Ok, "every key in the unlocked vaults loaded");
+        return Check::new(
+            "keys",
+            Level::Ok,
+            "every key in the unlocked databases loaded",
+        );
     }
     Check::new(
         "keys",
@@ -219,7 +223,7 @@ fn classify_keyring(served: &[(String, String)], keyring: &[String]) -> Check {
         return Check::new(
             "gpg-keyring",
             Level::Ok,
-            "gpg's keyring has the public key of every vault GPG key",
+            "gpg's keyring has the public key of every database GPG key",
         );
     }
     Check::new(
@@ -403,7 +407,7 @@ fn classify_ssh_auth_sock(
                 Level::Warn,
                 format!("SSH_AUTH_SOCK is trove's agent ({value}), but troved isn't serving it"),
             )
-            .hint("`trove unlock <VAULT>` starts it")
+            .hint("`trove unlock <DATABASE>` starts it")
         };
     }
     if scoped.iter().any(|s| s == value) {
@@ -420,7 +424,7 @@ fn classify_ssh_auth_sock(
             "ssh-agent",
             Level::Ok,
             format!(
-                "SSH_AUTH_SOCK is another agent ({value}); unlock copies vault keys into it \
+                "SSH_AUTH_SOCK is another agent ({value}); unlock copies database keys into it \
                  unless TROVE_SSH_FORWARD=0"
             ),
         );
@@ -492,7 +496,7 @@ fn classify_gpg(
                     Level::Warn,
                     format!(
                         "{} points at trove, but troved isn't serving {}; gpg signing fails \
-                         until a vault is unlocked",
+                         until a database is unlocked",
                         agent_socket.display(),
                         trove_gpg.display()
                     ),
@@ -514,20 +518,20 @@ fn classify_gpg(
             "gpg-agent",
             Level::Info,
             format!(
-                "gpg uses its own agent at {}; vault GPG keys aren't reachable from gpg",
+                "gpg uses its own agent at {}; database GPG keys aren't reachable from gpg",
                 agent_socket.display()
             ),
         )
-        .hint(format!("to sign with vault keys: {link_cmd}")),
+        .hint(format!("to sign with database keys: {link_cmd}")),
     }
 }
 
-fn vault_check(vault: Option<&Path>) -> Check {
-    let Some(path) = vault else {
+fn database_check(database: Option<&Path>) -> Check {
+    let Some(path) = database else {
         return Check::new(
-            "vault",
+            "database",
             Level::Info,
-            "no vault named (pass --vault or set TROVE_VAULT to check one)",
+            "no database named (pass --database or set TROVE_DATABASE to check one)",
         );
     };
     match std::fs::File::open(path) {
@@ -535,32 +539,32 @@ fn vault_check(vault: Option<&Path>) -> Check {
             use std::io::Read as _;
             let mut head = [0u8; 12];
             let n = f.read(&mut head).unwrap_or(0);
-            classify_vault_header(path, &head[..n])
+            classify_database_header(path, &head[..n])
         }
         Err(e) => Check::new(
-            "vault",
+            "database",
             Level::Fail,
             format!("can't open {}: {e}", path.display()),
         ),
     }
 }
 
-/// Read the KDBX signature and version from a vault's first 12 bytes. Pure,
+/// Read the KDBX signature and version from a database's first 12 bytes. Pure,
 /// so the cases are unit-tested.
-fn classify_vault_header(path: &Path, head: &[u8]) -> Check {
+fn classify_database_header(path: &Path, head: &[u8]) -> Check {
     const SIG1: [u8; 4] = [0x03, 0xd9, 0xa2, 0x9a];
     const SIG2_KDBX: [u8; 4] = [0x67, 0xfb, 0x4b, 0xb5];
     const SIG2_KDB: [u8; 4] = [0x65, 0xfb, 0x4b, 0xb5];
     if head.len() < 12 || head[..4] != SIG1 {
         return Check::new(
-            "vault",
+            "database",
             Level::Fail,
             format!("{} is not a KeePass database", path.display()),
         );
     }
     if head[4..8] == SIG2_KDB {
         return Check::new(
-            "vault",
+            "database",
             Level::Fail,
             format!(
                 "{} is a KeePass 1.x (.kdb) database, which trove can't open",
@@ -571,7 +575,7 @@ fn classify_vault_header(path: &Path, head: &[u8]) -> Check {
     }
     if head[4..8] != SIG2_KDBX {
         return Check::new(
-            "vault",
+            "database",
             Level::Fail,
             format!("{} is not a KDBX database", path.display()),
         );
@@ -580,12 +584,12 @@ fn classify_vault_header(path: &Path, head: &[u8]) -> Check {
     let major = u16::from_le_bytes([head[10], head[11]]);
     match major {
         4 => Check::new(
-            "vault",
+            "database",
             Level::Ok,
             format!("{} is KDBX {major}.{minor}", path.display()),
         ),
         3 => Check::new(
-            "vault",
+            "database",
             Level::Warn,
             format!(
                 "{} is KDBX {major}.{minor}; trove reads it, and saving it writes KDBX 4",
@@ -593,7 +597,7 @@ fn classify_vault_header(path: &Path, head: &[u8]) -> Check {
             ),
         ),
         _ => Check::new(
-            "vault",
+            "database",
             Level::Fail,
             format!(
                 "{} is KDBX {major}.{minor}, which trove can't open",
@@ -605,8 +609,8 @@ fn classify_vault_header(path: &Path, head: &[u8]) -> Check {
 
 /// Every `.env.trove.yaml` a bare `--env` would find, checked for permissions,
 /// and every retired `.env.trove` where one belongs, which `--env` refuses.
-fn env_file_checks(vault: Option<&Path>) -> Vec<Check> {
-    crate::env_file_candidates(vault)
+fn env_file_checks(database: Option<&Path>) -> Vec<Check> {
+    crate::env_file_candidates(database)
         .into_iter()
         .filter_map(|p| {
             if p.is_file() {
@@ -743,7 +747,7 @@ mod tests {
         let clean = serde_json::json!({"status": "ok"});
         assert_eq!(skipped_keys_check(&clean).status, Level::Ok);
         let skipped = serde_json::json!({"skipped_keys": [{
-            "agent": "ssh", "vault": "/v.kdbx", "entry": "Old/dsa",
+            "agent": "ssh", "database": "/v.kdbx", "entry": "Old/dsa",
             "attachment": "id", "reason": "DSA keys are not supported",
         }]});
         let c = skipped_keys_check(&skipped);
@@ -804,38 +808,38 @@ mod tests {
     }
 
     #[test]
-    fn vault_header_cases() {
+    fn database_header_cases() {
         let p = Path::new("v.kdbx");
         let kdbx = [0x67, 0xfb, 0x4b, 0xb5];
         assert_eq!(
-            classify_vault_header(p, &header(kdbx, 1, 4)).status,
+            classify_database_header(p, &header(kdbx, 1, 4)).status,
             Level::Ok
         );
-        let v3 = classify_vault_header(p, &header(kdbx, 1, 3));
+        let v3 = classify_database_header(p, &header(kdbx, 1, 3));
         assert_eq!(v3.status, Level::Warn);
         assert!(v3.detail.contains("KDBX 3.1"), "{}", v3.detail);
         assert_eq!(
-            classify_vault_header(p, &header(kdbx, 0, 5)).status,
+            classify_database_header(p, &header(kdbx, 0, 5)).status,
             Level::Fail
         );
-        let kdb = classify_vault_header(p, &header([0x65, 0xfb, 0x4b, 0xb5], 0, 1));
+        let kdb = classify_database_header(p, &header([0x65, 0xfb, 0x4b, 0xb5], 0, 1));
         assert_eq!(kdb.status, Level::Fail);
         assert!(kdb.detail.contains("1.x"));
         assert_eq!(
-            classify_vault_header(p, b"hello world!").status,
+            classify_database_header(p, b"hello world!").status,
             Level::Fail
         );
-        assert_eq!(classify_vault_header(p, b"").status, Level::Fail);
+        assert_eq!(classify_database_header(p, b"").status, Level::Fail);
     }
 
     #[test]
-    fn a_real_vault_passes() {
+    fn a_real_database_passes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.kdbx");
-        trove_core::Vault::create(&path, "pw").unwrap();
-        assert_eq!(vault_check(Some(&path)).status, Level::Ok);
+        trove_core::Database::create(&path, "pw").unwrap();
+        assert_eq!(database_check(Some(&path)).status, Level::Ok);
         assert_eq!(
-            vault_check(Some(&dir.path().join("missing.kdbx"))).status,
+            database_check(Some(&dir.path().join("missing.kdbx"))).status,
             Level::Fail
         );
     }

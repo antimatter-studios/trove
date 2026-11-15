@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
-//! Vault-ops interop against the `keepassxc-cli` oracle:
+//! Database-ops interop against the `keepassxc-cli` oracle:
 //!   1. Merge equivalence — trove and keepassxc merge the SAME diverged pair;
 //!      both results contain the same entry set.
-//!   2. `db-edit` rekey — keepassxc opens the vault with the new credentials
+//!   2. `db-edit` rekey — keepassxc opens the database with the new credentials
 //!      (and refuses the old ones).
 //!   3. `export --format xml` — keepassxc IMPORTS trove's XML and reads the
 //!      secrets back.
@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 
 use matrix::{keepassxc_party, trove_party};
 
-const PW: &str = "interop-vault-ops-pw";
+const PW: &str = "interop-database-ops-pw";
 
 fn run(bin: &Path, args: &[&str], stdin_lines: &str) -> (bool, String, String) {
     let mut child = Command::new(bin)
@@ -69,17 +69,17 @@ fn oracles() -> Vec<keepassxc_party::Oracle> {
     oracles
 }
 
-fn seed(trove: &Path, vault: &str, entry: &str, secret: &str) {
+fn seed(trove: &Path, database: &str, entry: &str, secret: &str) {
     run_ok(
         trove,
-        &["--vault", vault, "--password-stdin", "init"],
+        &["--database", database, "--password-stdin", "init"],
         &format!("{PW}\n"),
     );
     run_ok(
         trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "add",
             "password",
@@ -90,12 +90,12 @@ fn seed(trove: &Path, vault: &str, entry: &str, secret: &str) {
     );
 }
 
-fn add(trove: &Path, vault: &str, entry: &str, secret: &str) {
+fn add(trove: &Path, database: &str, entry: &str, secret: &str) {
     run_ok(
         trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "add",
             "password",
@@ -128,7 +128,7 @@ fn merge_matches_keepassxc() {
         let tms = trove_merged.to_str().unwrap();
         run_ok(
             &trove,
-            &["--vault", tms, "--password-stdin", "merge", forks],
+            &["--database", tms, "--password-stdin", "merge", forks],
             &format!("{PW}\n{PW}\n"),
         );
 
@@ -160,7 +160,7 @@ fn merge_matches_keepassxc() {
         assert_eq!(
             titles(tms),
             titles(kms),
-            "trove-merged and keepassxc-merged vaults must agree"
+            "trove-merged and keepassxc-merged databases must agree"
         );
     }
 }
@@ -181,7 +181,7 @@ fn rekey_recognized_by_keepassxc() {
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             vs,
             "--password-stdin",
             "db-edit",
@@ -219,7 +219,7 @@ fn exported_xml_reimports_in_keepassxc() {
 
     let xml = run_ok(
         &trove,
-        &["--vault", vs, "--password-stdin", "export"],
+        &["--database", vs, "--password-stdin", "export"],
         &format!("{PW}\n"),
     );
     let xml_path = dir.path().join("export.xml");
@@ -269,7 +269,7 @@ fn csv_header_matches_keepassxc() {
     let ours = run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             vs,
             "--password-stdin",
             "export",

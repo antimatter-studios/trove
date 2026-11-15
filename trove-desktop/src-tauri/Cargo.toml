@@ -1,7 +1,7 @@
 [package]
 name = "trove-desktop"
 version = "0.27.1"
-description = "Trove — a desktop vault manager"
+description = "Trove — a desktop database manager"
 authors = ["Chris Thomas"]
 license = "MIT"
 publish = false
@@ -41,8 +41,8 @@ trove-core = { path = "../../crates/trove-core" }
 troved = { path = "../../crates/troved" }
 
 # Argon2 is deliberately CPU-heavy, and unoptimised it is ~10x slower still: a
-# debug build took 11.4s to open a vault the release CLI opens in ~1.5s. That
-# is a dev-experience trap, not a vault problem — so optimise the crates that
+# debug build took 11.4s to open a database the release CLI opens in ~1.5s. That
+# is a dev-experience trap, not a database problem — so optimise the crates that
 # actually do the KDF work.
 #
 # Deliberately NOT `package."*"`: optimising every dependency cost minutes on

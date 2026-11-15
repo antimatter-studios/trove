@@ -3,7 +3,7 @@
 //! with it, or the settings describe something that no longer exists.
 #![allow(missing_docs)]
 
-use trove_core::Vault;
+use trove_core::Database;
 
 const PASSWORD: &str = "correct horse battery staple";
 
@@ -11,7 +11,7 @@ const PASSWORD: &str = "correct horse battery staple";
 fn renaming_an_attachment_moves_its_materialize_settings() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v.kdbx");
-    let mut v = Vault::create(&path, PASSWORD).expect("create");
+    let mut v = Database::create(&path, PASSWORD).expect("create");
     let id = v.add_entry("Work/server").expect("add entry");
 
     v.attach_binary(&id, "id_rsa", b"KEYBYTES").expect("attach");
@@ -71,7 +71,7 @@ fn a_renamed_attachment_survives_a_save_and_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v.kdbx");
     {
-        let mut v = Vault::create(&path, PASSWORD).expect("create");
+        let mut v = Database::create(&path, PASSWORD).expect("create");
         let id = v.add_entry("Work/server").expect("add entry");
         v.attach_binary(&id, "id_rsa", b"KEYBYTES").expect("attach");
         v.set_field(&id, "Materialize.id_rsa.Target", "/tmp/out/id_rsa")
@@ -81,7 +81,7 @@ fn a_renamed_attachment_survives_a_save_and_reopen() {
         v.save().expect("save");
     }
 
-    let v = Vault::open(&path, PASSWORD).expect("reopen");
+    let v = Database::open(&path, PASSWORD).expect("reopen");
     let id = v.find_by_title("Work/server").expect("entry");
     assert_eq!(
         v.read_binary(&id, "id_ed25519").expect("read"),
@@ -99,7 +99,7 @@ fn a_renamed_attachment_survives_a_save_and_reopen() {
 fn renaming_onto_an_existing_attachment_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v.kdbx");
-    let mut v = Vault::create(&path, PASSWORD).expect("create");
+    let mut v = Database::create(&path, PASSWORD).expect("create");
     let id = v.add_entry("Work/server").expect("add entry");
     v.attach_binary(&id, "a", b"AAA").expect("attach");
     v.attach_binary(&id, "b", b"BBB").expect("attach");
@@ -122,7 +122,7 @@ fn renaming_onto_an_existing_attachment_is_refused() {
 fn renaming_a_missing_attachment_is_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v.kdbx");
-    let mut v = Vault::create(&path, PASSWORD).expect("create");
+    let mut v = Database::create(&path, PASSWORD).expect("create");
     let id = v.add_entry("Work/server").expect("add entry");
     let err = v
         .rename_attachment(&id, "nope", "other")
@@ -136,7 +136,7 @@ fn renaming_a_missing_attachment_is_an_error() {
 fn a_keeagent_entry_reports_that_its_settings_need_rewriting() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("v.kdbx");
-    let mut v = Vault::create(&path, PASSWORD).expect("create");
+    let mut v = Database::create(&path, PASSWORD).expect("create");
     let id = v.add_entry("Work/server").expect("add entry");
     v.attach_binary(&id, "id_rsa", b"KEY").expect("attach");
     v.attach_binary(&id, "KeeAgent.settings", b"<xml/>")

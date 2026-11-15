@@ -13,7 +13,7 @@
 //! As a CONSUMER, trove only offers `list`, which prints one line per entry:
 //! `<uuid>  <group/path/title>  [attachments: a, b]`. It reports neither field
 //! values nor custom fields, so [`consume`] recovers entry PATHS and attachment
-//! NAMES only — enough to prove trove can open a foreign-produced vault and
+//! NAMES only — enough to prove trove can open a foreign-produced database and
 //! enumerate its groups/entries correctly.
 //!
 //! The password is always supplied via trove's global `--password-stdin` flag
@@ -23,7 +23,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::matrix::{EntryRepr, VaultRepr};
+use crate::matrix::{EntryRepr, DatabaseRepr};
 
 /// A located `trove` binary.
 pub struct Trove {
@@ -63,14 +63,14 @@ pub fn locate() -> Option<Trove> {
 
 /// A resource trove can add via its subcommands.
 pub enum TroveAdd {
-    /// `trove add ssh <title> <keyfile> <comment> --vault <vault> --user <user>`.
+    /// `trove add ssh <title> <keyfile> <comment> --database <database> --user <user>`.
     /// The comment is set to the title here, matching trove's prior default.
     Ssh {
         title: String,
         user: String,
         key: Vec<u8>,
     },
-    /// `trove add file <vault> <title> --src <srcfile> --target <target> --mode <mode>`.
+    /// `trove add file <database> <title> --src <srcfile> --target <target> --mode <mode>`.
     File {
         title: String,
         src_name: String,
@@ -80,23 +80,23 @@ pub enum TroveAdd {
     },
 }
 
-/// Mint a real trove vault: `init` then run each add in order. Returns the
+/// Mint a real trove database: `init` then run each add in order. Returns the
 /// resulting `.kdbx` bytes.
 ///
-/// All staging happens inside a single tempdir (vault file + key/source files),
+/// All staging happens inside a single tempdir (database file + key/source files),
 /// torn down on return. On any non-zero exit we surface the command's stderr
 /// first line as `Err(..)`.
 pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u8>, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
-    let vault = dir.path().join("v.kdbx");
+    let database = dir.path().join("v.kdbx");
 
     // init: with --password-stdin the single stdin line IS the password (no
-    // confirm). The vault file must not already exist.
+    // confirm). The database file must not already exist.
     run(
         trove,
         &[
-            "--vault".as_ref(),
-            vault.as_os_str(),
+            "--database".as_ref(),
+            database.as_os_str(),
             "--password-stdin".as_ref(),
             "init".as_ref(),
         ],
@@ -117,8 +117,8 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
                         title.as_ref(),
                         keyfile.as_os_str(),
                         title.as_ref(),
-                        "--vault".as_ref(),
-                        vault.as_os_str(),
+                        "--database".as_ref(),
+                        database.as_os_str(),
                         "--user".as_ref(),
                         user.as_ref(),
                     ],
@@ -138,8 +138,8 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
                 run(
                     trove,
                     &[
-                        "--vault".as_ref(),
-                        vault.as_os_str(),
+                        "--database".as_ref(),
+                        database.as_os_str(),
                         "--password-stdin".as_ref(),
                         "add".as_ref(),
                         "file".as_ref(),
@@ -157,14 +157,14 @@ pub fn produce(trove: &Trove, password: &str, adds: &[TroveAdd]) -> Result<Vec<u
         }
     }
 
-    std::fs::read(&vault).map_err(|e| format!("read produced vault: {e}"))
+    std::fs::read(&database).map_err(|e| format!("read produced database: {e}"))
 }
 
-/// Open a *foreign* vault's bytes with trove and force a full re-save by adding
+/// Open a *foreign* database's bytes with trove and force a full re-save by adding
 /// one SSH entry, returning the rewritten `.kdbx` bytes.
 ///
-/// Unlike [`produce`] (which `init`s a fresh vault), this writes `bytes` to disk
-/// first, so it exercises trove's open → mutate → save path on a vault it did
+/// Unlike [`produce`] (which `init`s a fresh database), this writes `bytes` to disk
+/// first, so it exercises trove's open → mutate → save path on a database it did
 /// not create — the path that rewrites a legacy KDBX 4.0 file into trove's
 /// current 4.1 on-disk format.
 pub fn resave_with_added_ssh(
@@ -175,8 +175,8 @@ pub fn resave_with_added_ssh(
     key: &[u8],
 ) -> Result<Vec<u8>, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
-    let vault = dir.path().join("v.kdbx");
-    std::fs::write(&vault, bytes).map_err(|e| format!("write db: {e}"))?;
+    let database = dir.path().join("v.kdbx");
+    std::fs::write(&database, bytes).map_err(|e| format!("write db: {e}"))?;
     let keyfile = dir.path().join("key");
     std::fs::write(&keyfile, key).map_err(|e| format!("write key file: {e}"))?;
 
@@ -189,16 +189,16 @@ pub fn resave_with_added_ssh(
             title.as_ref(),
             keyfile.as_os_str(),
             title.as_ref(),
-            "--vault".as_ref(),
-            vault.as_os_str(),
+            "--database".as_ref(),
+            database.as_os_str(),
         ],
         password,
     )?;
 
-    std::fs::read(&vault).map_err(|e| format!("read resaved vault: {e}"))
+    std::fs::read(&database).map_err(|e| format!("read resaved database: {e}"))
 }
 
-/// Open a vault with `trove list --json` and recover entry PATHS +
+/// Open a database with `trove list --json` and recover entry PATHS +
 /// attachment NAMES.
 ///
 /// `--json`, not the human format: that one groups, aligns and summarises for a
@@ -208,18 +208,18 @@ pub fn resave_with_added_ssh(
 ///
 /// `list` reports nothing else, so each [`EntryRepr`] maps attachment
 /// `name -> ""` (trove doesn't surface the byte hash) and leaves the standard
-/// fields, custom fields and tags empty. The returned [`VaultRepr`] is keyed by
+/// fields, custom fields and tags empty. The returned [`DatabaseRepr`] is keyed by
 /// the group/title path (root entries => bare title).
-pub fn consume(trove: &Trove, bytes: &[u8], password: &str) -> Result<VaultRepr, String> {
+pub fn consume(trove: &Trove, bytes: &[u8], password: &str) -> Result<DatabaseRepr, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
-    let vault = dir.path().join("v.kdbx");
-    std::fs::write(&vault, bytes).map_err(|e| format!("write db: {e}"))?;
+    let database = dir.path().join("v.kdbx");
+    std::fs::write(&database, bytes).map_err(|e| format!("write db: {e}"))?;
 
     let out = run(
         trove,
         &[
-            "--vault".as_ref(),
-            vault.as_os_str(),
+            "--database".as_ref(),
+            database.as_os_str(),
             "--password-stdin".as_ref(),
             "list".as_ref(),
             "--json".as_ref(),
@@ -230,7 +230,7 @@ pub fn consume(trove: &Trove, bytes: &[u8], password: &str) -> Result<VaultRepr,
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(&out).map_err(|e| format!("parse `trove list --json`: {e}"))?;
 
-    let mut repr = VaultRepr::new();
+    let mut repr = DatabaseRepr::new();
     for entry in entries {
         let Some(path) = entry.get("path").and_then(|p| p.as_str()) else {
             return Err(format!("entry without a path: {entry}"));

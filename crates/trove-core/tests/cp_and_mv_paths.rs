@@ -9,14 +9,14 @@
 //! `cp` exists because one key reused across machines ends up filed under
 //! whichever service it was first made for, and the only way to give it an
 //! accurate second name was to export the private key to disk and re-add it —
-//! writing out a key that had never left the vault. The copy is independent on
+//! writing out a key that had never left the database. The copy is independent on
 //! purpose: nothing links the two entries, so rotating one cannot disturb the
 //! other.
 
 #![allow(missing_docs)]
 
 use tempfile::TempDir;
-use trove_core::Vault;
+use trove_core::Database;
 
 const PASSWORD: &str = "cp-mv-test-pw";
 
@@ -30,11 +30,11 @@ mrfzQMJodqDZClxmrD/RAAAAF211bHRpdmF1bHQtYkB0cm92ZS50ZXN0AQIDBAUG
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-/// A vault with `antimatter-studios/gitea` carrying a key, a settings blob, a
+/// A database with `antimatter-studios/gitea` carrying a key, a settings blob, a
 /// password and a custom field — the shape the feature exists for.
-fn vault_with_entry(dir: &TempDir) -> (Vault, std::path::PathBuf) {
+fn database_with_entry(dir: &TempDir) -> (Database, std::path::PathBuf) {
     let path = dir.path().join("v.kdbx");
-    let mut v = Vault::create(&path, PASSWORD).expect("create");
+    let mut v = Database::create(&path, PASSWORD).expect("create");
     v.add_group("antimatter-studios").expect("group");
     v.add_group("homelab").expect("group");
     let id = v.add_entry("antimatter-studios/gitea").expect("entry");
@@ -53,7 +53,7 @@ fn vault_with_entry(dir: &TempDir) -> (Vault, std::path::PathBuf) {
 #[test]
 fn mv_into_an_existing_group_keeps_the_title() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let id = v.find_by_title("gitea").expect("find");
     v.move_entry_to_path(&id, "homelab").expect("move");
     let moved = v.get_entry(&id).expect("entry");
@@ -63,7 +63,7 @@ fn mv_into_an_existing_group_keeps_the_title() {
 #[test]
 fn mv_to_a_new_leaf_moves_and_renames_at_once() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let id = v.find_by_title("gitea").expect("find");
     v.move_entry_to_path(&id, "homelab/ssh").expect("move");
     let moved = v.get_entry(&id).expect("entry");
@@ -77,7 +77,7 @@ fn mv_to_a_new_leaf_moves_and_renames_at_once() {
 #[test]
 fn mv_still_refuses_a_destination_whose_parent_does_not_exist() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let id = v.find_by_title("gitea").expect("find");
     let err = v
         .move_entry_to_path(&id, "typo/ssh")
@@ -96,7 +96,7 @@ fn mv_still_refuses_a_destination_whose_parent_does_not_exist() {
 #[test]
 fn cp_duplicates_everything_the_entry_holds() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     let dst = v.copy_entry(&src, "homelab/ssh").expect("copy");
 
@@ -141,7 +141,7 @@ fn cp_duplicates_everything_the_entry_holds() {
 #[test]
 fn the_original_survives_the_copy_untouched() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     v.copy_entry(&src, "homelab/ssh").expect("copy");
     let original = v.get_entry(&src).expect("entry");
@@ -152,7 +152,7 @@ fn the_original_survives_the_copy_untouched() {
 #[test]
 fn the_copy_is_independent_of_its_source() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     let dst = v.copy_entry(&src, "homelab/ssh").expect("copy");
 
@@ -176,7 +176,7 @@ fn the_copy_is_independent_of_its_source() {
 #[test]
 fn cp_refuses_an_existing_destination() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     v.copy_entry(&src, "homelab/ssh").expect("first copy");
     let err = v
@@ -191,7 +191,7 @@ fn cp_refuses_an_existing_destination() {
 #[test]
 fn cp_refuses_a_destination_whose_parent_does_not_exist() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     let err = v
         .copy_entry(&src, "typo/ssh")
@@ -205,13 +205,13 @@ fn cp_refuses_a_destination_whose_parent_does_not_exist() {
 #[test]
 fn a_copy_survives_a_save_and_reopen() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, path) = vault_with_entry(&dir);
+    let (mut v, path) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     v.copy_entry(&src, "homelab/ssh").expect("copy");
     v.save().expect("save");
     drop(v);
 
-    let reopened = Vault::open(&path, PASSWORD).expect("reopen");
+    let reopened = Database::open(&path, PASSWORD).expect("reopen");
     let dst = reopened.find_by_title("ssh").expect("copy is on disk");
     assert_eq!(
         reopened.read_binary(&dst, "id").expect("read"),
@@ -222,7 +222,7 @@ fn a_copy_survives_a_save_and_reopen() {
 #[test]
 fn cp_into_an_existing_group_keeps_the_title() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     // `homelab` is a group, so this is "copy into it", not "make a root-level
     // entry called homelab" — the same resolution `mv` uses.
@@ -237,7 +237,7 @@ fn cp_into_an_existing_group_keeps_the_title() {
 #[test]
 fn mv_refuses_a_destination_that_is_already_occupied() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     v.add_entry("homelab/ssh").expect("occupant");
     let src = v.find_by_title("gitea").expect("find");
     let err = v
@@ -257,7 +257,7 @@ fn mv_refuses_a_destination_that_is_already_occupied() {
 #[test]
 fn mv_onto_the_entrys_own_location_is_not_a_collision() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     // Already in `antimatter-studios`; moving it there again must be a no-op,
     // not "an entry already exists at that path".
@@ -272,7 +272,7 @@ fn mv_onto_the_entrys_own_location_is_not_a_collision() {
 #[test]
 fn cp_refuses_to_copy_an_entry_onto_itself() {
     let dir = TempDir::new().expect("tempdir");
-    let (mut v, _) = vault_with_entry(&dir);
+    let (mut v, _) = database_with_entry(&dir);
     let src = v.find_by_title("gitea").expect("find");
     let err = v
         .copy_entry(&src, "antimatter-studios/gitea")

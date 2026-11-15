@@ -56,7 +56,7 @@ Every claim below was executed and observed; the supporting transcript is in
 6. **The card can drive a user prompt.** Issuing `INQUIRE NEEDPIN <prompt>` from the card causes
    gpg-agent to run its pinentry flow and return the entered secret as `D <pin>` + `END`.
    Verified end-to-end (loopback pinentry). Trove could use this for per-signature approval or
-   vault unlock.
+   database unlock.
 
 7. **Concurrency works, and the extra socket is optional.**
    - If the card answers `GETINFO socket_name` with a path and serves Assuan there, gpg-agent

@@ -1,15 +1,15 @@
-//! End-to-end test for offline mode: the global `--vault <PATH>` selector lets
-//! every vault command operate directly on a kdbx file, with no daemon and no
+//! End-to-end test for offline mode: the global `--database <PATH>` selector lets
+//! every database command operate directly on a kdbx file, with no daemon and no
 //! `TROVE_SESSION`. This is the path automation drives — each invocation is a
 //! fresh process that addresses entries by `group/sub/title` and reads the
 //! password from stdin (`--password-stdin`), never the command line.
 //!
-//! Critically, `--vault` is a GLOBAL option: it works both BEFORE and AFTER the
+//! Critically, `--database` is a GLOBAL option: it works both BEFORE and AFTER the
 //! subcommand. The round trip below alternates placement on purpose.
 //!
-//! Also asserts the daemon-mode contract (no `--vault`) still gates on
+//! Also asserts the daemon-mode contract (no `--database`) still gates on
 //! `TROVE_SESSION`, and that commands with no daemon mode error without
-//! `--vault`.
+//! `--database`.
 //!
 //! Skips gracefully when the `trove` binary is missing.
 
@@ -64,17 +64,17 @@ fn offline_round_trip_no_daemon() {
     };
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let vault = tmp.path().join("v.kdbx");
-    let vault_s = vault.to_str().unwrap();
+    let database = tmp.path().join("v.kdbx");
+    let database_s = database.to_str().unwrap();
 
     // init — global flags BEFORE the subcommand.
     let out = run_trove(
         &trove,
-        &["--vault", vault_s, "--password-stdin", "init"],
+        &["--database", database_s, "--password-stdin", "init"],
         PASSWORD,
     );
     assert_ok(&out, "init");
-    assert!(vault.exists(), "init should create the vault file");
+    assert!(database.exists(), "init should create the database file");
 
     // generate ssh — global flags AFTER the subcommand (global-arg behavior).
     // Mints a real keypair in-tool, stored offline at the entry path.
@@ -84,8 +84,8 @@ fn offline_round_trip_no_daemon() {
             "generate",
             "ssh",
             "work/github",
-            "--vault",
-            vault_s,
+            "--database",
+            database_s,
             "--password-stdin",
         ],
         PASSWORD,
@@ -96,8 +96,8 @@ fn offline_round_trip_no_daemon() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault_s,
+            "--database",
+            database_s,
             "--password-stdin",
             "get",
             "ssh",
@@ -118,8 +118,8 @@ fn offline_round_trip_no_daemon() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault_s,
+            "--database",
+            database_s,
             "--password-stdin",
             "get",
             "file",
@@ -141,8 +141,8 @@ fn offline_round_trip_no_daemon() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault_s,
+            "--database",
+            database_s,
             "--password-stdin",
             "get",
             "ssh",
@@ -165,7 +165,7 @@ fn offline_round_trip_no_daemon() {
     // list (offline) → shows the entry at its full path.
     let out = run_trove(
         &trove,
-        &["--vault", vault_s, "--password-stdin", "list"],
+        &["--database", database_s, "--password-stdin", "list"],
         PASSWORD,
     );
     assert_ok(&out, "list");
@@ -177,17 +177,17 @@ fn offline_round_trip_no_daemon() {
 }
 
 #[test]
-fn get_without_vault_or_session_fails() {
+fn get_without_database_or_session_fails() {
     let Some(trove) = find_trove() else {
         eprintln!("trove binary not found; skipping offline e2e");
         return;
     };
-    // No --vault and no TROVE_SESSION → daemon mode rejects up front with the
-    // session-code requirement, never opening any vault.
+    // No --database and no TROVE_SESSION → daemon mode rejects up front with the
+    // session-code requirement, never opening any database.
     let out = run_trove(&trove, &["get", "ssh", "whatever"], "");
     assert!(
         !out.status.success(),
-        "get ssh with neither --vault nor TROVE_SESSION must fail"
+        "get ssh with neither --database nor TROVE_SESSION must fail"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -197,17 +197,17 @@ fn get_without_vault_or_session_fails() {
 }
 
 #[test]
-fn vault_required_commands_error_without_vault() {
+fn database_required_commands_error_without_database() {
     let Some(trove) = find_trove() else {
         eprintln!("trove binary not found; skipping offline e2e");
         return;
     };
-    // `init` has no daemon mode; without --vault it must explain it needs one.
+    // `init` has no daemon mode; without --database it must explain it needs one.
     let out = run_trove(&trove, &["--password-stdin", "init"], PASSWORD);
-    assert!(!out.status.success(), "init without --vault must fail");
+    assert!(!out.status.success(), "init without --database must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--vault"),
-        "expected an error naming --vault\nstderr: {stderr}"
+        stderr.contains("--database"),
+        "expected an error naming --database\nstderr: {stderr}"
     );
 }

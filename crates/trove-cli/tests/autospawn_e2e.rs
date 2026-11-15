@@ -69,8 +69,8 @@ fn run_with_stdin(cmd: &mut Command, input: &str) -> std::process::Output {
 }
 
 /// The autospawn path itself, via a command that uses it: `unlock` brings up
-/// `troved` when none is running, unlocks the vault, and the daemon stays up
-/// (a vault is open) — so the user never has to run `troved &`.
+/// `troved` when none is running, unlocks the database, and the daemon stays up
+/// (a database is open) — so the user never has to run `troved &`.
 #[test]
 fn unlock_autospawns_troved_when_none_running() {
     let Some(trove) = find_trove() else {
@@ -87,15 +87,15 @@ fn unlock_autospawns_troved_when_none_running() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let sock = tmp.path().join("trove.sock");
-    let vault = tmp.path().join("v.kdbx");
+    let database = tmp.path().join("v.kdbx");
 
-    // Create the vault offline — `init` talks to no daemon. Vault via the
-    // global `--vault`.
+    // Create the database offline — `init` talks to no daemon. Database via the
+    // global `--database`.
     let init = run_with_stdin(
         Command::new(&trove)
             .arg("init")
-            .arg("--vault")
-            .arg(&vault)
+            .arg("--database")
+            .arg(&database)
             .arg("--password-stdin"),
         PASSWORD,
     );
@@ -112,7 +112,7 @@ fn unlock_autospawns_troved_when_none_running() {
     let out = run_with_stdin(
         Command::new(&trove)
             .arg("unlock")
-            .arg(&vault)
+            .arg(&database)
             .arg("--password-stdin")
             .env("TROVE_SOCK", &sock)
             .env("TROVE_SSH_SOCK", tmp.path().join("ssh.sock"))
@@ -192,7 +192,7 @@ fn status_does_not_autospawn_when_none_running() {
         "status must NOT autospawn a daemon — no control socket should appear"
     );
     assert!(
-        stdout.contains("no vault unlocked") && stdout.contains("not running"),
+        stdout.contains("no database unlocked") && stdout.contains("not running"),
         "expected the locked/not-running default:\n{stdout}"
     );
 }

@@ -15,43 +15,55 @@ function normEntries(list) {
   return (list || []).map(normEntry);
 }
 
-/* ---- Vault lifecycle ---- */
+/* ---- Database lifecycle ---- */
 
-// list_vaults() -> Vec<VaultDto>  { id, name, file, path, locked }
-export function listVaults() {
-  return invoke('list_vaults');
+// list_databases() -> Vec<DatabaseDto>  { id, name, file, path, locked }
+export function listDatabases() {
+  return invoke('list_databases');
 }
 
-// register_vault(path) -> VaultDto  (adds an existing .kdbx as locked; idempotent)
-export function registerVault(path) {
-  return invoke('register_vault', { path });
+// register_database(path) -> DatabaseDto  (adds an existing .kdbx as locked; idempotent)
+export function registerDatabase(path) {
+  return invoke('register_database', { path });
 }
 
-// create_vault(path, password) -> VaultDto  (new .kdbx, registered unlocked)
-export function createVault(path, password) {
-  return invoke('create_vault', { path, password });
+// create_database(path, password) -> DatabaseDto  (new .kdbx, registered unlocked)
+export function createDatabase(path, password) {
+  return invoke('create_database', { path, password });
 }
 
-// unlock_vault(id, password) -> Vec<EntryDto>  (wrong password rejects)
-export function unlockVault(id, password) {
-  return invoke('unlock_vault', { id, password }).then(normEntries);
+// unlock_database(id, password) -> Vec<EntryDto>  (wrong password rejects)
+export function unlockDatabase(id, password) {
+  return invoke('unlock_database', { id, password }).then(normEntries);
 }
 
-// lock_vault(id) -> ()
-// lock_vault(id, retractKeys) -> ()
+// lock_database(id) -> ()
+// lock_database(id, retractKeys) -> ()
 // retractKeys=false leaves forwarded keys in the OS agent — used by the idle
 // timer, which should blank the window without revoking credentials.
-export function lockVault(id, retractKeys = true) {
-  return invoke('lock_vault', { id, retractKeys });
+export function lockDatabase(id, retractKeys = true) {
+  return invoke('lock_database', { id, retractKeys });
 }
 
-// list_entries(id) -> Vec<EntryDto>  (re-read an already-unlocked vault)
+export function saveDatabase(id) {
+  return invoke('save_database', { id });
+}
+
+export function removeDatabase(id) {
+  return invoke('remove_database', { id });
+}
+
+// list_entries(id) -> Vec<EntryDto>  (re-read an already-unlocked database)
 export function listEntries(id) {
   return invoke('list_entries', { id }).then(normEntries);
 }
 
 export function listGroups(id) {
   return invoke('list_groups', { id });
+}
+
+export function createGroup(id, path) {
+  return invoke('create_group', { id, path });
 }
 
 export function setGroupTags(id, path, tags) {
@@ -100,6 +112,19 @@ export function getEntryDetail(id, entryId) {
   return invoke('get_entry_detail', { id, entryId });
 }
 
+export const getEntryRevisions = (id, entryId) => invoke('get_entry_revisions', { id, entryId });
+export const listRevisionEntries = (id) => invoke('list_revision_entries', { id });
+export const applyEntryRevision = (id, sourceId, entryId, index, sourceToken, targetToken) =>
+  invoke('apply_entry_revision', { id, sourceId, entryId, index, sourceToken, targetToken });
+
+export function setCustomAttribute(id, entryId, oldName, name, value) {
+  return invoke('set_custom_attribute', { id, entryId, oldName: oldName || null, name, value });
+}
+
+export function removeCustomAttribute(id, entryId, name) {
+  return invoke('remove_custom_attribute', { id, entryId, name });
+}
+
 /* ---- Mutations (backend saves, then returns the fresh list) ---- */
 
 // save_entry(id, input) -> { entries: Vec<EntryDto>, id }
@@ -135,6 +160,11 @@ export function setSettings(settings) {
   return invoke('set_settings', { settings });
 }
 
+// Read and persist KDBX metadata plus Trove's shared database UUID.
+export const getDatabaseMetadata = (id) => invoke('get_database_metadata', { id });
+export const setDatabaseMetadata = (id, metadata) =>
+  invoke('set_database_metadata', { id, metadata });
+
 // set_agent_key(id, entryId, enabled) -> Vec<EntryDto>
 // Picks whether this entry's SSH key is added to the system agent on unlock.
 // policy = { lifetime: number|null, confirm: bool, removeOnClose: bool }
@@ -155,14 +185,14 @@ export function buildInfo() {
 
 /* ---- external changes ---- */
 
-// vault_changed_on_disk(id) -> bool
+// database_changed_on_disk(id) -> bool
 // True when something else wrote the file since this window read it: the CLI,
-// KeePassXC, or the same vault synced from another Mac.
-export const vaultChangedOnDisk = (id) =>
-  invoke('vault_changed_on_disk', { id }).catch(() => false);
+// KeePassXC, or the same database synced from another Mac.
+export const databaseChangedOnDisk = (id) =>
+  invoke('database_changed_on_disk', { id }).catch(() => false);
 
-// reload_vault(id) -> entries
-export const reloadVault = (id) => invoke('reload_vault', { id }).then(normEntries);
+// reload_database(id) -> entries
+export const reloadDatabase = (id) => invoke('reload_database', { id }).then(normEntries);
 /* ---- Touch ID (macOS) ---- */
 
 // biometric_status(id) -> { available, enrolled }
@@ -178,7 +208,7 @@ export const biometricStatus = (id) =>
 export const biometricUnlock = (id) =>
   invoke('biometric_unlock', { id }).then((list) => (list ? normEntries(list) : null));
 
-// biometric_enroll(id, password) — proves the password opens the vault first.
+// biometric_enroll(id, password) — proves the password opens the database first.
 export const biometricEnroll = (id, password) => invoke('biometric_enroll', { id, password });
 
 // biometric_forget(id) -> bool (false when there was nothing stored)

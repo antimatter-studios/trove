@@ -1,5 +1,5 @@
 //! End-to-end tests for `--env`: load a `.env.trove.yaml` before running, so a
-//! vault opens without a prompt, a pipeline, or a password on the command line.
+//! database opens without a prompt, a pipeline, or a password on the command line.
 //!
 //! Three forms, all exercised below: bare `--env` (`./.env.trove.yaml` in the
 //! current directory), `--env <dir>` (that directory's `.env.trove.yaml`), and
@@ -9,7 +9,7 @@
 //!   * A variable already set in the environment WINS over the file, so the
 //!     file supplies defaults and never overrides an explicit caller.
 //!   * The password is taken from the environment ONLY when `--env` was passed.
-//!     An exported `TROVE_VAULT_PASSWORD` must never silently unlock a vault for a
+//!     An exported `TROVE_DATABASE_PASSWORD` must never silently unlock a database for a
 //!     command that didn't ask for it.
 //!
 //! Skips gracefully when the `trove` binary is missing.
@@ -41,8 +41,8 @@ fn run_in(
     cmd.args(args)
         .current_dir(cwd)
         .env_remove("TROVE_SESSION")
-        .env_remove("TROVE_VAULT_PASSWORD")
-        .env_remove("TROVE_VAULT")
+        .env_remove("TROVE_DATABASE_PASSWORD")
+        .env_remove("TROVE_DATABASE")
         .env_remove("TROVE_ENV_STRICT")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -62,16 +62,16 @@ fn run_in(
 
 const ENV_FILE: &str = ".env.trove.yaml";
 
-/// A vault with one entry, plus a `.env.trove.yaml` in `dir` naming its password.
+/// A database with one entry, plus a `.env.trove.yaml` in `dir` naming its password.
 fn fixture(trove: &Path, dir: &Path) -> PathBuf {
-    let vault = dir.join("v.kdbx");
+    let database = dir.join("v.kdbx");
     let out = run_in(
         trove,
         dir,
         &[
             "init",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             "--password-stdin",
         ],
         &format!("{PASSWORD}\n"),
@@ -80,10 +80,10 @@ fn fixture(trove: &Path, dir: &Path) -> PathBuf {
     assert!(out.status.success(), "init should succeed");
     std::fs::write(
         dir.join(ENV_FILE),
-        format!("# vault credentials\ndatabases:\n  v.kdbx: \"{PASSWORD}\"\n"),
+        format!("# database credentials\ndatabases:\n  v.kdbx: \"{PASSWORD}\"\n"),
     )
     .expect("write .env.trove.yaml");
-    vault
+    database
 }
 
 fn write_suffix_credentials(path: &Path, entries: &[(&str, &str)]) {
@@ -94,7 +94,7 @@ fn write_suffix_credentials(path: &Path, entries: &[(&str, &str)]) {
 }
 
 #[test]
-fn yaml_path_suffixes_disambiguate_same_named_vaults() {
+fn yaml_path_suffixes_disambiguate_same_named_databases() {
     let trove = find_trove().expect("cargo-built trove");
     let tmp = TempDir::new().expect("tempdir");
     let credentials = tmp.path().join(".env.trove.yaml");
@@ -116,12 +116,12 @@ fn yaml_path_suffixes_disambiguate_same_named_vaults() {
         ("archive", "fallback-password"),
     ] {
         let dir = tmp.path().join(directory);
-        std::fs::create_dir_all(&dir).expect("create vault directory");
-        let vault = dir.join("v.kdbx");
+        std::fs::create_dir_all(&dir).expect("create database directory");
+        let database = dir.join("v.kdbx");
         let init = run_in(
             &trove,
             &dir,
-            &["init", "--vault", "v.kdbx", "--password-stdin"],
+            &["init", "--database", "v.kdbx", "--password-stdin"],
             &format!("{password}\n"),
             &[],
         );
@@ -132,8 +132,14 @@ fn yaml_path_suffixes_disambiguate_same_named_vaults() {
         );
 
         // A bare filename must still match its parent directories from cwd.
-        for path in ["v.kdbx", vault.to_str().unwrap()] {
-            let out = run_in(&trove, &dir, &["list", "--vault", path, &env_arg], "", &[]);
+        for path in ["v.kdbx", database.to_str().unwrap()] {
+            let out = run_in(
+                &trove,
+                &dir,
+                &["list", "--database", path, &env_arg],
+                "",
+                &[],
+            );
             assert!(
                 out.status.success(),
                 "{directory} ({path}): {}",
@@ -148,8 +154,8 @@ fn yaml_path_suffixes_do_not_match_partial_components() {
     let trove = find_trove().expect("cargo-built trove");
     let tmp = TempDir::new().expect("tempdir");
     let dir = tmp.path().join("homelab");
-    std::fs::create_dir_all(&dir).expect("create vault directory");
-    let vault = fixture(&trove, &dir);
+    std::fs::create_dir_all(&dir).expect("create database directory");
+    let database = fixture(&trove, &dir);
     let credentials = tmp.path().join(".env.trove.yaml");
     write_suffix_credentials(
         &credentials,
@@ -160,8 +166,8 @@ fn yaml_path_suffixes_do_not_match_partial_components() {
         &dir,
         &[
             "list",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             &format!("--env={}", credentials.display()),
         ],
         "",
@@ -188,10 +194,10 @@ fn unlock_preserves_alias_suffixes_and_legacy_canonical_filenames() {
         .expect("tempdir");
     let storage = tmp.path().join("storage");
     std::fs::create_dir(&storage).expect("create storage");
-    let vault = fixture(&trove, &storage);
+    let database = fixture(&trove, &storage);
     let alias = tmp.path().join("homelab");
     symlink(&storage, &alias).expect("create alias");
-    symlink(&vault, tmp.path().join("renamed.kdbx")).expect("create renamed file alias");
+    symlink(&database, tmp.path().join("renamed.kdbx")).expect("create renamed file alias");
     let credentials = tmp.path().join(".env.trove.yaml");
     write_suffix_credentials(
         &credentials,
@@ -264,7 +270,7 @@ fn unlock_preserves_alias_suffixes_and_legacy_canonical_filenames() {
     for request in requests {
         assert_eq!(
             request["path"],
-            std::fs::canonicalize(&vault).unwrap().to_str().unwrap()
+            std::fs::canonicalize(&database).unwrap().to_str().unwrap()
         );
     }
 }
@@ -273,12 +279,12 @@ fn unlock_preserves_alias_suffixes_and_legacy_canonical_filenames() {
 fn bare_env_reads_dot_env_trove_from_the_current_directory() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
 
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -293,7 +299,7 @@ fn bare_env_reads_dot_env_trove_from_the_current_directory() {
 fn env_accepts_a_directory_and_appends_the_default_filename() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     let elsewhere = TempDir::new().expect("second tempdir");
 
     // Run from a directory with no .env.trove.yaml of its own, pointing at the one
@@ -303,8 +309,8 @@ fn env_accepts_a_directory_and_appends_the_default_filename() {
         elsewhere.path(),
         &[
             "list",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             &format!("--env={}", tmp.path().display()),
         ],
         "",
@@ -321,7 +327,7 @@ fn env_accepts_a_directory_and_appends_the_default_filename() {
 fn env_accepts_an_explicit_file_path() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     let renamed = tmp.path().join("credentials.yaml");
     std::fs::rename(tmp.path().join(ENV_FILE), &renamed).expect("rename");
 
@@ -330,8 +336,8 @@ fn env_accepts_an_explicit_file_path() {
         tmp.path(),
         &[
             "list",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             &format!("--env={}", renamed.display()),
         ],
         "",
@@ -348,7 +354,7 @@ fn env_accepts_an_explicit_file_path() {
 fn the_environment_wins_over_the_file() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
 
     // The file holds the right password; the environment holds a wrong one.
     // The environment must win, so this must FAIL — proving the file supplies
@@ -356,9 +362,9 @@ fn the_environment_wins_over_the_file() {
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
-        &[("TROVE_VAULT_PASSWORD", "not-the-password")],
+        &[("TROVE_DATABASE_PASSWORD", "not-the-password")],
     );
     assert!(
         !out.status.success(),
@@ -370,20 +376,20 @@ fn the_environment_wins_over_the_file() {
 fn the_password_is_only_used_when_env_was_asked_for() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
 
     // Correct password in the environment, but no --env: trove must not use it.
     // Stdin is closed, so a prompt fails rather than hanging.
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap()],
+        &["list", "--database", database.to_str().unwrap()],
         "",
-        &[("TROVE_VAULT_PASSWORD", PASSWORD)],
+        &[("TROVE_DATABASE_PASSWORD", PASSWORD)],
     );
     assert!(
         !out.status.success(),
-        "TROVE_VAULT_PASSWORD must not unlock a vault unless --env opted in"
+        "TROVE_DATABASE_PASSWORD must not unlock a database unless --env opted in"
     );
 }
 
@@ -391,13 +397,13 @@ fn the_password_is_only_used_when_env_was_asked_for() {
 fn a_missing_env_file_is_an_error_not_a_silent_prompt() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::remove_file(tmp.path().join(ENV_FILE)).expect("remove");
 
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -413,7 +419,7 @@ fn a_missing_env_file_is_an_error_not_a_silent_prompt() {
 fn other_trove_variables_load_from_the_file_too() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     // `--env` is a general loader, not only a password mechanism: anything
     // under `environment:` lands in the environment. A bare YAML number is
     // taken as its text, so `1` needs no quotes.
@@ -426,7 +432,7 @@ fn other_trove_variables_load_from_the_file_too() {
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -442,18 +448,18 @@ fn other_trove_variables_load_from_the_file_too() {
     );
 }
 
-/// Bare `--env` falls back to the vault's own directory.
+/// Bare `--env` falls back to the database's own directory.
 ///
 /// Keeping `work.kdbx` and `.env.trove.yaml` together is the natural layout, and
-/// `trove unlock ~/vaults/work.kdbx` run from anywhere else must still find it —
+/// `trove unlock ~/databases/work.kdbx` run from anywhere else must still find it —
 /// otherwise the flag only works when you happen to be standing in the right
 /// directory.
 #[test]
-fn bare_env_falls_back_to_the_directory_holding_the_vault() {
+fn bare_env_falls_back_to_the_directory_holding_the_database() {
     let Some(trove) = find_trove() else { return };
-    let vault_dir = TempDir::new().expect("tempdir");
+    let database_dir = TempDir::new().expect("tempdir");
     let elsewhere = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, vault_dir.path());
+    let database = fixture(&trove, database_dir.path());
     assert!(
         !elsewhere.path().join(ENV_FILE).exists(),
         "the working directory must NOT have one, or this proves nothing"
@@ -462,13 +468,13 @@ fn bare_env_falls_back_to_the_directory_holding_the_vault() {
     let out = run_in(
         &trove,
         elsewhere.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
     assert!(
         out.status.success(),
-        "should find the vault's own .env.trove.yaml: {}",
+        "should find the database's own .env.trove.yaml: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
@@ -478,26 +484,26 @@ fn bare_env_falls_back_to_the_directory_holding_the_vault() {
     );
 }
 
-/// The working directory wins, so a checkout can override the vault's own file.
+/// The working directory wins, so a checkout can override the database's own file.
 #[test]
-fn the_working_directory_beats_the_vaults_directory() {
+fn the_working_directory_beats_the_databases_directory() {
     let Some(trove) = find_trove() else { return };
-    let vault_dir = TempDir::new().expect("tempdir");
+    let database_dir = TempDir::new().expect("tempdir");
     let cwd = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, vault_dir.path());
+    let database = fixture(&trove, database_dir.path());
 
     // A local file that names the WRONG password: if it is the one used, the
     // unlock fails, which is what proves precedence rather than a lucky pass.
     std::fs::write(
         cwd.path().join(ENV_FILE),
-        "databases:\n  v.kdbx: \"not-the-vault-password\"\n",
+        "databases:\n  v.kdbx: \"not-the-database-password\"\n",
     )
     .expect("write local .env.trove.yaml");
 
     let out = run_in(
         &trove,
         cwd.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -512,15 +518,15 @@ fn the_working_directory_beats_the_vaults_directory() {
 #[test]
 fn a_missing_env_file_reports_where_it_looked() {
     let Some(trove) = find_trove() else { return };
-    let vault_dir = TempDir::new().expect("tempdir");
+    let database_dir = TempDir::new().expect("tempdir");
     let cwd = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, vault_dir.path());
-    std::fs::remove_file(vault_dir.path().join(ENV_FILE)).expect("remove fixture env file");
+    let database = fixture(&trove, database_dir.path());
+    std::fs::remove_file(database_dir.path().join(ENV_FILE)).expect("remove fixture env file");
 
     let out = run_in(
         &trove,
         cwd.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -531,12 +537,12 @@ fn a_missing_env_file_reports_where_it_looked() {
         "the error should say where it looked: {err}"
     );
     assert!(
-        err.contains(vault_dir.path().to_str().expect("utf8")),
-        "including the vault's directory: {err}"
+        err.contains(database_dir.path().to_str().expect("utf8")),
+        "including the database's directory: {err}"
     );
 }
 
-/// An env file holds a vault password, so a group/world-readable one is worth
+/// An env file holds a database password, so a group/world-readable one is worth
 /// saying out loud — but only saying, by default. See `check_env_file_perms`:
 /// the file may live in a synced folder or on a `noowners` volume, where the
 /// mode bits are not the user's doing and not theirs to fix.
@@ -546,7 +552,7 @@ fn a_world_readable_env_file_warns_but_still_works() {
     use std::os::unix::fs::PermissionsExt;
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::set_permissions(
         tmp.path().join(ENV_FILE),
         std::fs::Permissions::from_mode(0o644),
@@ -556,7 +562,7 @@ fn a_world_readable_env_file_warns_but_still_works() {
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -578,7 +584,7 @@ fn env_file_does_not_follow_symlinks() {
     use std::os::unix::fs::symlink;
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::rename(
         tmp.path().join(ENV_FILE),
         tmp.path().join("credentials.yaml"),
@@ -593,7 +599,7 @@ fn env_file_does_not_follow_symlinks() {
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -612,7 +618,7 @@ fn strict_mode_refuses_a_world_readable_env_file() {
     use std::os::unix::fs::PermissionsExt;
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::set_permissions(
         tmp.path().join(ENV_FILE),
         std::fs::Permissions::from_mode(0o644),
@@ -622,7 +628,7 @@ fn strict_mode_refuses_a_world_readable_env_file() {
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[("TROVE_ENV_STRICT", "1")],
     );
@@ -642,7 +648,7 @@ fn strict_mode_refuses_a_world_readable_env_file() {
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[("TROVE_ENV_STRICT", "1")],
     );
@@ -661,13 +667,18 @@ fn strict_mode_refuses_a_world_readable_env_file() {
 fn keychain_refuses_without_a_terminal_and_never_outranks_the_others() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
 
     // `run_in` gives the child pipes, not a tty — exactly the agent case.
     let out = run_in(
         &trove,
         tmp.path(),
-        &["list", "--vault", vault.to_str().unwrap(), "--keychain"],
+        &[
+            "list",
+            "--database",
+            database.to_str().unwrap(),
+            "--keychain",
+        ],
         "",
         &[],
     );
@@ -689,8 +700,8 @@ fn keychain_refuses_without_a_terminal_and_never_outranks_the_others() {
         tmp.path(),
         &[
             "list",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             "--env",
             "--keychain",
         ],
@@ -710,7 +721,7 @@ fn keychain_refuses_without_a_terminal_and_never_outranks_the_others() {
 
 /// The bug `require_equals` exists to fix, at the level it actually bit.
 ///
-/// `git config credential.helper "trove --vault v --env git-credential"` has
+/// `git config credential.helper "trove --database v --env git-credential"` has
 /// git append the operation, so trove sees `--env git-credential get`. With an
 /// optional value and no `=`, `--env` took `git-credential` as its path and
 /// `get` became the subcommand — so the one command `--env` was written to
@@ -720,14 +731,14 @@ fn keychain_refuses_without_a_terminal_and_never_outranks_the_others() {
 fn a_bare_env_does_not_swallow_the_subcommand() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
 
     let out = run_in(
         &trove,
         tmp.path(),
         &[
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             "--env",
             "git-credential",
             "get",
@@ -753,7 +764,7 @@ fn a_bare_env_does_not_swallow_the_subcommand() {
 fn the_space_separated_form_says_what_to_type_instead() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     let env_path = tmp.path().join(ENV_FILE);
 
     let out = run_in(
@@ -761,8 +772,8 @@ fn the_space_separated_form_says_what_to_type_instead() {
         tmp.path(),
         &[
             "list",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             "--env",
             env_path.to_str().unwrap(),
         ],
@@ -778,15 +789,15 @@ fn the_space_separated_form_says_what_to_type_instead() {
 }
 
 #[test]
-fn environment_trove_vault_selects_the_default_offline_vault() {
+fn environment_trove_database_selects_the_default_offline_database() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::write(
         tmp.path().join(ENV_FILE),
         format!(
-            "databases:\n  v.kdbx: \"{PASSWORD}\"\nenvironment:\n  TROVE_VAULT: \"{}\"\n",
-            vault.display()
+            "databases:\n  v.kdbx: \"{PASSWORD}\"\nenvironment:\n  TROVE_DATABASE: \"{}\"\n",
+            database.display()
         ),
     )
     .expect("write .env.trove.yaml");
@@ -794,22 +805,22 @@ fn environment_trove_vault_selects_the_default_offline_vault() {
     let out = run_in(&trove, tmp.path(), &["db-info", "--json", "--env"], "", &[]);
     assert!(
         out.status.success(),
-        "TROVE_VAULT should select the offline vault: {}",
+        "TROVE_DATABASE should select the offline database: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let info: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON db-info");
-    assert_eq!(info["path"], vault.to_string_lossy().as_ref());
+    assert_eq!(info["path"], database.to_string_lossy().as_ref());
 }
 
 #[test]
-fn explicit_vault_flag_overrides_trove_vault_from_env_file() {
+fn explicit_database_flag_overrides_trove_database_from_env_file() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::write(
         tmp.path().join(ENV_FILE),
         format!(
-            "databases:\n  v.kdbx: \"{PASSWORD}\"\nenvironment:\n  TROVE_VAULT: /does/not/exist.kdbx\n"
+            "databases:\n  v.kdbx: \"{PASSWORD}\"\nenvironment:\n  TROVE_DATABASE: /does/not/exist.kdbx\n"
         ),
     )
     .expect("write .env.trove.yaml");
@@ -820,8 +831,8 @@ fn explicit_vault_flag_overrides_trove_vault_from_env_file() {
         &[
             "db-info",
             "--json",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             "--env",
         ],
         "",
@@ -829,41 +840,41 @@ fn explicit_vault_flag_overrides_trove_vault_from_env_file() {
     );
     assert!(
         out.status.success(),
-        "--vault must win over TROVE_VAULT: {}",
+        "--database must win over TROVE_DATABASE: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let info: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON db-info");
-    assert_eq!(info["path"], vault.to_string_lossy().as_ref());
+    assert_eq!(info["path"], database.to_string_lossy().as_ref());
 }
 
 #[test]
-fn exported_trove_vault_selects_offline_mode_without_env_file() {
+fn exported_trove_database_selects_offline_mode_without_env_file() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
 
     let out = run_in(
         &trove,
         tmp.path(),
         &["db-info", "--json", "--password-stdin"],
         &format!("{PASSWORD}\n"),
-        &[("TROVE_VAULT", vault.to_str().unwrap())],
+        &[("TROVE_DATABASE", database.to_str().unwrap())],
     );
     assert!(
         out.status.success(),
-        "exported TROVE_VAULT should select the offline vault: {}",
+        "exported TROVE_DATABASE should select the offline database: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let info: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON db-info");
-    assert_eq!(info["path"], vault.to_string_lossy().as_ref());
+    assert_eq!(info["path"], database.to_string_lossy().as_ref());
 }
 
 /// Run `trove list --env` in `cwd` and return its stderr, asserting it failed.
-fn env_list_fails(trove: &Path, cwd: &Path, vault: &Path) -> String {
+fn env_list_fails(trove: &Path, cwd: &Path, database: &Path) -> String {
     let out = run_in(
         trove,
         cwd,
-        &["list", "--vault", vault.to_str().unwrap(), "--env"],
+        &["list", "--database", database.to_str().unwrap(), "--env"],
         "",
         &[],
     );
@@ -879,31 +890,31 @@ fn env_list_fails(trove: &Path, cwd: &Path, vault: &Path) -> String {
 fn a_retired_env_trove_is_refused_with_directions() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::rename(tmp.path().join(ENV_FILE), tmp.path().join(".env.trove"))
         .expect("rename to the retired name");
 
-    let err = env_list_fails(&trove, tmp.path(), &vault);
+    let err = env_list_fails(&trove, tmp.path(), &database);
     assert!(err.contains(".env.trove "), "names the old file: {err}");
     assert!(err.contains(ENV_FILE), "names the new file: {err}");
     assert!(err.contains("databases:"), "shows the new layout: {err}");
 }
 
 /// A retired file in the working directory stops the search there: carrying on
-/// to the vault's directory would hide it behind whatever is found next.
+/// to the database's directory would hide it behind whatever is found next.
 #[test]
 fn a_retired_env_trove_stops_the_search_even_when_a_new_file_exists_further_on() {
     let Some(trove) = find_trove() else { return };
-    let vault_dir = TempDir::new().expect("tempdir");
+    let database_dir = TempDir::new().expect("tempdir");
     let cwd = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, vault_dir.path());
+    let database = fixture(&trove, database_dir.path());
     std::fs::write(
         cwd.path().join(".env.trove"),
-        format!("TROVE_VAULT_PASSWORD={PASSWORD}\n"),
+        format!("TROVE_DATABASE_PASSWORD={PASSWORD}\n"),
     )
     .expect("write retired file");
 
-    let err = env_list_fails(&trove, cwd.path(), &vault);
+    let err = env_list_fails(&trove, cwd.path(), &database);
     assert!(err.contains("databases:"), "says how to convert: {err}");
 }
 
@@ -913,7 +924,7 @@ fn a_retired_env_trove_stops_the_search_even_when_a_new_file_exists_further_on()
 fn env_dir_with_only_a_retired_file_says_how_to_convert_it() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::rename(tmp.path().join(ENV_FILE), tmp.path().join(".env.trove"))
         .expect("rename to the retired name");
     let elsewhere = TempDir::new().expect("tempdir");
@@ -923,8 +934,8 @@ fn env_dir_with_only_a_retired_file_says_how_to_convert_it() {
         elsewhere.path(),
         &[
             "list",
-            "--vault",
-            vault.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
             &format!("--env={}", tmp.path().display()),
         ],
         "",
@@ -941,14 +952,14 @@ fn env_dir_with_only_a_retired_file_says_how_to_convert_it() {
 fn dotenv_lines_in_the_new_file_are_refused() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::write(
         tmp.path().join(ENV_FILE),
-        format!("TROVE_VAULT_PASSWORD={PASSWORD}\n"),
+        format!("TROVE_DATABASE_PASSWORD={PASSWORD}\n"),
     )
     .expect("write dotenv lines");
 
-    let err = env_list_fails(&trove, tmp.path(), &vault);
+    let err = env_list_fails(&trove, tmp.path(), &database);
     assert!(err.contains("databases:"), "says how to convert: {err}");
 }
 
@@ -958,59 +969,59 @@ fn dotenv_lines_in_the_new_file_are_refused() {
 fn a_bare_filename_to_password_map_is_refused() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::write(
         tmp.path().join(ENV_FILE),
         format!("v.kdbx: \"{PASSWORD}\"\n"),
     )
     .expect("write bare map");
 
-    let err = env_list_fails(&trove, tmp.path(), &vault);
+    let err = env_list_fails(&trove, tmp.path(), &database);
     assert!(err.contains("databases:"), "says how to convert: {err}");
 }
 
 /// A password smuggled in through `environment:` is refused, so there is one
 /// place a password can be and one thing to audit.
 #[test]
-fn environment_cannot_carry_a_vault_password() {
+fn environment_cannot_carry_a_database_password() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let vault = fixture(&trove, tmp.path());
+    let database = fixture(&trove, tmp.path());
     std::fs::write(
         tmp.path().join(ENV_FILE),
-        format!("environment:\n  TROVE_VAULT_PASSWORD: \"{PASSWORD}\"\n"),
+        format!("environment:\n  TROVE_DATABASE_PASSWORD: \"{PASSWORD}\"\n"),
     )
     .expect("write");
 
-    let err = env_list_fails(&trove, tmp.path(), &vault);
+    let err = env_list_fails(&trove, tmp.path(), &database);
     assert!(
-        err.contains("TROVE_VAULT_PASSWORD") && err.contains("databases:"),
+        err.contains("TROVE_DATABASE_PASSWORD") && err.contains("databases:"),
         "names the variable and where passwords go: {err}"
     );
 }
 
-/// One file holds several vaults' passwords, each matched by filename.
+/// One file holds several databases' passwords, each matched by filename.
 #[test]
-fn each_vault_gets_the_password_named_by_its_filename() {
+fn each_database_gets_the_password_named_by_its_filename() {
     let Some(trove) = find_trove() else { return };
     let tmp = TempDir::new().expect("tempdir");
-    let mut vaults = Vec::new();
+    let mut databases = Vec::new();
     for (name, password) in [("a.kdbx", "alpha-pw"), ("b.kdbx", "beta-pw")] {
-        let vault = tmp.path().join(name);
+        let database = tmp.path().join(name);
         let out = run_in(
             &trove,
             tmp.path(),
             &[
                 "init",
-                "--vault",
-                vault.to_str().unwrap(),
+                "--database",
+                database.to_str().unwrap(),
                 "--password-stdin",
             ],
             &format!("{password}\n"),
             &[],
         );
         assert!(out.status.success(), "init {name}");
-        vaults.push(vault);
+        databases.push(database);
     }
     std::fs::write(
         tmp.path().join(ENV_FILE),
@@ -1018,18 +1029,18 @@ fn each_vault_gets_the_password_named_by_its_filename() {
     )
     .expect("write");
 
-    for vault in &vaults {
+    for database in &databases {
         let out = run_in(
             &trove,
             tmp.path(),
-            &["list", "--vault", vault.to_str().unwrap(), "--env"],
+            &["list", "--database", database.to_str().unwrap(), "--env"],
             "",
             &[],
         );
         assert!(
             out.status.success(),
             "{} should open with its own password: {}",
-            vault.display(),
+            database.display(),
             String::from_utf8_lossy(&out.stderr)
         );
     }

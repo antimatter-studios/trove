@@ -225,7 +225,7 @@ async fn locking_the_agent_hides_keys_until_unlocked() {
 
 /// An entry's KeeAgent lifetime applies to trove's own agent: once it runs
 /// out, `ssh-add -l` stops listing the key and a signature is refused, while
-/// the vault (and so the store) stays as it was.
+/// the database (and so the store) stays as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_key_past_its_lifetime_is_neither_listed_nor_used() {
     if !have("ssh-add") {

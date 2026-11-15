@@ -14,7 +14,7 @@
 //! and so is equally immune to what a process inherited. Prefer it when you can:
 //!
 //! **What forwarding gives up.** The private bytes leave troved. Once another
-//! agent holds them, trove's idle-lock, per-vault `lock`, and secure wipe no
+//! agent holds them, trove's idle-lock, per-database `lock`, and secure wipe no
 //! longer govern that copy — `lock` can only *ask* the other agent to drop it
 //! (`REMOVE_IDENTITY`), and an agent that is wedged, or a troved that is killed
 //! outright, leaves the key live. That is why lock always sends the removal, and
@@ -22,7 +22,7 @@
 //! constraint is the only part of the guarantee that survives trove dying. An
 //! entry that names its own duration gets that; everything else inherits
 //! trove's auto-lock window, so the forwarded copy expires roughly when the
-//! vault would have locked anyway. Only `idle timeout 0` — auto-lock explicitly
+//! database would have locked anyway. Only `idle timeout 0` — auto-lock explicitly
 //! disabled — leaves a key in the other agent indefinitely.
 //!
 //! Forwarding is on by default and switched off wholesale with
@@ -451,7 +451,7 @@ pub async fn on_unlock_when(
 }
 
 /// Which of these keys asked to be taken back out of the external agent when
-/// the vault closes. Call this on the key store *before* clearing it — the
+/// the database closes. Call this on the key store *before* clearing it — the
 /// policy travels with the key, so nothing else has to be remembered.
 pub fn to_unforward(keys: &[LoadedKey]) -> Vec<ForwardedKey> {
     keys.iter()
@@ -463,7 +463,7 @@ pub fn to_unforward(keys: &[LoadedKey]) -> Vec<ForwardedKey> {
 /// Ask the user's own agent to drop the keys that opted into removal at close.
 ///
 /// Deliberately *not* gated on [`forwarding_enabled`]: if forwarding was on when
-/// the vault was unlocked and got switched off before the lock, we still want
+/// the database was unlocked and got switched off before the lock, we still want
 /// the keys out. Asking an agent to remove a key it never had is harmless.
 pub async fn on_lock(keys: &[ForwardedKey]) -> ForwardReport {
     if keys.is_empty() {

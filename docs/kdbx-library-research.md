@@ -39,7 +39,7 @@ A writer bug = users lose every secret. A reader bug that accepts malformed inpu
 
 #### Our vendored fork (`vendor/keepass/`)
 - Three patches on 0.7.33: `Value::Bytes` non-UTF-8 base64 fallback in `xml_db/dump/entry.rs`; inner-header binary-pool round-trip for `<Binary Ref="..."/>` (upstream TODO); read-back of those refs.
-- Tests covering our patches: `crates/trove-core/tests/binary_attachments.rs` (5 fns), `vault_roundtrip.rs` (10 fns).
+- Tests covering our patches: `crates/trove-core/tests/binary_attachments.rs` (5 fns), `database_roundtrip.rs` (10 fns).
 
 #### Other Rust crates — all disqualified
 - `kdbx-rs` (tonyfinn, Codeberg): GPLv3+, **license incompatible** with our MIT/Apache-2.0 dual license. Last commit Oct 2024.
@@ -154,7 +154,7 @@ If merged: drop `[patch.crates-io]`, bump to `keepass = "0.12"`, migrate. If sta
 - Several public types now `#[non_exhaustive]` (#310).
 - Custom-UUID entry creation API in flux (#322 open).
 
-Existing `vault_roundtrip.rs` + `binary_attachments.rs` are the regression fence.
+Existing `database_roundtrip.rs` + `binary_attachments.rs` are the regression fence.
 
 **Phase B — contribute test PRs**, in priority order:
 
@@ -173,7 +173,7 @@ Existing `vault_roundtrip.rs` + `binary_attachments.rs` are the regression fence
 ### Defensive testing inside `trove-core`
 
 Independent of upstream:
-- Mirror items 1, 2, 4 as integration tests in `crates/trove-core/tests/` (seeded by `vault_roundtrip.rs` + `binary_attachments.rs`).
+- Mirror items 1, 2, 4 as integration tests in `crates/trove-core/tests/` (seeded by `database_roundtrip.rs` + `binary_attachments.rs`).
 - CI job running against selected KeePassXC `tests/data/` fixtures (data files, not GPL-tainted source) — or regenerate equivalents.
 - trove golden-file lock: small set of `.kdbx` files we ship and guarantee to read+round-trip byte-identically forever; CI fails on any deviation. Defense-in-depth — catches keepass-rs regressions before they touch user data.
 

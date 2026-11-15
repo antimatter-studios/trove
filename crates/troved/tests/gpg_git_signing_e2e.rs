@@ -8,8 +8,8 @@
 //!   1. Spin up an isolated `GNUPGHOME`.
 //!   2. Generate a real ed25519 GPG signing key (`--quick-generate-key`).
 //!   3. Export the secret as a binary blob.
-//!   4. Stash it in a real .kdbx vault under attachment `gpg-priv`.
-//!   5. Open the vault, populate the in-memory GPG key store.
+//!   4. Stash it in a real .kdbx database under attachment `gpg-priv`.
+//!   5. Open the database, populate the in-memory GPG key store.
 //!   6. Spawn our GPG agent listener on a temp socket; symlink it as
 //!      `$GNUPGHOME/S.gpg-agent` so gpg connects to *our* agent.
 //!   7. Run `git commit -S --allow-empty` and assert the commit was made.
@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::RwLock;
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::{self, GpgKeyStore};
-use troved::handler::load_gpg_keys_from_vault;
+use troved::handler::load_gpg_keys_from_database;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 
 fn noop_idle() -> Arc<IdleTracker> {
@@ -75,7 +75,7 @@ async fn git_commit_dash_capital_s_against_our_agent() {
         std::fs::set_permissions(&gnupghome, perms).unwrap();
     }
     let secret_path = tmp.path().join("secret.gpg");
-    let vault_path = tmp.path().join("vault.kdbx");
+    let database_path = tmp.path().join("database.kdbx");
     let sock_path = tmp.path().join("gpg.sock");
     let repo_path = tmp.path().join("repo");
 
@@ -142,23 +142,23 @@ async fn git_commit_dash_capital_s_against_our_agent() {
     let secret_bytes = std::fs::read(&secret_path).expect("read exported key");
     assert!(!secret_bytes.is_empty());
 
-    // 4. Stash in a vault.
+    // 4. Stash in a database.
     let password = "itest-pw";
     {
-        let mut vault = Vault::create(&vault_path, password).expect("create vault");
-        let id = vault.add_entry("gpg-itest").expect("add entry");
-        vault
+        let mut database = Database::create(&database_path, password).expect("create database");
+        let id = database.add_entry("gpg-itest").expect("add entry");
+        database
             .attach_binary(&id, "gpg-priv", &secret_bytes)
             .expect("attach gpg-priv");
-        vault.save().expect("save vault");
+        database.save().expect("save database");
     }
 
-    // 5. Populate the GPG key store from the vault.
-    let vault = Vault::open(&vault_path, password).expect("reopen");
-    let keys = load_gpg_keys_from_vault(&vault);
+    // 5. Populate the GPG key store from the database.
+    let database = Database::open(&database_path, password).expect("reopen");
+    let keys = load_gpg_keys_from_database(&database);
     assert!(
         !keys.is_empty(),
-        "vault should yield at least one ed25519 GPG key"
+        "database should yield at least one ed25519 GPG key"
     );
     let store: GpgKeyStore = Arc::new(RwLock::new(keys));
 

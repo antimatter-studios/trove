@@ -25,31 +25,31 @@ protocols, and the OpenPGP key parser.
 
 ## Features
 
-### 1. Multi-vault daemon
+### 1. Multi-database daemon
 
-The daemon held exactly one vault (`Option<Vault>`). It now holds a set.
+The daemon held exactly one database (`Option<Database>`). It now holds a set.
 
-- `unlock` is **additive** — a personal vault and a work vault serve at once.
+- `unlock` is **additive** — a personal database and a work database serve at once.
 - The SSH/GPG agents serve the **union**; agents key by public blob / keygrip,
   so different keys simply coexist.
-- `lock --vault <path>` drops one vault; a bare `lock` still drops everything.
+- `lock --database <path>` drops one database; a bare `lock` still drops everything.
 - `list` / `search` / `status` span the whole set.
-- Title collisions across vaults are **refused with both vault names**, never
-  guessed — returning the wrong vault's secret would be worse than an error.
+- Title collisions across databases are **refused with both database names**, never
+  guessed — returning the wrong database's secret would be worse than an error.
 
-New type `troved::vaults::VaultSet` with canonical-path keying, so `./v.kdbx`
-and `/abs/v.kdbx` are one vault rather than two.
+New type `troved::databases::DatabaseSet` with canonical-path keying, so `./v.kdbx`
+and `/abs/v.kdbx` are one database rather than two.
 
 **Two things this surfaced that weren't in the design doc:**
 
 - **The idle timer wasn't re-armed after a partial lock.** Harmless when locking
-  always meant locking everything; with `lock --vault` it would have left the
-  remaining vaults unlocked indefinitely.
+  always meant locking everything; with `lock --database` it would have left the
+  remaining databases unlocked indefinitely.
 - **Materialized files collide the opposite way from keys.** Keys are
   last-wins and harmless (same keypair, same signature). Files are **first-wins**:
-  overwriting replaces data a live process is using, and locking either vault
+  overwriting replaces data a live process is using, and locking either database
   would then wipe a path the other still expects. `MaterializedFile` now carries
-  its source vault.
+  its source database.
 
 ### 2. RSA for OpenPGP — signing and decryption
 
@@ -85,7 +85,7 @@ unanswered.
 The KeePassXC model — push keys into whatever agent `$SSH_AUTH_SOCK` names, so
 processes that never inherited trove's socket path can still use them.
 
-Driven entirely by **per-entry `KeeAgent.settings`** already in the vault, which
+Driven entirely by **per-entry `KeeAgent.settings`** already in the database, which
 round-trip through KeePassXC's own UI — no new trove config:
 
 | Setting | Behaviour |
@@ -227,7 +227,7 @@ New: [todo.md](todo.md), [macos.md](macos.md), [windows.md](windows.md),
 [agent-routing.md](agent-routing.md), [spike-scdaemon.md](spike-scdaemon.md),
 [session-summary-2026-08-01.md](session-summary-2026-08-01.md), this report.
 
-Updated: `multi-vault.md` (phase 1 now implemented), `threat-model.md`,
+Updated: `multi-database.md` (phase 1 now implemented), `threat-model.md`,
 `cli-reference.md`, `architecture.md`, `README.md`.
 
 Everything unverified is marked as such rather than asserted.

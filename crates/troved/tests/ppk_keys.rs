@@ -86,12 +86,12 @@ fn a_ppk_key_signs_exactly_like_the_original() {
 }
 
 #[test]
-fn a_ppk_attachment_in_a_vault_is_served() {
+fn a_ppk_attachment_in_a_database_is_served() {
     // KeeAgent on Windows often keeps .ppk files; both the KeeAgent-named
     // attachment and a plain content scan must pick one up.
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("v.kdbx");
-    let mut v = trove_core::Vault::create(&path, "pw").unwrap();
+    let mut v = trove_core::Database::create(&path, "pw").unwrap();
     let named = v.add_entry("Windows/putty").unwrap();
     v.attach_binary(&named, "key.ppk", &fixture("ed25519-v3.ppk"))
         .unwrap();
@@ -106,7 +106,7 @@ fn a_ppk_attachment_in_a_vault_is_served() {
     v.attach_binary(&scanned, "id", &fixture("rsa-v2.ppk"))
         .unwrap();
 
-    let keys = troved::handler::load_ssh_keys_from_vault_filtered(&v, None);
+    let keys = troved::handler::load_ssh_keys_from_database_filtered(&v, None);
     let mut comments: Vec<&str> = keys.iter().map(|k| k.comment.as_str()).collect();
     comments.sort_unstable();
     assert_eq!(comments.len(), 2, "{comments:?}");

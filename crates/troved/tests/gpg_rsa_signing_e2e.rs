@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::RwLock;
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::{self, GpgKeyStore};
-use troved::handler::load_gpg_keys_from_vault;
+use troved::handler::load_gpg_keys_from_database;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 
 fn noop_idle() -> Arc<IdleTracker> {
@@ -73,7 +73,7 @@ async fn git_commit_dash_capital_s_with_an_rsa_key() {
         std::fs::set_permissions(&gnupghome, perms).unwrap();
     }
     let secret_path = tmp.path().join("secret.gpg");
-    let vault_path = tmp.path().join("vault.kdbx");
+    let database_path = tmp.path().join("database.kdbx");
     let sock_path = tmp.path().join("g.sock");
     let repo_path = tmp.path().join("repo");
 
@@ -126,7 +126,7 @@ async fn git_commit_dash_capital_s_with_an_rsa_key() {
         .expect("find keygrip")
         .to_ascii_lowercase();
 
-    // 3. Export and stash in a vault, as a user would.
+    // 3. Export and stash in a database, as a user would.
     let ex = Command::new("gpg")
         .env("GNUPGHOME", &gnupghome)
         .args([
@@ -151,17 +151,17 @@ async fn git_commit_dash_capital_s_with_an_rsa_key() {
 
     let password = "rsa-itest-pw";
     {
-        let mut vault = Vault::create(&vault_path, password).expect("create vault");
-        let id = vault.add_entry("gpg-rsa").expect("add entry");
-        vault
+        let mut database = Database::create(&database_path, password).expect("create database");
+        let id = database.add_entry("gpg-rsa").expect("add entry");
+        database
             .attach_binary(&id, "gpg-priv", &secret_bytes)
             .expect("attach");
-        vault.save().expect("save");
+        database.save().expect("save");
     }
 
     // 4. Load it the way the daemon does on unlock.
-    let vault = Vault::open(&vault_path, password).expect("reopen");
-    let keys = load_gpg_keys_from_vault(&vault);
+    let database = Database::open(&database_path, password).expect("reopen");
+    let keys = load_gpg_keys_from_database(&database);
     assert!(
         !keys.is_empty(),
         "an RSA export must yield a usable key — an empty store here means the \

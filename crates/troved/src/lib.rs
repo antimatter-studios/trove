@@ -16,6 +16,9 @@ pub mod approval;
 /// builds on the singleton flock, which has no Windows analogue).
 #[cfg(unix)]
 pub mod daemons;
+/// The set of databases currently held unlocked. `Unlock` is additive; see the
+/// module docs and `docs/multi-database.md`.
+pub mod databases;
 pub mod gpg_agent;
 pub mod handler;
 /// Process-level hardening (non-dumpable on Linux).
@@ -31,6 +34,3 @@ pub mod server;
 #[cfg(unix)]
 pub mod singleton;
 pub mod ssh_agent;
-/// The set of vaults currently held unlocked. `Unlock` is additive; see the
-/// module docs and `docs/multi-vault.md`.
-pub mod vaults;

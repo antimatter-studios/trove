@@ -1,5 +1,5 @@
 //! `Unlock` with the wire-level `keyfile` field: the daemon opens a
-//! composite-key vault, holds the keyfile bytes in Vault memory, and its own
+//! composite-key database, holds the keyfile bytes in Database memory, and its own
 //! re-saves (via a write RPC) derive the same composite key — proven by
 //! reopening the file from disk with the pair afterwards.
 
@@ -12,7 +12,7 @@ use base64::Engine as _;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -42,7 +42,7 @@ impl Harness {
     fn new() -> Self {
         let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
         Self {
-            state: Arc::new(Mutex::new(troved::vaults::VaultSet::new())),
+            state: Arc::new(Mutex::new(troved::databases::DatabaseSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
             scoped_agents: troved::ssh_agent::scoped::new_registry(),
@@ -85,7 +85,8 @@ fn unlock_req(path: &std::path::Path, keyfile_bytes: Option<&[u8]>) -> Request {
 async fn unlock_with_keyfile_and_daemon_resave_keeps_composite_key() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("kf.kdbx");
-    Vault::create_with_key(&path, PASSWORD, Some(&keyfile())).expect("create composite vault");
+    Database::create_with_key(&path, PASSWORD, Some(&keyfile()))
+        .expect("create composite database");
 
     let h = Harness::new();
 
@@ -133,7 +134,7 @@ async fn unlock_with_keyfile_and_daemon_resave_keeps_composite_key() {
     assert_eq!(resp["status"], "ok", "{resp}");
 
     // The file on disk still opens with the SAME composite key…
-    let v = Vault::open_with_key(&path, PASSWORD, Some(&keyfile())).expect("reopen composite");
+    let v = Database::open_with_key(&path, PASSWORD, Some(&keyfile())).expect("reopen composite");
     let id = v.find_by_title("written-by-daemon").expect("daemon write");
     assert_eq!(
         v.get_field(&id, "Password").unwrap().as_deref(),
@@ -142,7 +143,7 @@ async fn unlock_with_keyfile_and_daemon_resave_keeps_composite_key() {
     drop(v);
     // …and NOT with the password alone (the daemon didn't drop the keyfile).
     assert!(
-        Vault::open(&path, PASSWORD).is_err(),
+        Database::open(&path, PASSWORD).is_err(),
         "daemon re-save must preserve the composite key"
     );
 }

@@ -28,12 +28,15 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use trove_core::{Error as CoreError, GroupTransferPlan, SearchFieldFilter, SearchQuery, Vault};
+use trove_core::{
+    Database, DatabaseMetadata, Error as CoreError, GroupTransferPlan, SearchFieldFilter,
+    SearchQuery,
+};
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
-/// Exit code for vault-level errors (bad password, corrupt kdbx).
-const EXIT_VAULT_ERROR: u8 = 2;
+/// Exit code for database-level errors (bad password, corrupt kdbx).
+const EXIT_DATABASE_ERROR: u8 = 2;
 
 /// Attachment slot used for SSH private keys. Kept short and conventional.
 const SSH_KEY_ATTACHMENT: &str = "id";
@@ -44,7 +47,7 @@ const SSH_KEY_ATTACHMENT: &str = "id";
 const SSH_PUBKEY_ATTACHMENT: &str = "id.pub";
 
 /// Attachment slot used for GPG secret-key exports. Matches what
-/// `troved::handler::load_gpg_keys_from_vault` looks for.
+/// `troved::handler::load_gpg_keys_from_database` looks for.
 const GPG_KEY_ATTACHMENT: &str = "gpg-priv";
 
 #[derive(Debug, Parser)]
@@ -57,32 +60,32 @@ const GPG_KEY_ATTACHMENT: &str = "gpg-priv";
     propagate_version = true
 )]
 struct Cli {
-    /// Read the vault password from stdin (one line) instead of prompting.
+    /// Read the database password from stdin (one line) instead of prompting.
     /// For `init`, the single line is used as the password without a confirm step.
     /// Intended for scripts and CI; do not use in shells where stdin may be logged.
     #[arg(long = "password-stdin", global = true)]
     password_stdin: bool,
 
-    /// Load vault passwords and settings from a `.env.trove.yaml` file before running.
+    /// Load database passwords and settings from a `.env.trove.yaml` file before running.
     ///
     /// Bare `--env` looks for `.env.trove.yaml` in the working directory and
-    /// then beside the vault being opened; pass a path to read a specific file.
-    /// The file is YAML: `databases:` maps a vault filename or path suffix to
+    /// then beside the database being opened; pass a path to read a specific file.
+    /// The file is YAML: `databases:` maps a database filename or path suffix to
     /// its password; the longest whole-component suffix wins. `environment:` sets variables such as
     /// `TROVE_IDLE_TIMEOUT`. An existing environment variable wins over the
-    /// file, and an exported `TROVE_VAULT_PASSWORD` wins over `databases:`.
+    /// file, and an exported `TROVE_DATABASE_PASSWORD` wins over `databases:`.
     ///
     /// The old dotenv `.env.trove` is no longer read: finding one is an error
     /// that says how to convert it. Nothing is read unless this flag is given —
     /// trove never picks up credentials just because a file happens to exist
-    /// next to a vault.
+    /// next to a database.
     #[arg(
         long = "env",
         global = true,
         num_args = 0..=1,
         // A value must be attached with `=`. Without this an optional-value
         // flag eats whatever follows it, and what follows it is usually the
-        // subcommand: `trove --vault v --env git-credential get` took
+        // subcommand: `trove --database v --env git-credential get` took
         // "git-credential" as the PATH and then ran `trove get`. That is the
         // credential-helper invocation exactly, since git appends the
         // operation to whatever `credential.helper` holds — so the one place
@@ -96,7 +99,7 @@ struct Cli {
     // (Some(Some(p)) — use exactly that).
     env_file: Option<Option<PathBuf>>,
 
-    /// Take the vault password from the macOS login keychain (see
+    /// Take the database password from the macOS login keychain (see
     /// `trove keychain save`).
     ///
     /// Opt-in only, and the LOWEST-priority source: `--env` and
@@ -109,31 +112,31 @@ struct Cli {
     keychain: bool,
 
     /// Operate directly on this .kdbx file (offline mode), bypassing the daemon.
-    /// Defaults to TROVE_VAULT when set; an explicit --vault takes precedence.
+    /// Defaults to TROVE_DATABASE when set; an explicit --database takes precedence.
     ///
     /// trove has two modes, selected by the presence of this flag:
     ///
-    /// * `--vault <PATH>` present — offline. The command opens the file at PATH
+    /// * `--database <PATH>` present — offline. The command opens the file at PATH
     ///   directly; the password comes from `--password-stdin` or a prompt (never
     ///   the command line). No daemon, no `TROVE_SESSION` needed. `init` and
     ///   `materialize` always work this way; with this flag `add`, `generate`,
     ///   `get`, and `list` do too.
-    /// * `--vault` absent — daemon. `add` (ssh/gpg/file), `generate ssh`, `get`,
-    ///   and `list` act on the vault unlocked in the running `troved`, gated by
+    /// * `--database` absent — daemon. `add` (ssh/gpg/file), `generate ssh`, `get`,
+    ///   and `list` act on the database unlocked in the running `troved`, gated by
     ///   the `TROVE_SESSION` code `trove unlock` minted. `init` and `materialize`
-    ///   have no daemon mode and error without `--vault`.
+    ///   have no daemon mode and error without `--database`.
     ///
     /// `unlock` is the exception: it is inherently daemon-directed, so it takes
-    /// its target as a positional `<VAULT>` and ignores this flag.
+    /// its target as a positional `<DATABASE>` and ignores this flag.
     ///
-    /// Works before or after the subcommand: `trove --vault V list` and
-    /// `trove list --vault V` are equivalent.
-    #[arg(long = "vault", global = true, value_name = "PATH")]
-    vault: Option<PathBuf>,
+    /// Works before or after the subcommand: `trove --database V list` and
+    /// `trove list --database V` are equivalent.
+    #[arg(long = "database", global = true, value_name = "PATH")]
+    database: Option<PathBuf>,
 
     /// Unlock with a composite key: this keyfile PLUS the password. Applies
-    /// wherever a vault is opened — offline `--vault` commands, `init`
-    /// (locks the new vault with the composite key), and `unlock` (the
+    /// wherever a database is opened — offline `--database` commands, `init`
+    /// (locks the new database with the composite key), and `unlock` (the
     /// daemon holds the keyfile bytes in memory for re-saves). Accepts any
     /// format KeePassXC does: XML v1/v2, raw 32-byte, hex-64, or an
     /// arbitrary file (hashed with SHA-256).
@@ -142,7 +145,7 @@ struct Cli {
 
     /// Unlock with a YubiKey HMAC-SHA1 challenge-response (KeePassXC's
     /// scheme): `--yubikey <SLOT>[:SERIAL]`, e.g. `--yubikey 2`. Applies to
-    /// offline `--vault` commands and `init`. The device must stay connected
+    /// offline `--database` commands and `init`. The device must stay connected
     /// while writing — every save answers a fresh challenge.
     #[cfg(feature = "yubikey")]
     #[arg(long = "yubikey", global = true, value_name = "SLOT[:SERIAL]")]
@@ -164,14 +167,53 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+enum DatabaseOp {
+    /// Show or edit KDBX metadata and Trove's shared database UUID.
+    Metadata {
+        #[command(subcommand)]
+        op: DatabaseMetadataOp,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DatabaseMetadataOp {
+    /// Show the name, description, default username and Trove UUID.
+    Show {
+        /// Print the metadata as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update one or more metadata fields. An empty value clears a field.
+    Set {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long = "default-username")]
+        default_username: Option<String>,
+        #[arg(long = "trove-uuid", conflicts_with = "generate_trove_uuid")]
+        trove_uuid: Option<String>,
+        /// Generate a new UUID for linking copies of this database.
+        #[arg(long, conflicts_with = "trove_uuid")]
+        generate_trove_uuid: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new empty vault at `--vault <PATH>` (required; must not exist).
+    /// Show or edit the selected KDBX database's metadata.
+    Database {
+        #[command(subcommand)]
+        op: DatabaseOp,
+    },
+
+    /// Create a new empty database at `--database <PATH>` (required; must not exist).
     Init,
 
     /// List entries, one per line.
     ///
-    /// With `--vault <PATH>`: open that file directly (offline). Without it:
-    /// list the vault currently unlocked in the running daemon (auto-spawning
+    /// With `--database <PATH>`: open that file directly (offline). Without it:
+    /// list the database currently unlocked in the running daemon (auto-spawning
     /// if needed) — no password prompt.
     List {
         /// Machine-readable output: a JSON array of entry summaries.
@@ -184,7 +226,7 @@ enum Command {
         show_id: bool,
     },
 
-    /// Add a resource (SSH key, password, ...) to a vault.
+    /// Add a resource (SSH key, password, ...) to a database.
     Add {
         #[command(subcommand)]
         resource: AddResource,
@@ -196,7 +238,7 @@ enum Command {
         resource: GenerateResource,
     },
 
-    /// Retrieve a resource from a vault.
+    /// Retrieve a resource from a database.
     Get {
         #[command(subcommand)]
         resource: GetResource,
@@ -214,7 +256,7 @@ enum Command {
         op: GpgAgentOp,
     },
 
-    /// Without a subcommand: materialize all opted-in entries in the vault to
+    /// Without a subcommand: materialize all opted-in entries in the database to
     /// disk in-process, without going through the daemon. Useful for testing
     /// and for disconnected workflows. Wipes everything on Ctrl-C / SIGINT.
     ///
@@ -241,11 +283,11 @@ enum Command {
         op: settings_cmd::SettingsOp,
     },
 
-    /// Unlock a vault and start a session. The keys + materialize plan land in
+    /// Unlock a database and start a session. The keys + materialize plan land in
     /// daemon memory; the SSH and GPG agents serve them.
     ///
     /// `unlock` is inherently daemon-directed, so it takes its target as a
-    /// positional `<VAULT>` and ignores the global `--vault` selector (which
+    /// positional `<DATABASE>` and ignores the global `--database` selector (which
     /// means "operate offline" everywhere else).
     ///
     /// Prompts for the master password unless `--password-stdin` is set; the
@@ -258,8 +300,8 @@ enum Command {
     /// `--export` / `--shell` force a mode, and `--detach` opts out of both:
     /// keys in the agents, your own prompt back, no session code.
     Unlock {
-        /// Path to the .kdbx vault to unlock.
-        vault: PathBuf,
+        /// Path to the .kdbx database to unlock.
+        database: PathBuf,
         /// Idle-lock timeout in seconds. Resets on every daemon request
         /// (control RPC, ssh-agent op, gpg-agent op). `0` disables auto-lock.
         /// When omitted, keeps the daemon's currently configured timeout
@@ -281,7 +323,7 @@ enum Command {
         /// Unlock and hand your prompt straight back: no subshell, nothing to
         /// `eval`, and no session code.
         ///
-        /// The vault is unlocked exactly as it always is — the SSH and GPG
+        /// The database is unlocked exactly as it always is — the SSH and GPG
         /// agents serve its keys, and `Materialize.*` entries are written to
         /// disk. What you don't get is the session code, because there is
         /// nowhere to put it: a process cannot set a variable in the shell that
@@ -289,27 +331,27 @@ enum Command {
         ///
         /// So `get` and `materialize` stay refused in that shell, while `ssh`,
         /// `git` and `gpg` keep working — they go through the agents, which
-        /// need no code. Use `--vault <PATH>` for an offline read, or unlock
+        /// need no code. Use `--database <PATH>` for an offline read, or unlock
         /// again without this flag if you want a session after all.
         #[arg(long = "detach", conflicts_with_all = ["export", "shell"])]
         detach: bool,
     },
 
     /// Tell the running `troved` to lock: wipe materialized files, drop
-    /// SSH+GPG keys, drop the vault. Idempotent.
+    /// SSH+GPG keys, drop the database. Idempotent.
     ///
-    /// With several vaults unlocked, a bare `trove lock` locks all of them.
-    /// `--vault <PATH>` locks just that one and leaves the rest serving.
+    /// With several databases unlocked, a bare `trove lock` locks all of them.
+    /// `--database <PATH>` locks just that one and leaves the rest serving.
     Lock {
-        /// Lock only the vault opened from this `.kdbx`, instead of all of
-        /// them. Errors if no vault is unlocked at that path.
-        #[arg(long = "vault", value_name = "PATH")]
-        vault: Option<PathBuf>,
+        /// Lock only the database opened from this `.kdbx`, instead of all of
+        /// them. Errors if no database is unlocked at that path.
+        #[arg(long = "database", value_name = "PATH")]
+        database: Option<PathBuf>,
     },
 
     /// Check the setup around trove: the daemon and its version, stray
-    /// daemons, where `SSH_AUTH_SOCK` and gpg's agent socket point, the vault
-    /// file (`--vault` or `TROVE_VAULT`) and `.env.trove.yaml` permissions.
+    /// daemons, where `SSH_AUTH_SOCK` and gpg's agent socket point, the database
+    /// file (`--database` or `TROVE_DATABASE`) and `.env.trove.yaml` permissions.
     ///
     /// Read-only, and never starts a daemon. Exits 1 if any check fails.
     Doctor {
@@ -319,7 +361,7 @@ enum Command {
     },
 
     /// Copy the SSH private keys in a directory (`~/.ssh` by default) into the
-    /// vault, one entry per key, asking about each.
+    /// database, one entry per key, asking about each.
     ///
     /// Keys are found by content, so any file holding a private key is offered
     /// whatever its name; `known_hosts`, `config`, `authorized_keys` and
@@ -331,8 +373,8 @@ enum Command {
     /// key whose entry already exists. The files themselves are never changed
     /// or removed.
     ///
-    /// Targets the vault unlocked in the running daemon by default; pass the
-    /// global `--vault <path>` to write a kdbx file directly.
+    /// Targets the database unlocked in the running daemon by default; pass the
+    /// global `--database <path>` to write a kdbx file directly.
     ImportSsh {
         /// Directory to scan. Defaults to ~/.ssh.
         dir: Option<PathBuf>,
@@ -348,13 +390,13 @@ enum Command {
     },
 
     /// Print a human-readable summary of the running `troved`'s state:
-    /// vault path (if unlocked), idle-lock state, and counts of SSH keys,
+    /// database path (if unlocked), idle-lock state, and counts of SSH keys,
     /// GPG keys, and materialized files in memory.
     Status {
         /// Print the status as a JSON object.
         #[arg(long)]
         json: bool,
-        /// Also list, per unlocked vault, the SSH keys served, the files
+        /// Also list, per unlocked database, the SSH keys served, the files
         /// materialized and the keys skipped, plus the GPG keys served.
         #[arg(long, short = 'v')]
         verbose: bool,
@@ -396,7 +438,7 @@ enum Command {
     /// names and attachment names. The password (and any other protected
     /// value) is shown only with `--show-protected`.
     ///
-    /// With `--vault <PATH>`: read the file directly (offline). Without it:
+    /// With `--database <PATH>`: read the file directly (offline). Without it:
     /// served by the running daemon; the summary view needs no session code,
     /// but protected values (`--attr Password --show-protected`) present the
     /// `TROVE_SESSION` code from `trove unlock`.
@@ -585,7 +627,7 @@ enum Command {
         /// Keep Materialize.* fields on copied entries (their targets may collide).
         #[arg(long, requires = "recursive")]
         keep_materialize: bool,
-        /// Show the preflighted transfer without changing the vault.
+        /// Show the preflighted transfer without changing the database.
         #[arg(long, requires = "recursive")]
         dry_run: bool,
     },
@@ -654,7 +696,7 @@ enum Command {
         json: bool,
     },
 
-    /// Audit the vault's passwords. Only entry paths are printed, never a
+    /// Audit the database's passwords. Only entry paths are printed, never a
     /// password. Exits 1 when any check finds something, so CI can gate on it.
     ///
     /// `--hibp` checks every password against an OFFLINE Have-I-Been-Pwned
@@ -663,7 +705,7 @@ enum Command {
     /// disk, never loaded. `--reuse` lists entries sharing a password,
     /// `--weak` those zxcvbn scores below `--min-score`, and `--age DAYS`
     /// those unchanged for longer than DAYS, and `--expired` those whose
-    /// expiry date has passed. Offline-only: requires `--vault`.
+    /// expiry date has passed. Offline-only: requires `--database`.
     #[command(group(clap::ArgGroup::new("checks").required(true).multiple(true).args(["hibp", "reuse", "weak", "age", "expired"])))]
     Analyze {
         /// Path to the sorted pwned-passwords dump.
@@ -689,11 +731,11 @@ enum Command {
         json: bool,
     },
 
-    /// Run every vault health check at once: reused, weak (zxcvbn below 3)
+    /// Run every database health check at once: reused, weak (zxcvbn below 3)
     /// and expired passwords, passwords unchanged for over a year, and,
     /// with `--hibp`, breached ones. The same report as `trove analyze` with
     /// all its checks on; exits 1 on any finding. Offline-only: requires
-    /// `--vault`.
+    /// `--database`.
     Health {
         /// Also check against this sorted pwned-passwords dump.
         #[arg(long, value_name = "FILE")]
@@ -706,7 +748,7 @@ enum Command {
     /// Act as a git credential helper (`git config credential.helper "trove
     /// git-credential"`). git appends the operation (get/store/erase) and
     /// speaks its key=value protocol on stdin/stdout. By default, `get` reads
-    /// from the unlocked daemon using TROVE_SESSION; pass `--vault` for offline
+    /// from the unlocked daemon using TROVE_SESSION; pass `--database` for offline
     /// mode. `store`/`erase` are accepted and ignored.
     GitCredential {
         /// The git operation: get, store, or erase.
@@ -715,7 +757,7 @@ enum Command {
 
     /// Resolve a `trove://<entry-path>[/<field>]` secret reference and print
     /// the value to stdout (the field defaults to Password). The primitive
-    /// behind config templating — `export DB=$(trove --vault v resolve
+    /// behind config templating — `export DB=$(trove --database v resolve
     /// trove://Infra/prod/postgres)`. Offline-only.
     Resolve {
         /// The trove:// reference to resolve.
@@ -737,12 +779,12 @@ enum Command {
     /// exports nothing; `trove env-agent add` creates it. The older
     /// `Exec.Env` and `Exec.<VAR>` fields still count as the document until
     /// it exists.
-    /// The child's exit code becomes trove's. With the global `--vault` it
-    /// opens that file; without it, it reads the vaults unlocked in the
+    /// The child's exit code becomes trove's. With the global `--database` it
+    /// opens that file; without it, it reads the databases unlocked in the
     /// daemon, gated by `TROVE_SESSION`.
     ///
     /// If an entry and group share a name, use `--entry PATH` or `--group PATH`.
-    /// Example: `trove --vault v.kdbx exec Infra/kubeconfig-prod -- bash`
+    /// Example: `trove --database v.kdbx exec Infra/kubeconfig-prod -- bash`
     Exec {
         /// Entry path or group path whose secrets to inject. If omitted, select
         /// exactly one of `--entry` or `--group`.
@@ -762,38 +804,38 @@ enum Command {
         command: Vec<std::ffi::OsString>,
     },
 
-    /// Merge another kdbx vault into `--vault` (KDBX-standard semantics:
+    /// Merge another kdbx database into `--database` (KDBX-standard semantics:
     /// last-write-wins by modification time, histories preserved — the same
     /// algorithm KeePassXC uses, so either tool can merge the same pair).
-    /// Offline-only. The SOURCE vault's password is prompted separately
+    /// Offline-only. The SOURCE database's password is prompted separately
     /// (with `--password-stdin` it is stdin line 2; target password line 1).
     Merge {
         /// Path to the source .kdbx to merge from (left unchanged).
         source: PathBuf,
-        /// Keyfile for the SOURCE vault, when it uses a composite key.
-        /// (The global --key-file applies to the TARGET vault.)
+        /// Keyfile for the SOURCE database, when it uses a composite key.
+        /// (The global --key-file applies to the TARGET database.)
         #[arg(long = "source-key-file", value_name = "PATH")]
         source_key_file: Option<PathBuf>,
     },
 
-    /// Two-way sync `--vault` with another copy of it — one in a synced
+    /// Two-way sync `--database` with another copy of it — one in a synced
     /// folder, on a USB stick, on a network share. Each side's changes are
     /// merged into the other (as `merge` does), and the other copy is
     /// replaced atomically, so both end equal; it is created if missing.
-    /// `--vault` is authoritative for vault settings such as the KDF. A new
-    /// copy gets `--vault`'s own credentials. Offline-only. An existing OTHER
+    /// `--database` is authoritative for database settings such as the KDF. A new
+    /// copy gets `--database`'s own credentials. Offline-only. An existing OTHER
     /// copy's password is prompted separately (with `--password-stdin` it is
-    /// stdin line 2; `--vault`'s password line 1).
+    /// stdin line 2; `--database`'s password line 1).
     Sync {
-        /// Path to the other copy of the vault.
+        /// Path to the other copy of the database.
         other: PathBuf,
         /// Keyfile for the OTHER copy, when it uses a composite key.
-        /// (The global --key-file applies to `--vault`.)
+        /// (The global --key-file applies to `--database`.)
         #[arg(long = "other-key-file", value_name = "PATH")]
         other_key_file: Option<PathBuf>,
     },
 
-    /// Export the vault: `xml` (the decrypted KeePass XML, importable by any
+    /// Export the database: `xml` (the decrypted KeePass XML, importable by any
     /// KeePass tool) or `csv` (KeePassXC's column convention). Offline-only,
     /// stdout. THE OUTPUT CONTAINS EVERY SECRET IN PLAINTEXT.
     Export {
@@ -852,7 +894,7 @@ enum Command {
 
     /// Manage the macOS login-keychain entry that `--keychain` reads.
     ///
-    /// One entry per vault, filed under its absolute path. No biometry here —
+    /// One entry per database, filed under its absolute path. No biometry here —
     /// the entry is gated by your login session, and by a keychain prompt when
     /// an unfamiliar binary asks (which `brew upgrade` causes again, since it
     /// replaces the binary).
@@ -955,7 +997,7 @@ enum IdleOp {
 
     /// Print the current idle-lock state. `disabled` if timeout is 0,
     /// otherwise `<N>s (remaining: <M>s)` while the timer is running, or
-    /// `<N>s (vault locked)` while it isn't.
+    /// `<N>s (database locked)` while it isn't.
     Get {
         /// Print the idle-lock state as a JSON object.
         #[arg(long)]
@@ -987,17 +1029,17 @@ enum GpgAgentOp {
         json: bool,
     },
 
-    /// Import the public half of every vault GPG key into gpg's keyring.
+    /// Import the public half of every database GPG key into gpg's keyring.
     ///
     /// gpg only asks an agent to sign with a key it already knows, so a key
-    /// that lives only in the vault is invisible to `gpg` and `git commit -S`
+    /// that lives only in the database is invisible to `gpg` and `git commit -S`
     /// until its public key is in the keyring. This derives each public key
     /// from the stored secret-key export and runs `gpg --import`. Only public
     /// keys are imported, and importing again changes nothing. The keyring
     /// keeps them after `trove lock`; remove one with `gpg --delete-keys`.
     ///
-    /// Reads the vaults unlocked in the running daemon, or the global
-    /// `--vault <path>` directly.
+    /// Reads the databases unlocked in the running daemon, or the global
+    /// `--database <path>` directly.
     Import {
         /// Write the public keys (binary OpenPGP) to stdout instead of
         /// importing them.
@@ -1065,7 +1107,7 @@ enum SshAgentOp {
 
     /// Print the path to a NEW, private agent socket that serves no keys.
     ///
-    /// The daemon's main agent serves every key in every unlocked vault, which
+    /// The daemon's main agent serves every key in every unlocked database, which
     /// is more than a deployment tool wants: `sshd`'s `MaxAuthTries` defaults
     /// to 6, every key an agent lists is offered and counted against that, and
     /// the connection dies before reaching a key that sits past the sixth. An
@@ -1089,7 +1131,7 @@ enum SshAgentOp {
     /// is refused rather than exhausting the daemon's file descriptors.
     ///
     /// Requires a daemon that is already running: a socket served by a daemon
-    /// with no vault unlocked could never be filled.
+    /// with no database unlocked could never be filled.
     ///
     /// `--add` and `--tag` create the socket and fill it in one step, as
     /// `trove ssh-agent add` would:
@@ -1105,7 +1147,7 @@ enum SshAgentOp {
         tag: Option<String>,
     },
 
-    /// Add vault entries' SSH keys to the agent named by `$SSH_AUTH_SOCK`.
+    /// Add database entries' SSH keys to the agent named by `$SSH_AUTH_SOCK`.
     ///
     /// The socket must be one `trove ssh-agent empty` handed out; any other is
     /// refused, because filling it would mean handing the key to an agent trove
@@ -1209,22 +1251,22 @@ enum SshKeyType {
 
 #[derive(Debug, Subcommand)]
 enum KeychainAction {
-    /// Store a vault's password, prompting for it (or reading it with
+    /// Store a database's password, prompting for it (or reading it with
     /// `--password-stdin`). Replaces any entry already there.
     Save {
         /// The .kdbx whose password this is.
-        vault: PathBuf,
+        database: PathBuf,
     },
-    /// Remove a vault's stored password.
+    /// Remove a database's stored password.
     Forget {
         /// The .kdbx to forget.
-        vault: PathBuf,
+        database: PathBuf,
     },
-    /// Say whether a vault has a stored password. Reads it to find out, so it
+    /// Say whether a database has a stored password. Reads it to find out, so it
     /// needs a terminal like any other keychain read.
     Status {
         /// The .kdbx to check.
-        vault: PathBuf,
+        database: PathBuf,
         /// Print keychain status as a JSON object.
         #[arg(long)]
         json: bool,
@@ -1234,7 +1276,7 @@ enum KeychainAction {
 #[derive(Debug, Subcommand)]
 enum GenerateResource {
     /// Generate a random password and print it to stdout. Purely local: no
-    /// vault, no daemon. Default pool is lower+upper+digits; add `--special`
+    /// database, no daemon. Default pool is lower+upper+digits; add `--special`
     /// or subtract classes with `--no-lower/--no-upper/--no-numeric`.
     Password {
         /// Password length.
@@ -1271,13 +1313,13 @@ enum GenerateResource {
         count: usize,
     },
 
-    /// Generate a new SSH keypair and store it on the vault, addressed by entry
+    /// Generate a new SSH keypair and store it on the database, addressed by entry
     /// path — no need to run `ssh-keygen` yourself. Stores the private key, the
     /// derived `id.pub`, and `KeeAgent.settings`, exactly like `add ssh`.
     ///
-    /// Like `add ssh`, this targets the vault unlocked in the running daemon by
+    /// Like `add ssh`, this targets the database unlocked in the running daemon by
     /// default (using `TROVE_SESSION` from `trove unlock`); pass the global
-    /// `--vault <path>` to write a kdbx file directly (offline).
+    /// `--database <path>` to write a kdbx file directly (offline).
     Ssh {
         /// Entry path, e.g. "github.com" or "Work/SSH/github".
         entry_path: String,
@@ -1299,9 +1341,9 @@ enum AddResource {
     /// (hidden, confirmed) unless `--generate` mints one or `--secret-stdin`
     /// reads it from stdin.
     ///
-    /// By default targets the vault unlocked in the running daemon (using the
+    /// By default targets the database unlocked in the running daemon (using the
     /// `TROVE_SESSION` code from `trove unlock`); pass the global
-    /// `--vault <path>` to write a kdbx file directly (offline).
+    /// `--database <path>` to write a kdbx file directly (offline).
     Password {
         /// Entry path, e.g. "github.com" or "Work/github".
         entry_path: String,
@@ -1322,7 +1364,7 @@ enum AddResource {
         #[arg(long, requires = "generate")]
         length: Option<usize>,
         /// Read the password from stdin instead of prompting. Offline only;
-        /// with global `--password-stdin`, the vault password is line 1 and
+        /// with global `--password-stdin`, the database password is line 1 and
         /// this secret is line 2.
         #[arg(long = "secret-stdin")]
         secret_stdin: bool,
@@ -1360,7 +1402,7 @@ enum AddResource {
         steam: bool,
     },
 
-    /// Store an SSH private key on the unlocked vault, addressed by entry path.
+    /// Store an SSH private key on the unlocked database, addressed by entry path.
     ///
     /// `<ENTRY_PATH>` is a `/`-separated path (`group/sub/title`); groups are
     /// created as needed and an existing entry has its `id` key replaced in
@@ -1370,9 +1412,9 @@ enum AddResource {
     /// passphrase on the terminal and is stored decrypted. `<COMMENT>` is the public-key
     /// comment (usually an email) recorded in the derived `id.pub`.
     ///
-    /// By default the key is added to the vault currently unlocked in the
-    /// running daemon — no vault path needed — using the `TROVE_SESSION` code
-    /// from `trove unlock`. Pass the global `--vault <path>` to operate on a
+    /// By default the key is added to the database currently unlocked in the
+    /// running daemon — no database path needed — using the `TROVE_SESSION` code
+    /// from `trove unlock`. Pass the global `--database <path>` to operate on a
     /// kdbx file directly (offline), prompting for the master password.
     Ssh {
         /// Entry path, e.g. "github.com" or "Work/SSH/github".
@@ -1389,19 +1431,19 @@ enum AddResource {
         user: Option<String>,
     },
 
-    /// Store a GPG secret key (binary export) in the vault under the
+    /// Store a GPG secret key (binary export) in the database under the
     /// `gpg-priv` attachment slot. Produced by:
     ///
     ///   `gpg --batch --pinentry-mode loopback --passphrase '' \
     ///        --export-secret-keys --output secret.gpg <KEYID>`
     ///
     /// The blob must be the binary OpenPGP packet stream (NOT armored). On
-    /// vault unlock, troved parses each `gpg-priv` attachment and registers
+    /// database unlock, troved parses each `gpg-priv` attachment and registers
     /// every ed25519 secret key it finds with the GPG agent listener.
     ///
-    /// By default the key is added to the vault currently unlocked in the
-    /// running daemon — no vault path needed — using the `TROVE_SESSION` code
-    /// from `trove unlock`. Pass the global `--vault <path>` to operate on a
+    /// By default the key is added to the database currently unlocked in the
+    /// running daemon — no database path needed — using the `TROVE_SESSION` code
+    /// from `trove unlock`. Pass the global `--database <path>` to operate on a
     /// kdbx file directly (offline), prompting for the master password.
     Gpg {
         /// Entry path or title (e.g. "git-signing").
@@ -1411,14 +1453,14 @@ enum AddResource {
         key: PathBuf,
     },
 
-    /// Store an arbitrary file (kubeconfig, .env, TLS cert, ...) in the vault
+    /// Store an arbitrary file (kubeconfig, .env, TLS cert, ...) in the database
     /// and configure it to materialize to disk on unlock. The file's bytes
     /// land in a real KDBX `<Binary>` attachment; the `Materialize.*` custom
     /// fields tell troved where to write it on unlock.
     ///
-    /// By default the file is added to the vault currently unlocked in the
-    /// running daemon — no vault path needed — using the `TROVE_SESSION` code
-    /// from `trove unlock`. Pass the global `--vault <path>` to operate on a
+    /// By default the file is added to the database currently unlocked in the
+    /// running daemon — no database path needed — using the `TROVE_SESSION` code
+    /// from `trove unlock`. Pass the global `--database <path>` to operate on a
     /// kdbx file directly (offline), prompting for the master password.
     File {
         /// Entry path or title (e.g. "kubeconfig-prod").
@@ -1437,7 +1479,7 @@ enum AddResource {
         #[arg(long = "mode", default_value = "0600")]
         mode: String,
         /// Materialization lifetime in seconds. Default: lifetime of the
-        /// vault unlock state.
+        /// database unlock state.
         #[arg(long = "ttl")]
         ttl: Option<u64>,
         /// Allow materializing to a non-tmpfs path. Off by default; setting
@@ -1453,7 +1495,7 @@ enum GetResource {
     /// (`trove get password api/stripe | …`). For a human-readable view of
     /// the whole entry use `trove show`.
     ///
-    /// With the global `--vault <PATH>`: read the file directly (offline).
+    /// With the global `--database <PATH>`: read the file directly (offline).
     /// Without it: served by the running daemon, gated by the `TROVE_SESSION`
     /// code from `trove unlock`.
     Password {
@@ -1466,7 +1508,7 @@ enum GetResource {
 
     /// Retrieve a stored SSH key by entry path.
     ///
-    /// With the global `--vault <PATH>`: read it from the file directly
+    /// With the global `--database <PATH>`: read it from the file directly
     /// (offline). Without it: served by the running daemon, gated by the
     /// `TROVE_SESSION` code from `trove unlock`. By default the PRIVATE key is
     /// written to stdout. `--public` emits the public key (an authorized_keys
@@ -1486,8 +1528,8 @@ enum GetResource {
 
     /// Retrieve a stored GPG secret-key export (the `gpg-priv` attachment).
     ///
-    /// With the global `--vault <PATH>`: read it from the file (offline).
-    /// Without it: read from the daemon's unlocked vault (`TROVE_SESSION`).
+    /// With the global `--database <PATH>`: read it from the file (offline).
+    /// Without it: read from the daemon's unlocked database (`TROVE_SESSION`).
     Gpg {
         /// Entry path or title to look up.
         title: String,
@@ -1500,14 +1542,14 @@ enum GetResource {
     /// The materialization config (Materialize.Target, Mode, ...) is ignored —
     /// `--out` controls where the bytes land.
     ///
-    /// With the global `--vault <PATH>`: read it from the file (offline).
-    /// Without it: read from the daemon's unlocked vault (`TROVE_SESSION`).
+    /// With the global `--database <PATH>`: read it from the file (offline).
+    /// Without it: read from the daemon's unlocked database (`TROVE_SESSION`).
     File {
         /// Entry path or title to look up.
         title: String,
         /// Attachment name to read (e.g. `id.pub`). Defaults to "blob". Pass
         /// `--name` for entries that don't use the conventional `blob` slot;
-        /// in daemon mode the vault is not opened to resolve `Materialize.Source`.
+        /// in daemon mode the database is not opened to resolve `Materialize.Source`.
         #[arg(long = "name")]
         name: Option<String>,
         /// Write the bytes to this path (chmod 0600 on Unix). Stdout if omitted.
@@ -1561,7 +1603,7 @@ fn is_subcommand_name(name: &str) -> bool {
 
 fn main() -> ExitCode {
     // `args_os`, not `args`: the latter panics on an argument that is not valid
-    // UTF-8, and arguments here are frequently paths — `--vault`, `--env`, and
+    // UTF-8, and arguments here are frequently paths — `--database`, `--env`, and
     // everything `exec` forwards to a child process, which it already carries
     // as `OsString` precisely because a path need not be UTF-8.
     let argv: Vec<OsString> = std::env::args_os().collect();
@@ -1592,18 +1634,18 @@ fn main() -> ExitCode {
     }
 }
 
-/// Unwrap the global `--vault` for commands that cannot run without a vault
+/// Unwrap the global `--database` for commands that cannot run without a database
 /// path (no daemon mode): `init`, `materialize`.
-fn require_vault(vault: Option<&Path>) -> Result<&Path> {
-    vault.ok_or_else(|| {
-        anyhow!("this command needs a vault file; pass --vault <PATH> (the password comes from --password-stdin or a prompt)")
+fn require_database(database: Option<&Path>) -> Result<&Path> {
+    database.ok_or_else(|| {
+        anyhow!("this command needs a database file; pass --database <PATH> (the password comes from --password-stdin or a prompt)")
     })
 }
 
 #[cfg(any(feature = "yubikey", test))]
-fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>) -> bool {
+fn challenge_response_uses_offline_database(command: &Command, database: Option<&Path>) -> bool {
     match command {
-        // These commands always open a local vault directly.
+        // These commands always open a local database directly.
         Command::Init
         | Command::Materialize { op: None }
         | Command::Group { .. }
@@ -1615,8 +1657,9 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
         | Command::Sync { .. }
         | Command::Export { .. }
         | Command::DbEdit { .. }
-        | Command::DbInfo { .. } => true,
-        // These route to troved when no explicit offline vault was selected.
+        | Command::DbInfo { .. }
+        | Command::Database { .. } => true,
+        // These route to troved when no explicit offline database was selected.
         Command::List { .. }
         | Command::Add { .. }
         | Command::Get { .. }
@@ -1633,11 +1676,11 @@ fn challenge_response_uses_offline_vault(command: &Command, vault: Option<&Path>
         | Command::Materialize { op: Some(_) }
         | Command::EnvAgent { .. }
         | Command::Settings { .. }
-        | Command::Exec { .. } => vault.is_some(),
+        | Command::Exec { .. } => database.is_some(),
         Command::Generate {
             resource: GenerateResource::Ssh { .. },
-        } => vault.is_some(),
-        // Includes unlock: its positional vault is always opened by troved.
+        } => database.is_some(),
+        // Includes unlock: its positional database is always opened by troved.
         _ => false,
     }
 }
@@ -1647,63 +1690,63 @@ mod challenge_response_routing_tests {
     use super::*;
 
     #[test]
-    fn challenge_response_is_allowed_only_on_offline_vault_paths() {
-        let vault = Path::new("vault.kdbx");
-        assert!(challenge_response_uses_offline_vault(
+    fn challenge_response_is_allowed_only_on_offline_database_paths() {
+        let database = Path::new("database.kdbx");
+        assert!(challenge_response_uses_offline_database(
             &Command::Init,
-            Some(vault)
+            Some(database)
         ));
-        assert!(challenge_response_uses_offline_vault(
+        assert!(challenge_response_uses_offline_database(
             &Command::Materialize { op: None },
-            Some(vault)
+            Some(database)
         ));
-        assert!(challenge_response_uses_offline_vault(
+        assert!(challenge_response_uses_offline_database(
             &Command::Exec {
                 scope: Some(String::from("Infra")),
                 entry: None,
                 group: None,
                 command: vec!["true".into()],
             },
-            Some(vault)
+            Some(database)
         ));
-        assert!(challenge_response_uses_offline_vault(
+        assert!(challenge_response_uses_offline_database(
             &Command::List {
                 json: false,
                 show_id: false,
             },
-            Some(vault)
+            Some(database)
         ));
-        assert!(!challenge_response_uses_offline_vault(
+        assert!(!challenge_response_uses_offline_database(
             &Command::List {
                 json: false,
                 show_id: false,
             },
             None
         ));
-        assert!(!challenge_response_uses_offline_vault(
+        assert!(!challenge_response_uses_offline_database(
             &Command::Status {
                 json: false,
                 verbose: false,
             },
-            Some(vault)
+            Some(database)
         ));
-        assert!(!challenge_response_uses_offline_vault(
+        assert!(!challenge_response_uses_offline_database(
             &Command::Unlock {
-                vault: PathBuf::from("vault.kdbx"),
+                database: PathBuf::from("database.kdbx"),
                 timeout: None,
                 filter: None,
                 export: false,
                 shell: false,
                 detach: false,
             },
-            Some(vault)
+            Some(database)
         ));
     }
 }
 
 /// The `--key-file` bytes, read once in `run()` before any command executes.
 /// A read-only global mirroring the flag's global scope (same trust model as
-/// the `TROVE_SOCK` env override) — every vault-opening path consults it via
+/// the `TROVE_SOCK` env override) — every database-opening path consults it via
 /// [`global_keyfile`] without threading a parameter through each command.
 static KEY_FILE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
 
@@ -1742,7 +1785,7 @@ fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponse> {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    // First, before anything reads the environment — socket paths, the vault
+    // First, before anything reads the environment — socket paths, the database
     // default, the idle timeout all come from it.
     ENV_OPT_IN
         .set(cli.env_file.is_some())
@@ -1773,8 +1816,8 @@ fn run(cli: Cli) -> Result<()> {
                 path
             }
             None => {
-                let env_vault = vault_for_env_lookup(&cli);
-                let candidates = env_file_candidates(env_vault.as_deref());
+                let env_database = database_for_env_lookup(&cli);
+                let candidates = env_file_candidates(env_database.as_deref());
                 let mut found = None;
                 for candidate in &candidates {
                     if candidate.is_file() {
@@ -1818,19 +1861,19 @@ fn run(cli: Cli) -> Result<()> {
     KEY_FILE.set(keyfile_bytes).expect("run() is called once");
     // The global offline selector. `Some` → operate on this file directly;
     // `None` → use the daemon (for commands that have a daemon mode).
-    // `unlock` ignores it and uses its own positional vault.
+    // `unlock` ignores it and uses its own positional database.
     // Explicit CLI input wins over the environment; the latter may have been
     // loaded from --env immediately above.
-    let selected_vault = cli.vault.clone().or_else(env_vault_path);
-    let vault = selected_vault.as_deref();
+    let selected_database = cli.database.clone().or_else(env_database_path);
+    let database = selected_database.as_deref();
     #[cfg(feature = "yubikey")]
     {
         let challenge_response_requested = cli.yubikey.is_some() || cli.cr_secret_hex.is_some();
         if challenge_response_requested
-            && !challenge_response_uses_offline_vault(&cli.command, vault)
+            && !challenge_response_uses_offline_database(&cli.command, database)
         {
             return Err(anyhow!(
-                "YubiKey challenge-response is supported only when trove opens a vault offline; daemon-backed commands, including `unlock`, do not support it"
+                "YubiKey challenge-response is supported only when trove opens a database offline; daemon-backed commands, including `unlock`, do not support it"
             ));
         }
         // Fail fast: a missing/ambiguous device or bad hex should surface
@@ -1843,8 +1886,11 @@ fn run(cli: Cli) -> Result<()> {
         CHALLENGE_RESPONSE.set(cr).expect("run() is called once");
     }
     match cli.command {
-        Command::Init => cmd_init(require_vault(vault)?, pw_stdin),
-        Command::List { json, show_id } => cmd_list(vault, pw_stdin, json, show_id),
+        Command::Database {
+            op: DatabaseOp::Metadata { op },
+        } => cmd_database_metadata(op, database, pw_stdin),
+        Command::Init => cmd_init(require_database(database)?, pw_stdin),
+        Command::List { json, show_id } => cmd_list(database, pw_stdin, json, show_id),
         Command::Add {
             resource:
                 AddResource::Ssh {
@@ -1857,19 +1903,19 @@ fn run(cli: Cli) -> Result<()> {
             &entry_path,
             &key,
             &comment,
-            vault,
+            database,
             user.as_deref(),
             pw_stdin,
         ),
         Command::Add {
             resource: AddResource::Gpg { title, key },
-        } => cmd_add_gpg(vault, &title, &key, pw_stdin),
+        } => cmd_add_gpg(database, &title, &key, pw_stdin),
         Command::ImportSsh {
             dir,
             group,
             yes,
             dry_run,
-        } => cmd_import_ssh(dir, &group, yes, dry_run, vault, pw_stdin),
+        } => cmd_import_ssh(dir, &group, yes, dry_run, database, pw_stdin),
         Command::Add {
             resource:
                 AddResource::File {
@@ -1882,7 +1928,7 @@ fn run(cli: Cli) -> Result<()> {
                     allow_disk_backed,
                 },
         } => cmd_add_file(
-            vault,
+            database,
             &title,
             &src,
             &target,
@@ -1904,7 +1950,7 @@ fn run(cli: Cli) -> Result<()> {
             &entry_path,
             comment.as_deref(),
             key_type,
-            vault,
+            database,
             user.as_deref(),
             pw_stdin,
         ),
@@ -1915,10 +1961,10 @@ fn run(cli: Cli) -> Result<()> {
                     public,
                     out,
                 },
-        } => cmd_get_ssh(&entry_path, public, out.as_deref(), vault, pw_stdin),
+        } => cmd_get_ssh(&entry_path, public, out.as_deref(), database, pw_stdin),
         Command::Get {
             resource: GetResource::Gpg { title, out },
-        } => cmd_get_gpg(vault, &title, out.as_deref(), pw_stdin),
+        } => cmd_get_gpg(database, &title, out.as_deref(), pw_stdin),
         Command::Get {
             resource:
                 GetResource::File {
@@ -1928,7 +1974,7 @@ fn run(cli: Cli) -> Result<()> {
                     base64,
                 },
         } => cmd_get_file(
-            vault,
+            database,
             &title,
             name.as_deref(),
             out.as_deref(),
@@ -1964,13 +2010,13 @@ fn run(cli: Cli) -> Result<()> {
         } => cmd_gpg_agent_list(json),
         Command::GpgAgent {
             op: GpgAgentOp::Import { print },
-        } => cmd_gpg_agent_import(vault, pw_stdin, print),
-        Command::Materialize { op: None } => cmd_materialize(require_vault(vault)?, pw_stdin),
+        } => cmd_gpg_agent_import(database, pw_stdin, print),
+        Command::Materialize { op: None } => cmd_materialize(require_database(database)?, pw_stdin),
         Command::Materialize { op: Some(op) } => {
-            settings_cmd::cmd_materialize_op(op, vault, pw_stdin)
+            settings_cmd::cmd_materialize_op(op, database, pw_stdin)
         }
-        Command::EnvAgent { op } => settings_cmd::cmd_env_agent(op, vault, pw_stdin),
-        Command::Settings { op } => settings_cmd::cmd_settings(op, vault, pw_stdin),
+        Command::EnvAgent { op } => settings_cmd::cmd_env_agent(op, database, pw_stdin),
+        Command::Settings { op } => settings_cmd::cmd_settings(op, database, pw_stdin),
         Command::SshAgent {
             op:
                 SshAgentOp::Enable {
@@ -1983,7 +2029,7 @@ fn run(cli: Cli) -> Result<()> {
             true,
             key.as_deref(),
             &constraints,
-            vault,
+            database,
             pw_stdin,
         ),
         Command::SshAgent {
@@ -1993,7 +2039,7 @@ fn run(cli: Cli) -> Result<()> {
             false,
             None,
             &settings_cmd::ConstraintArgs::default(),
-            vault,
+            database,
             pw_stdin,
         ),
         Command::GpgAgent {
@@ -2011,12 +2057,12 @@ fn run(cli: Cli) -> Result<()> {
             &keygrips,
             uses.as_deref(),
             &constraints,
-            vault,
+            database,
             pw_stdin,
         ),
         Command::GpgAgent {
             op: GpgAgentOp::Disable { entry, key },
-        } => settings_cmd::cmd_gpg_agent_disable(&entry, key.as_deref(), vault, pw_stdin),
+        } => settings_cmd::cmd_gpg_agent_disable(&entry, key.as_deref(), database, pw_stdin),
         Command::GpgAgent {
             op:
                 GpgAgentOp::Defaults {
@@ -2030,12 +2076,12 @@ fn run(cli: Cli) -> Result<()> {
             uses.as_deref(),
             &constraints,
             &clear,
-            vault,
+            database,
             pw_stdin,
         ),
         Command::Group {
             op: GroupOp::List { json },
-        } => cmd_group_list(require_vault(vault)?, pw_stdin, json),
+        } => cmd_group_list(require_database(database)?, pw_stdin, json),
         Command::Group {
             op:
                 GroupOp::Edit {
@@ -2045,26 +2091,26 @@ fn run(cli: Cli) -> Result<()> {
                     clear_tags,
                 },
         } => cmd_group_edit(
-            require_vault(vault)?,
+            require_database(database)?,
             &group_path,
             &tags,
             &untags,
             clear_tags,
             pw_stdin,
         ),
-        // `unlock` is daemon-directed: it uses its own positional vault and
-        // deliberately ignores the global `--vault` offline selector.
+        // `unlock` is daemon-directed: it uses its own positional database and
+        // deliberately ignores the global `--database` offline selector.
         Command::Unlock {
-            vault,
+            database,
             timeout,
             filter,
             export,
             shell,
             detach,
-        } => cmd_unlock(&vault, timeout, filter, export, shell, detach, pw_stdin),
-        Command::Lock { vault } => cmd_lock(vault.as_deref()),
+        } => cmd_unlock(&database, timeout, filter, export, shell, detach, pw_stdin),
+        Command::Lock { database } => cmd_lock(database.as_deref()),
         Command::Status { json, verbose } => cmd_status(json, verbose),
-        Command::Doctor { json } => cmd_doctor(vault, json),
+        Command::Doctor { json } => cmd_doctor(database, json),
         #[cfg(unix)]
         Command::Daemons { op } => match op.unwrap_or(DaemonsOp::List { json: false }) {
             DaemonsOp::List { json } => cmd_daemons_list(json),
@@ -2082,7 +2128,14 @@ fn run(cli: Cli) -> Result<()> {
             attr,
             totp,
             timeout,
-        } => cmd_clip(vault, &entry_path, attr.as_deref(), totp, timeout, pw_stdin),
+        } => cmd_clip(
+            database,
+            &entry_path,
+            attr.as_deref(),
+            totp,
+            timeout,
+            pw_stdin,
+        ),
         Command::ClearClipboard { secs } => {
             clip::run_clearer_from_stdin(secs)?;
             Ok(())
@@ -2097,7 +2150,7 @@ fn run(cli: Cli) -> Result<()> {
             expired,
             json,
         } => cmd_analyze(
-            require_vault(vault)?,
+            require_database(database)?,
             AnalyzeChecks {
                 hibp,
                 reuse,
@@ -2109,7 +2162,7 @@ fn run(cli: Cli) -> Result<()> {
             json,
         ),
         Command::Health { hibp, json } => cmd_analyze(
-            require_vault(vault)?,
+            require_database(database)?,
             AnalyzeChecks {
                 hibp,
                 reuse: true,
@@ -2125,16 +2178,16 @@ fn run(cli: Cli) -> Result<()> {
             entry,
             group,
             command,
-        } => cmd_exec(vault, scope, entry, group, &command, pw_stdin),
-        Command::GitCredential { operation } => cmd_git_credential(vault, &operation, pw_stdin),
+        } => cmd_exec(database, scope, entry, group, &command, pw_stdin),
+        Command::GitCredential { operation } => cmd_git_credential(database, &operation, pw_stdin),
         Command::Resolve { reference, base64 } => {
-            cmd_resolve(require_vault(vault)?, &reference, base64, pw_stdin)
+            cmd_resolve(require_database(database)?, &reference, base64, pw_stdin)
         }
         Command::Merge {
             source,
             source_key_file,
         } => cmd_merge(
-            require_vault(vault)?,
+            require_database(database)?,
             &source,
             source_key_file.as_deref(),
             pw_stdin,
@@ -2143,12 +2196,12 @@ fn run(cli: Cli) -> Result<()> {
             other,
             other_key_file,
         } => cmd_sync(
-            require_vault(vault)?,
+            require_database(database)?,
             &other,
             other_key_file.as_deref(),
             pw_stdin,
         ),
-        Command::Export { format } => cmd_export(require_vault(vault)?, format, pw_stdin),
+        Command::Export { format } => cmd_export(require_database(database)?, format, pw_stdin),
         Command::DbEdit {
             set_password,
             set_key_file,
@@ -2157,7 +2210,7 @@ fn run(cli: Cli) -> Result<()> {
             kdf_iterations,
             kdf_parallelism,
         } => cmd_db_edit(
-            require_vault(vault)?,
+            require_database(database)?,
             set_password,
             set_key_file.as_deref(),
             unset_key_file,
@@ -2166,7 +2219,7 @@ fn run(cli: Cli) -> Result<()> {
             kdf_parallelism,
             pw_stdin,
         ),
-        Command::DbInfo { json } => cmd_db_info(require_vault(vault)?, pw_stdin, json),
+        Command::DbInfo { json } => cmd_db_info(require_database(database)?, pw_stdin, json),
         Command::Generate {
             resource:
                 GenerateResource::Password {
@@ -2204,7 +2257,7 @@ fn run(cli: Cli) -> Result<()> {
             entry_path,
             old_name,
             new_name,
-        } => cmd_rename_attachment(vault, &entry_path, &old_name, &new_name, pw_stdin),
+        } => cmd_rename_attachment(database, &entry_path, &old_name, &new_name, pw_stdin),
 
         Command::Keychain { action } => cmd_keychain(&action, pw_stdin),
 
@@ -2217,10 +2270,10 @@ fn run(cli: Cli) -> Result<()> {
             base64,
         } => {
             if totp {
-                cmd_show_totp(vault, &entry_path, pw_stdin)
+                cmd_show_totp(database, &entry_path, pw_stdin)
             } else {
                 cmd_show(
-                    vault,
+                    database,
                     &entry_path,
                     &attrs,
                     show_protected,
@@ -2230,7 +2283,7 @@ fn run(cli: Cli) -> Result<()> {
                 )
             }
         }
-        Command::Describe { path, json } => cmd_describe(vault, &path, pw_stdin, json),
+        Command::Describe { path, json } => cmd_describe(database, &path, pw_stdin, json),
         Command::Search {
             term,
             fields,
@@ -2239,7 +2292,7 @@ fn run(cli: Cli) -> Result<()> {
             json,
             show_id,
         } => cmd_search(
-            vault,
+            database,
             SearchOptions {
                 term,
                 fields,
@@ -2267,7 +2320,7 @@ fn run(cli: Cli) -> Result<()> {
             icon,
             no_icon,
         } => cmd_edit(
-            vault,
+            database,
             &entry_path,
             title.as_deref(),
             username.as_deref(),
@@ -2296,14 +2349,14 @@ fn run(cli: Cli) -> Result<()> {
         Command::Rm {
             entry_path,
             permanent,
-        } => cmd_rm(vault, &entry_path, permanent, pw_stdin),
+        } => cmd_rm(database, &entry_path, permanent, pw_stdin),
         Command::Mv {
             entry_path,
             group_path,
             recursive,
             verbose,
         } => cmd_mv(
-            vault,
+            database,
             &entry_path,
             &group_path,
             recursive,
@@ -2318,7 +2371,7 @@ fn run(cli: Cli) -> Result<()> {
             keep_materialize,
             dry_run,
         } => cmd_cp(
-            vault,
+            database,
             &entry_path,
             &dest_path,
             GroupCopyOptions {
@@ -2329,12 +2382,12 @@ fn run(cli: Cli) -> Result<()> {
             },
             pw_stdin,
         ),
-        Command::Mkdir { group_path } => cmd_mkdir(vault, &group_path, pw_stdin),
+        Command::Mkdir { group_path } => cmd_mkdir(database, &group_path, pw_stdin),
         Command::Rmdir {
             group_path,
             permanent,
             recursive,
-        } => cmd_rmdir(vault, &group_path, permanent, recursive, pw_stdin),
+        } => cmd_rmdir(database, &group_path, permanent, recursive, pw_stdin),
         Command::Add {
             resource:
                 AddResource::Totp {
@@ -2347,7 +2400,7 @@ fn run(cli: Cli) -> Result<()> {
                     steam,
                 },
         } => cmd_add_totp(
-            vault,
+            database,
             &entry_path,
             uri.as_deref(),
             secret.as_deref(),
@@ -2369,7 +2422,7 @@ fn run(cli: Cli) -> Result<()> {
                     secret_stdin,
                 },
         } => cmd_add_password(
-            vault,
+            database,
             &entry_path,
             username.as_deref(),
             url.as_deref(),
@@ -2381,7 +2434,7 @@ fn run(cli: Cli) -> Result<()> {
         ),
         Command::Get {
             resource: GetResource::Password { entry_path, base64 },
-        } => cmd_get_password(vault, &entry_path, base64, pw_stdin),
+        } => cmd_get_password(database, &entry_path, base64, pw_stdin),
         Command::Completions {
             shell,
             install,
@@ -2397,7 +2450,7 @@ const RC_BEGIN: &str =
 const RC_END: &str = "# <<< trove shell completions (managed by `trove completions --install`) <<<";
 
 /// `trove completions [SHELL] [--install|--check]`. Pure local operation: no
-/// vault, no daemon, no password.
+/// database, no daemon, no password.
 ///
 /// - no flags: print the completion script for SHELL to stdout.
 /// - `--install`: write the script to the standard location and wire it into
@@ -2739,7 +2792,7 @@ fn cmd_ssh_agent_list(json: bool) -> Result<()> {
 /// `trove ssh-agent empty` — print the path to a fresh, private agent socket
 /// serving no keys.
 ///
-/// Deliberately does NOT autospawn. A daemon with no vault holds no keys, so a
+/// Deliberately does NOT autospawn. A daemon with no database holds no keys, so a
 /// socket it handed out could never be filled — and a daemon started this way
 /// has no idle timer running, so it and its sockets would sit there until
 /// something else came along. Requiring one that is already up makes the
@@ -2750,7 +2803,7 @@ fn cmd_ssh_agent_empty(add: Option<&str>, tag: Option<&str>) -> Result<()> {
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
                 message: "no trove daemon is running, so a private agent socket would \
-                          have nothing to serve; unlock a vault first"
+                          have nothing to serve; unlock a database first"
                     .to_string(),
                 exit: EXIT_USER_ERROR,
             }
@@ -2790,7 +2843,7 @@ fn cmd_ssh_agent_empty(add: Option<&str>, tag: Option<&str>) -> Result<()> {
 /// Reads the socket from the environment rather than the daemon's default,
 /// because the whole point is to fill the private one the caller just exported.
 /// Deliberately does NOT autospawn: a daemon that wasn't running holds no
-/// unlocked vault and no scoped socket, so spawning one would only turn a clear
+/// unlocked database and no scoped socket, so spawning one would only turn a clear
 /// problem into a confusing one.
 fn cmd_ssh_agent_add(entry: Option<&str>, tag: Option<&str>) -> Result<()> {
     let socket = std::env::var("SSH_AUTH_SOCK").unwrap_or_default();
@@ -3186,14 +3239,14 @@ fn cmd_gpg_agent_list(json: bool) -> Result<()> {
     }
 }
 
-/// `trove gpg-agent import` — put each vault GPG key's public key into gpg's
+/// `trove gpg-agent import` — put each database GPG key's public key into gpg's
 /// keyring (or on stdout with `--print`).
-fn cmd_gpg_agent_import(vault: Option<&Path>, pw_stdin: bool, print: bool) -> Result<()> {
+fn cmd_gpg_agent_import(database: Option<&Path>, pw_stdin: bool, print: bool) -> Result<()> {
     use std::io::{IsTerminal as _, Write as _};
-    let keys: Vec<(String, Vec<u8>)> = match vault {
+    let keys: Vec<(String, Vec<u8>)> = match database {
         Some(path) => {
-            let v = open_vault(path, pw_stdin)?;
-            troved::handler::gpg_public_keys_from_vault(&v, None)
+            let v = open_database(path, pw_stdin)?;
+            troved::handler::gpg_public_keys_from_database(&v, None)
         }
         None => {
             let resp = match daemon::send(&daemon::Request::GpgPublicKeys) {
@@ -3201,7 +3254,7 @@ fn cmd_gpg_agent_import(vault: Option<&Path>, pw_stdin: bool, print: bool) -> Re
                 Err(e) if daemon::is_daemon_not_running(&e) => {
                     return Err(DaemonClassified {
                         message: "no trove daemon is running, so nothing is unlocked; \
-                                  `trove unlock <VAULT>` first, or pass --vault <PATH>"
+                                  `trove unlock <DATABASE>` first, or pass --database <PATH>"
                             .to_string(),
                         exit: EXIT_USER_ERROR,
                     }
@@ -3232,7 +3285,7 @@ fn cmd_gpg_agent_import(vault: Option<&Path>, pw_stdin: bool, print: bool) -> Re
         }
     };
     if keys.is_empty() {
-        eprintln!("trove: no GPG keys in the vault");
+        eprintln!("trove: no GPG keys in the database");
         return Ok(());
     }
     let all: Vec<u8> = keys.iter().flat_map(|(_, b)| b.iter().copied()).collect();
@@ -3240,7 +3293,7 @@ fn cmd_gpg_agent_import(vault: Option<&Path>, pw_stdin: bool, print: bool) -> Re
         if std::io::stdout().is_terminal() {
             return Err(DaemonClassified {
                 message: "--print writes binary OpenPGP data; redirect it, e.g. \
-                          `trove gpg-agent import --print > vault-keys.gpg`"
+                          `trove gpg-agent import --print > database-keys.gpg`"
                     .to_string(),
                 exit: EXIT_USER_ERROR,
             }
@@ -3280,43 +3333,121 @@ fn cmd_gpg_agent_import(vault: Option<&Path>, pw_stdin: bool, print: bool) -> Re
     Ok(())
 }
 
-fn cmd_init(vault_path: &Path, pw_stdin: bool) -> Result<()> {
-    if vault_path.exists() {
+fn cmd_init(database_path: &Path, pw_stdin: bool) -> Result<()> {
+    if database_path.exists() {
         return Err(anyhow!(
-            "vault file already exists: {}",
-            vault_path.display()
+            "database file already exists: {}",
+            database_path.display()
         ));
     }
     let password = if let Some(p) = password_from_env() {
         p
     } else if pw_stdin {
-        read_password_from_stdin().context("reading new vault password from stdin")?
+        read_password_from_stdin().context("reading new database password from stdin")?
     } else {
-        prompt_new_password().context("reading new vault password")?
+        prompt_new_password().context("reading new database password")?
     };
     #[cfg(feature = "yubikey")]
     if let Some(cr) = global_challenge_response() {
-        let _vault = Vault::create_with_challenge_response(
-            vault_path,
+        let _database = Database::create_with_challenge_response(
+            database_path,
             &password,
             global_keyfile(),
             cr.clone(),
         )
-        .context("creating vault")?;
+        .context("creating database")?;
         println!(
-            "created vault at {} (composite key incl. challenge-response)",
-            vault_path.display()
+            "created database at {} (composite key incl. challenge-response)",
+            database_path.display()
         );
         return Ok(());
     }
-    let _vault = Vault::create_with_key(vault_path, &password, global_keyfile())
-        .context("creating vault")?;
+    let _database = Database::create_with_key(database_path, &password, global_keyfile())
+        .context("creating database")?;
     match global_keyfile() {
         Some(_) => println!(
-            "created vault at {} (composite key: password + key file)",
-            vault_path.display()
+            "created database at {} (composite key: password + key file)",
+            database_path.display()
         ),
-        None => println!("created vault at {}", vault_path.display()),
+        None => println!("created database at {}", database_path.display()),
+    }
+    Ok(())
+}
+
+fn cmd_database_metadata(
+    op: DatabaseMetadataOp,
+    database_path: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let path = require_database(database_path)?;
+    let mut database = open_database(path, pw_stdin)?;
+    match op {
+        DatabaseMetadataOp::Show { json } => {
+            let metadata = database.database_metadata();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "name": metadata.name,
+                        "description": metadata.description,
+                        "default_username": metadata.default_username,
+                        "trove_uuid": metadata.trove_uuid,
+                    }))?
+                );
+            } else {
+                println!("Database name: {}", metadata.name.as_deref().unwrap_or(""));
+                println!(
+                    "Description: {}",
+                    metadata.description.as_deref().unwrap_or("")
+                );
+                println!(
+                    "Default username: {}",
+                    metadata.default_username.as_deref().unwrap_or("")
+                );
+                println!(
+                    "Trove database UUID: {}",
+                    metadata.trove_uuid.as_deref().unwrap_or("")
+                );
+            }
+        }
+        DatabaseMetadataOp::Set {
+            name,
+            description,
+            default_username,
+            trove_uuid,
+            generate_trove_uuid,
+        } => {
+            if name.is_none()
+                && description.is_none()
+                && default_username.is_none()
+                && trove_uuid.is_none()
+                && !generate_trove_uuid
+            {
+                return Err(anyhow!("provide at least one metadata field to set"));
+            }
+            let mut metadata: DatabaseMetadata = database.database_metadata();
+            if let Some(value) = name {
+                metadata.name = (!value.is_empty()).then_some(value);
+            }
+            if let Some(value) = description {
+                metadata.description = (!value.is_empty()).then_some(value);
+            }
+            if let Some(value) = default_username {
+                metadata.default_username = (!value.is_empty()).then_some(value);
+            }
+            if let Some(value) = trove_uuid {
+                metadata.trove_uuid = (!value.is_empty()).then_some(value);
+            }
+            if generate_trove_uuid {
+                metadata.trove_uuid = Some(Database::generate_trove_uuid());
+            }
+            database.set_database_metadata(metadata.clone())?;
+            database.save()?;
+            println!("Database metadata saved.");
+            if let Some(uuid) = metadata.trove_uuid {
+                println!("Trove database UUID: {uuid}");
+            }
+        }
     }
     Ok(())
 }
@@ -3337,12 +3468,12 @@ fn entry_summary_json(e: &trove_core::EntrySummary) -> Value {
     })
 }
 
-fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool, show_id: bool) -> Result<()> {
-    match vault_path {
+fn cmd_list(database_path: Option<&Path>, pw_stdin: bool, json: bool, show_id: bool) -> Result<()> {
+    match database_path {
         Some(path) => {
-            let vault = open_vault(path, pw_stdin)?;
+            let database = open_database(path, pw_stdin)?;
             if json {
-                let arr: Vec<Value> = vault
+                let arr: Vec<Value> = database
                     .list_entries()
                     .iter()
                     .map(entry_summary_json)
@@ -3350,7 +3481,7 @@ fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool, show_id: bool
                 println!("{}", serde_json::to_string_pretty(&arr)?);
                 return Ok(());
             }
-            let rows = vault
+            let rows = database
                 .list_entries()
                 .iter()
                 .map(|e| ListRow {
@@ -3367,12 +3498,12 @@ fn cmd_list(vault_path: Option<&Path>, pw_stdin: bool, json: bool, show_id: bool
     }
 }
 
-/// Daemon-backed list. The vault must already be unlocked in the daemon;
-/// otherwise the daemon returns "no vault unlocked" and we surface that as
+/// Daemon-backed list. The database must already be unlocked in the daemon;
+/// otherwise the daemon returns "no database unlocked" and we surface that as
 /// a user error (exit 1). Auto-spawn semantics are inherited from
 /// `daemon::send_autospawn` — if no daemon is running we spawn one, but it
-/// will come up with no vault unlocked, so the user gets the same friendly
-/// "no vault unlocked" message and a hint to run `trove unlock`.
+/// will come up with no database unlocked, so the user gets the same friendly
+/// "no database unlocked" message and a hint to run `trove unlock`.
 fn cmd_list_via_daemon(json: bool, show_id: bool) -> Result<()> {
     let resp = match daemon::send_autospawn(&daemon::Request::List) {
         Ok(v) => v,
@@ -3386,8 +3517,8 @@ fn cmd_list_via_daemon(json: bool, show_id: bool) -> Result<()> {
         Err(e) => return Err(e),
     };
     if let Some(msg) = daemon::response_error(&resp) {
-        let hint = if msg.contains("no vault") {
-            "; pass a vault path or run `trove unlock <vault>` first"
+        let hint = if msg.contains("no database") {
+            "; pass a database path or run `trove unlock <database>` first"
         } else {
             ""
         };
@@ -3595,7 +3726,7 @@ fn cmd_add_ssh(
     entry_path: &str,
     key_path: &Path,
     comment: &str,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     user: Option<&str>,
     pw_stdin: bool,
 ) -> Result<()> {
@@ -3603,13 +3734,13 @@ fn cmd_add_ssh(
         .with_context(|| format!("reading ssh key from {}", key_path.display()))?;
 
     // A passphrase-protected key is decrypted here, in memory, and stored
-    // without its passphrase: the vault is what protects it, and no decrypted
+    // without its passphrase: the database is what protects it, and no decrypted
     // copy has to be written to disk first.
     let key_bytes = if matches!(
         troved::ssh_agent::keys::parse_private_key(&key_bytes, comment),
         Err(troved::ssh_agent::keys::ParseError::Encrypted)
     ) {
-        decrypt_ssh_key_for_vault(&key_bytes, key_path)?
+        decrypt_ssh_key_for_database(&key_bytes, key_path)?
     } else {
         zeroize::Zeroizing::new(key_bytes)
     };
@@ -3631,7 +3762,7 @@ fn cmd_add_ssh(
     };
 
     store_ssh_key(
-        "stored", entry_path, &key_bytes, comment, vault, user, pw_stdin,
+        "stored", entry_path, &key_bytes, comment, database, user, pw_stdin,
     )
 }
 
@@ -3642,7 +3773,7 @@ fn cmd_generate_ssh(
     entry_path: &str,
     comment: Option<&str>,
     key_type: SshKeyType,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     user: Option<&str>,
     pw_stdin: bool,
 ) -> Result<()> {
@@ -3663,7 +3794,7 @@ fn cmd_generate_ssh(
         entry_path,
         &key_bytes,
         comment,
-        vault,
+        database,
         user,
         pw_stdin,
     )
@@ -3674,7 +3805,7 @@ fn cmd_generate_ssh(
 /// derived `id.pub`, and `KeeAgent.settings`. `verb` ("stored"/"generated")
 /// only flavours the success line.
 ///
-/// `Some(vault)` opens the kdbx file directly (offline); the default routes
+/// `Some(database)` opens the kdbx file directly (offline); the default routes
 /// through the unlocked daemon, which derives id.pub + KeeAgent itself and
 /// reloads the agent key store so a new key is served immediately.
 fn store_ssh_key(
@@ -3682,21 +3813,21 @@ fn store_ssh_key(
     entry_path: &str,
     key_bytes: &[u8],
     comment: &str,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     user: Option<&str>,
     pw_stdin: bool,
 ) -> Result<()> {
-    match vault {
+    match database {
         // Offline: open the kdbx file directly and write to it.
-        Some(vault_path) => {
-            let mut vault = open_vault(vault_path, pw_stdin)?;
-            let id = attach_ssh_key(&mut vault, entry_path, key_bytes, comment, user)?;
-            vault.save().context("saving vault")?;
+        Some(database_path) => {
+            let mut database = open_database(database_path, pw_stdin)?;
+            let id = attach_ssh_key(&mut database, entry_path, key_bytes, comment, user)?;
+            database.save().context("saving database")?;
             println!("{verb} ssh key on entry {id} ({entry_path})");
             Ok(())
         }
-        // Default: store into the daemon's currently unlocked vault. The daemon
-        // mutates the held vault, persists it, and reloads the agent key store
+        // Default: store into the daemon's currently unlocked database. The daemon
+        // mutates the held database, persists it, and reloads the agent key store
         // so the new key is served immediately.
         None => {
             let code = require_session_code()?;
@@ -3753,38 +3884,38 @@ fn materialize_item(
     attrs
 }
 
-/// Put an SSH private key on an entry of an open vault, creating the entry if
+/// Put an SSH private key on an entry of an open database, creating the entry if
 /// needed: the key, `KeeAgent.settings` and the derived `id.pub`. The caller
 /// saves.
 fn attach_ssh_key(
-    vault: &mut Vault,
+    database: &mut Database,
     entry_path: &str,
     key_bytes: &[u8],
     comment: &str,
     user: Option<&str>,
 ) -> Result<trove_core::EntryId> {
-    let id = match vault.find_by_title(entry_path) {
+    let id = match database.find_by_title(entry_path) {
         Some(existing) => existing,
-        None => vault
+        None => database
             .add_entry(entry_path)
             .with_context(|| format!("creating entry '{entry_path}'"))?,
     };
-    vault
+    database
         .attach_binary(&id, SSH_KEY_ATTACHMENT, key_bytes)
         .context("attaching ssh key")?;
     // KeeAgent.settings so KeePassXC's SSH agent picks this entry up.
     let settings = troved::ssh_agent::keeagent::settings_xml(SSH_KEY_ATTACHMENT);
-    vault
+    database
         .attach_binary(&id, troved::ssh_agent::keeagent::ATTACHMENT_NAME, &settings)
         .context("attaching KeeAgent.settings")?;
     // Persist the public key as real data so any tool can read it
     // without deriving it from the private key (a trove-only ability).
     let pub_line = ssh_public_line(key_bytes, comment)?;
-    vault
+    database
         .attach_binary(&id, SSH_PUBKEY_ATTACHMENT, pub_line.as_bytes())
         .context("attaching public key")?;
     if let Some(user) = user {
-        vault
+        database
             .set_field(&id, "UserName", user)
             .context("setting UserName")?;
     }
@@ -3798,7 +3929,7 @@ fn cmd_import_ssh(
     group: &str,
     yes: bool,
     dry_run: bool,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
     use std::io::{BufRead as _, IsTerminal as _, Write as _};
@@ -3825,10 +3956,10 @@ fn cmd_import_ssh(
         return Ok(());
     }
 
-    // Offline, the vault is opened once, up front: its entries decide what is
+    // Offline, the database is opened once, up front: its entries decide what is
     // skipped, and the same handle takes the import.
-    let mut offline = match vault {
-        Some(path) => Some(open_vault(path, pw_stdin)?),
+    let mut offline = match database {
+        Some(path) => Some(open_database(path, pw_stdin)?),
         None => None,
     };
     let existing = match &offline {
@@ -3845,7 +3976,7 @@ fn cmd_import_ssh(
     };
 
     // Confirmation reads stdin, so it needs a terminal there, and one not
-    // already carrying the vault password.
+    // already carrying the database password.
     let ask = !yes && !dry_run;
     if ask && (pw_stdin || !std::io::stdin().is_terminal()) {
         return Err(DaemonClassified {
@@ -3897,7 +4028,7 @@ fn cmd_import_ssh(
         // A protected key is decrypted now, on the terminal, and stored
         // without its passphrase, as `add ssh` does.
         let bytes = if key.protected {
-            match decrypt_ssh_key_for_vault(&key.bytes, &key.path) {
+            match decrypt_ssh_key_for_database(&key.bytes, &key.path) {
                 Ok(plain) => plain,
                 Err(e) => {
                     eprintln!("skip   {}: {e}", key.path.display());
@@ -3930,7 +4061,7 @@ fn cmd_import_ssh(
             for (path, key, bytes) in &accepted {
                 attach_ssh_key(v, path, bytes, &key.comment, None)?;
             }
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
         }
         None => {
             let code = require_session_code()?;
@@ -3958,13 +4089,13 @@ fn cmd_import_ssh(
         println!("imported {} as {path}", key.path.display());
     }
     println!(
-        "the key files are still in {}; delete them yourself once you rely on the vault",
+        "the key files are still in {}; delete them yourself once you rely on the database",
         dir.display()
     );
     Ok(())
 }
 
-/// Every entry path in the daemon's unlocked vaults, so an import never
+/// Every entry path in the daemon's unlocked databases, so an import never
 /// overwrites one. A dry run with no daemon running just checks nothing.
 fn daemon_entry_paths(dry_run: bool) -> Result<Vec<String>> {
     let resp = match daemon::send(&daemon::Request::List) {
@@ -3972,8 +4103,8 @@ fn daemon_entry_paths(dry_run: bool) -> Result<Vec<String>> {
         Err(e) if daemon::is_daemon_not_running(&e) && dry_run => return Ok(Vec::new()),
         Err(e) if daemon::is_daemon_not_running(&e) => {
             return Err(DaemonClassified {
-                message: "no trove daemon is running; `trove unlock <VAULT>` first, \
-                          or pass --vault <PATH>"
+                message: "no trove daemon is running; `trove unlock <DATABASE>` first, \
+                          or pass --database <PATH>"
                     .to_string(),
                 exit: EXIT_USER_ERROR,
             }
@@ -3996,11 +4127,16 @@ fn daemon_entry_paths(dry_run: bool) -> Result<Vec<String>> {
     Ok(rows_from_json(&entries).iter().map(row_path).collect())
 }
 
-fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: bool) -> Result<()> {
+fn cmd_add_gpg(
+    database: Option<&Path>,
+    title: &str,
+    key_path: &Path,
+    pw_stdin: bool,
+) -> Result<()> {
     let key_bytes = std::fs::read(key_path)
         .with_context(|| format!("reading gpg secret-key export from {}", key_path.display()))?;
     // A passphrase-protected export is decrypted here, on the terminal, and
-    // stored unprotected: the vault is the encryption boundary, and no
+    // stored unprotected: the database is the encryption boundary, and no
     // plaintext export ever has to touch the disk.
     let key_bytes = if troved::gpg_agent::protect::is_protected(&key_bytes) {
         decrypt_gpg_export(&key_bytes, key_path)?.to_vec()
@@ -4008,23 +4144,23 @@ fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: boo
         key_bytes
     };
 
-    match vault {
+    match database {
         // Offline: open the kdbx file directly and write to it.
-        Some(vault_path) => {
-            let mut vault = open_vault(vault_path, pw_stdin)?;
+        Some(database_path) => {
+            let mut database = open_database(database_path, pw_stdin)?;
 
-            let id = match vault.find_by_title(title) {
+            let id = match database.find_by_title(title) {
                 Some(existing) => existing,
-                None => vault
+                None => database
                     .add_entry(title)
                     .with_context(|| format!("creating entry '{title}'"))?,
             };
 
-            vault
+            database
                 .attach_binary(&id, GPG_KEY_ATTACHMENT, &key_bytes)
                 .context("attaching gpg secret key")?;
             // Naming the key in GpgAgent.settings is what has the agent serve it.
-            vault
+            database
                 .ensure_settings_item(
                     &id,
                     trove_core::settings::Capability::GpgAgent,
@@ -4032,11 +4168,11 @@ fn cmd_add_gpg(vault: Option<&Path>, title: &str, key_path: &Path, pw_stdin: boo
                 )
                 .context("writing GpgAgent.settings")?;
 
-            vault.save().context("saving vault")?;
+            database.save().context("saving database")?;
             println!("stored gpg secret key on entry {id} ({title})");
             Ok(())
         }
-        // Default: store into the daemon's currently unlocked vault.
+        // Default: store into the daemon's currently unlocked database.
         None => {
             let code = require_session_code()?;
             use base64::Engine;
@@ -4105,10 +4241,10 @@ fn decrypt_gpg_export(bytes: &[u8], key_path: &Path) -> Result<zeroize::Zeroizin
 
 /// Pull an attachment out of the *unlocked daemon*, gated by the session code.
 ///
-/// Extraction (`get`) no longer opens the vault one-shot — that would let any
+/// Extraction (`get`) no longer opens the database one-shot — that would let any
 /// password holder bypass the session-code gate. Instead we read `TROVE_SESSION`
 /// (the one-time code `trove unlock` minted) and ask the daemon, which serves
-/// the bytes only if: the vault is unlocked, the code matches, and we are the
+/// the bytes only if: the database is unlocked, the code matches, and we are the
 /// uid that unlocked (SO_PEERCRED). The daemon returns the bytes base64-encoded
 /// on the JSON wire; we decode them here. See docs/provisioning-sessions.md.
 fn daemon_get_attachment(title: &str, attachment: &str) -> Result<Vec<u8>> {
@@ -4190,31 +4326,31 @@ fn write_value_out(out: Option<&Path>, bytes: &[u8], what: &str, base64: bool) -
 }
 
 /// Read an attachment by entry path directly from a kdbx file (offline mode).
-/// Opens the vault (password via `--password-stdin` or prompt), resolves the
+/// Opens the database (password via `--password-stdin` or prompt), resolves the
 /// entry path, and returns the named attachment's bytes.
 fn offline_get_attachment(
-    vault_path: &Path,
+    database_path: &Path,
     entry_path: &str,
     attachment: &str,
     pw_stdin: bool,
 ) -> Result<Vec<u8>> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    let id = vault
+    let database = open_database(database_path, pw_stdin)?;
+    let id = database
         .find_by_title(entry_path)
-        .ok_or_else(|| anyhow!("no entry at '{entry_path}' in {}", vault_path.display()))?;
-    vault
+        .ok_or_else(|| anyhow!("no entry at '{entry_path}' in {}", database_path.display()))?;
+    database
         .read_binary(&id, attachment)
         .with_context(|| format!("reading attachment '{attachment}' from '{entry_path}'"))?
         .ok_or_else(|| anyhow!("entry '{entry_path}' has no attachment '{attachment}'"))
 }
 
 fn cmd_get_gpg(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     title: &str,
     out: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    let bytes = match vault {
+    let bytes = match database {
         Some(path) => offline_get_attachment(path, title, GPG_KEY_ATTACHMENT, pw_stdin)?,
         None => daemon_get_attachment(title, GPG_KEY_ATTACHMENT)?,
     };
@@ -4238,11 +4374,13 @@ fn cmd_get_ssh(
     entry_path: &str,
     public: bool,
     out: Option<&Path>,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    match vault {
-        Some(vault_path) => cmd_get_ssh_offline(vault_path, entry_path, public, out, pw_stdin),
+    match database {
+        Some(database_path) => {
+            cmd_get_ssh_offline(database_path, entry_path, public, out, pw_stdin)
+        }
         None => cmd_get_ssh_daemon(entry_path, public, out),
     }
 }
@@ -4286,23 +4424,23 @@ fn cmd_get_ssh_daemon(entry_path: &str, public: bool, out: Option<&Path>) -> Res
 }
 
 /// Offline path for `get ssh`: open the kdbx file directly and read the `id` /
-/// `id.pub` attachments. The vault is opened once (one password prompt) and the
+/// `id.pub` attachments. The database is opened once (one password prompt) and the
 /// public key falls back to deriving it from the private key for legacy entries
 /// that predate the persisted `id.pub`.
 fn cmd_get_ssh_offline(
-    vault_path: &Path,
+    database_path: &Path,
     entry_path: &str,
     public: bool,
     out: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    let id = vault
+    let database = open_database(database_path, pw_stdin)?;
+    let id = database
         .find_by_title(entry_path)
-        .ok_or_else(|| anyhow!("no entry at '{entry_path}' in {}", vault_path.display()))?;
+        .ok_or_else(|| anyhow!("no entry at '{entry_path}' in {}", database_path.display()))?;
 
     let read = |name: &str| -> Result<Option<Vec<u8>>> {
-        vault
+        database
             .read_binary(&id, name)
             .with_context(|| format!("reading attachment '{name}' from '{entry_path}'"))
     };
@@ -4359,7 +4497,7 @@ fn require_session_code() -> Result<String> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             DaemonClassified {
-                message: "session code required: run `eval \"$(trove unlock <vault>)\"` first, \
+                message: "session code required: run `eval \"$(trove unlock <database>)\"` first, \
                           then retry in the same shell"
                     .to_string(),
                 exit: EXIT_USER_ERROR,
@@ -4369,8 +4507,11 @@ fn require_session_code() -> Result<String> {
 }
 
 /// Ask on the terminal for a key file's passphrase and return the key without
-/// one. Reads the terminal even when stdin carries the vault password.
-fn decrypt_ssh_key_for_vault(bytes: &[u8], key_path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+/// one. Reads the terminal even when stdin carries the database password.
+fn decrypt_ssh_key_for_database(
+    bytes: &[u8],
+    key_path: &Path,
+) -> Result<zeroize::Zeroizing<Vec<u8>>> {
     use troved::ssh_agent::keys::{decrypt_to_openssh, ParseError};
     let user_err = |message: String| -> anyhow::Error {
         DaemonClassified {
@@ -4494,7 +4635,7 @@ fn write_public_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
+fn open_database(path: &Path, pw_stdin: bool) -> Result<Database> {
     if !path.exists() {
         return Err(CoreError::NotFound(path.to_path_buf()).into());
     }
@@ -4504,28 +4645,33 @@ fn open_vault(path: &Path, pw_stdin: bool) -> Result<Vault> {
     // disaster — the file wins and stdin is there if it yields nothing). The
     // keychain comes last because reading it can raise a system dialog, and a
     // dialog in a terminal that cannot answer costs you the session.
-    let password = if let Some(p) = password_for_vault(path) {
+    let password = if let Some(p) = password_for_database(path) {
         p
     } else if pw_stdin {
-        read_password_from_stdin().context("reading vault password from stdin")?
+        read_password_from_stdin().context("reading database password from stdin")?
     } else if let Some(p) = password_from_keychain(Some(path))? {
         p
     } else {
-        rpassword::prompt_password("Vault password: ").context(
-            "reading vault password (use --password-stdin when no terminal is available)",
+        rpassword::prompt_password("Database password: ").context(
+            "reading database password (use --password-stdin when no terminal is available)",
         )?
     };
     #[cfg(feature = "yubikey")]
     if let Some(cr) = global_challenge_response() {
-        return Vault::open_with_challenge_response(path, &password, global_keyfile(), cr.clone())
-            .with_context(|| format!("opening vault {}", path.display()));
+        return Database::open_with_challenge_response(
+            path,
+            &password,
+            global_keyfile(),
+            cr.clone(),
+        )
+        .with_context(|| format!("opening database {}", path.display()));
     }
-    Vault::open_with_key(path, &password, global_keyfile())
-        .with_context(|| format!("opening vault {}", path.display()))
+    Database::open_with_key(path, &password, global_keyfile())
+        .with_context(|| format!("opening database {}", path.display()))
 }
 
 fn prompt_new_password() -> Result<String> {
-    let first = rpassword::prompt_password("New vault password: ")?;
+    let first = rpassword::prompt_password("New database password: ")?;
     let second = rpassword::prompt_password("Confirm password: ")?;
     if first != second {
         return Err(anyhow!("passwords do not match"));
@@ -4540,29 +4686,29 @@ fn prompt_new_password() -> Result<String> {
 /// is a directory.
 ///
 /// The `.env.` prefix is load-bearing: gitignore templates, secret scanners and
-/// coding agents already treat `.env.*` as secret, and this file holds vault
+/// coding agents already treat `.env.*` as secret, and this file holds database
 /// passwords. `.yaml` gets it highlighted as what it is.
 const DEFAULT_ENV_FILE: &str = ".env.trove.yaml";
 /// The retired dotenv file. Never read: finding one where `--env` looks is an
 /// error that says how to convert it, so an upgrade cannot silently fall back
 /// to a password prompt or to some other file.
 const LEGACY_ENV_FILE: &str = ".env.trove";
-/// A vault password taken from the real environment. Never from the file:
+/// A database password taken from the real environment. Never from the file:
 /// passwords there go under `databases:`.
-const PASSWORD_VAR: &str = "TROVE_VAULT_PASSWORD";
-const VAULT_VAR: &str = "TROVE_VAULT";
+const PASSWORD_VAR: &str = "TROVE_DATABASE_PASSWORD";
+const DATABASE_VAR: &str = "TROVE_DATABASE";
 
-fn env_vault_path() -> Option<PathBuf> {
-    std::env::var_os(VAULT_VAR).map(PathBuf::from)
+fn env_database_path() -> Option<PathBuf> {
+    std::env::var_os(DATABASE_VAR).map(PathBuf::from)
 }
-/// Per-vault credentials loaded from the `databases:` map of `.env.trove.yaml`,
+/// Per-database credentials loaded from the `databases:` map of `.env.trove.yaml`,
 /// keyed by filename or path suffix (for example, `homelab/work.kdbx`).
-static VAULT_PASSWORDS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+static DATABASE_PASSWORDS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
     std::sync::OnceLock::new();
 
 /// Whether `--env` was given. Only then will a password be taken from the
-/// environment: an exported `TROVE_VAULT_PASSWORD` must never silently unlock a
-/// vault for a command that didn't ask for it.
+/// environment: an exported `TROVE_DATABASE_PASSWORD` must never silently unlock a
+/// database for a command that didn't ask for it.
 static ENV_OPT_IN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Whether `--keychain` was given. Like [`ENV_OPT_IN`], the point is that the
@@ -4570,23 +4716,23 @@ static ENV_OPT_IN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// and a dialog in a script is a dead terminal.
 static KEYCHAIN_OPT_IN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// The vault password from the keychain, if `--keychain` opted in and there is
-/// an entry for `vault`.
-fn password_from_keychain(vault: Option<&Path>) -> Result<Option<String>> {
+/// The database password from the keychain, if `--keychain` opted in and there is
+/// an entry for `database`.
+fn password_from_keychain(database: Option<&Path>) -> Result<Option<String>> {
     if !KEYCHAIN_OPT_IN.get().copied().unwrap_or(false) {
         return Ok(None);
     }
-    let Some(vault) = vault else {
+    let Some(database) = database else {
         return Err(anyhow!(
-            "--keychain needs to know which vault: pass the vault path (or --vault <PATH>)"
+            "--keychain needs to know which database: pass the database path (or --database <PATH>)"
         ));
     };
-    match keychain::load(vault)? {
+    match keychain::load(database)? {
         Some(p) => Ok(Some(p)),
         None => Err(anyhow!(
             "no keychain entry for {} — run `trove keychain save {}` first",
-            vault.display(),
-            vault.display()
+            database.display(),
+            database.display()
         )),
     }
 }
@@ -4602,19 +4748,19 @@ fn resolve_env_file(given: &Path) -> PathBuf {
 }
 
 /// Where a bare `--env` looks, in order: the working directory, then the
-/// directory holding the vault being opened.
+/// directory holding the database being opened.
 ///
-/// Beside the vault matters because that is where the file belongs when you
-/// keep a vault and its settings together — `~/vaults/work.kdbx` and
-/// `~/vaults/.env.trove.yaml` — and running `trove unlock ~/vaults/work.kdbx` from
+/// Beside the database matters because that is where the file belongs when you
+/// keep a database and its settings together — `~/databases/work.kdbx` and
+/// `~/databases/.env.trove.yaml` — and running `trove unlock ~/databases/work.kdbx` from
 /// somewhere else should still find it. The working directory comes first so a
 /// project checkout can override with its own.
 ///
 /// Deliberately NOT a user-wide config directory: those get committed to
-/// dotfile repositories, and this file holds a vault password.
-fn env_file_candidates(vault: Option<&Path>) -> Vec<PathBuf> {
+/// dotfile repositories, and this file holds a database password.
+fn env_file_candidates(database: Option<&Path>) -> Vec<PathBuf> {
     let mut out = vec![PathBuf::from(DEFAULT_ENV_FILE)];
-    if let Some(dir) = vault.and_then(Path::parent) {
+    if let Some(dir) = database.and_then(Path::parent) {
         let beside = dir.join(DEFAULT_ENV_FILE);
         if !out.contains(&beside) {
             out.push(beside);
@@ -4637,7 +4783,7 @@ fn legacy_env_file(candidate: &Path) -> Option<PathBuf> {
 /// loader and `doctor`, so both say the same thing.
 fn legacy_env_file_advice(path: &Path) -> String {
     format!(
-        "{} uses a format trove no longer reads. Put vault passwords under \
+        "{} uses a format trove no longer reads. Put database passwords under \
          `databases:` and other variables under `environment:` in {DEFAULT_ENV_FILE}, \
          then delete the old file:\n\n\
          databases:\n  work.kdbx: \"<password>\"\n\
@@ -4646,15 +4792,15 @@ fn legacy_env_file_advice(path: &Path) -> String {
     )
 }
 
-/// The vault a bare `--env` should look next to: the global `--vault` when it
+/// The database a bare `--env` should look next to: the global `--database` when it
 /// is offline mode, or the one `unlock` was pointed at.
-fn vault_for_env_lookup(cli: &Cli) -> Option<PathBuf> {
-    if let Some(v) = cli.vault.as_deref() {
+fn database_for_env_lookup(cli: &Cli) -> Option<PathBuf> {
+    if let Some(v) = cli.database.as_deref() {
         return Some(v.to_path_buf());
     }
     match &cli.command {
-        Command::Unlock { vault, .. } => Some(vault.clone()),
-        _ => env_vault_path(),
+        Command::Unlock { database, .. } => Some(database.clone()),
+        _ => env_database_path(),
     }
 }
 
@@ -4677,7 +4823,7 @@ fn env_strict() -> bool {
 
 /// Complain when an env file is readable by anyone but its owner.
 ///
-/// It holds a vault password, so ssh's reasoning applies — ssh refuses a
+/// It holds a database password, so ssh's reasoning applies — ssh refuses a
 /// private key at 0644 outright. trove only warns by default, because the two
 /// files do not live in the same world. `~/.ssh` is local, owned, on a real
 /// filesystem; an env file may sit in a synced folder (iCloud Drive does not
@@ -4700,7 +4846,7 @@ fn check_env_file_perms(path: &Path, file: &std::fs::File) -> Result<()> {
     }
     let complaint = format!(
         "{} is mode {:04o} — readable by more than its owner, and it holds a \
-         vault password. Fix with: chmod 600 {}",
+         database password. Fix with: chmod 600 {}",
         path.display(),
         mode,
         path.display()
@@ -4720,7 +4866,7 @@ fn check_env_file_perms(_path: &Path, _file: &std::fs::File) -> Result<()> {
 /// The contents of a `.env.trove.yaml`, validated.
 #[derive(Debug, Default, PartialEq)]
 struct EnvFile {
-    /// Vault filename → password.
+    /// Database filename → password.
     databases: std::collections::HashMap<String, String>,
     /// Variables to set, in file order.
     environment: Vec<(String, String)>,
@@ -4731,12 +4877,12 @@ fn is_env_var_name(key: &str) -> bool {
 }
 
 /// Whether `key` is one of the retired ways of putting a password in the
-/// environment: the shared password or a `TROVE_VAULT_<NAME>_FILE`/`_PASSWORD`
+/// environment: the shared password or a `TROVE_DATABASE_<NAME>_FILE`/`_PASSWORD`
 /// profile. In the file, passwords belong under `databases:`.
 fn is_password_var(key: &str) -> bool {
     key == PASSWORD_VAR
         || key
-            .strip_prefix("TROVE_VAULT_")
+            .strip_prefix("TROVE_DATABASE_")
             .is_some_and(|rest| rest.ends_with("_PASSWORD") || rest.ends_with("_FILE"))
 }
 
@@ -4744,7 +4890,7 @@ fn is_password_var(key: &str) -> bool {
 ///
 /// ```yaml
 /// databases:
-///   work.kdbx: "work vault password"
+///   work.kdbx: "work database password"
 /// environment:
 ///   TROVE_IDLE_TIMEOUT: "900"
 /// ```
@@ -4812,7 +4958,7 @@ fn parse_databases(
 ) -> Result<std::collections::HashMap<String, String>> {
     let map = section.as_mapping().ok_or_else(|| {
         anyhow!(
-            "{}: `databases` must map vault filenames or path suffixes to passwords",
+            "{}: `databases` must map database filenames or path suffixes to passwords",
             path.display()
         )
     })?;
@@ -4820,7 +4966,7 @@ fn parse_databases(
     for (name, password) in map {
         let name = name
             .as_str()
-            .ok_or_else(|| anyhow!("{}: vault names must be strings", path.display()))?;
+            .ok_or_else(|| anyhow!("{}: database names must be strings", path.display()))?;
         let suffix = Path::new(name);
         if suffix.file_name().is_none()
             || suffix
@@ -4828,7 +4974,7 @@ fn parse_databases(
                 .any(|c| c == std::path::Component::ParentDir)
         {
             return Err(anyhow!(
-                "{}: {name:?} must be a vault filename or path suffix ending in a filename, \
+                "{}: {name:?} must be a database filename or path suffix ending in a filename, \
                  without parent-directory (`..`) components",
                 path.display()
             ));
@@ -4874,8 +5020,8 @@ fn parse_environment(path: &Path, section: &serde_yaml::Value) -> Result<Vec<(St
         }
         if is_password_var(key) {
             return Err(anyhow!(
-                "{}: {key} is not allowed under `environment:` — vault passwords go \
-                 under `databases:`, keyed by vault filename",
+                "{}: {key} is not allowed under `environment:` — database passwords go \
+                 under `databases:`, keyed by database filename",
                 path.display()
             ));
         }
@@ -4895,7 +5041,7 @@ fn parse_environment(path: &Path, section: &serde_yaml::Value) -> Result<Vec<(St
     Ok(out)
 }
 
-/// Load `.env.trove.yaml`: remember its vault passwords and set its
+/// Load `.env.trove.yaml`: remember its database passwords and set its
 /// environment variables. A variable already set wins, so the file supplies
 /// defaults and never overrides an explicit caller. Returns how many passwords
 /// and how many variables it supplied.
@@ -4918,7 +5064,7 @@ fn load_env_file(path: &Path) -> Result<(usize, usize)> {
         .with_context(|| format!("reading env file {}", path.display()))?;
     let parsed = parse_env_file(path, &text)?;
     let databases = parsed.databases.len();
-    VAULT_PASSWORDS
+    DATABASE_PASSWORDS
         .set(parsed.databases)
         .map_err(|_| anyhow!("{DEFAULT_ENV_FILE} was already loaded"))?;
     let mut variables = 0usize;
@@ -4931,7 +5077,7 @@ fn load_env_file(path: &Path) -> Result<(usize, usize)> {
     Ok((databases, variables))
 }
 
-/// The vault password from the environment, if `--env` opted in and the
+/// The database password from the environment, if `--env` opted in and the
 /// variable is set to something non-empty.
 fn password_from_env() -> Option<String> {
     if !ENV_OPT_IN.get().copied().unwrap_or(false) {
@@ -4943,26 +5089,26 @@ fn password_from_env() -> Option<String> {
     }
 }
 
-/// Resolve the opt-in password source for a particular vault: an exported
-/// `TROVE_VAULT_PASSWORD` first, so an explicit caller wins over the file, then
-/// the file's most specific `databases:` suffix matching the supplied vault path.
-fn password_for_vault(vault: &Path) -> Option<String> {
+/// Resolve the opt-in password source for a particular database: an exported
+/// `TROVE_DATABASE_PASSWORD` first, so an explicit caller wins over the file, then
+/// the file's most specific `databases:` suffix matching the supplied database path.
+fn password_for_database(database: &Path) -> Option<String> {
     password_from_env().or_else(|| {
         if !ENV_OPT_IN.get().copied().unwrap_or(false) {
             return None;
         }
         // Include cwd for relative paths, while preserving meaningful symlink
         // aliases such as `homelab` instead of resolving them to mount names.
-        let vault = if vault.is_absolute() {
-            vault.to_path_buf()
+        let database = if database.is_absolute() {
+            database.to_path_buf()
         } else {
-            std::env::current_dir().ok()?.join(vault)
+            std::env::current_dir().ok()?.join(database)
         };
-        VAULT_PASSWORDS.get().and_then(|map| {
+        DATABASE_PASSWORDS.get().and_then(|map| {
             map.iter()
                 .filter_map(|(suffix, password)| {
                     let suffix_path = Path::new(suffix);
-                    vault
+                    database
                         .ends_with(suffix_path)
                         .then(|| (suffix_path.components().count(), suffix, password))
                 })
@@ -5009,7 +5155,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 /// the default attachment name; `--name` overrides.
 #[allow(clippy::too_many_arguments)]
 fn cmd_add_file(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     title: &str,
     src: &Path,
     target: &Path,
@@ -5034,18 +5180,18 @@ fn cmd_add_file(
             })?,
     };
 
-    match vault {
+    match database {
         // Offline: open the kdbx file directly and write to it.
-        Some(vault_path) => {
-            let mut vault = open_vault(vault_path, pw_stdin)?;
-            let id = match vault.find_by_title(title) {
+        Some(database_path) => {
+            let mut database = open_database(database_path, pw_stdin)?;
+            let id = match database.find_by_title(title) {
                 Some(existing) => existing,
-                None => vault
+                None => database
                     .add_entry(title)
                     .with_context(|| format!("creating entry '{title}'"))?,
             };
 
-            vault
+            database
                 .attach_binary(&id, &attachment_name, &bytes)
                 .context("attaching file bytes")?;
             // One `<File>` in the entry's Materialize.settings per attachment,
@@ -5054,7 +5200,7 @@ fn cmd_add_file(
             let target_str = target
                 .to_str()
                 .ok_or_else(|| anyhow!("target path is not valid utf8"))?;
-            vault
+            database
                 .upsert_settings_item(
                     &id,
                     trove_core::settings::Capability::Materialize,
@@ -5062,7 +5208,7 @@ fn cmd_add_file(
                 )
                 .context("writing Materialize.settings")?;
 
-            vault.save().context("saving vault")?;
+            database.save().context("saving database")?;
             println!(
                 "stored '{}' as attachment '{attachment_name}' on entry {id} ({title}); \
                  materializes to {} on unlock",
@@ -5079,7 +5225,7 @@ fn cmd_add_file(
             }
             Ok(())
         }
-        // Default: store into the daemon's currently unlocked vault. The file
+        // Default: store into the daemon's currently unlocked database. The file
         // lands on disk on the next unlock, not in the current session.
         None => {
             let target_str = target
@@ -5126,15 +5272,15 @@ fn cmd_add_file(
 }
 
 /// `trove get file` — read a named attachment to disk WITHOUT engaging
-/// materialization. Offline with `--vault`, otherwise daemon-routed and
+/// materialization. Offline with `--database`, otherwise daemon-routed and
 /// session-code-gated like `trove get ssh`.
 ///
 /// The attachment name comes from `--name`, defaulting to `"blob"`. (In daemon
 /// mode we cannot resolve a default from the entry's `Materialize.Source` field
-/// without opening the vault, which would defeat the session-code gate — so
+/// without opening the database, which would defeat the session-code gate — so
 /// pass `--name` for entries that don't use the conventional `blob` slot.)
 fn cmd_get_file(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     title: &str,
     name: Option<&str>,
     out: Option<&Path>,
@@ -5142,7 +5288,7 @@ fn cmd_get_file(
     pw_stdin: bool,
 ) -> Result<()> {
     let attachment = name.unwrap_or("blob");
-    let bytes = match vault {
+    let bytes = match database {
         Some(path) => offline_get_attachment(path, title, attachment, pw_stdin)?,
         None => daemon_get_attachment(title, attachment)?,
     };
@@ -5153,7 +5299,7 @@ fn cmd_get_file(
 
 /// One daemon round-trip with the standard error plumbing shared by the CRUD
 /// commands: autospawn, map "daemon not running" and protocol-level errors to
-/// user errors (exit 1), append the unlock hint when no vault is open.
+/// user errors (exit 1), append the unlock hint when no database is open.
 fn daemon_call(req: &daemon::Request) -> Result<Value> {
     let resp = match daemon::send_autospawn(req) {
         Ok(v) => v,
@@ -5167,8 +5313,8 @@ fn daemon_call(req: &daemon::Request) -> Result<Value> {
         Err(e) => return Err(e),
     };
     if let Some(msg) = daemon::response_error(&resp) {
-        let hint = if msg.contains("no vault") {
-            "; pass a vault path or run `trove unlock <vault>` first"
+        let hint = if msg.contains("no database") {
+            "; pass a database path or run `trove unlock <database>` first"
         } else {
             ""
         };
@@ -5182,7 +5328,7 @@ fn daemon_call(req: &daemon::Request) -> Result<Value> {
 }
 
 /// The fields trove-core stores with the kdbx Protected flag (see
-/// `Vault::set_field`): `Password` and `otp` — the same pair KeePassXC
+/// `Database::set_field`): `Password` and `otp` — the same pair KeePassXC
 /// memory-protects by default.
 fn is_protected_field(name: &str) -> bool {
     name.eq_ignore_ascii_case("password") || name.eq_ignore_ascii_case("otp")
@@ -5225,7 +5371,7 @@ fn parse_set_kv(s: &str) -> Result<(String, String)> {
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_add_password(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     username: Option<&str>,
     url: Option<&str>,
@@ -5235,13 +5381,13 @@ fn cmd_add_password(
     secret_stdin: bool,
     pw_stdin: bool,
 ) -> Result<()> {
-    if vault.is_none() && pw_stdin {
-        anyhow::bail!("--password-stdin is only valid with --vault for `add password`; the unlocked daemon does not need the vault password");
+    if database.is_none() && pw_stdin {
+        anyhow::bail!("--password-stdin is only valid with --database for `add password`; the unlocked daemon does not need the database password");
     }
-    // Offline mode opens the vault FIRST so that with `--password-stdin
-    // --secret-stdin` the vault password is line 1 and the secret line 2.
-    let mut offline_vault = match vault {
-        Some(path) => Some(open_vault(path, pw_stdin)?),
+    // Offline mode opens the database FIRST so that with `--password-stdin
+    // --secret-stdin` the database password is line 1 and the secret line 2.
+    let mut offline_database = match database {
+        Some(path) => Some(open_database(path, pw_stdin)?),
         None => None,
     };
     let password = if generate {
@@ -5252,7 +5398,7 @@ fn cmd_add_password(
         prompt_entry_password().context("reading entry password")?
     };
 
-    match offline_vault.as_mut() {
+    match offline_database.as_mut() {
         Some(v) => {
             if v.find_by_title(entry_path).is_some() {
                 return Err(anyhow!(
@@ -5268,7 +5414,7 @@ fn cmd_add_password(
                         .with_context(|| format!("setting {name}"))?;
                 }
             }
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
         }
         None => {
             let code = require_session_code()?;
@@ -5293,14 +5439,14 @@ fn cmd_add_password(
 }
 
 fn cmd_get_password(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     base64: bool,
     pw_stdin: bool,
 ) -> Result<()> {
-    let password = match vault {
+    let password = match database {
         Some(path) => {
-            let v = open_vault(path, pw_stdin)?;
+            let v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
@@ -5466,24 +5612,24 @@ fn entry_show_json(e: ShowJson<'_>) -> Value {
 }
 
 fn cmd_rename_attachment(
-    vault_path: Option<&Path>,
+    database_path: Option<&Path>,
     entry_path: &str,
     old_name: &str,
     new_name: &str,
     pw_stdin: bool,
 ) -> Result<()> {
-    let Some(path) = vault_path else {
+    let Some(path) = database_path else {
         return Err(anyhow!(
-            "rename-attachment needs --vault <PATH>: it rewrites the file, and \
-             the daemon serves an already-open vault"
+            "rename-attachment needs --database <PATH>: it rewrites the file, and \
+             the daemon serves an already-open database"
         ));
     };
-    let mut vault = open_vault(path, pw_stdin)?;
-    let id = vault
+    let mut database = open_database(path, pw_stdin)?;
+    let id = database
         .find_by_title(entry_path)
         .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
 
-    let renamed = vault
+    let renamed = database
         .rename_attachment(&id, old_name, new_name)
         .with_context(|| format!("renaming attachment {old_name:?} to {new_name:?}"))?;
 
@@ -5491,17 +5637,17 @@ fn cmd_rename_attachment(
     // so finishing the job belongs here, where the format is understood.
     let mut agent_updated = false;
     if renamed.has_keeagent_settings {
-        if let Some(bytes) = vault.read_binary(&id, "KeeAgent.settings")? {
+        if let Some(bytes) = database.read_binary(&id, "KeeAgent.settings")? {
             if let Some(updated) =
                 troved::ssh_agent::keeagent::rewrite_key_attachment(&bytes, new_name)
             {
-                vault.attach_binary(&id, "KeeAgent.settings", &updated)?;
+                database.attach_binary(&id, "KeeAgent.settings", &updated)?;
                 agent_updated = true;
             }
         }
     }
 
-    vault.save().context("saving vault")?;
+    database.save().context("saving database")?;
 
     println!("renamed attachment {old_name} → {new_name}");
     for field in &renamed.moved_fields {
@@ -5520,38 +5666,45 @@ fn cmd_rename_attachment(
 
 fn cmd_keychain(action: &KeychainAction, pw_stdin: bool) -> Result<()> {
     match action {
-        KeychainAction::Save { vault } => {
-            if !vault.exists() {
-                return Err(anyhow!("vault file does not exist: {}", vault.display()));
+        KeychainAction::Save { database } => {
+            if !database.exists() {
+                return Err(anyhow!(
+                    "database file does not exist: {}",
+                    database.display()
+                ));
             }
             let password = if pw_stdin {
-                read_password_from_stdin().context("reading vault password from stdin")?
+                read_password_from_stdin().context("reading database password from stdin")?
             } else {
-                rpassword::prompt_password("Vault password: ").context("reading vault password")?
+                rpassword::prompt_password("Database password: ")
+                    .context("reading database password")?
             };
-            // Prove the password opens the vault before storing it: an entry
+            // Prove the password opens the database before storing it: an entry
             // that does not work is worse than no entry, because it fails
             // later and somewhere else.
-            Vault::open_with_key(vault, &password, global_keyfile())
-                .with_context(|| format!("opening vault {}", vault.display()))?;
-            keychain::save(vault, &password)?;
+            Database::open_with_key(database, &password, global_keyfile())
+                .with_context(|| format!("opening database {}", database.display()))?;
+            keychain::save(database, &password)?;
             eprintln!(
                 "trove: saved the password for {} — unlock with `--keychain`",
-                keychain::describe(vault)?
+                keychain::describe(database)?
             );
             Ok(())
         }
-        KeychainAction::Forget { vault } => {
-            if keychain::forget(vault)? {
-                eprintln!("trove: removed the keychain entry for {}", vault.display());
+        KeychainAction::Forget { database } => {
+            if keychain::forget(database)? {
+                eprintln!(
+                    "trove: removed the keychain entry for {}",
+                    database.display()
+                );
             } else {
-                eprintln!("trove: no keychain entry for {}", vault.display());
+                eprintln!("trove: no keychain entry for {}", database.display());
             }
             Ok(())
         }
-        KeychainAction::Status { vault, json } => {
-            let stored = keychain::load(vault)?.is_some();
-            let description = keychain::describe(vault)?;
+        KeychainAction::Status { database, json } => {
+            let stored = keychain::load(database)?.is_some();
+            let description = keychain::describe(database)?;
             if *json {
                 println!(
                     "{}",
@@ -5569,15 +5722,15 @@ fn cmd_keychain(action: &KeychainAction, pw_stdin: bool) -> Result<()> {
 
 /// `keychain status --json`. A function so a unit test can pin its shape: the
 /// command itself needs a terminal and a keychain.
-fn keychain_status_json(stored: bool, vault: &str) -> Value {
+fn keychain_status_json(stored: bool, database: &str) -> Value {
     serde_json::json!({
         "stored": stored,
-        "vault": vault,
+        "database": database,
     })
 }
 
 fn cmd_show(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     attrs: &[String],
     show_protected: bool,
@@ -5596,9 +5749,9 @@ fn cmd_show(
             ));
         }
     }
-    match vault {
+    match database {
         Some(path) => {
-            let v = open_vault(path, pw_stdin)?;
+            let v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
@@ -5800,7 +5953,7 @@ struct SearchOptions {
     show_id: bool,
 }
 
-fn cmd_search(vault: Option<&Path>, options: SearchOptions, pw_stdin: bool) -> Result<()> {
+fn cmd_search(database: Option<&Path>, options: SearchOptions, pw_stdin: bool) -> Result<()> {
     let fields = parse_search_fields(&options.fields)?;
     if options.term.is_none()
         && fields.is_empty()
@@ -5816,9 +5969,9 @@ fn cmd_search(vault: Option<&Path>, options: SearchOptions, pw_stdin: bool) -> R
         .with_fields(fields.clone())
         .with_tags(options.tags.clone())
         .with_attachments(options.attachments.clone());
-    match vault {
+    match database {
         Some(path) => {
-            let v = open_vault(path, pw_stdin)?;
+            let v = open_database(path, pw_stdin)?;
             let hits = v.search_entries_with(&query);
             if options.json {
                 let arr: Vec<Value> = hits
@@ -5887,10 +6040,10 @@ fn parse_search_fields(fields: &[String]) -> Result<Vec<SearchFieldFilter>> {
         .collect()
 }
 
-fn cmd_describe(vault: Option<&Path>, path: &str, pw_stdin: bool, json: bool) -> Result<()> {
-    let descriptions = match vault {
-        Some(path_to_vault) => {
-            let v = open_vault(path_to_vault, pw_stdin)?;
+fn cmd_describe(database: Option<&Path>, path: &str, pw_stdin: bool, json: bool) -> Result<()> {
+    let descriptions = match database {
+        Some(path_to_database) => {
+            let v = open_database(path_to_database, pw_stdin)?;
             v.describe(path)?
                 .into_iter()
                 .map(|description| {
@@ -5976,7 +6129,7 @@ fn print_descriptions(descriptions: &[Value]) {
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_edit(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     title: Option<&str>,
     username: Option<&str>,
@@ -6021,9 +6174,9 @@ fn cmd_edit(
              --expires/--no-expiry or --icon/--no-icon"
         ));
     }
-    match vault {
+    match database {
         Some(path) => {
-            let mut v = open_vault(path, pw_stdin)?;
+            let mut v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
@@ -6065,7 +6218,7 @@ fn cmd_edit(
             if let Some(icon) = icon {
                 v.set_entry_icon(&id, icon)?;
             }
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
         }
         None => {
             let code = require_session_code()?;
@@ -6113,15 +6266,20 @@ fn report_removal(what: &str, recycled: bool) {
     }
 }
 
-fn cmd_rm(vault: Option<&Path>, entry_path: &str, permanent: bool, pw_stdin: bool) -> Result<()> {
-    let recycled = match vault {
+fn cmd_rm(
+    database: Option<&Path>,
+    entry_path: &str,
+    permanent: bool,
+    pw_stdin: bool,
+) -> Result<()> {
+    let recycled = match database {
         Some(path) => {
-            let mut v = open_vault(path, pw_stdin)?;
+            let mut v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
             let recycled = v.recycle_entry(&id, permanent).context("removing entry")?;
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
             recycled
         }
         None => {
@@ -6141,7 +6299,7 @@ fn cmd_rm(vault: Option<&Path>, entry_path: &str, permanent: bool, pw_stdin: boo
 }
 
 fn cmd_mv(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     group_path: &str,
     recursive: bool,
@@ -6149,11 +6307,11 @@ fn cmd_mv(
     pw_stdin: bool,
 ) -> Result<()> {
     if recursive {
-        let plan = match vault {
+        let plan = match database {
             Some(path) => {
-                let mut v = open_vault(path, pw_stdin)?;
+                let mut v = open_database(path, pw_stdin)?;
                 let plan = v.move_group_to_path(entry_path, group_path)?;
-                v.save().context("saving vault")?;
+                v.save().context("saving database")?;
                 plan
             }
             None => {
@@ -6169,15 +6327,15 @@ fn cmd_mv(
         print_group_transfer(&plan, "moved", verbose, false, false);
         return Ok(());
     }
-    match vault {
+    match database {
         Some(path) => {
-            let mut v = open_vault(path, pw_stdin)?;
+            let mut v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
             v.move_entry_to_path(&id, group_path)
                 .context("moving entry")?;
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
         }
         None => {
             let code = require_session_code()?;
@@ -6201,7 +6359,7 @@ struct GroupCopyOptions {
 }
 
 fn cmd_cp(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     dest_path: &str,
     options: GroupCopyOptions,
@@ -6214,14 +6372,14 @@ fn cmd_cp(
         dry_run,
     } = options;
     if recursive {
-        let plan = match vault {
+        let plan = match database {
             Some(path) => {
-                let mut v = open_vault(path, pw_stdin)?;
+                let mut v = open_database(path, pw_stdin)?;
                 if dry_run {
                     v.plan_group_transfer(entry_path, dest_path)?
                 } else {
                     let plan = v.copy_group(entry_path, dest_path, keep_materialize)?;
-                    v.save().context("saving vault")?;
+                    v.save().context("saving database")?;
                     plan
                 }
             }
@@ -6246,14 +6404,14 @@ fn cmd_cp(
         );
         return Ok(());
     }
-    match vault {
+    match database {
         Some(path) => {
-            let mut v = open_vault(path, pw_stdin)?;
+            let mut v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
             v.copy_entry(&id, dest_path).context("copying entry")?;
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
         }
         None => {
             let code = require_session_code()?;
@@ -6338,9 +6496,9 @@ fn print_group_transfer(
     }
 }
 
-fn cmd_group_list(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    let groups = vault.list_groups();
+fn cmd_group_list(database_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
+    let database = open_database(database_path, pw_stdin)?;
+    let groups = database.list_groups();
     if json {
         let values: Vec<Value> = groups
             .iter()
@@ -6369,7 +6527,7 @@ fn cmd_group_list(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
 }
 
 fn cmd_group_edit(
-    vault_path: &Path,
+    database_path: &Path,
     group_path: &str,
     tags: &[String],
     untags: &[String],
@@ -6381,8 +6539,8 @@ fn cmd_group_edit(
             "nothing to change: pass --tag, --untag or --clear-tags"
         ));
     }
-    let mut vault = open_vault(vault_path, pw_stdin)?;
-    let group = vault
+    let mut database = open_database(database_path, pw_stdin)?;
+    let group = database
         .list_groups()
         .into_iter()
         .find(|group| group.display_path().eq_ignore_ascii_case(group_path))
@@ -6400,20 +6558,20 @@ fn cmd_group_edit(
             current.push(tag.clone());
         }
     }
-    vault
+    database
         .set_group_tags(group_path, &current)
         .context("setting group tags")?;
-    vault.save().context("saving vault")?;
+    database.save().context("saving database")?;
     println!("updated tags on group '{group_path}'");
     Ok(())
 }
 
-fn cmd_mkdir(vault: Option<&Path>, group_path: &str, pw_stdin: bool) -> Result<()> {
-    match vault {
+fn cmd_mkdir(database: Option<&Path>, group_path: &str, pw_stdin: bool) -> Result<()> {
+    match database {
         Some(path) => {
-            let mut v = open_vault(path, pw_stdin)?;
+            let mut v = open_database(path, pw_stdin)?;
             v.add_group(group_path).context("creating group")?;
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
         }
         None => {
             let code = require_session_code()?;
@@ -6428,19 +6586,19 @@ fn cmd_mkdir(vault: Option<&Path>, group_path: &str, pw_stdin: bool) -> Result<(
 }
 
 fn cmd_rmdir(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     group_path: &str,
     permanent: bool,
     recursive: bool,
     pw_stdin: bool,
 ) -> Result<()> {
-    let recycled = match vault {
+    let recycled = match database {
         Some(path) => {
-            let mut v = open_vault(path, pw_stdin)?;
+            let mut v = open_database(path, pw_stdin)?;
             let recycled = v
                 .remove_group(group_path, permanent, recursive)
                 .context("removing group")?;
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
             recycled
         }
         None => {
@@ -6463,10 +6621,10 @@ fn cmd_rmdir(
 /// `trove show <entry> --totp`: print the current code. Offline computes
 /// in-process; daemon mode uses the code-gated `GetTotp` RPC, which returns
 /// only the ephemeral code — the shared secret stays in the daemon.
-fn cmd_show_totp(vault: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
-    match vault {
+fn cmd_show_totp(database: Option<&Path>, entry_path: &str, pw_stdin: bool) -> Result<()> {
+    match database {
         Some(path) => {
-            let v = open_vault(path, pw_stdin)?;
+            let v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
@@ -6505,7 +6663,7 @@ fn report_totp_window(valid_for_secs: u64) {
 /// `trove add totp`: build/validate the otpauth URI and store it.
 #[allow(clippy::too_many_arguments)]
 fn cmd_add_totp(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     uri: Option<&str>,
     secret: Option<&str>,
@@ -6550,15 +6708,15 @@ fn cmd_add_totp(
         }
         (None, None) => unreachable!("clap requires --uri or --secret"),
     };
-    match vault {
+    match database {
         Some(path) => {
-            let mut v = open_vault(path, pw_stdin)?;
+            let mut v = open_database(path, pw_stdin)?;
             let id = match v.find_by_title(entry_path) {
                 Some(id) => id,
                 None => v.add_entry(entry_path).context("creating entry")?,
             };
             v.set_totp_uri(&id, &uri).context("setting otp")?;
-            v.save().context("saving vault")?;
+            v.save().context("saving database")?;
         }
         None => {
             let code = require_session_code()?;
@@ -6577,16 +6735,16 @@ fn cmd_add_totp(
 /// current TOTP code), copy it, and hand the guarded auto-clear to a
 /// detached child so this process can exit immediately.
 fn cmd_clip(
-    vault: Option<&Path>,
+    database: Option<&Path>,
     entry_path: &str,
     attr: Option<&str>,
     totp: bool,
     timeout: u64,
     pw_stdin: bool,
 ) -> Result<()> {
-    let (value, label) = match vault {
+    let (value, label) = match database {
         Some(path) => {
-            let v = open_vault(path, pw_stdin)?;
+            let v = open_database(path, pw_stdin)?;
             let id = v
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
@@ -6654,10 +6812,10 @@ fn cmd_clip(
 }
 
 /// `trove git-credential <op>` — a git credential helper over stdin/stdout.
-fn cmd_git_credential(vault_path: Option<&Path>, operation: &str, pw_stdin: bool) -> Result<()> {
-    if let Some(vault_path) = vault_path {
-        let v = open_vault(vault_path, pw_stdin)?;
-        // When --password-stdin is used, open_vault consumes only the first
+fn cmd_git_credential(database_path: Option<&Path>, operation: &str, pw_stdin: bool) -> Result<()> {
+    if let Some(database_path) = database_path {
+        let v = open_database(database_path, pw_stdin)?;
+        // When --password-stdin is used, open_database consumes only the first
         // line; Git's credential request remains available to the helper.
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
@@ -6666,7 +6824,9 @@ fn cmd_git_credential(vault_path: Option<&Path>, operation: &str, pw_stdin: bool
         return gitcred::run(&v, operation, &mut reader, &mut writer);
     }
     if pw_stdin {
-        return Err(anyhow!("--password-stdin requires --vault in offline mode"));
+        return Err(anyhow!(
+            "--password-stdin requires --database in offline mode"
+        ));
     }
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
@@ -6694,7 +6854,7 @@ fn cmd_git_credential(vault_path: Option<&Path>, operation: &str, pw_stdin: bool
         Ok(response) => response,
         Err(error) if daemon::is_daemon_not_running(&error) => {
             return Err(anyhow!(
-                "no trove daemon is running; run `trove unlock <VAULT>` first, or pass `--vault <PATH>` for offline mode"
+                "no trove daemon is running; run `trove unlock <DATABASE>` first, or pass `--database <PATH>` for offline mode"
             ));
         }
         Err(error) => return Err(error),
@@ -6715,8 +6875,8 @@ fn cmd_git_credential(vault_path: Option<&Path>, operation: &str, pw_stdin: bool
 }
 
 /// `trove resolve trove://…` — print one referenced secret to stdout.
-fn cmd_resolve(vault_path: &Path, reference: &str, base64: bool, pw_stdin: bool) -> Result<()> {
-    let v = open_vault(vault_path, pw_stdin)?;
+fn cmd_resolve(database_path: &Path, reference: &str, base64: bool, pw_stdin: bool) -> Result<()> {
+    let v = open_database(database_path, pw_stdin)?;
     let value = v.resolve_ref(reference).context("resolving reference")?;
     if base64 {
         write_value_out(None, value.as_bytes(), "resolved value", true)
@@ -6729,20 +6889,20 @@ fn cmd_resolve(vault_path: &Path, reference: &str, base64: bool, pw_stdin: bool)
 /// `trove exec <SCOPE> -- cmd…` — inject, run, wipe. The child's exit code
 /// becomes ours (after cleanup), so pipelines and CI see the real result.
 fn cmd_exec(
-    vault_path: Option<&Path>,
+    database_path: Option<&Path>,
     scope: Option<String>,
     entry: Option<String>,
     group: Option<String>,
     command: &[std::ffi::OsString],
     pw_stdin: bool,
 ) -> Result<()> {
-    // Offline with --vault; otherwise the vaults unlocked in the daemon.
-    let opened = match vault_path {
-        Some(path) => Some(open_vault(path, pw_stdin)?),
+    // Offline with --database; otherwise the databases unlocked in the daemon.
+    let opened = match database_path {
+        Some(path) => Some(open_database(path, pw_stdin)?),
         None => None,
     };
     let source: Box<dyn exec::Source + '_> = match &opened {
-        Some(v) => Box::new(exec::VaultSource::new(v)),
+        Some(v) => Box::new(exec::DatabaseSource::new(v)),
         None => Box::new(exec::DaemonSource::connect()?),
     };
     let scope = match (scope, entry, group) {
@@ -6753,7 +6913,7 @@ fn cmd_exec(
     };
     let tmp = exec::private_tmp_dir()?;
     let injections = exec::resolve(source.as_ref(), scope, &tmp);
-    // The decrypted vault isn't needed while the child runs.
+    // The decrypted database isn't needed while the child runs.
     drop(source);
     drop(opened);
     // Run inside a closure so EVERY exit path below, a failed resolve
@@ -6808,20 +6968,21 @@ fn cmd_exec(
     Ok(())
 }
 
-/// `trove merge <SOURCE>` — KDBX-standard merge into `--vault`. Two secrets
-/// arrive in order: target vault password, then source vault password.
+/// `trove merge <SOURCE>` — KDBX-standard merge into `--database`. Two secrets
+/// arrive in order: target database password, then source database password.
 fn cmd_merge(
-    vault_path: &Path,
+    database_path: &Path,
     source: &Path,
     source_key_file: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    let mut v = open_vault(vault_path, pw_stdin)?;
+    let mut v = open_database(database_path, pw_stdin)?;
     let source_password = if pw_stdin {
-        read_password_from_stdin().context("reading SOURCE vault password from stdin (line 2)")?
+        read_password_from_stdin()
+            .context("reading SOURCE database password from stdin (line 2)")?
     } else {
-        rpassword::prompt_password("Source vault password: ")
-            .context("reading source vault password")?
+        rpassword::prompt_password("Source database password: ")
+            .context("reading source database password")?
     };
     let source_keyfile = match source_key_file {
         Some(p) => Some(
@@ -6845,14 +7006,14 @@ fn cmd_merge(
 
 /// `trove sync` — two-way merge with another copy, leaving both equal.
 fn cmd_sync(
-    vault_path: &Path,
+    database_path: &Path,
     other: &Path,
     other_key_file: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    let mut v = open_vault(vault_path, pw_stdin)?;
+    let mut v = open_database(database_path, pw_stdin)?;
     // A new copy is an exact copy: same password and key file, so it is
-    // neither weaker than the vault nor locked by a mistyped password.
+    // neither weaker than the database nor locked by a mistyped password.
     let (other_password, other_keyfile) = if !other.exists() {
         (
             v.current_password().to_string(),
@@ -6861,7 +7022,7 @@ fn cmd_sync(
     } else {
         let password = if pw_stdin {
             read_password_from_stdin()
-                .context("reading OTHER vault password from stdin (line 2)")?
+                .context("reading OTHER database password from stdin (line 2)")?
         } else {
             rpassword::prompt_password("Other copy's password: ")
                 .context("reading the other copy's password")?
@@ -6886,7 +7047,7 @@ fn cmd_sync(
     };
     if s.created {
         println!(
-            "created {} from this vault, with the same credentials",
+            "created {} from this database, with the same credentials",
             other.display()
         );
     } else if s.other_written {
@@ -6898,7 +7059,7 @@ fn cmd_sync(
         );
     } else {
         println!(
-            "synced {}: pulled {}; it already had everything from this vault",
+            "synced {}: pulled {}; it already had everything from this database",
             other.display(),
             counts(s.pulled)
         );
@@ -6907,8 +7068,8 @@ fn cmd_sync(
 }
 
 /// `trove export` — decrypted XML or KeePassXC-convention CSV on stdout.
-fn cmd_export(vault_path: &Path, format: ExportFormat, pw_stdin: bool) -> Result<()> {
-    let v = open_vault(vault_path, pw_stdin)?;
+fn cmd_export(database_path: &Path, format: ExportFormat, pw_stdin: bool) -> Result<()> {
+    let v = open_database(database_path, pw_stdin)?;
     match format {
         ExportFormat::Xml => {
             let xml = xml_export::export_xml(&v).context("exporting xml")?;
@@ -6952,7 +7113,7 @@ fn cmd_export(vault_path: &Path, format: ExportFormat, pw_stdin: bool) -> Result
 /// confirmed prompt).
 #[allow(clippy::too_many_arguments)]
 fn cmd_db_edit(
-    vault_path: &Path,
+    database_path: &Path,
     set_password: bool,
     set_key_file: Option<&Path>,
     unset_key_file: bool,
@@ -6969,7 +7130,7 @@ fn cmd_db_edit(
              or a --kdf-* option"
         ));
     }
-    let mut v = open_vault(vault_path, pw_stdin)?;
+    let mut v = open_database(database_path, pw_stdin)?;
 
     if any_key {
         let new_password = if set_password {
@@ -6979,7 +7140,7 @@ fn cmd_db_edit(
                 prompt_new_password().context("reading new password")?
             }
         } else {
-            // Keeping the password: reuse the one that just opened the vault.
+            // Keeping the password: reuse the one that just opened the database.
             // rekey() needs it verbatim; prompting again would be hostile.
             v.current_password().to_string()
         };
@@ -7014,12 +7175,12 @@ fn mib_to_kib(memory_mib: u64) -> Result<u64> {
 }
 
 /// `trove db-info` — non-secret database facts.
-fn cmd_db_info(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
-    let v = open_vault(vault_path, pw_stdin)?;
+fn cmd_db_info(database_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
+    let v = open_database(database_path, pw_stdin)?;
     let i = v.db_info();
     if json {
         let obj = serde_json::json!({
-            "path": vault_path.display().to_string(),
+            "path": database_path.display().to_string(),
             "version": i.version,
             "cipher": i.cipher,
             "compression": i.compression,
@@ -7031,7 +7192,7 @@ fn cmd_db_info(vault_path: &Path, pw_stdin: bool, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&obj)?);
         return Ok(());
     }
-    println!("Path:        {}", vault_path.display());
+    println!("Path:        {}", database_path.display());
     println!("Version:     {}", i.version);
     println!("Cipher:      {}", i.cipher);
     println!("Compression: {}", i.compression);
@@ -7093,7 +7254,7 @@ fn cmd_estimate(password: Option<&str>, json: bool) -> Result<()> {
 }
 
 /// `trove analyze --hibp <FILE>` — offline breach check of every password in
-/// the vault. Prints one line per breached entry (path + count); exits 0 with
+/// the database. Prints one line per breached entry (path + count); exits 0 with
 /// "no breached passwords" when clean. Exit 1 when breaches were found, so
 /// scripts and CI can gate on it.
 /// Which `trove analyze` checks to run.
@@ -7107,13 +7268,18 @@ struct AnalyzeChecks {
     expired: bool,
 }
 
-fn cmd_analyze(vault_path: &Path, checks: AnalyzeChecks, pw_stdin: bool, json: bool) -> Result<()> {
+fn cmd_analyze(
+    database_path: &Path,
+    checks: AnalyzeChecks,
+    pw_stdin: bool,
+    json: bool,
+) -> Result<()> {
     if let Some(file) = &checks.hibp {
         if !file.exists() {
             return Err(anyhow!("HIBP file not found: {}", file.display()));
         }
     }
-    let v = open_vault(vault_path, pw_stdin)?;
+    let v = open_database(database_path, pw_stdin)?;
     let entries = v.list_entries();
     let mut passwords = Vec::new();
     let mut empty_paths = Vec::new();
@@ -7272,15 +7438,15 @@ fn zeroize_string(s: String) -> zeroize::Zeroizing<String> {
     zeroize::Zeroizing::new(s)
 }
 
-/// `trove materialize` — open vault, run the materialize plan in-process,
+/// `trove materialize` — open database, run the materialize plan in-process,
 /// hold open until SIGINT, then wipe.
 ///
 /// We deliberately do NOT touch the daemon's MaterializedStore here; this is
 /// a standalone command meant for testing and disconnected use. If you have
 /// the daemon running, use `troved unlock` instead so SSH/GPG agents work too.
-fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
-    let vault = open_vault(vault_path, pw_stdin)?;
-    let (plans, errors) = troved::materialize::build_plans(&vault);
+fn cmd_materialize(database_path: &Path, pw_stdin: bool) -> Result<()> {
+    let database = open_database(database_path, pw_stdin)?;
+    let (plans, errors) = troved::materialize::build_plans(&database);
     for (title, e) in &errors {
         eprintln!("skip '{title}': {e}");
     }
@@ -7301,10 +7467,15 @@ fn cmd_materialize(vault_path: &Path, pw_stdin: bool) -> Result<()> {
             std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let mut materialised_count = 0usize;
         for plan in &plans {
-            // Offline `trove materialize` opens exactly one vault, so the
-            // per-vault attribution the daemon needs is just that vault's path.
-            let vault_key = troved::vaults::canonical_key(vault.path());
-            match troved::materialize::materialize_one(&vault, &vault_key, plan, store.clone()) {
+            // Offline `trove materialize` opens exactly one database, so the
+            // per-database attribution the daemon needs is just that database's path.
+            let database_key = troved::databases::canonical_key(database.path());
+            match troved::materialize::materialize_one(
+                &database,
+                &database_key,
+                plan,
+                store.clone(),
+            ) {
                 Ok(m) => {
                     println!(
                         "materialized '{}' -> {} (mode {:o}{}{})",
@@ -7379,10 +7550,10 @@ struct DaemonClassified {
     exit: u8,
 }
 
-/// `trove unlock <vault>` — send `unlock` to the daemon. Prompts for password
+/// `trove unlock <database>` — send `unlock` to the daemon. Prompts for password
 /// (or reads stdin) before calling out, so we fail fast on a typo.
 fn cmd_unlock(
-    vault: &Path,
+    database: &Path,
     timeout: Option<u64>,
     filter: Option<String>,
     export: bool,
@@ -7390,9 +7561,9 @@ fn cmd_unlock(
     detach: bool,
     pw_stdin: bool,
 ) -> Result<()> {
-    if !vault.exists() {
+    if !database.exists() {
         return Err(DaemonClassified {
-            message: format!("vault file not found: {}", vault.display()),
+            message: format!("database file not found: {}", database.display()),
             exit: EXIT_USER_ERROR,
         }
         .into());
@@ -7402,30 +7573,31 @@ fn cmd_unlock(
     // an absolute path here, against the user's cwd (the existence check above
     // guarantees canonicalize succeeds), so the daemon opens the file the user
     // actually named.
-    let vault_abs = std::fs::canonicalize(vault)
-        .with_context(|| format!("resolving vault path: {}", vault.display()))?;
-    let vault_str = vault_abs
+    let database_abs = std::fs::canonicalize(database)
+        .with_context(|| format!("resolving database path: {}", database.display()))?;
+    let database_str = database_abs
         .to_str()
-        .ok_or_else(|| anyhow!("vault path is not valid utf-8"))?
+        .ok_or_else(|| anyhow!("database path is not valid utf-8"))?
         .to_string();
-    // Same order as `open_vault`: the sources that cannot block come first.
+    // Same order as `open_database`: the sources that cannot block come first.
     // Prefer the caller's alias, retaining the old canonical filename fallback
     // for a file symlink whose name differs from the target's.
-    let password =
-        if let Some(p) = password_for_vault(vault).or_else(|| password_for_vault(&vault_abs)) {
-            p
-        } else if pw_stdin {
-            read_password_from_stdin().context("reading vault password from stdin")?
-        } else if let Some(p) = password_from_keychain(Some(&vault_abs))? {
-            p
-        } else {
-            rpassword::prompt_password("Vault password: ").context(
-                "reading vault password (use --password-stdin when no terminal is available)",
-            )?
-        };
+    let password = if let Some(p) =
+        password_for_database(database).or_else(|| password_for_database(&database_abs))
+    {
+        p
+    } else if pw_stdin {
+        read_password_from_stdin().context("reading database password from stdin")?
+    } else if let Some(p) = password_from_keychain(Some(&database_abs))? {
+        p
+    } else {
+        rpassword::prompt_password("Database password: ").context(
+            "reading database password (use --password-stdin when no terminal is available)",
+        )?
+    };
 
     let req = daemon::Request::Unlock {
-        path: vault_str,
+        path: database_str,
         password,
         timeout,
         keyfile: global_keyfile().map(|bytes| {
@@ -7450,11 +7622,11 @@ fn cmd_unlock(
     };
 
     if let Some(msg) = daemon::response_error(&resp) {
-        // Heuristic: anything that mentions "password" or "kdbx" is a vault
+        // Heuristic: anything that mentions "password" or "kdbx" is a database
         // error (exit 2); everything else is a user error (exit 1). This
         // matches the existing `classify_exit` mapping for trove-core errors.
-        let exit = if looks_like_vault_error(&msg) {
-            EXIT_VAULT_ERROR
+        let exit = if looks_like_database_error(&msg) {
+            EXIT_DATABASE_ERROR
         } else {
             EXIT_USER_ERROR
         };
@@ -7500,7 +7672,7 @@ fn cmd_unlock(
     }
 
     // Surface any materialization failures loudly on stderr. Unlock still
-    // succeeds (a typo on one entry must not break the vault), but a configured
+    // succeeds (a typo on one entry must not break the database), but a configured
     // materialized file that failed to write MUST be visible — never a silent
     // `ok` with the file missing (issue #56). stderr, so `eval "$(…)"` on
     // stdout is unaffected.
@@ -7562,7 +7734,7 @@ fn cmd_unlock(
     if detach {
         eprintln!(
             "trove: unlocked {} · keys served by the agents · no session code (--detach)",
-            vault.display()
+            database.display()
         );
         // The one thing detaching cannot do for itself. When the daemon had to
         // forward keys somewhere other than this shell's SSH_AUTH_SOCK, the
@@ -7589,7 +7761,7 @@ fn cmd_unlock(
     if spawn_shell {
         eprintln!(
             "trove: unlocked {} · session active in this shell — run add/get here, `exit` to end",
-            vault.display()
+            database.display()
         );
         return exec_session_shell(code, agent_sock.as_deref(), &exports);
     }
@@ -7606,7 +7778,7 @@ fn cmd_unlock(
     println!("export TROVE_SESSION={code}");
     eprintln!(
         "trove: unlocked {} · session code exported to $TROVE_SESSION",
-        vault.display()
+        database.display()
     );
     Ok(())
 }
@@ -7663,19 +7835,19 @@ fn exec_session_shell(
     }
 }
 
-/// Heuristic mapping from a daemon-reported error string to vault-error
-/// status. Anything mentioning "password" or "kdbx" is treated as a vault
+/// Heuristic mapping from a daemon-reported error string to database-error
+/// status. Anything mentioning "password" or "kdbx" is treated as a database
 /// error; anything else is a user error.
-fn looks_like_vault_error(msg: &str) -> bool {
+fn looks_like_database_error(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
     lower.contains("password") || lower.contains("kdbx") || lower.contains("decrypt")
 }
 
 /// `trove lock` — send `lock` to the daemon. Idempotent on the daemon side;
 /// we treat its response as the source of truth.
-fn cmd_lock(vault: Option<&std::path::Path>) -> Result<()> {
+fn cmd_lock(database: Option<&std::path::Path>) -> Result<()> {
     let req = daemon::Request::Lock {
-        vault: vault.map(|p| p.display().to_string()),
+        database: database.map(|p| p.display().to_string()),
     };
     let resp = match daemon::send_autospawn(&req) {
         Ok(v) => v,
@@ -7695,17 +7867,17 @@ fn cmd_lock(vault: Option<&std::path::Path>) -> Result<()> {
         }
         .into());
     }
-    match vault {
-        Some(p) => println!("vault locked: {}", p.display()),
-        None => println!("vault locked"),
+    match database {
+        Some(p) => println!("database locked: {}", p.display()),
+        None => println!("database locked"),
     }
     Ok(())
 }
 
 /// `trove status` — pretty-print the daemon's `Status` response.
 /// `trove doctor` — run the pre-flight checks in [`doctor`] and report them.
-fn cmd_doctor(vault: Option<&Path>, json: bool) -> Result<()> {
-    let checks = doctor::run_checks(vault);
+fn cmd_doctor(database: Option<&Path>, json: bool) -> Result<()> {
+    let checks = doctor::run_checks(database);
     let failed = checks
         .iter()
         .filter(|c| c.status == doctor::Level::Fail)
@@ -7728,7 +7900,7 @@ fn cmd_doctor(vault: Option<&Path>, json: bool) -> Result<()> {
 }
 
 fn cmd_status(json: bool, verbose: bool) -> Result<()> {
-    // `status` never autospawns. The daemon runs only while a vault is unlocked
+    // `status` never autospawns. The daemon runs only while a database is unlocked
     // (or materialized files still need cleanup), so "no daemon" is itself the
     // answer: nothing is unlocked. A live daemon gives the real state; otherwise
     // we print the empty/locked default rather than starting one just to say so.
@@ -7749,7 +7921,7 @@ fn cmd_status(json: bool, verbose: bool) -> Result<()> {
             if json {
                 let mut out = status_json(&resp, true);
                 if let (Some(d), Some(obj)) = (&detail, out.as_object_mut()) {
-                    obj.insert("vaults".into(), d.vaults_json());
+                    obj.insert("databases".into(), d.databases_json());
                     obj.insert("gpg_keys".into(), Value::from(d.gpg_keys.clone()));
                 }
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -7772,7 +7944,7 @@ fn cmd_status(json: bool, verbose: bool) -> Result<()> {
                 );
             } else {
                 println!("Daemon:          not running (nothing unlocked)");
-                println!("Vault:           no vault unlocked");
+                println!("Database:           no database unlocked");
                 println!("SSH keys:        0 loaded");
                 println!("GPG keys:        0 loaded");
                 println!("Materialized:    0 files");
@@ -7783,15 +7955,15 @@ fn cmd_status(json: bool, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// What `status --verbose` adds: per unlocked vault, the SSH keys served,
+/// What `status --verbose` adds: per unlocked database, the SSH keys served,
 /// the live materialized files and the skipped keys; and the GPG keys served,
-/// which the agent doesn't tie to a vault.
+/// which the agent doesn't tie to a database.
 struct StatusDetail {
-    vaults: Vec<VaultDetail>,
+    databases: Vec<DatabaseDetail>,
     gpg_keys: Vec<String>,
 }
 
-struct VaultDetail {
+struct DatabaseDetail {
     path: String,
     ssh_keys: Vec<String>,
     /// (entry title, target path).
@@ -7813,7 +7985,7 @@ fn status_detail(status: &Value) -> Result<StatusDetail> {
     let mat = daemon::send(&daemon::Request::MaterializeStatus)?;
     let ssh_comments = strings_of(&ssh, "ssh_keys", "comment");
     let paths: Vec<String> = status
-        .get("vault_paths")
+        .get("database_paths")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -7823,22 +7995,22 @@ fn status_detail(status: &Value) -> Result<StatusDetail> {
         Path::new(path)
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("vault")
+            .unwrap_or("database")
             .to_string()
     };
-    let mut vaults: Vec<VaultDetail> = paths
+    let mut databases: Vec<DatabaseDetail> = paths
         .iter()
-        .map(|path| VaultDetail {
+        .map(|path| DatabaseDetail {
             path: path.clone(),
             ssh_keys: Vec::new(),
             materialized: Vec::new(),
             skipped: Vec::new(),
         })
         .collect();
-    // The agent labels each key `<vault file stem>:<entry path>`.
+    // The agent labels each key `<database file stem>:<entry path>`.
     for comment in ssh_comments {
         let (label, entry) = comment.split_once(':').unwrap_or(("", comment.as_str()));
-        if let Some(v) = vaults.iter_mut().find(|v| stem(&v.path) == label) {
+        if let Some(v) = databases.iter_mut().find(|v| stem(&v.path) == label) {
             v.ssh_keys.push(entry.to_string());
         }
     }
@@ -7849,7 +8021,7 @@ fn status_detail(status: &Value) -> Result<StatusDetail> {
         .flatten()
     {
         let field = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        if let Some(v) = vaults.iter_mut().find(|v| v.path == field("vault")) {
+        if let Some(v) = databases.iter_mut().find(|v| v.path == field("database")) {
             v.materialized.push((field("title"), field("target_path")));
         }
     }
@@ -7860,7 +8032,7 @@ fn status_detail(status: &Value) -> Result<StatusDetail> {
         .flatten()
     {
         let field = |n: &str| k.get(n).and_then(Value::as_str).unwrap_or("?");
-        if let Some(v) = vaults.iter_mut().find(|v| v.path == field("vault")) {
+        if let Some(v) = databases.iter_mut().find(|v| v.path == field("database")) {
             v.skipped.push(format!(
                 "{} {} ({}): {}",
                 field("agent"),
@@ -7871,14 +8043,14 @@ fn status_detail(status: &Value) -> Result<StatusDetail> {
         }
     }
     Ok(StatusDetail {
-        vaults,
+        databases,
         gpg_keys: strings_of(&gpg, "gpg_keys", "comment"),
     })
 }
 
 impl StatusDetail {
     fn print(&self) {
-        for v in &self.vaults {
+        for v in &self.databases {
             println!();
             println!("{}", v.path);
             let list = |label: &str, items: &[String]| {
@@ -7904,13 +8076,13 @@ impl StatusDetail {
         }
         if !self.gpg_keys.is_empty() {
             println!();
-            println!("GPG keys (all vaults): {}", self.gpg_keys.join(", "));
+            println!("GPG keys (all databases): {}", self.gpg_keys.join(", "));
         }
     }
 
-    fn vaults_json(&self) -> Value {
+    fn databases_json(&self) -> Value {
         Value::from(
-            self.vaults
+            self.databases
                 .iter()
                 .map(|v| {
                     serde_json::json!({
@@ -7946,19 +8118,19 @@ fn skipped_keys(resp: &Value) -> Vec<String> {
 }
 
 fn status_json(resp: &Value, daemon_running: bool) -> Value {
-    let vault_paths = resp
-        .get("vault_paths")
+    let database_paths = resp
+        .get("database_paths")
         .and_then(Value::as_array)
         .cloned()
         .or_else(|| {
-            resp.get("vault_path")
+            resp.get("database_path")
                 .and_then(Value::as_str)
                 .map(|path| vec![Value::String(path.to_string())])
         })
         .unwrap_or_default();
     serde_json::json!({
         "daemon_running": daemon_running,
-        "vault_paths": vault_paths,
+        "database_paths": database_paths,
         "idle_timeout_seconds": resp.get("idle_timeout_secs").cloned().unwrap_or(Value::Null),
         "idle_remaining_seconds": resp.get("idle_remaining_secs").cloned().unwrap_or(Value::Null),
         "ssh_key_count": resp.get("ssh_keys").and_then(Value::as_u64).unwrap_or(0),
@@ -7969,26 +8141,29 @@ fn status_json(resp: &Value, daemon_running: bool) -> Value {
 }
 
 fn print_status(resp: &Value) {
-    // `vault_paths` lists every unlocked vault (unlock is additive). Older
-    // daemons don't send it, so fall back to the single `vault_path`.
+    // `database_paths` lists every unlocked database (unlock is additive). Older
+    // daemons don't send it, so fall back to the single `database_path`.
     let paths: Vec<&str> = resp
-        .get("vault_paths")
+        .get("database_paths")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     match paths.len() {
         0 => {
-            // Vault path. `null` -> "no vault unlocked".
-            let vault_line = match resp.get("vault_path") {
-                Some(v) if v.is_null() => "no vault unlocked".to_string(),
-                Some(v) => v.as_str().unwrap_or("(unparseable vault_path)").to_string(),
-                None => "no vault unlocked".to_string(),
+            // Database path. `null` -> "no database unlocked".
+            let database_line = match resp.get("database_path") {
+                Some(v) if v.is_null() => "no database unlocked".to_string(),
+                Some(v) => v
+                    .as_str()
+                    .unwrap_or("(unparseable database_path)")
+                    .to_string(),
+                None => "no database unlocked".to_string(),
             };
-            println!("Vault:           {vault_line}");
+            println!("Database:           {database_line}");
         }
-        1 => println!("Vault:           {}", paths[0]),
+        1 => println!("Database:           {}", paths[0]),
         n => {
-            println!("Vaults:          {n} unlocked");
+            println!("Databases:          {n} unlocked");
             for p in paths {
                 println!("                 {p}");
             }
@@ -8249,7 +8424,7 @@ fn cmd_idle_get(json: bool) -> Result<()> {
     } else if let Some(r) = remaining {
         println!("{secs}s (remaining: {r}s)");
     } else {
-        println!("{secs}s (vault locked)");
+        println!("{secs}s (database locked)");
     }
     Ok(())
 }
@@ -8332,11 +8507,11 @@ fn classify_exit(err: &anyhow::Error) -> u8 {
         }
         if let Some(core) = cause.downcast_ref::<CoreError>() {
             return match core {
-                // A stale write is a vault-state problem, not something the
+                // A stale write is a database-state problem, not something the
                 // user typed wrong: the file is fine, it just moved on without
-                // us. Same class as a corrupt or unreadable vault.
+                // us. Same class as a corrupt or unreadable database.
                 CoreError::BadPassword | CoreError::Kdbx(_) | CoreError::StaleWrite(_) => {
-                    EXIT_VAULT_ERROR
+                    EXIT_DATABASE_ERROR
                 }
                 CoreError::AlreadyExists(_)
                 | CoreError::NotFound(_)
@@ -8366,13 +8541,13 @@ mod env_flag_tests {
 
     /// The bug this flag's shape caused: `--env` took the SUBCOMMAND as its
     /// path and left the next word as the command, so the credential helper —
-    /// `git config credential.helper "trove --vault v --env git-credential"`,
+    /// `git config credential.helper "trove --database v --env git-credential"`,
     /// with git appending the operation — silently ran `trove get` instead.
     #[test]
     fn env_does_not_swallow_the_subcommand() {
         let cli = Cli::try_parse_from([
             "trove",
-            "--vault",
+            "--database",
             "/tmp/v.kdbx",
             "--env",
             "git-credential",
@@ -8394,7 +8569,7 @@ mod env_flag_tests {
     fn env_takes_an_attached_path() {
         let cli = Cli::try_parse_from([
             "trove",
-            "--vault",
+            "--database",
             "/tmp/v.kdbx",
             "--env=/tmp/x.env",
             "status",
@@ -8414,7 +8589,7 @@ mod env_flag_tests {
     fn env_never_swallowed_a_flag() {
         let cli = Cli::try_parse_from([
             "trove",
-            "--vault",
+            "--database",
             "/tmp/v.kdbx",
             "--env",
             "--keychain",
@@ -8636,36 +8811,36 @@ mod classify_tests {
     use super::*;
 
     /// The heuristic that decides whether a daemon-reported error string maps
-    /// to exit 2 (vault error) vs exit 1 (user error). Must be case-insensitive
+    /// to exit 2 (database error) vs exit 1 (user error). Must be case-insensitive
     /// and key only off the password/kdbx/decrypt vocabulary.
     #[test]
-    fn looks_like_vault_error_matches_vault_vocabulary() {
-        assert!(looks_like_vault_error(
-            "invalid password or corrupted vault"
+    fn looks_like_database_error_matches_database_vocabulary() {
+        assert!(looks_like_database_error(
+            "invalid password or corrupted database"
         ));
-        assert!(looks_like_vault_error("kdbx error: bad header id"));
-        assert!(looks_like_vault_error("failed to decrypt inner stream"));
+        assert!(looks_like_database_error("kdbx error: bad header id"));
+        assert!(looks_like_database_error("failed to decrypt inner stream"));
         // Case-insensitive.
-        assert!(looks_like_vault_error("PASSWORD incorrect"));
-        assert!(looks_like_vault_error("KDBX corrupt"));
+        assert!(looks_like_database_error("PASSWORD incorrect"));
+        assert!(looks_like_database_error("KDBX corrupt"));
 
-        // Non-vault daemon errors stay user-level.
-        assert!(!looks_like_vault_error("no vault unlocked"));
-        assert!(!looks_like_vault_error("vault file not found: /x"));
-        assert!(!looks_like_vault_error(""));
+        // Non-database daemon errors stay user-level.
+        assert!(!looks_like_database_error("no database unlocked"));
+        assert!(!looks_like_database_error("database file not found: /x"));
+        assert!(!looks_like_database_error(""));
     }
 
     #[test]
     fn classify_exit_maps_daemon_classified_verbatim() {
-        let vault: anyhow::Error = DaemonClassified {
+        let database: anyhow::Error = DaemonClassified {
             message: "bad password".into(),
-            exit: EXIT_VAULT_ERROR,
+            exit: EXIT_DATABASE_ERROR,
         }
         .into();
-        assert_eq!(classify_exit(&vault), EXIT_VAULT_ERROR);
+        assert_eq!(classify_exit(&database), EXIT_DATABASE_ERROR);
 
         let user: anyhow::Error = DaemonClassified {
-            message: "no vault unlocked".into(),
+            message: "no database unlocked".into(),
             exit: EXIT_USER_ERROR,
         }
         .into();
@@ -8674,14 +8849,14 @@ mod classify_tests {
 
     #[test]
     fn classify_exit_maps_core_errors() {
-        // Vault-level (exit 2).
+        // Database-level (exit 2).
         assert_eq!(
             classify_exit(&CoreError::BadPassword.into()),
-            EXIT_VAULT_ERROR
+            EXIT_DATABASE_ERROR
         );
         assert_eq!(
             classify_exit(&CoreError::Kdbx("bad block".into()).into()),
-            EXIT_VAULT_ERROR
+            EXIT_DATABASE_ERROR
         );
 
         // User-level (exit 1).
@@ -8715,9 +8890,9 @@ mod classify_tests {
     #[test]
     fn classify_exit_walks_context_chain() {
         let wrapped = anyhow::Error::new(CoreError::BadPassword)
-            .context("opening vault /home/x.kdbx")
+            .context("opening database /home/x.kdbx")
             .context("running unlock");
-        assert_eq!(classify_exit(&wrapped), EXIT_VAULT_ERROR);
+        assert_eq!(classify_exit(&wrapped), EXIT_DATABASE_ERROR);
     }
 
     /// Anything we don't recognise defaults to the user-error exit code.
@@ -8732,7 +8907,7 @@ mod classify_tests {
     fn keychain_status_json_shape() {
         assert_eq!(
             keychain_status_json(true, "/v.kdbx"),
-            serde_json::json!({"stored": true, "vault": "/v.kdbx"})
+            serde_json::json!({"stored": true, "database": "/v.kdbx"})
         );
     }
 }
@@ -8809,7 +8984,7 @@ mod add_password_stdin_tests {
     use super::*;
 
     #[test]
-    fn daemon_add_password_rejects_vault_password_stdin_before_reading_secret() {
+    fn daemon_add_password_rejects_database_password_stdin_before_reading_secret() {
         let err = cmd_add_password(
             None,
             "github.com",
@@ -8822,7 +8997,7 @@ mod add_password_stdin_tests {
             true,
         )
         .expect_err("daemon mode must reject the offline-only password flag");
-        assert!(err.to_string().contains("only valid with --vault"));
+        assert!(err.to_string().contains("only valid with --database"));
     }
 }
 
@@ -8891,7 +9066,7 @@ mod env_file_tests {
 
     #[test]
     fn dotenv_lines_get_the_conversion_advice() {
-        assert!(err("TROVE_VAULT_PASSWORD=x\n").contains("databases:"));
+        assert!(err("TROVE_DATABASE_PASSWORD=x\n").contains("databases:"));
         assert!(err("export A=\"b: c\"\n").contains("databases:"));
     }
 
@@ -8953,9 +9128,9 @@ mod env_file_tests {
         assert!(err("environment:\n  A-B: x\n").contains("not a valid variable name"));
         assert!(err("environment:\n  A:\n    b: c\n").contains("string, number or boolean"));
         for key in [
-            "TROVE_VAULT_PASSWORD",
-            "TROVE_VAULT_WORK_PASSWORD",
-            "TROVE_VAULT_WORK_FILE",
+            "TROVE_DATABASE_PASSWORD",
+            "TROVE_DATABASE_WORK_PASSWORD",
+            "TROVE_DATABASE_WORK_FILE",
         ] {
             assert!(
                 err(&format!("environment:\n  {key}: x\n")).contains("go under `databases:`"),
@@ -8966,10 +9141,10 @@ mod env_file_tests {
 
     #[test]
     fn password_vars_are_recognised() {
-        assert!(is_password_var("TROVE_VAULT_PASSWORD"));
-        assert!(is_password_var("TROVE_VAULT_X_PASSWORD"));
-        assert!(is_password_var("TROVE_VAULT_X_FILE"));
-        assert!(!is_password_var("TROVE_VAULT"));
+        assert!(is_password_var("TROVE_DATABASE_PASSWORD"));
+        assert!(is_password_var("TROVE_DATABASE_X_PASSWORD"));
+        assert!(is_password_var("TROVE_DATABASE_X_FILE"));
+        assert!(!is_password_var("TROVE_DATABASE"));
         assert!(!is_password_var("TROVE_IDLE_TIMEOUT"));
     }
 

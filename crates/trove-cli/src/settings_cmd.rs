@@ -4,7 +4,7 @@
 //! and `trove settings show|edit|validate|migrate`.
 //!
 //! Each command reads the current document, changes it and writes it back,
-//! through the vault file with the global `--vault` or through the daemon's
+//! through the database file with the global `--database` or through the daemon's
 //! `Settings` / `SetSettings` requests otherwise. Creating the first item
 //! creates the document, which is what turns a capability on; `disable`
 //! deletes it.
@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 use serde_json::{json, Value};
 use trove_core::settings::{Attributes, Capability, Document};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::protocol::SettingsDto;
 
 use crate::daemon::Request;
@@ -42,16 +42,19 @@ impl Target {
 #[derive(Debug, Clone, Args)]
 pub struct GroupArg {
     /// The group whose defaults to change.
-    #[arg(required_unless_present = "database", conflicts_with = "database")]
+    #[arg(
+        required_unless_present = "at_database",
+        conflicts_with = "at_database"
+    )]
     pub group: Option<String>,
     /// Change the database's defaults, which every group inherits.
-    #[arg(long)]
-    pub database: bool,
+    #[arg(long = "at-database")]
+    pub at_database: bool,
 }
 
 impl GroupArg {
     fn target(&self) -> Target {
-        Target::Group(if self.database {
+        Target::Group(if self.at_database {
             String::new()
         } else {
             self.group.clone().unwrap_or_default()
@@ -130,7 +133,7 @@ pub enum EnvAgentOp {
 
 #[derive(Debug, Subcommand)]
 pub enum MaterializeOp {
-    /// Write an attachment to disk while the vault is unlocked.
+    /// Write an attachment to disk while the database is unlocked.
     Add {
         entry: String,
         attachment: String,
@@ -182,10 +185,10 @@ pub enum SettingsOp {
         path: Option<String>,
         /// One capability: env-agent, materialize, gpg-agent or ssh-agent.
         capability: Option<String>,
-        #[arg(long, conflicts_with = "database")]
+        #[arg(long, conflicts_with = "at_database")]
         group: bool,
-        #[arg(long)]
-        database: bool,
+        #[arg(long = "at-database")]
+        at_database: bool,
         #[arg(long)]
         effective: bool,
         #[arg(long)]
@@ -195,14 +198,14 @@ pub enum SettingsOp {
     Edit {
         /// env-agent, materialize or gpg-agent.
         capability: String,
-        /// Entry path, or with --group a group path; none with --database.
+        /// Entry path, or with --group a group path; none with --at-database.
         path: Option<String>,
-        #[arg(long, conflicts_with = "database")]
+        #[arg(long, conflicts_with = "at_database")]
         group: bool,
-        #[arg(long)]
-        database: bool,
+        #[arg(long = "at-database")]
+        at_database: bool,
     },
-    /// Check every settings document in the vault, or under a group.
+    /// Check every settings document in the database, or under a group.
     Validate { scope: Option<String> },
     /// Convert legacy `Exec.*` and `Materialize.*` fields to documents.
     Migrate {
@@ -225,16 +228,16 @@ struct Current {
     legacy: bool,
 }
 
-/// Reads and writes documents through the vault file or the daemon.
+/// Reads and writes documents through the database file or the daemon.
 enum Store {
-    Offline(Box<Vault>),
+    Offline(Box<Database>),
     Daemon { code: String },
 }
 
 impl Store {
-    fn open(vault: Option<&Path>, pw_stdin: bool) -> Result<Store> {
-        match vault {
-            Some(p) => Ok(Store::Offline(Box::new(crate::open_vault(p, pw_stdin)?))),
+    fn open(database: Option<&Path>, pw_stdin: bool) -> Result<Store> {
+        match database {
+            Some(p) => Ok(Store::Offline(Box::new(crate::open_database(p, pw_stdin)?))),
             None => Ok(Store::Daemon {
                 code: crate::require_session_code()?,
             }),
@@ -242,16 +245,16 @@ impl Store {
     }
 
     /// For reading only: the daemon needs no session code to show settings.
-    fn open_read(vault: Option<&Path>, pw_stdin: bool) -> Result<Store> {
-        match vault {
-            Some(p) => Ok(Store::Offline(Box::new(crate::open_vault(p, pw_stdin)?))),
+    fn open_read(database: Option<&Path>, pw_stdin: bool) -> Result<Store> {
+        match database {
+            Some(p) => Ok(Store::Offline(Box::new(crate::open_database(p, pw_stdin)?))),
             None => Ok(Store::Daemon {
                 code: String::new(),
             }),
         }
     }
 
-    fn entry_id(v: &Vault, path: &str) -> Result<trove_core::EntryId> {
+    fn entry_id(v: &Database, path: &str) -> Result<trove_core::EntryId> {
         v.find_by_title(path)
             .ok_or_else(|| anyhow!("no entry matches '{path}'"))
     }
@@ -320,7 +323,7 @@ impl Store {
                     }
                     Target::Group(p) => v.set_group_settings(p, cap, doc)?,
                 }
-                v.save().context("saving vault")
+                v.save().context("saving database")
             }
             Store::Daemon { code } => {
                 let (path, group) = match target {
@@ -354,7 +357,7 @@ impl Store {
                     xml.as_bytes().to_vec()
                 };
                 v.attach_binary(&id, "KeeAgent.settings", &bytes)?;
-                v.save().context("saving vault")
+                v.save().context("saving database")
             }
             Store::Daemon { code } => {
                 crate::daemon_call(&Request::SetSettings {
@@ -370,7 +373,7 @@ impl Store {
         }
     }
 
-    /// Entry paths in the vault, for validate and migrate.
+    /// Entry paths in the database, for validate and migrate.
     fn entry_paths(&self) -> Result<Vec<String>> {
         match self {
             Store::Offline(v) => Ok(v.list_entries().iter().map(|e| e.display_path()).collect()),
@@ -404,7 +407,7 @@ impl Store {
     fn group_paths(&self) -> Vec<String> {
         match self {
             Store::Offline(v) => v.list_groups().iter().map(|g| g.display_path()).collect(),
-            // The daemon's group listing is per vault; validate covers groups
+            // The daemon's group listing is per database; validate covers groups
             // through each entry's resolution instead.
             Store::Daemon { .. } => Vec::new(),
         }
@@ -463,8 +466,8 @@ fn apply_defaults(doc: &mut Document, attrs: &Attributes, clear: &[String]) -> R
     Ok(())
 }
 
-pub fn cmd_env_agent(op: EnvAgentOp, vault: Option<&Path>, pw_stdin: bool) -> Result<()> {
-    let mut store = Store::open(vault, pw_stdin)?;
+pub fn cmd_env_agent(op: EnvAgentOp, database: Option<&Path>, pw_stdin: bool) -> Result<()> {
+    let mut store = Store::open(database, pw_stdin)?;
     let cap = Capability::EnvAgent;
     match op {
         EnvAgentOp::Add {
@@ -523,8 +526,12 @@ pub fn cmd_env_agent(op: EnvAgentOp, vault: Option<&Path>, pw_stdin: bool) -> Re
     Ok(())
 }
 
-pub fn cmd_materialize_op(op: MaterializeOp, vault: Option<&Path>, pw_stdin: bool) -> Result<()> {
-    let mut store = Store::open(vault, pw_stdin)?;
+pub fn cmd_materialize_op(
+    op: MaterializeOp,
+    database: Option<&Path>,
+    pw_stdin: bool,
+) -> Result<()> {
+    let mut store = Store::open(database, pw_stdin)?;
     let cap = Capability::Materialize;
     match op {
         MaterializeOp::Add {
@@ -611,10 +618,10 @@ pub fn cmd_gpg_agent_enable(
     keygrips: &[String],
     uses: Option<&str>,
     constraints: &ConstraintArgs,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    let mut store = Store::open(vault, pw_stdin)?;
+    let mut store = Store::open(database, pw_stdin)?;
     let mut attrs: Attributes = vec![("attachment".to_string(), key.to_string())];
     if !keygrips.is_empty() {
         set(&mut attrs, "keygrips", &keygrips.join(" "));
@@ -634,10 +641,10 @@ pub fn cmd_gpg_agent_enable(
 pub fn cmd_gpg_agent_disable(
     entry: &str,
     key: Option<&str>,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    let mut store = Store::open(vault, pw_stdin)?;
+    let mut store = Store::open(database, pw_stdin)?;
     match key {
         Some(k) => {
             update_entry(&mut store, entry, Capability::GpgAgent, |doc| {
@@ -666,10 +673,10 @@ pub fn cmd_gpg_agent_defaults(
     uses: Option<&str>,
     constraints: &ConstraintArgs,
     clear: &[String],
-    vault: Option<&Path>,
+    database: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
-    let mut store = Store::open(vault, pw_stdin)?;
+    let mut store = Store::open(database, pw_stdin)?;
     let mut attrs = Attributes::new();
     if let Some(u) = uses {
         set(&mut attrs, "uses", u);
@@ -691,11 +698,11 @@ pub fn cmd_ssh_agent_toggle(
     enable: bool,
     key: Option<&str>,
     constraints: &ConstraintArgs,
-    vault: Option<&Path>,
+    database: Option<&Path>,
     pw_stdin: bool,
 ) -> Result<()> {
     use troved::ssh_agent::keeagent::{self, AgentPolicy, Decision, Encoding};
-    let mut store = Store::open(vault, pw_stdin)?;
+    let mut store = Store::open(database, pw_stdin)?;
     let target = Target::Entry(entry.to_string());
     let existing = store.dto(&target, "ssh-agent")?.document;
     let current = existing.as_deref().map(|x| keeagent::parse(x.as_bytes()));
@@ -768,18 +775,18 @@ fn settings_target(path: Option<String>, group: bool, database: bool) -> Result<
     })
 }
 
-pub fn cmd_settings(op: SettingsOp, vault: Option<&Path>, pw_stdin: bool) -> Result<()> {
+pub fn cmd_settings(op: SettingsOp, database: Option<&Path>, pw_stdin: bool) -> Result<()> {
     match op {
         SettingsOp::Show {
             path,
             capability,
             group,
-            database,
+            at_database,
             effective,
             json,
         } => {
-            let store = Store::open_read(vault, pw_stdin)?;
-            let target = settings_target(path, group, database)?;
+            let store = Store::open_read(database, pw_stdin)?;
+            let target = settings_target(path, group, at_database)?;
             let caps: Vec<String> = match capability {
                 Some(c) => vec![c],
                 None => {
@@ -829,10 +836,10 @@ pub fn cmd_settings(op: SettingsOp, vault: Option<&Path>, pw_stdin: bool) -> Res
             path,
             capability,
             group,
-            database,
+            at_database,
         } => {
-            let mut store = Store::open(vault, pw_stdin)?;
-            let target = settings_target(path, group, database)?;
+            let mut store = Store::open(database, pw_stdin)?;
+            let target = settings_target(path, group, at_database)?;
             let cap = capability_named(&capability)?;
             let current = store.read(&target, cap)?;
             let start = current.doc.unwrap_or_else(|| Document::new(cap)).to_xml();
@@ -852,7 +859,7 @@ pub fn cmd_settings(op: SettingsOp, vault: Option<&Path>, pw_stdin: bool) -> Res
             Ok(())
         }
         SettingsOp::Validate { scope } => {
-            let store = Store::open_read(vault, pw_stdin)?;
+            let store = Store::open_read(database, pw_stdin)?;
             let mut problems = Vec::new();
             let mut checked = 0usize;
             for path in store.entry_paths()? {
@@ -889,9 +896,9 @@ pub fn cmd_settings(op: SettingsOp, vault: Option<&Path>, pw_stdin: bool) -> Res
         }
         SettingsOp::Migrate { scope, dry_run } => {
             let mut store = if dry_run {
-                Store::open_read(vault, pw_stdin)?
+                Store::open_read(database, pw_stdin)?
             } else {
-                Store::open(vault, pw_stdin)?
+                Store::open(database, pw_stdin)?
             };
             let mut converted = 0usize;
             for path in store.entry_paths()? {

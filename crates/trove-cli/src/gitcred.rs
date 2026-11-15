@@ -1,19 +1,19 @@
-//! `trove git-credential` — a git credential helper backed by the vault.
+//! `trove git-credential` — a git credential helper backed by the database.
 //!
 //! git speaks a line-based protocol on stdin/stdout: `key=value` lines, a
 //! blank line terminating each request. For `get` we receive at least
 //! `protocol` and `host` (sometimes `path`, `username`) and reply with
 //! `username=` / `password=` lines. `store` and `erase` are accepted and
-//! ignored — trove is a deliberate vault, not an auto-populated cache.
+//! ignored — trove is a deliberate database, not an auto-populated cache.
 //!
 //! Configure per-repo or globally:
-//!   git config credential.helper "trove --vault ~/v.kdbx git-credential"
+//!   git config credential.helper "trove --database ~/v.kdbx git-credential"
 //! (git appends the operation, so `get` etc. arrive as the last arg.)
 //!
 //! Matching: an entry matches when its `URL` host equals the requested
 //! `host` (scheme/port/path ignored). If the request carries a `username`,
 //! only an entry whose `UserName` also matches is used. The first match in
-//! vault order wins; ties are the user's to disambiguate by narrowing URLs.
+//! database order wins; ties are the user's to disambiguate by narrowing URLs.
 //!
 //! Which secret is sent: the entry's `git.token` attribute when it has one,
 //! otherwise `Password`. Forges increasingly refuse account passwords for git
@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use anyhow::{anyhow, Result};
-use trove_core::Vault;
+use trove_core::Database;
 
 /// Parse git's `key=value\n...\n\n` request block from a reader. Stops at the
 /// first blank line or EOF. Unknown keys are retained (harmless).
@@ -91,7 +91,7 @@ fn normalized_host(host_port: &str) -> Option<String> {
 }
 
 /// Find `(username, password)` for a git credential request.
-pub fn lookup(v: &Vault, req: &HashMap<String, String>) -> Result<Option<(String, String)>> {
+pub fn lookup(v: &Database, req: &HashMap<String, String>) -> Result<Option<(String, String)>> {
     let host = match req.get("host") {
         Some(h) => match normalized_host(h) {
             Some(host) => host,
@@ -132,7 +132,7 @@ pub const TOKEN_FIELD: &str = "git.token";
 /// the normal case for a self-hosted forge, and sending the wrong one fails
 /// with the forge's generic "invalid username, password or token", which says
 /// nothing about which of the two it just rejected.
-fn git_secret(v: &Vault, id: &trove_core::EntryId) -> Result<Option<String>> {
+fn git_secret(v: &Database, id: &trove_core::EntryId) -> Result<Option<String>> {
     for name in v.custom_field_names(id)? {
         if name.eq_ignore_ascii_case(TOKEN_FIELD) {
             if let Some(tok) = v.get_field(id, &name)? {
@@ -152,7 +152,7 @@ fn git_secret(v: &Vault, id: &trove_core::EntryId) -> Result<Option<String>> {
 /// `store`/`erase` consume their request and do nothing. Unknown operations
 /// are an error (git only ever sends these three).
 pub fn run(
-    v: &Vault,
+    v: &Database,
     operation: &str,
     reader: &mut impl BufRead,
     writer: &mut impl Write,
@@ -219,8 +219,8 @@ mod tests {
         assert_eq!(req.len(), 3);
     }
 
-    fn vault(dir: &TempDir) -> Vault {
-        let mut v = Vault::create(&dir.path().join("g.kdbx"), "pw").unwrap();
+    fn database(dir: &TempDir) -> Database {
+        let mut v = Database::create(&dir.path().join("g.kdbx"), "pw").unwrap();
         let id = v.add_entry("Git/github").unwrap();
         v.set_field(&id, "UserName", "octocat").unwrap();
         v.set_field(&id, "Password", "ghp_token_1").unwrap();
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn a_git_token_attribute_is_preferred_over_the_password() {
         let dir = TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("t.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("t.kdbx"), "pw").unwrap();
         let id = v.add_entry("Git/gitea").unwrap();
         v.set_field(&id, "UserName", "chris").unwrap();
         v.set_field(&id, "Password", "my-web-login").unwrap();
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn without_the_attribute_the_password_is_still_used() {
         let dir = TempDir::new().unwrap();
-        let v = vault(&dir);
+        let v = database(&dir);
         let out = get(&v, "protocol=https\nhost=github.com\nusername=octocat\n\n");
         assert!(out.contains("password=ghp_token_1"), "{out}");
     }
@@ -276,7 +276,7 @@ mod tests {
     fn the_attribute_name_is_matched_case_insensitively() {
         for spelling in ["git.token", "Git.Token", "GIT.TOKEN"] {
             let dir = TempDir::new().unwrap();
-            let mut v = Vault::create(&dir.path().join("t.kdbx"), "pw").unwrap();
+            let mut v = Database::create(&dir.path().join("t.kdbx"), "pw").unwrap();
             let id = v.add_entry("Git/x").unwrap();
             v.set_field(&id, "UserName", "u").unwrap();
             v.set_field(&id, "Password", "pw-not-this").unwrap();
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn an_empty_git_token_falls_back_rather_than_sending_nothing() {
         let dir = TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("t.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("t.kdbx"), "pw").unwrap();
         let id = v.add_entry("Git/y").unwrap();
         v.set_field(&id, "UserName", "u").unwrap();
         v.set_field(&id, "Password", "still-works").unwrap();
@@ -307,7 +307,7 @@ mod tests {
         assert!(out.contains("password=still-works"), "{out}");
     }
 
-    fn get(v: &Vault, req_lines: &str) -> String {
+    fn get(v: &Database, req_lines: &str) -> String {
         let mut out = Vec::new();
         run(v, "get", &mut Cursor::new(req_lines), &mut out).unwrap();
         String::from_utf8(out).unwrap()
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn get_matches_host_and_username() {
         let dir = TempDir::new().unwrap();
-        let v = vault(&dir);
+        let v = database(&dir);
 
         // Host only → SOME valid github pair. Entry iteration order isn't
         // guaranteed with two same-host entries, so assert a self-consistent
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn get_matches_bracketed_ipv6_host_and_ignores_port() {
         let dir = TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("ipv6.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("ipv6.kdbx"), "pw").unwrap();
         let id = v.add_entry("Git/local").unwrap();
         v.set_field(&id, "UserName", "local-user").unwrap();
         v.set_field(&id, "Password", "local-token").unwrap();
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn store_and_erase_are_noops() {
         let dir = TempDir::new().unwrap();
-        let v = vault(&dir);
+        let v = database(&dir);
         let mut out = Vec::new();
         run(
             &v,

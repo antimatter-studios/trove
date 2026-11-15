@@ -1,8 +1,8 @@
 # Agent routing — design notes
 
 Status: **design only, not implemented.** Captures the model worked out in
-discussion so it isn't lost. Companion to [multi-vault.md](multi-vault.md)
-(which is the same idea applied to vaults), and to [macos.md](macos.md) /
+discussion so it isn't lost. Companion to [multi-database.md](multi-database.md)
+(which is the same idea applied to databases), and to [macos.md](macos.md) /
 [windows.md](windows.md), which decide *where* routing is even possible.
 
 ## The idea in one paragraph
@@ -10,7 +10,7 @@ discussion so it isn't lost. Companion to [multi-vault.md](multi-vault.md)
 Today trove is a key **holder** that happens to speak two agent protocols.
 The generalisation is trove as a key-operation **router**: requests arrive
 addressed by key identity, and trove dispatches each to whichever backend owns
-that key — its own unlocked vaults, the platform's agent, a smartcard daemon, or
+that key — its own unlocked databases, the platform's agent, a smartcard daemon, or
 something else later. Holding keys becomes one backend among several rather than
 the whole job.
 
@@ -60,7 +60,7 @@ Two consequences worth internalising:
   different place than ssh's — which is easy to miss if you go looking for an
   `ADD_IDENTITY` equivalent.
 
-What this genuinely costs trove: a key cannot exist *only while a vault is
+What this genuinely costs trove: a key cannot exist *only while a database is
 unlocked* without either writing it to disk (unacceptable) or being an scdaemon
 (viable, unbuilt). Shadow keys remain on-disk state even though they hold public
 parameters only. And cache flushing is agent-wide, so it carries the same
@@ -106,9 +106,9 @@ We have exactly one concrete second backend today (the system agent). Build the
 backends onto a hardcoded single passthrough means rewriting the dispatch.
 
 - **Backends are an ordered list, config-declared.** Not a hardcoded "the real
-  agent". Backend 0 is trove's own vault set.
-- **First-wins by declared order.** Deliberately *unlike* the vault key union in
-  [multi-vault.md](multi-vault.md), which is last-wins. That's safe there because
+  agent". Backend 0 is trove's own database set.
+- **First-wins by declared order.** Deliberately *unlike* the database key union in
+  [multi-database.md](multi-database.md), which is last-wins. That's safe there because
   a colliding key is byte-identical — only the `ssh-add -l` comment differs.
   Different *backends* are different implementations, so predictability beats
   recency.
@@ -124,9 +124,9 @@ backends onto a hardcoded single passthrough means rewriting the dispatch.
 ## What we already have that is nearly this
 
 `union_agent_keys` in `crates/troved/src/handler.rs` is a miniature router
-already: it walks every unlocked vault, collects keys, and dedups by public blob
+already: it walks every unlocked database, collects keys, and dedups by public blob
 (SSH) or keygrip (GPG) — the exact addressing a real router would use. Extending
-"which vault owns this key" to "which *backend* owns this key" is the same shape
+"which database owns this key" to "which *backend* owns this key" is the same shape
 one level up.
 
 ## The YAGNI line
@@ -143,7 +143,7 @@ than a general plugin host, which is what makes it defensible.
    this key identity?", with an ordered list that currently holds one entry.
    No behaviour change.
 2. **Windows SSH front door.** Bind the well-known pipe when free; route to
-   trove's vaults, fall back to forwarding when the pipe is taken.
+   trove's databases, fall back to forwarding when the pipe is taken.
 3. **GPG via scdaemon.** Only after the spike in [macos.md](macos.md) confirms
    the route works at all.
 4. **Second backend** (the system agent as a routable target rather than a

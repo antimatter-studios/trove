@@ -1,4 +1,4 @@
-//! Store a vault password in the macOS login keychain, as an explicit
+//! Store a database password in the macOS login keychain, as an explicit
 //! alternative to `--env` and `--password-stdin`.
 //!
 //! **Never consulted unless asked for.** `--keychain` opts in per invocation;
@@ -27,25 +27,27 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 
-/// The account name for `vault`: its canonical path, so two vaults with the
+/// The account name for `database`: its canonical path, so two databases with the
 /// same file name do not collide and a relative path does not create a second
-/// entry for a vault that already has one.
-fn account(vault: &Path) -> Result<String> {
-    let canonical = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
+/// entry for a database that already has one.
+fn account(database: &Path) -> Result<String> {
+    let canonical = database
+        .canonicalize()
+        .unwrap_or_else(|_| database.to_path_buf());
     canonical
         .to_str()
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("vault path is not valid UTF-8: {}", vault.display()))
+        .ok_or_else(|| anyhow!("database path is not valid UTF-8: {}", database.display()))
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
     use super::account;
 
-    /// One keychain entry per vault, addressed by the vault's absolute path.
+    /// One keychain entry per database, addressed by the database's absolute path.
     /// Lives here rather than at module scope because only this side uses it —
     /// at module scope it is dead code on every other platform.
-    const SERVICE: &str = "trove vault password";
+    const SERVICE: &str = "trove database password";
 
     use anyhow::{Context, Result};
     use security_framework::passwords::{
@@ -69,14 +71,14 @@ mod imp {
         ))
     }
 
-    pub fn save(vault: &Path, password: &str) -> Result<()> {
-        let account = account(vault)?;
+    pub fn save(database: &Path, password: &str) -> Result<()> {
+        let account = account(database)?;
         set_generic_password(SERVICE, &account, password.as_bytes())
             .with_context(|| format!("saving the password for {account} to the keychain"))
     }
 
-    pub fn load(vault: &Path) -> Result<Option<String>> {
-        let account = account(vault)?;
+    pub fn load(database: &Path) -> Result<Option<String>> {
+        let account = account(database)?;
         require_someone_present()?;
         match get_generic_password(SERVICE, &account) {
             Ok(bytes) => {
@@ -84,7 +86,7 @@ mod imp {
                     String::from_utf8(bytes).context("the stored password is not valid UTF-8")?;
                 Ok(Some(password))
             }
-            // Nothing stored for this vault is not an error: the caller reports
+            // Nothing stored for this database is not an error: the caller reports
             // it as "not enrolled" and moves on to asking.
             Err(e) if e.code() == -25300 => Ok(None),
             Err(e) => Err(e)
@@ -92,8 +94,8 @@ mod imp {
         }
     }
 
-    pub fn forget(vault: &Path) -> Result<bool> {
-        let account = account(vault)?;
+    pub fn forget(database: &Path) -> Result<bool> {
+        let account = account(database)?;
         match delete_generic_password(SERVICE, &account) {
             Ok(()) => Ok(true),
             Err(e) if e.code() == -25300 => Ok(false),
@@ -115,38 +117,38 @@ mod imp {
         )
     }
 
-    pub fn save(_vault: &Path, _password: &str) -> Result<()> {
+    pub fn save(_database: &Path, _password: &str) -> Result<()> {
         Err(unsupported())
     }
 
-    pub fn load(_vault: &Path) -> Result<Option<String>> {
+    pub fn load(_database: &Path) -> Result<Option<String>> {
         Err(unsupported())
     }
 
-    pub fn forget(_vault: &Path) -> Result<bool> {
+    pub fn forget(_database: &Path) -> Result<bool> {
         Err(unsupported())
     }
 }
 
-/// Put `password` in the keychain for `vault`, replacing any entry already
+/// Put `password` in the keychain for `database`, replacing any entry already
 /// there.
-pub fn save(vault: &Path, password: &str) -> Result<()> {
-    imp::save(vault, password)
+pub fn save(database: &Path, password: &str) -> Result<()> {
+    imp::save(database, password)
 }
 
-/// The stored password for `vault`, or `None` when nothing is stored.
+/// The stored password for `database`, or `None` when nothing is stored.
 ///
 /// Refuses without an interactive terminal — see the module note.
-pub fn load(vault: &Path) -> Result<Option<String>> {
-    imp::load(vault)
+pub fn load(database: &Path) -> Result<Option<String>> {
+    imp::load(database)
 }
 
-/// Remove the entry for `vault`. `false` when there was nothing to remove.
-pub fn forget(vault: &Path) -> Result<bool> {
-    imp::forget(vault)
+/// Remove the entry for `database`. `false` when there was nothing to remove.
+pub fn forget(database: &Path) -> Result<bool> {
+    imp::forget(database)
 }
 
 /// The account string an entry is filed under, for `keychain status` to print.
-pub fn describe(vault: &Path) -> Result<String> {
-    account(vault).context("resolving the vault path for the keychain entry")
+pub fn describe(database: &Path) -> Result<String> {
+    account(database).context("resolving the database path for the keychain entry")
 }

@@ -89,7 +89,7 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags, 
 /// How long a carried item has to rest on a closed folder before it opens.
 const HOVER_OPEN_MS = 1000;
 
-function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel, drag, onDragStart }) {
+function Sidebar({ tree, selectedGroup, onSelectGroup, onEditGroupTags, database, onSwitcher, onEditMetadata, onSync, syncSelected, onNew, onDataLock, idleLabel, drag, onDragStart }) {
   const [open, setOpenState] = React.useState({ __root: true, inpace: true, personal: true, infra: false });
   const setOpen = (p) => setOpenState((o) => ({ ...o, [p]: !o[p] }));
   // The bin is not a folder you file things in; it is pinned apart below.
@@ -133,43 +133,30 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, f
   return (
     <div className={"pane sidebar" + (dnd && !dnd.valid ? " dnd-no" : "")}>
       <div className="sb-scroll">
-        {/* The vault chip carries its own lock state: green unlocked, amber
+        {/* The database chip carries its own lock state: green unlocked, amber
             locked. State belongs on the thing it describes, not in a separate
-            pill across the window — and with several vaults registered, "which
-            one is unlocked" is a per-vault fact. */}
+            pill across the window — and with several databases registered, "which
+            one is unlocked" is a per-database fact. */}
         <button
-          className={"sb-vault" + (vault.locked ? " is-locked" : " is-unlocked")}
+          className={"sb-database" + (database.locked ? " is-locked" : " is-unlocked")}
           onClick={onSwitcher}
-          title={(vault.locked ? "Locked" : "Unlocked") + " — click to switch vault"}
+          title={(database.locked ? "Locked" : "Unlocked") + " — click to switch database"}
         >
           <div className="vbadge">
-            <Icon name={vault.locked ? "lock" : "unlock"} size={16} />
+            <Icon name={database.locked ? "lock" : "unlock"} size={16} />
           </div>
           <div style={{ minWidth: 0, flex: 1, textAlign: "left" }}>
-            <div className="vname">{vault.name}</div>
+            <div className="vname">{database.name}</div>
             <div className="vmeta">
-              {vault.locked ? "Locked" : "Unlocked"}
+              {database.locked ? "Locked" : "Unlocked"}
               {/* Countdown on its own line: mid-phrase wrapping read badly. */}
-              {!vault.locked && idleLabel ? <span className="vsub">{idleLabel}</span> : null}
+              {!database.locked && idleLabel ? <span className="vsub">{idleLabel}</span> : null}
             </div>
           </div>
           <Icon name="chevronDown" size={15} className="vchev" />
         </button>
 
-        <div className="sb-label">Library</div>
-        <div className={"tree-row" + (selectedGroup === "__all" ? " sel" : "")} onClick={() => onSelectGroup("__all")} style={{ paddingLeft: 6 }}>
-          <span className="tw" style={{ visibility: "hidden" }} />
-          <Icon name="hash" size={15} className="tfic" />
-          <span className="tr-name" style={{ fontFamily: "var(--font-sans)", fontWeight: 500 }}>All entries</span>
-          <span className="tr-count">{total}</span>
-        </div>
-        <div className={"tree-row" + (selectedGroup === "__fav" ? " sel" : "")} onClick={() => onSelectGroup("__fav")} style={{ paddingLeft: 6 }}>
-          <span className="tw" style={{ visibility: "hidden" }} />
-          <Icon name="star" size={15} className="tfic" />
-          <span className="tr-name" style={{ fontFamily: "var(--font-sans)", fontWeight: 500 }}>Favorites</span>
-          <span className="tr-count">{favCount}</span>
-        </div>
-
+        {onSync && <button className={'sb-sync' + (syncSelected ? ' selected' : '')} onClick={onSync} aria-pressed={!!syncSelected}><Icon name="link" size={16} />Database Sync</button>}
         <div className="sb-label">Groups</div>
         {folders.map((n) => (
           <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} dnd={dnd} onDragStart={onDragStart} />
@@ -180,20 +167,23 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, f
           <TreeNode node={bin} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} dnd={dnd} onDragStart={onDragStart} />
         </div>
       )}
-      {/* Pinned to the bottom of the sidebar: a new entry goes into the vault
+      {/* Pinned to the bottom of the sidebar: a new item goes into the database
           this pane belongs to, so the action lives with its target rather than
           floating in a global toolbar. */}
-      {/* Both act on the vault this pane represents: put its keys and files
+      {/* Both act on the database this pane represents: put its keys and files
           back, or add something to it. Neither is a global toolbar concern. */}
       <div className="sb-new">
-        {!vault.locked && (
+        {!database.locked && (
           <button className="btn-lock" onClick={onDataLock}
                   title="Removes keys from the system agent and dematerializes files (⌘L)">
             <Icon name="lock" size={15} /> Data lock
           </button>
         )}
+        <button className="btn-lock" onClick={onEditMetadata}>
+          <Icon name="gear" size={15} /> Database metadata
+        </button>
         <button className="btn-accent" onClick={onNew}>
-          <Icon name="plus" size={16} />New entry
+          <Icon name="plus" size={16} />Create item
         </button>
       </div>
       <div className="sb-foot">
@@ -205,7 +195,7 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, onEditGroupTags, f
 }
 
 /* ============ ENTRY LIST ============ */
-function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort, query, onQuery, searchRef, vaultName, drag, onDragStart }) {
+function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort, query, onQuery, searchRef, databaseName, drag, onDragStart }) {
   const listRef = React.useRef(null);
   React.useEffect(() => {
     const el = listRef.current && listRef.current.querySelector(".erow.sel");
@@ -230,7 +220,7 @@ function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCyc
         <input
           ref={searchRef} value={query} spellCheck="false"
           onChange={(e) => onQuery(e.target.value)}
-          placeholder={"Search " + (vaultName || "vault").toLowerCase() + "…"}
+          placeholder={"Search " + (databaseName || "database").toLowerCase() + "…"}
         />
         {query ? (
           <button className="icon-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); onQuery(""); }}>
@@ -311,6 +301,82 @@ function Field({ k, value, secret, revealed, onReveal, link, onCopy, copiedKey, 
           <Icon name={isCopied ? "check" : "copy"} size={16} />
         </button>
       </div>
+    </div>
+  );
+}
+
+function AttributeField({ entry, field, fields, onCopy, copiedKey, onSave, onDelete }) {
+  const [draft, setDraft] = React.useState(null);
+  const [confirming, setConfirming] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const begin = (duplicate) => {
+    let name = field.k;
+    if (duplicate) {
+      let suffix = 2;
+      const names = new Set(fields.map((item) => item.k));
+      while (names.has(`${field.k}(${suffix})`)) suffix += 1;
+      name = `${field.k}(${suffix})`;
+    }
+    setDraft({ oldName: duplicate ? null : field.k, name, value: field.v });
+    setConfirming(false);
+    setError("");
+  };
+  const save = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await onSave(entry.id, draft.oldName, draft.name, draft.value);
+      setDraft(null);
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await onDelete(entry.id, field.k);
+      setConfirming(false);
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      {draft ? (
+        <div className="fld" style={{ marginBottom: 8 }}>
+          <input className="inp mono" aria-label={`Attribute name ${field.k}`} value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
+          <textarea className="inp mono" aria-label={`Attribute value ${field.k}`} rows={2} value={draft.value} onChange={(e) => setDraft((d) => ({ ...d, value: e.target.value }))} />
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn-accent" onClick={save} disabled={busy || !draft.name.trim()}>Save</button>
+            <button className="btn-ghost" onClick={() => setDraft(null)} disabled={busy}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <Field k={field.k} value={field.v} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":attr:" + field.k} />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, marginTop: -5, marginBottom: 6 }}>
+            <button className="icon-btn" title={`Edit ${field.k}`} aria-label={`Edit ${field.k}`} onClick={() => begin(false)}><Icon name="edit" size={14} /></button>
+            <button className="icon-btn" title={`Duplicate ${field.k}`} aria-label={`Duplicate ${field.k}`} onClick={() => begin(true)}><Icon name="copy" size={14} /></button>
+            {confirming ? (
+              <>
+                <button className="btn-danger" onClick={remove} disabled={busy}>Confirm delete</button>
+                <button className="btn-ghost" onClick={() => setConfirming(false)} disabled={busy}>Cancel</button>
+              </>
+            ) : (
+              <button className="icon-btn" title={`Delete ${field.k}`} aria-label={`Delete ${field.k}`} onClick={() => setConfirming(true)}><Icon name="trash" size={14} /></button>
+            )}
+          </div>
+        </>
+      )}
+      {error && <div className="att-err">{error}</div>}
     </div>
   );
 }
@@ -414,7 +480,7 @@ function sourceAttrs(value) {
 
 /// One capability's items as editable rows. Every change writes the item at
 /// once and redraws from what the backend returns, so the panel never shows a
-/// state the vault does not hold.
+/// state the database does not hold.
 function CapabilityRows({ cap, columns, onSave, onRemove }) {
   return (
     <div className="cap-rows">
@@ -554,26 +620,26 @@ function GpgSection({ cap, onSave, onRemove, onOff }) {
 
 /// The settings sections an entry has, and "+ Add capability" for the rest.
 /// Materialize lives with the attachments it writes; SSH with its key.
-function CapabilitySections({ vaultId, entry }) {
+function CapabilitySections({ databaseId, entry }) {
   const [caps, setCaps] = React.useState([]);
   const [err, setErr] = React.useState("");
   React.useEffect(() => {
     let live = true;
     setErr("");
     (async () => {
-      try { const c = await api.entryCapabilities(vaultId, entry.id); if (live) setCaps(c || []); }
+      try { const c = await api.entryCapabilities(databaseId, entry.id); if (live) setCaps(c || []); }
       catch (e) { if (live) setErr(String(e)); }
     })();
     return () => { live = false; };
-  }, [vaultId, entry.id]);
+  }, [databaseId, entry.id]);
   const run = async (call) => {
     try { setCaps((await call()) || []); setErr(""); }
     catch (e) { setErr(String(e)); }
   };
   const handlers = (name) => ({
-    onSave: (attrs) => run(() => api.setCapabilityItem(vaultId, entry.id, name, Object.fromEntries(Object.entries(attrs).filter(([, v]) => v !== undefined)))),
-    onRemove: (key) => run(() => api.removeCapabilityItem(vaultId, entry.id, name, key)),
-    onOff: () => run(() => api.setCapabilityOn(vaultId, entry.id, name, false)),
+    onSave: (attrs) => run(() => api.setCapabilityItem(databaseId, entry.id, name, Object.fromEntries(Object.entries(attrs).filter(([, v]) => v !== undefined)))),
+    onRemove: (key) => run(() => api.removeCapabilityItem(databaseId, entry.id, name, key)),
+    onOff: () => run(() => api.setCapabilityOn(databaseId, entry.id, name, false)),
   });
   const env = caps.find((c) => c.capability === "env-agent");
   const gpg = caps.find((c) => c.capability === "gpg-agent");
@@ -588,7 +654,7 @@ function CapabilitySections({ vaultId, entry }) {
       {(addable.length > 0 || err) && (
         <div className="dt-section cap-addcap">
           {addable.map(([name, label]) => (
-            <button key={name} className="att-add" onClick={() => run(() => api.setCapabilityOn(vaultId, entry.id, name, true))}>
+            <button key={name} className="att-add" onClick={() => run(() => api.setCapabilityOn(databaseId, entry.id, name, true))}>
               <Icon name="plus" size={13} /> {label}
             </button>
           ))}
@@ -605,11 +671,11 @@ function fmtBytes(n) {
   return (n / (1024 * 1024)).toFixed(1) + " MB";
 }
 
-/// A bar for a vault write, which takes seconds and cannot be made not to.
+/// A bar for a database write, which takes seconds and cannot be made not to.
 ///
 /// KDBX rotates the master seed on every save, so every save re-runs Argon2 at
-/// whatever cost the vault is configured for. `estimateMs` is what the LAST
-/// write on this vault actually took, measured by the backend — so the bar
+/// whatever cost the database is configured for. `estimateMs` is what the LAST
+/// write on this database actually took, measured by the backend — so the bar
 /// tracks the real thing rather than an invented duration. It stops at 95% and
 /// waits there: the remainder is the file landing, and a bar that hits 100%
 /// before the work is done is worse than one that pauses.
@@ -646,7 +712,7 @@ function WriteBar({ estimateMs, label }) {
 /// key that matches it — so this is a list you pick from rather than a single
 /// slot. Selecting one opens its content and its materialize settings together,
 /// because "what is this file" and "where does it go" are the same question.
-function AttachmentsSection({ vaultId, entry }) {
+function AttachmentsSection({ databaseId, entry }) {
   const [items, setItems] = React.useState([]);
   const [sel, setSel] = React.useState(null);
   const [text, setText] = React.useState("");
@@ -656,7 +722,7 @@ function AttachmentsSection({ vaultId, entry }) {
   const [adding, setAdding] = React.useState(false);
   const [newName, setNewName] = React.useState("");
   // Materialize fields are edited locally and applied on Save, so a half-typed
-  // path is never written to the vault.
+  // path is never written to the database.
   const [mat, setMat] = React.useState({ target: "", mode: "", ttl: "", allowDiskBacked: false, useDir: false });
   // A picked file shows in the list the moment it is picked. The write behind
   // it is seconds of Argon2, and a list that stays empty until it lands reads
@@ -666,14 +732,14 @@ function AttachmentsSection({ vaultId, entry }) {
   // to see an SVG's source instead.
   const [img, setImg] = React.useState(null);
   const [asText, setAsText] = React.useState(false);
-  // `{ estimateMs }` while a vault write is in flight, `null` otherwise.
+  // `{ estimateMs }` while a database write is in flight, `null` otherwise.
   const [write, setWrite] = React.useState(null);
 
   // The backend emits this around every save, in any part of the app. Only
   // listen while mounted — a stale listener would drive a bar nobody can see.
   React.useEffect(() => {
     let stop;
-    listen("vault-write", (e) => {
+    listen("database-write", (e) => {
       const { phase, estimateMs } = e.payload || {};
       setWrite(phase === "start" ? { estimateMs: estimateMs || 0 } : null);
     }).then((f) => { stop = f; });
@@ -682,11 +748,11 @@ function AttachmentsSection({ vaultId, entry }) {
 
   const load = React.useCallback(async () => {
     try {
-      const list = await api.listAttachments(vaultId, entry.id);
+      const list = await api.listAttachments(databaseId, entry.id);
       setItems(list);
       return list;
     } catch (e) { setErr(String(e)); return []; }
-  }, [vaultId, entry.id]);
+  }, [databaseId, entry.id]);
 
   // Reload whenever the entry changes, and drop any selection from the last one.
   React.useEffect(() => {
@@ -703,11 +769,11 @@ function AttachmentsSection({ vaultId, entry }) {
     setMat({ target: inherited ? "" : a.target, mode: a.mode, ttl: a.ttl, allowDiskBacked: a.allowDiskBacked, useDir: inherited });
     setImg(null); setAsText(false);
     if (a.isImage) {
-      try { setImg(await api.readAttachmentImage(vaultId, entry.id, a.name)); }
+      try { setImg(await api.readAttachmentImage(databaseId, entry.id, a.name)); }
       catch (e) { setErr(String(e)); }
     }
     if (!a.isText) { setText(""); return; }
-    try { setText(await api.readAttachment(vaultId, entry.id, a.name)); }
+    try { setText(await api.readAttachment(databaseId, entry.id, a.name)); }
     catch (e) { setText(""); setErr(String(e)); }
   };
 
@@ -716,7 +782,7 @@ function AttachmentsSection({ vaultId, entry }) {
   const saveContent = async () => {
     if (!sel || busy) return;
     setBusy(true); setErr("");
-    try { setItems(await api.saveAttachment(vaultId, entry.id, sel, text)); setDirty(false); }
+    try { setItems(await api.saveAttachment(databaseId, entry.id, sel, text)); setDirty(false); }
     catch (e) { setErr(String(e)); }
     setBusy(false);
   };
@@ -724,7 +790,7 @@ function AttachmentsSection({ vaultId, entry }) {
   const saveMaterialize = async () => {
     if (!sel || busy) return;
     setBusy(true); setErr("");
-    try { setItems(await api.setAttachmentMaterialize(vaultId, entry.id, sel, mat)); }
+    try { setItems(await api.setAttachmentMaterialize(databaseId, entry.id, sel, mat)); }
     catch (e) { setErr(String(e)); }
     setBusy(false);
   };
@@ -733,7 +799,7 @@ function AttachmentsSection({ vaultId, entry }) {
     if (busy) return;
     setBusy(true); setErr("");
     try {
-      setItems(await api.deleteAttachment(vaultId, entry.id, name));
+      setItems(await api.deleteAttachment(databaseId, entry.id, name));
       if (sel === name) { setSel(null); setText(""); }
     } catch (e) { setErr(String(e)); }
     setBusy(false);
@@ -751,7 +817,7 @@ function AttachmentsSection({ vaultId, entry }) {
     setPending(base);
     setBusy(true); setErr(""); setAdding(false);
     try {
-      const list = await api.attachFile(vaultId, entry.id, picked);
+      const list = await api.attachFile(databaseId, entry.id, picked);
       setItems(list);
       const made = list.find((a) => a.name === base);
       if (made) await open(made);
@@ -765,7 +831,7 @@ function AttachmentsSection({ vaultId, entry }) {
     if (!name || busy) return;
     setBusy(true); setErr(""); setPending(name);
     try {
-      const list = await api.saveAttachment(vaultId, entry.id, name, "");
+      const list = await api.saveAttachment(databaseId, entry.id, name, "");
       setItems(list); setAdding(false); setNewName("");
       const made = list.find((a) => a.name === name);
       if (made) await open(made);
@@ -796,7 +862,7 @@ function AttachmentsSection({ vaultId, entry }) {
         </span>
       </div>
 
-      {write && <WriteBar estimateMs={write.estimateMs} label="Encrypting the vault…" />}
+      {write && <WriteBar estimateMs={write.estimateMs} label="Encrypting the database…" />}
 
       {adding && (
         <div className="att-new">
@@ -940,7 +1006,7 @@ function AttachmentsSection({ vaultId, entry }) {
   );
 }
 
-function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, appActions }) {
+function Detail({ databaseId, entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, onSaveAttribute, onDeleteAttribute, onHistory, appActions }) {
   if (!entry) {
     return (
       <div className="pane detail">
@@ -948,7 +1014,7 @@ function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, on
         <div className="empty">
           <div className="eglyph"><Icon name="key" size={30} /></div>
           <h3>No entry selected</h3>
-          <p>Pick an entry from the list, or press <span className="kbd">⌘K</span> to search your whole vault.</p>
+          <p>Pick an entry from the list, or press <span className="kbd">⌘K</span> to search your whole database.</p>
         </div>
       </div>
     );
@@ -976,6 +1042,7 @@ function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, on
               <div className="dt-type"><Icon name="hash" size={12} />{entry.type}</div>
             </div>
             <div className="dt-actions">
+              {onHistory && <button className="icon-btn" onClick={() => onHistory(entry)} title="Entry history" aria-label="Entry history"><Icon name="clock" size={17} /></button>}
               <button className={"icon-btn" + (entry.fav ? " active" : "")} onClick={() => onToggleFav(entry.id)} title="Favorite"><Icon name="star" size={17} /></button>
               <button className="icon-btn" onClick={() => onEdit(entry)} title="Edit (E)"><Icon name="edit" size={17} /></button>
               <button className="icon-btn" onClick={() => onDelete(entry)} title="Delete"><Icon name="trash" size={17} /></button>
@@ -1012,15 +1079,15 @@ function Detail({ vaultId, entry, notes, fields, password, onCopy, copiedKey, on
           <AgentSection entry={entry} onChange={onToggleAgentKey} />
         )}
 
-        <AttachmentsSection vaultId={vaultId} entry={entry} />
+        <AttachmentsSection databaseId={databaseId} entry={entry} />
 
-        <CapabilitySections vaultId={vaultId} entry={entry} />
+        <CapabilitySections databaseId={databaseId} entry={entry} />
 
         {fields && fields.length > 0 && (
           <div className="dt-section">
             <div className="dt-sec-label">Attributes</div>
-            {fields.map((f, i) => (
-              <Field key={i} k={f.k} value={f.v} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":attr" + i} />
+            {fields.map((f) => (
+              <AttributeField key={f.k} entry={entry} field={f} fields={fields} onCopy={onCopy} copiedKey={copiedKey} onSave={onSaveAttribute} onDelete={onDeleteAttribute} />
             ))}
           </div>
         )}

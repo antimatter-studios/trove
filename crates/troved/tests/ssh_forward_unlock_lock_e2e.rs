@@ -1,7 +1,7 @@
 //! Unlock/lock driving a REAL `ssh-agent`, through the real `handle()`.
 //!
 //! `ssh_agent_forward_e2e` proves the wire format in isolation; this proves the
-//! wiring: that unlocking a vault actually pushes its keys into the user's own
+//! wiring: that unlocking a database actually pushes its keys into the user's own
 //! agent, that locking takes them back out, and that the four `KeeAgent.settings`
 //! knobs we now parse each change what the agent ends up doing. Every assertion
 //! is made against `ssh-add`, never against trove's own bookkeeping — the whole
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -180,7 +180,7 @@ impl Harness {
     fn new() -> Self {
         let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
         Self {
-            state: Arc::new(AsyncMutex::new(troved::vaults::VaultSet::new())),
+            state: Arc::new(AsyncMutex::new(troved::databases::DatabaseSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
             scoped_agents: troved::ssh_agent::scoped::new_registry(),
@@ -208,9 +208,9 @@ impl Harness {
         .response
     }
 
-    async fn unlock(&self, vault: &Path) -> Response {
+    async fn unlock(&self, database: &Path) -> Response {
         self.handle(Request::Unlock {
-            path: vault.to_string_lossy().into_owned(),
+            path: database.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -221,7 +221,7 @@ impl Harness {
     }
 
     async fn lock_all(&self) -> Response {
-        self.handle(Request::Lock { vault: None }).await
+        self.handle(Request::Lock { database: None }).await
     }
 }
 
@@ -247,10 +247,10 @@ fn settings(remove_at_close: bool, lifetime: Option<u32>, confirm: bool) -> Vec<
     .into_bytes()
 }
 
-/// A vault holding one SSH entry. `entry_settings` of `None` means no
+/// A database holding one SSH entry. `entry_settings` of `None` means no
 /// `KeeAgent.settings` attachment at all (the content-scan path).
-fn vault_with_key(path: &Path, title: &str, key: &[u8], entry_settings: Option<Vec<u8>>) {
-    let mut v = Vault::create(path, PASSWORD).expect("create vault");
+fn database_with_key(path: &Path, title: &str, key: &[u8], entry_settings: Option<Vec<u8>>) {
+    let mut v = Database::create(path, PASSWORD).expect("create database");
     let id = v.add_entry(title).expect("add entry");
     v.attach_binary(&id, "id", key).expect("attach key");
     if let Some(blob) = entry_settings {
@@ -304,10 +304,10 @@ async fn unlock_forwards_into_the_users_agent_and_lock_takes_the_key_back() {
         return;
     };
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
+    let database = tmp.path().join("v.kdbx");
     // The blob trove itself writes on `add ssh`: RemoveAtDatabaseClose=true.
-    vault_with_key(
-        &vault,
+    database_with_key(
+        &database,
         "fwd-basic",
         KEY_A,
         Some(keeagent::settings_xml("id")),
@@ -317,7 +317,7 @@ async fn unlock_forwards_into_the_users_agent_and_lock_takes_the_key_back() {
     let h = Harness::new();
 
     assert!(!agent.holds("fwd-basic"), "agent starts empty");
-    let resp = h.unlock(&vault).await;
+    let resp = h.unlock(&database).await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
     assert!(
         warnings(&resp).is_empty(),
@@ -347,15 +347,15 @@ async fn an_entry_with_no_keeagent_settings_is_forwarded_too() {
         return;
     };
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
+    let database = tmp.path().join("v.kdbx");
     // No settings blob at all — the content-scan path. Forwarding is on by
     // default, so this key must still reach the agent and still be removed.
-    vault_with_key(&vault, "fwd-noconfig", KEY_A, None);
+    database_with_key(&database, "fwd-noconfig", KEY_A, None);
 
     point_at(Some(&agent.sock), tmp.path());
     let h = Harness::new();
 
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     assert!(
         agent.holds("fwd-noconfig"),
         "forwarding defaults ON: {}",
@@ -373,9 +373,9 @@ async fn remove_at_database_close_false_leaves_the_key_in_the_other_agent() {
         return;
     };
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
-    vault_with_key(
-        &vault,
+    let database = tmp.path().join("v.kdbx");
+    database_with_key(
+        &database,
         "fwd-keep",
         KEY_A,
         Some(settings(false, None, false)),
@@ -384,7 +384,7 @@ async fn remove_at_database_close_false_leaves_the_key_in_the_other_agent() {
     point_at(Some(&agent.sock), tmp.path());
     let h = Harness::new();
 
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     assert!(agent.holds("fwd-keep"), "{}", agent.list());
 
     h.lock_all().await;
@@ -410,14 +410,14 @@ async fn a_lifetime_constraint_from_the_settings_expires_the_key_in_the_agent() 
         return;
     };
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
+    let database = tmp.path().join("v.kdbx");
     // Short enough that the agent's own expiry is observable inside a test,
     // long enough that observing the *add* isn't a race against it. At one
     // second a loaded runner can spend the whole lifetime between the unlock
     // and the assertion below, and then the key is legitimately gone — the
     // agent did its job and the test failed anyway.
-    vault_with_key(
-        &vault,
+    database_with_key(
+        &database,
         "fwd-shortlived",
         KEY_A,
         Some(settings(true, Some(5), false)),
@@ -426,7 +426,7 @@ async fn a_lifetime_constraint_from_the_settings_expires_the_key_in_the_agent() 
     point_at(Some(&agent.sock), tmp.path());
     let h = Harness::new();
 
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     assert!(
         agent.holds("fwd-shortlived"),
         "constrained add must still be accepted: {}",
@@ -459,11 +459,11 @@ async fn no_lifetime_constraint_means_the_key_stays_put() {
         return;
     };
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
+    let database = tmp.path().join("v.kdbx");
     // The control for the test above: same key, constraint switched off. With
     // the harness's idle timeout at 0 there's no daemon default either.
-    vault_with_key(
-        &vault,
+    database_with_key(
+        &database,
         "fwd-persistent",
         KEY_A,
         Some(settings(true, None, false)),
@@ -472,7 +472,7 @@ async fn no_lifetime_constraint_means_the_key_stays_put() {
     point_at(Some(&agent.sock), tmp.path());
     let h = Harness::new();
 
-    h.unlock(&vault).await;
+    h.unlock(&database).await;
     tokio::time::sleep(Duration::from_millis(2500)).await;
     assert!(
         agent.holds("fwd-persistent"),
@@ -515,7 +515,7 @@ async fn a_confirm_constraint_makes_the_agent_refuse_to_sign_unprompted() {
 
     // Baseline: without the constraint, the agent signs on request.
     let plain = tmp.path().join("plain.kdbx");
-    vault_with_key(
+    database_with_key(
         &plain,
         "fwd-confirm",
         KEY_A,
@@ -547,7 +547,7 @@ async fn a_confirm_constraint_makes_the_agent_refuse_to_sign_unprompted() {
     // trove's own agent, so nothing stops working; only the forwarding
     // convenience is withheld for that entry.
     let confirmed = tmp.path().join("confirm.kdbx");
-    vault_with_key(
+    database_with_key(
         &confirmed,
         "fwd-confirm",
         KEY_A,
@@ -627,8 +627,8 @@ async fn forwarding_heals_a_stale_ssh_auth_sock() {
         return;
     };
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
-    vault_with_key(&vault, "fwd-heal", KEY_A, None);
+    let database = tmp.path().join("v.kdbx");
+    database_with_key(&database, "fwd-heal", KEY_A, None);
 
     // What the caller holds: a socket whose agent has gone.
     let stale = tmp.path().join("stale.sock");
@@ -637,7 +637,7 @@ async fn forwarding_heals_a_stale_ssh_auth_sock() {
     std::env::set_var("TROVE_SSH_AGENT_SOCK", &agent.sock);
 
     let h = Harness::new();
-    let resp = h.unlock(&vault).await;
+    let resp = h.unlock(&database).await;
     assert!(matches!(resp, Response::Ok(_)), "unlock must succeed");
 
     let w = warnings(&resp);
@@ -671,15 +671,15 @@ async fn forwarding_heals_a_stale_ssh_auth_sock() {
 async fn unlock_succeeds_and_warns_when_the_agent_is_unreachable() {
     let _guard = env_lock().await;
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
-    vault_with_key(&vault, "fwd-dead", KEY_A, None);
+    let database = tmp.path().join("v.kdbx");
+    database_with_key(&database, "fwd-dead", KEY_A, None);
 
     // A path that no agent is listening on.
     let nowhere = tmp.path().join("dead.sock");
     point_at(Some(&nowhere), tmp.path());
     let h = Harness::new();
 
-    let resp = h.unlock(&vault).await;
+    let resp = h.unlock(&database).await;
     assert!(
         matches!(resp, Response::Ok(_)),
         "a dead agent must never fail the unlock: {resp:?}"
@@ -700,8 +700,8 @@ async fn unlock_succeeds_and_warns_when_the_agent_is_unreachable() {
 async fn a_wedged_agent_times_out_instead_of_hanging_the_unlock() {
     let _guard = env_lock().await;
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
-    vault_with_key(&vault, "fwd-wedged", KEY_A, None);
+    let database = tmp.path().join("v.kdbx");
+    database_with_key(&database, "fwd-wedged", KEY_A, None);
 
     // An "agent" that accepts the connection and then says nothing — the case a
     // plain connect-failure test can't reach, and the one that would otherwise
@@ -727,7 +727,7 @@ async fn a_wedged_agent_times_out_instead_of_hanging_the_unlock() {
     let h = Harness::new();
 
     let started = std::time::Instant::now();
-    let resp = h.unlock(&vault).await;
+    let resp = h.unlock(&database).await;
     let elapsed = started.elapsed();
 
     assert!(
@@ -753,13 +753,13 @@ async fn a_wedged_agent_times_out_instead_of_hanging_the_unlock() {
 async fn unlock_forwards_nothing_when_there_is_no_external_agent() {
     let _guard = env_lock().await;
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
-    vault_with_key(&vault, "fwd-noagent", KEY_A, None);
+    let database = tmp.path().join("v.kdbx");
+    database_with_key(&database, "fwd-noagent", KEY_A, None);
 
     point_at(None, tmp.path());
     let h = Harness::new();
 
-    let resp = h.unlock(&vault).await;
+    let resp = h.unlock(&database).await;
     assert!(matches!(resp, Response::Ok(_)), "{resp:?}");
     assert!(
         warnings(&resp).is_empty(),
@@ -777,14 +777,14 @@ async fn trove_ssh_forward_0_switches_forwarding_off_entirely() {
         return;
     };
     let tmp = short_tempdir();
-    let vault = tmp.path().join("v.kdbx");
-    vault_with_key(&vault, "fwd-optout", KEY_A, None);
+    let database = tmp.path().join("v.kdbx");
+    database_with_key(&database, "fwd-optout", KEY_A, None);
 
     point_at(Some(&agent.sock), tmp.path());
     std::env::set_var("TROVE_SSH_FORWARD", "0");
     let h = Harness::new();
 
-    let resp = h.unlock(&vault).await;
+    let resp = h.unlock(&database).await;
     assert!(matches!(resp, Response::Ok(_)), "{resp:?}");
     assert!(
         !agent.holds("fwd-optout"),
@@ -800,7 +800,7 @@ async fn trove_ssh_forward_0_switches_forwarding_off_entirely() {
 }
 
 #[tokio::test]
-async fn locking_one_vault_leaves_another_vaults_forwarded_keys_alone() {
+async fn locking_one_database_leaves_another_databases_forwarded_keys_alone() {
     let _guard = env_lock().await;
     let Some(agent) = RealAgent::start() else {
         return;
@@ -810,7 +810,7 @@ async fn locking_one_vault_leaves_another_vaults_forwarded_keys_alone() {
         return;
     }
     let tmp = short_tempdir();
-    // A second, distinct key so the two vaults don't collide in the agent.
+    // A second, distinct key so the two databases don't collide in the agent.
     let keypath = tmp.path().join("id_b");
     let gen = Command::new("ssh-keygen")
         .args(["-t", "ed25519", "-N", "", "-C", "b", "-q", "-f"])
@@ -820,38 +820,38 @@ async fn locking_one_vault_leaves_another_vaults_forwarded_keys_alone() {
     assert!(gen.status.success(), "ssh-keygen failed");
     let key_b = std::fs::read(&keypath).expect("read generated key");
 
-    let vault_a = tmp.path().join("a.kdbx");
-    let vault_b = tmp.path().join("b.kdbx");
-    vault_with_key(&vault_a, "fwd-vault-a", KEY_A, None);
-    vault_with_key(&vault_b, "fwd-vault-b", &key_b, None);
+    let database_a = tmp.path().join("a.kdbx");
+    let database_b = tmp.path().join("b.kdbx");
+    database_with_key(&database_a, "fwd-database-a", KEY_A, None);
+    database_with_key(&database_b, "fwd-database-b", &key_b, None);
 
     point_at(Some(&agent.sock), tmp.path());
     let h = Harness::new();
-    h.unlock(&vault_a).await;
-    h.unlock(&vault_b).await;
-    assert!(agent.holds("fwd-vault-a"), "{}", agent.list());
-    assert!(agent.holds("fwd-vault-b"), "{}", agent.list());
+    h.unlock(&database_a).await;
+    h.unlock(&database_b).await;
+    assert!(agent.holds("fwd-database-a"), "{}", agent.list());
+    assert!(agent.holds("fwd-database-b"), "{}", agent.list());
 
     // Lock only A. B is still unlocked, so its forwarded key must survive —
     // this is the diff between "was forwarded" and "is still served".
     let resp = h
         .handle(Request::Lock {
-            vault: Some(vault_a.to_string_lossy().into_owned()),
+            database: Some(database_a.to_string_lossy().into_owned()),
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "{resp:?}");
     assert!(
-        !agent.holds("fwd-vault-a"),
-        "the locked vault's key must go: {}",
+        !agent.holds("fwd-database-a"),
+        "the locked database's key must go: {}",
         agent.list()
     );
     assert!(
-        agent.holds("fwd-vault-b"),
-        "the still-unlocked vault's key must stay: {}",
+        agent.holds("fwd-database-b"),
+        "the still-unlocked database's key must stay: {}",
         agent.list()
     );
 
     h.lock_all().await;
-    assert!(!agent.holds("fwd-vault-b"), "{}", agent.list());
+    assert!(!agent.holds("fwd-database-b"), "{}", agent.list());
     clear_env();
 }
