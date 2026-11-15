@@ -48,9 +48,9 @@ pub type SessionStore = Arc<Mutex<Option<Session>>>;
 /// it's safe as an env-var value and on a command line).
 fn mint_session_code() -> String {
     use base64::Engine;
-    use rand::RngCore;
+    use rand::Rng;
     let mut b = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut b);
+    rand::rng().fill_bytes(&mut b);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 

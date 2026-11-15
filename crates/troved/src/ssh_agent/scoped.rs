@@ -52,7 +52,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rand::RngCore;
+use rand::Rng;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -268,7 +268,7 @@ fn fresh_socket_path() -> PathBuf {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let mut bytes = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     dir.join(format!("trove-ssh-{suffix}.sock"))
 }

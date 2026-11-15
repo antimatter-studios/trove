@@ -12,7 +12,7 @@ use keepass::{
     DatabaseKey,
 };
 
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 pub const MASTER_SEED: u64 = 0xdead_beef_cafe_f00d;
 pub const DEMO_PASSWORD: &str = "demopass";

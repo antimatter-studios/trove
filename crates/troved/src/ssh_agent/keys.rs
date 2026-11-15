@@ -584,12 +584,12 @@ fn parse_pem_private_key(s: &str) -> Result<PrivateKey, ParseError> {
     {
         return Ok(pk);
     }
-    if let Ok(rsa) = rsa_ssh::RsaPrivateKey::from_pkcs1_pem(s) {
+    if let Ok(rsa) = rsa_ssh::PrivateKey::from_pkcs1_pem(s) {
         let kp = RsaKeypair::try_from(rsa)
             .map_err(|e| ParseError::NotOpenssh(format!("rsa pkcs1: {e}")))?;
         return Ok(PrivateKey::from(kp));
     }
-    if let Ok(rsa) = rsa_ssh::RsaPrivateKey::from_pkcs8_pem(s) {
+    if let Ok(rsa) = rsa_ssh::PrivateKey::from_pkcs8_pem(s) {
         let kp = RsaKeypair::try_from(rsa)
             .map_err(|e| ParseError::NotOpenssh(format!("rsa pkcs8: {e}")))?;
         return Ok(PrivateKey::from(kp));

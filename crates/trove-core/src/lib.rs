@@ -365,7 +365,7 @@ fn otp_param<'a>(uri: &'a str, name: &str) -> Option<&'a str> {
 /// written as five characters from Steam's 26-letter alphabet rather than as
 /// decimal digits. Matches KeePassXC's `encoder=steam`.
 fn steam_code(secret_b32: &str, period: u64, unix_secs: u64) -> Result<String> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     const ALPHABET: &[u8; 26] = b"23456789BCDFGHJKMNPQRTVWXY";
     let secret = base32::decode(base32::Alphabet::Rfc4648 { padding: true }, secret_b32)
         .ok_or_else(|| Error::Totp("TOTP secret is not base32".to_string()))?;

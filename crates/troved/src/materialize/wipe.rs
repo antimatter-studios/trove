@@ -22,7 +22,7 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
-use rand::RngCore;
+use rand::Rng;
 
 /// Outcome of a single wipe attempt. We continue processing other files even
 /// if one returns `Err` — see [`wipe_file`] for the no-panic guarantee.
@@ -130,7 +130,7 @@ fn overwrite_random(f: &mut std::fs::File, len: u64) -> std::io::Result<()> {
     let chunk = 64 * 1024;
     let mut buf = vec![0u8; chunk];
     let mut written: u64 = 0;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     while written < len {
         let remaining = (len - written) as usize;
         let n = remaining.min(chunk);

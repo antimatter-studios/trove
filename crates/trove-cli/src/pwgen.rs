@@ -1,9 +1,11 @@
 //! Password + passphrase generation. Everything draws from the OS CSPRNG
-//! (`OsRng`) via `rand::distributions::Uniform` — uniform selection with
+//! (`SysRng`) via `rand::distr::Uniform` — uniform selection with
 //! rejection sampling, no modulo bias.
 
 use anyhow::{anyhow, Result};
-use rand::distributions::{Distribution, Uniform};
+use rand::distr::{Distribution, Uniform};
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 
 const LOWER: &str = "abcdefghijklmnopqrstuvwxyz";
 const UPPER: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -61,8 +63,8 @@ pub fn generate(opts: &GenerateOpts) -> Result<String> {
             "character pool is empty: enable at least one class or exclude less"
         ));
     }
-    let dist = Uniform::from(0..pool.len());
-    let mut rng = rand::rngs::OsRng;
+    let dist = Uniform::new(0, pool.len())?;
+    let mut rng = UnwrapErr(SysRng);
     Ok((0..opts.length)
         .map(|_| pool[dist.sample(&mut rng)])
         .collect())
@@ -87,8 +89,8 @@ pub fn diceware(words: usize) -> Result<String> {
     }
     let list = wordlist();
     debug_assert_eq!(list.len(), 7776, "EFF large wordlist must be intact");
-    let dist = Uniform::from(0..list.len());
-    let mut rng = rand::rngs::OsRng;
+    let dist = Uniform::new(0, list.len())?;
+    let mut rng = UnwrapErr(SysRng);
     Ok((0..words)
         .map(|_| list[dist.sample(&mut rng)])
         .collect::<Vec<_>>()

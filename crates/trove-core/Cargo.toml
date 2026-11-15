@@ -29,12 +29,12 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 # Steam Guard codes (`encoder=steam`), which keepass's TOTP renders as decimal
 # digits. All three are already in the tree through keepass's `totp` feature.
-hmac = "0.12"
-sha1 = "0.10"
+hmac = "0.13"
+sha1 = "0.11"
 sha2 = "0.11.1"
 base32 = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
 keepass = { workspace = true, features = ["save_kdbx4", "totp"] }
-rand = "0.8"
+rand = "0.10"

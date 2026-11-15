@@ -1,4 +1,4 @@
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::fs::File;
 use std::path::Path;
 use tempfile::TempDir;
