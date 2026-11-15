@@ -489,7 +489,8 @@ enum Command {
         /// Match an unprotected field by name, or exactly by NAME=VALUE. Repeatable.
         #[arg(long = "field", value_name = "NAME[=VALUE]")]
         fields: Vec<String>,
-        /// Match an entry or inherited group tag. Repeatable.
+        /// Match an entry or inherited group tag, case-insensitively.
+        /// Repeatable. Example: trove search --tag work
         #[arg(long = "tag", value_name = "TAG")]
         tags: Vec<String>,
         /// Match an attachment name using `*` and `?` wildcards. Repeatable.

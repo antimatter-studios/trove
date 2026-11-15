@@ -115,6 +115,7 @@ trove --database my-database.kdbx show Web/github          # password stays mask
 trove --database my-database.kdbx get password Web/github  # script primitive
 trove --database my-database.kdbx edit Web/github --set Env=prod
 trove --database my-database.kdbx search github
+trove --database my-database.kdbx search --tag work     # entry or group tag
 trove --database my-database.kdbx rm Web/github            # → shared Recycle Bin
 
 # Inspect what's in the database (offline — reads the file directly).
