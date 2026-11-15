@@ -48,7 +48,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "z
 # gpg-agent uses on the Assuan wire.
 sha1 = { version = "0.10", default-features = false, features = ["std", "oid"] }
 # HMAC for the MAC on PuTTY .ppk keys (already in the tree via ecdsa's rfc6979).
-hmac = "0.12"
+hmac = "0.13"
 # v0.0.3.1: PKDECRYPT support. ECDH-on-Curve25519 needs Montgomery-form X25519
 # scalar multiplication; `x25519-dalek` v2 is pure-rust and re-uses the
 # `curve25519-dalek` crate already pulled in by `ed25519-dalek`. AES Key Wrap
