@@ -1,0 +1,2349 @@
+From 34015904824e4811b7c5c08a215c92ec2de79a1a Mon Sep 17 00:00:00 2001
+From: Chris Thomas <chris.thomas@antimatter-studios.com>
+Date: Sun, 6 Sep 2026 09:30:26 +0200
+Subject: [PATCH] feat(desktop): per-key agent policy, app/data lock split, and
+ a reworked layout
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Unlocking a vault used to freeze the window: every `#[tauri::command]` was
+synchronous, so it ran on the main thread and blocked the event loop for the
+whole Argon2 derivation. All sixteen commands now run off the main thread and
+the unlock reports its progress step by step instead of going dark.
+
+Locking is now two separate ideas, because one button was doing both:
+
+- App lock hides the window. It takes nothing back from the machine, and it
+  fires on the idle timer.
+- Data lock removes that vault's keys from the system agent and dematerializes
+  its files. It applies to one database, so with several open you land on the
+  next open vault rather than at a login screen.
+
+Each SSH entry gets its own agent policy — whether to load it, how long it
+lives, whether to confirm each signature, and whether a data lock takes it
+back — written to KeeAgent.settings so KeePassXC reads the same values.
+
+The toolbar row is gone. Search moved above the list it filters, the lock
+state onto the vault chip that it describes, and the app controls to the top
+of the detail column. The title bar carries the vault name, the key count and
+expiry, and the build stamp.
+
+Claude-Session: https://claude.ai/code/session_014AdM94sGw7X5A2qPLtVXyk
+---
+ crates/troved/src/ssh_agent/keeagent.rs |  85 ++-
+ trove-desktop/src-tauri/Cargo.toml      |  18 +
+ trove-desktop/src-tauri/build.rs        |  39 ++
+ trove-desktop/src-tauri/src/commands.rs | 681 ++++++++++++++++++------
+ trove-desktop/src-tauri/src/lib.rs      |   1 +
+ trove-desktop/src-tauri/tauri.conf.json |   8 +-
+ trove-desktop/src/App.jsx               | 217 ++++++--
+ trove-desktop/src/api.js                |  23 +-
+ trove-desktop/src/overlays.jsx          | 157 +++++-
+ trove-desktop/src/styles.css            | 128 ++++-
+ trove-desktop/src/views.jsx             | 158 +++++-
+ trove-desktop/tests/App.test.jsx        |  31 +-
+ trove-desktop/tests/VaultView.test.jsx  |  20 +
+ 13 files changed, 1272 insertions(+), 294 deletions(-)
+
+diff --git a/crates/troved/src/ssh_agent/keeagent.rs b/crates/troved/src/ssh_agent/keeagent.rs
+index bd7b1d0..724b72b 100644
+--- a/crates/troved/src/ssh_agent/keeagent.rs
++++ b/crates/troved/src/ssh_agent/keeagent.rs
+@@ -64,11 +64,57 @@ pub enum Encoding {
+ /// The declared `encoding=` always matches the bytes — a file that lies about
+ /// its encoding is exactly the trap this module had to be fixed for.
+ pub fn settings_xml_encoded(key_attachment: &str, allow: bool, encoding: Encoding) -> Vec<u8> {
+-    let text = settings_xml_text(key_attachment, allow, encoding);
++    settings_xml_policy(
++        key_attachment,
++        AgentPolicy {
++            allow,
++            ..AgentPolicy::default()
++        },
++        encoding,
++    )
++}
++
++/// The per-entry agent policy, as the file expresses it.
++///
++/// This is what an editor writes; [`ForwardPolicy`] is what the loader reads
++/// back out. `lifetime_secs: None` means "no lifetime constraint" — the entry
++/// defers to whatever default the caller applies.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct AgentPolicy {
++    pub allow: bool,
++    pub lifetime_secs: Option<u32>,
++    pub confirm: bool,
++    pub remove_at_close: bool,
++}
++
++impl Default for AgentPolicy {
++    fn default() -> Self {
++        Self {
++            allow: true,
++            lifetime_secs: None,
++            confirm: false,
++            // KeePassXC's own default, and the safer one: a key that outlived
++            // the database it came from would surprise anyone who locked.
++            remove_at_close: true,
++        }
++    }
++}
++
++/// Write settings expressing `policy`, in `encoding`.
++pub fn settings_xml_policy(
++    key_attachment: &str,
++    policy: AgentPolicy,
++    encoding: Encoding,
++) -> Vec<u8> {
++    let declared = match encoding {
++        Encoding::Utf8 => "utf-8",
++        Encoding::Utf16Le => "UTF-16",
++    };
++    let text = settings_xml_body(key_attachment, policy, declared);
+     match encoding {
+         Encoding::Utf8 => text.into_bytes(),
+         Encoding::Utf16Le => {
+-            let mut out = vec![0xFF, 0xFE]; // BOM, as KeePassXC writes it
++            let mut out = vec![0xFF, 0xFE];
+             for unit in text.encode_utf16() {
+                 out.extend_from_slice(&unit.to_le_bytes());
+             }
+@@ -77,25 +123,26 @@ pub fn settings_xml_encoded(key_attachment: &str, allow: bool, encoding: Encodin
+     }
+ }
+ 
+-fn settings_xml_text(key_attachment: &str, allow: bool, encoding: Encoding) -> String {
+-    let declared = match encoding {
+-        Encoding::Utf8 => "utf-8",
+-        Encoding::Utf16Le => "UTF-16",
+-    };
+-    settings_xml_body(key_attachment, allow, declared)
+-}
+-
+-fn settings_xml_body(key_attachment: &str, allow: bool, declared: &str) -> String {
+-    let _ = declared;
++fn settings_xml_body(key_attachment: &str, policy: AgentPolicy, declared: &str) -> String {
++    let AgentPolicy {
++        allow,
++        lifetime_secs,
++        confirm,
++        remove_at_close,
++    } = policy;
++    // The duration is written even when unused, because that is what KeePassXC
++    // does — it keeps the number you last chose while the flag is off.
++    let use_lifetime = lifetime_secs.is_some();
++    let duration = lifetime_secs.unwrap_or(DEFAULT_LIFETIME_SECS);
+     format!(
+         "<?xml version=\"1.0\" encoding=\"{declared}\"?>\n\
+          <EntrySettings>\n\
+          \x20 <AllowUseOfSshKey>{allow}</AllowUseOfSshKey>\n\
+          \x20 <AddAtDatabaseOpen>{allow}</AddAtDatabaseOpen>\n\
+-         \x20 <RemoveAtDatabaseClose>true</RemoveAtDatabaseClose>\n\
+-         \x20 <UseConfirmConstraintWhenAdding>false</UseConfirmConstraintWhenAdding>\n\
+-         \x20 <UseLifetimeConstraintWhenAdding>false</UseLifetimeConstraintWhenAdding>\n\
+-         \x20 <LifetimeConstraintDuration>{DEFAULT_LIFETIME_SECS}</LifetimeConstraintDuration>\n\
++         \x20 <RemoveAtDatabaseClose>{remove_at_close}</RemoveAtDatabaseClose>\n\
++         \x20 <UseConfirmConstraintWhenAdding>{confirm}</UseConfirmConstraintWhenAdding>\n\
++         \x20 <UseLifetimeConstraintWhenAdding>{use_lifetime}</UseLifetimeConstraintWhenAdding>\n\
++         \x20 <LifetimeConstraintDuration>{duration}</LifetimeConstraintDuration>\n\
+          \x20 <Location>\n\
+          \x20   <SelectedType>Attachment</SelectedType>\n\
+          \x20   <AttachmentName>{key_attachment}</AttachmentName>\n\
+@@ -155,6 +202,10 @@ pub enum Decision {
+     Skip,
+ }
+ 
++/// Decode the attachment to text. Public because anything reading these
++/// settings needs the same UTF-16 handling — a second reader that forgets it
++/// is the exact bug this module was fixed for.
++///
+ /// Decode the attachment to text.
+ ///
+ /// KeePassXC writes this file as **UTF-16** (its own exports declare
+@@ -162,7 +213,7 @@ pub enum Decision {
+ /// user has marked — which is the opposite of the intent, and silently. We
+ /// accept UTF-8 (what trove itself writes), and UTF-16 in either byte order,
+ /// with or without a BOM.
+-fn decode(bytes: &[u8]) -> Option<String> {
++pub fn decode(bytes: &[u8]) -> Option<String> {
+     // UTF-16 MUST be detected before trying UTF-8: NUL is a valid UTF-8
+     // character, so `from_utf8` happily accepts UTF-16LE ASCII text and returns
+     // "<\0A\0l\0l\0o\0w...". Every tag lookup then misses and the entry is
+diff --git a/trove-desktop/src-tauri/Cargo.toml b/trove-desktop/src-tauri/Cargo.toml
+index b91c4de..1bf0d01 100644
+--- a/trove-desktop/src-tauri/Cargo.toml
++++ b/trove-desktop/src-tauri/Cargo.toml
+@@ -35,3 +35,21 @@ trove-core = { path = "../../crates/trove-core" }
+ # it. Same arrangement trove-cli already uses; it pulls in tokio, which Tauri
+ # is running anyway.
+ troved = { path = "../../crates/troved" }
++
++# Argon2 is deliberately CPU-heavy, and unoptimised it is ~10x slower still: a
++# debug build took 11.4s to open a vault the release CLI opens in ~1.5s. That
++# is a dev-experience trap, not a vault problem — so optimise the crates that
++# actually do the KDF work.
++#
++# Deliberately NOT `package."*"`: optimising every dependency cost minutes on
++# each rebuild (and `troved` is a path dep, so editing it rebuilt the lot),
++# which traded a slow unlock for a slow edit-run loop. Only these three are on
++# the hot path.
++[profile.dev.package.argon2]
++opt-level = 3
++
++[profile.dev.package.trove-core]
++opt-level = 3
++
++[profile.dev.package.troved]
++opt-level = 3
+diff --git a/trove-desktop/src-tauri/build.rs b/trove-desktop/src-tauri/build.rs
+index d860e1e..154e24b 100644
+--- a/trove-desktop/src-tauri/build.rs
++++ b/trove-desktop/src-tauri/build.rs
+@@ -1,3 +1,42 @@
++use std::process::Command;
++
+ fn main() {
++    // Build identity, in two parts.
++    //
++    // MODE is the optional half: empty for a production build, so the version
++    // stands alone and nothing has to be trimmed off it later. Anything else —
++    // "dev", "rc", "nightly" — is carried through verbatim and concatenated by
++    // the consumer. Override with TROVE_BUILD_MODE; otherwise a debug build
++    // says "dev" and a release build says nothing.
++    let mode = std::env::var("TROVE_BUILD_MODE").unwrap_or_else(|_| {
++        if std::env::var("PROFILE").as_deref() == Ok("release") {
++            String::new()
++        } else {
++            "dev".to_string()
++        }
++    });
++    println!("cargo:rustc-env=TROVE_BUILD_MODE={mode}");
++    println!("cargo:rerun-if-env-changed=TROVE_BUILD_MODE");
++
++    // COMMIT identifies which build it is, and is only meaningful alongside a
++    // mode — a released version is identified by its version number. Empty
++    // outside a git checkout, so a source tarball still builds.
++    let commit = Command::new("git")
++        .args(["rev-parse", "--short=8", "HEAD"])
++        .output()
++        .ok()
++        .filter(|o| o.status.success())
++        .and_then(|o| String::from_utf8(o.stdout).ok())
++        .map(|s| s.trim().to_string())
++        .unwrap_or_default();
++    println!("cargo:rustc-env=TROVE_DESKTOP_GIT={commit}");
++
++    // Without this the stamp sticks at whatever it was on the first build.
++    for p in ["../../.git/HEAD", "../../.git/refs/heads"] {
++        if std::path::Path::new(p).exists() {
++            println!("cargo:rerun-if-changed={p}");
++        }
++    }
++
+     tauri_build::build()
+ }
+diff --git a/trove-desktop/src-tauri/src/commands.rs b/trove-desktop/src-tauri/src/commands.rs
+index b4995cd..598d9fe 100644
+--- a/trove-desktop/src-tauri/src/commands.rs
++++ b/trove-desktop/src-tauri/src/commands.rs
+@@ -20,10 +20,10 @@ use std::str::FromStr;
+ use std::sync::Mutex;
+ 
+ use serde::{Deserialize, Serialize};
+-use tauri::{AppHandle, Manager, State};
++use tauri::{AppHandle, Emitter as _, Manager, State};
+ use trove_core::{EntryId, Vault};
+ use troved::materialize::{self, MaterializedFile, MaterializedStore};
+-use troved::ssh_agent::{self, ForwardedKey, LoadedKey};
++use troved::ssh_agent::{self, keeagent, ForwardedKey, LoadedKey};
+ use zxcvbn::zxcvbn;
+ 
+ /// Basename of the JSON file (in the app config dir) that persists the
+@@ -48,6 +48,10 @@ pub struct RegisteredVault {
+     /// Files this vault materialized, wiped on lock. Shares the daemon's
+     /// store type so `materialize::wipe_all` does the removal.
+     pub materialized: MaterializedStore,
++    /// Unix seconds at which the first forwarded key expires, or `None` when
++    /// nothing was forwarded or nothing expires. The agent keeps its own clock
++    /// and never reports it, so this is trove's record of what it asked for.
++    pub keys_expire_at: Option<u64>,
+ }
+ 
+ impl RegisteredVault {
+@@ -58,6 +62,7 @@ impl RegisteredVault {
+             vault: None,
+             exported_keys: Vec::new(),
+             materialized: MaterializedStore::default(),
++            keys_expire_at: None,
+         }
+     }
+ }
+@@ -81,6 +86,13 @@ pub struct Settings {
+     /// Write `Materialize.*` entries to their target paths on unlock, and wipe
+     /// them on lock.
+     pub materialize: bool,
++    /// Minutes of no interaction before the vault view locks itself. `0`
++    /// disables it.
++    ///
++    /// This closes the window and drops the decrypted database; it does NOT
++    /// retract keys from the OS agent, which have their own expiry. Locking a
++    /// UI and revoking machine-wide credentials are different decisions.
++    pub idle_lock_minutes: u32,
+ }
+ 
+ impl Default for Settings {
+@@ -94,6 +106,7 @@ impl Default for Settings {
+             system_agent: true,
+             system_agent_lifetime: 900,
+             materialize: false,
++            idle_lock_minutes: 5,
+         }
+     }
+ }
+@@ -126,6 +139,13 @@ pub struct VaultDto {
+     pub file: String,
+     pub path: String,
+     pub locked: bool,
++    /// How many of this vault's keys are currently sitting in the system
++    /// agent. The whole point of forwarding is invisible otherwise — this is
++    /// what makes "are my keys actually loaded?" answerable without a terminal.
++    pub agent_keys: usize,
++    /// When the soonest-expiring forwarded key drops out of the agent, in unix
++    /// seconds. `null` when nothing expires — the UI shows a countdown from it.
++    pub keys_expire_at: Option<u64>,
+ }
+ 
+ /// Non-secret view of an entry, safe to render in a list. Carries a strength
+@@ -164,6 +184,14 @@ pub struct EntryDto {
+     /// unlocking adds it to the system agent. Backed by `KeeAgent.settings`,
+     /// the same bytes KeePassXC reads and writes.
+     pub agent_key: bool,
++    /// Per-entry expiry in seconds, or `null` to use the app's default. This is
++    /// KeeAgent's `UseLifetimeConstraintWhenAdding` + `LifetimeConstraintDuration`
++    /// folded into one value, the same way the loader reads it.
++    pub agent_lifetime: Option<u32>,
++    /// Ask the agent to confirm before every use of this key.
++    pub agent_confirm: bool,
++    /// Take this key back out of the agent when the vault is locked.
++    pub agent_remove_on_close: bool,
+ }
+ 
+ /// One custom string field (`k` = name, `v` = value).
+@@ -266,6 +294,8 @@ fn vault_dto(id: &str, rv: &RegisteredVault) -> VaultDto {
+         file: vault_file(&rv.path),
+         path: rv.path.to_string_lossy().into_owned(),
+         locked: rv.vault.is_none(),
++        agent_keys: rv.exported_keys.len(),
++        keys_expire_at: rv.keys_expire_at,
+     }
+ }
+ 
+@@ -350,6 +380,67 @@ fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+     std::fs::write(&path, json).map_err(|e| format!("writing settings: {e}"))
+ }
+ 
++/// What build this is, for the title bar.
++///
++/// Two parts: the version, which every build has, and an optional mode. A
++/// production build has an empty mode, so its version stands alone and nothing
++/// has to be stripped back off for display; anything else carries the mode and
++/// the commit, because "which build am I looking at" is otherwise guesswork
++/// when a dev window and an installed one look identical.
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct BuildInfo {
++    pub version: String,
++    /// Empty in production; otherwise "dev", "rc", "nightly"… Set at compile
++    /// time from `TROVE_BUILD_MODE`.
++    pub mode: String,
++    /// Short commit, or empty outside a git checkout. Only interesting
++    /// alongside a mode — a release is identified by its version.
++    pub commit: String,
++}
++
++#[tauri::command]
++pub fn build_info() -> BuildInfo {
++    BuildInfo {
++        version: env!("CARGO_PKG_VERSION").to_string(),
++        mode: env!("TROVE_BUILD_MODE").to_string(),
++        commit: env!("TROVE_DESKTOP_GIT").to_string(),
++    }
++}
++
++// --- unlock progress -------------------------------------------------------
++
++/// One step of an unlock, reported to the UI as it happens.
++///
++/// Unlock is slow by construction — the KDF is deliberately expensive, and the
++/// agent hand-off is a round trip per key — so a silent dialog reads as a
++/// hang. The frontend renders these as a checklist and ticks them off.
++#[derive(Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++pub struct UnlockStep {
++    /// Stable id the UI matches on: `open`, `entries`, `agent`, `files`.
++    pub step: &'static str,
++    /// `pending` while running, `done` when finished, `skipped` when the
++    /// setting is off, `failed` when it did not work (never fatal).
++    pub state: &'static str,
++    /// Human detail, e.g. "4 keys" — shown beside the step.
++    pub detail: String,
++}
++
++const UNLOCK_PROGRESS_EVENT: &str = "unlock-progress";
++
++fn step(app: &AppHandle, step: &'static str, state: &'static str, detail: impl Into<String>) {
++    // Best-effort: a UI that isn't listening must never fail an unlock.
++    let _ = app.emit(
++        UNLOCK_PROGRESS_EVENT,
++        UnlockStep {
++            step,
++            state,
++            detail: detail.into(),
++        },
++    );
++}
++
+ // --- unlock/lock side effects ----------------------------------------------
+ 
+ /// Push this vault's SSH keys into the system agent, returning what went in so
+@@ -362,23 +453,41 @@ fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+ /// windowed app has no shell.
+ ///
+ /// Best-effort by design: a vault still opens if the agent is unreachable.
+-fn export_keys(vault: &Vault, settings: &Settings) -> Vec<ForwardedKey> {
++async fn export_keys(vault: &Vault, settings: &Settings) -> (Vec<ForwardedKey>, Option<u64>) {
+     if !settings.system_agent {
+-        return Vec::new();
++        return (Vec::new(), None);
+     }
+     let keys: Vec<LoadedKey> = troved::handler::load_ssh_keys_from_vault(vault);
+     if keys.is_empty() {
+-        return Vec::new();
++        return (Vec::new(), None);
+     }
+-    let warnings = tauri::async_runtime::block_on(ssh_agent::forward_on_unlock_when(
+-        true,
+-        &keys,
+-        u64::from(settings.system_agent_lifetime),
+-    ));
++    // Awaited, not `block_on`: this is socket I/O with a per-key timeout, and
++    // blocking a thread on it is what made the window freeze.
++    let warnings =
++        ssh_agent::forward_on_unlock_when(true, &keys, u64::from(settings.system_agent_lifetime))
++            .await;
+     for w in warnings {
+         eprintln!("trove: ssh-agent: {w}");
+     }
+-    ssh_agent::keys_to_unforward(&keys)
++    (
++        ssh_agent::keys_to_unforward(&keys),
++        soonest_expiry(&keys, settings.system_agent_lifetime),
++    )
++}
++
++/// When the soonest of `keys` expires, given the app default for any key that
++/// doesn't state its own. Mirrors the rule in `forward::on_unlock_when`: the
++/// entry's lifetime wins, otherwise the default, and 0 anywhere means never.
++fn soonest_expiry(keys: &[LoadedKey], default_secs: u32) -> Option<u64> {
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .ok()?
++        .as_secs();
++    keys.iter()
++        .map(|k| k.forward.lifetime_secs.unwrap_or(default_secs))
++        .filter(|secs| *secs > 0)
++        .min()
++        .map(|secs| now + u64::from(secs))
+ }
+ 
+ /// Materialize every entry whose `Materialize.*` fields validate. Plan errors
+@@ -412,14 +521,11 @@ fn materialize_all(
+ 
+ /// Undo both side effects, in the daemon's order: files off disk first, then
+ /// keys out of the agent.
+-fn undo_side_effects(rv: &mut RegisteredVault) {
+-    tauri::async_runtime::block_on(async {
+-        materialize::wipe_all(&rv.materialized).await;
+-        if !rv.exported_keys.is_empty() {
+-            ssh_agent::unforward_on_lock(&rv.exported_keys).await;
+-        }
+-    });
+-    rv.exported_keys.clear();
++async fn undo_side_effects(exported: Vec<ForwardedKey>, materialized: MaterializedStore) {
++    materialize::wipe_all(&materialized).await;
++    if !exported.is_empty() {
++        ssh_agent::unforward_on_lock(&exported).await;
++    }
+ }
+ 
+ /// Add-or-update one recent by canonical path, then persist the whole list.
+@@ -439,6 +545,55 @@ fn persist_recent(app: &AppHandle, canonical: &Path, name: &str) -> Result<(), S
+ 
+ // --- open-vault access helpers ---------------------------------------------
+ 
++/// Run `f` against an open vault, off the main thread.
++///
++/// EVERY command that touches a vault must go through this. A synchronous
++/// `#[tauri::command]` runs on the MAIN thread, and these commands hold a
++/// `std::sync::Mutex` over the whole app state while doing kdbx work — so a
++/// sync command is a frozen window and a queue of everything behind it. The
++/// lock is taken and released inside the blocking task, never across an await.
++///
++/// `AppHandle` is `Send`, which is what lets the state be reached from there;
++/// `State` itself cannot cross the boundary.
++async fn on_vault<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
++where
++    T: Send + 'static,
++    F: FnOnce(&Vault) -> Result<T, String> + Send + 'static,
++{
++    tauri::async_runtime::spawn_blocking(move || {
++        let state = app.state::<VaultState>();
++        with_open(&state, &id, f)
++    })
++    .await
++    .map_err(|e| format!("vault task panicked: {e}"))?
++}
++
++/// [`on_vault`] for the mutating half.
++async fn on_vault_mut<T, F>(app: AppHandle, id: String, f: F) -> Result<T, String>
++where
++    T: Send + 'static,
++    F: FnOnce(&mut Vault) -> Result<T, String> + Send + 'static,
++{
++    tauri::async_runtime::spawn_blocking(move || {
++        let state = app.state::<VaultState>();
++        with_open_mut(&state, &id, f)
++    })
++    .await
++    .map_err(|e| format!("vault task panicked: {e}"))?
++}
++
++/// Run any state-touching work off the main thread, for commands that need the
++/// registry rather than an open vault.
++async fn off_main<T, F>(app: AppHandle, f: F) -> Result<T, String>
++where
++    T: Send + 'static,
++    F: FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,
++{
++    tauri::async_runtime::spawn_blocking(move || f(&app))
++        .await
++        .map_err(|e| format!("task panicked: {e}"))?
++}
++
+ fn with_open<T>(
+     state: &State<'_, VaultState>,
+     id: &str,
+@@ -539,7 +694,8 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
+     };
+     let pw_len = u16::try_from(password.chars().count()).unwrap_or(u16::MAX);
+     let strength = strength(&password);
+-    let (ssh_key_attachment, agent_key) = agent_key_state(vault, &s.id, &s.attachment_names);
++    let (ssh_key_attachment, agent_key, policy) =
++        agent_key_state(vault, &s.id, &s.attachment_names);
+ 
+     EntryDto {
+         id,
+@@ -558,6 +714,9 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
+         attachment_names: s.attachment_names,
+         ssh_key_attachment,
+         agent_key,
++        agent_lifetime: policy.lifetime_secs,
++        agent_confirm: policy.confirm,
++        agent_remove_on_close: policy.remove_at_close,
+     }
+ }
+ 
+@@ -568,25 +727,45 @@ fn entry_dto(vault: &Vault, s: trove_core::EntrySummary) -> EntryDto {
+ /// and carries the opt-in. Without it we look for a parseable key so the UI can
+ /// still offer the toggle, and report it as not declared (which is exactly how
+ /// the export path treats it).
+-fn agent_key_state(vault: &Vault, id: &EntryId, attachment_names: &[String]) -> (String, bool) {
++fn agent_key_state(
++    vault: &Vault,
++    id: &EntryId,
++    attachment_names: &[String],
++) -> (String, bool, keeagent::AgentPolicy) {
+     if attachment_names
+         .iter()
+-        .any(|a| a == troved::ssh_agent::keeagent::ATTACHMENT_NAME)
++        .any(|a| a == keeagent::ATTACHMENT_NAME)
+     {
+-        if let Ok(Some(bytes)) = vault.read_binary(id, troved::ssh_agent::keeagent::ATTACHMENT_NAME)
+-        {
++        if let Ok(Some(bytes)) = vault.read_binary(id, keeagent::ATTACHMENT_NAME) {
+             // A declared entry names its attachment and is opted in; an entry
+-            // that opted out still tells us which attachment it was about, so
+-            // read that out of the blob either way.
++            // that opted out still says which attachment it was about, so read
++            // that out of the blob either way. The policy comes back for both,
++            // so the editor shows what is stored rather than a default.
+             let named = keeagent_attachment_name(&bytes);
+-            return match troved::ssh_agent::keeagent::parse(&bytes, "") {
+-                troved::ssh_agent::keeagent::Decision::Load { attachment, .. } => {
+-                    (attachment, true)
+-                }
+-                troved::ssh_agent::keeagent::Decision::Skip => (named.unwrap_or_default(), false),
++            return match keeagent::parse(&bytes, "") {
++                keeagent::Decision::Load {
++                    attachment,
++                    forward,
++                } => (
++                    attachment,
++                    true,
++                    keeagent::AgentPolicy {
++                        allow: true,
++                        lifetime_secs: forward.lifetime_secs,
++                        confirm: forward.confirm,
++                        remove_at_close: forward.remove_at_close,
++                    },
++                ),
++                keeagent::Decision::Skip => (
++                    named.unwrap_or_default(),
++                    false,
++                    stored_policy(&bytes).unwrap_or_default(),
++                ),
+             };
+         }
+     }
++    // No settings at all: the key is found by content scan, so it is not
++    // declared and carries the defaults an editor would start from.
+     let found = attachment_names
+         .iter()
+         .find(|name| {
+@@ -598,12 +777,44 @@ fn agent_key_state(vault: &Vault, id: &EntryId, attachment_names: &[String]) ->
+         })
+         .cloned()
+         .unwrap_or_default();
+-    (found, false)
++    (found, false, keeagent::AgentPolicy::default())
++}
++
++/// Decode a settings blob to text, handling UTF-16 the way the loader does.
++fn keeagent_text(bytes: &[u8]) -> Option<String> {
++    troved::ssh_agent::keeagent::decode(bytes)
++}
++
++/// Read the stored policy out of a blob the loader decided to Skip, so an entry
++/// that is switched off still shows the lifetime/confirm it had.
++fn stored_policy(bytes: &[u8]) -> Option<keeagent::AgentPolicy> {
++    let text = keeagent_text(bytes)?;
++    let tag = |k: &str| -> Option<String> {
++        let open = format!("<{k}>");
++        let close = format!("</{k}>");
++        let start = text.find(&open)? + open.len();
++        let rest = &text[start..];
++        Some(rest[..rest.find(&close)?].trim().to_string())
++    };
++    let flag = |k: &str| tag(k).is_some_and(|v| v.eq_ignore_ascii_case("true"));
++    Some(keeagent::AgentPolicy {
++        allow: false,
++        lifetime_secs: (flag("UseLifetimeConstraintWhenAdding")
++            || flag("UseLifetimeConstraintWhenSigning"))
++        .then(|| tag("LifetimeConstraintDuration").and_then(|d| d.parse().ok()))
++        .flatten(),
++        confirm: flag("UseConfirmConstraintWhenAdding") || flag("UseConfirmConstraintWhenSigning"),
++        remove_at_close: tag("RemoveAtDatabaseClose")
++            .map(|v| v.eq_ignore_ascii_case("true"))
++            .unwrap_or(true),
++    })
+ }
+ 
+ /// Pull `<AttachmentName>` out of a settings blob without judging the opt-in.
+ fn keeagent_attachment_name(bytes: &[u8]) -> Option<String> {
+-    let xml = std::str::from_utf8(bytes).ok()?;
++    // Through the shared decoder: KeePassXC writes UTF-16, and `from_utf8`
++    // accepts those bytes while matching no tags.
++    let xml = &keeagent_text(bytes)?;
+     let start = xml.find("<AttachmentName>")? + "<AttachmentName>".len();
+     let rest = &xml[start..];
+     let end = rest.find("</AttachmentName>")?;
+@@ -853,244 +1064,380 @@ pub fn create_vault(
+ 
+ /// Decrypt a registered vault, store the open `Vault`, return its entry list.
+ #[tauri::command]
+-pub fn unlock_vault(
++pub async fn unlock_vault(
+     app: AppHandle,
+     id: String,
+     password: String,
+     state: State<'_, VaultState>,
+ ) -> Result<Vec<EntryDto>, String> {
+-    let mut guard = state.lock().map_err(poisoned)?;
+-    let rv = guard
+-        .vaults
+-        .get_mut(&id)
+-        .ok_or_else(|| "vault is not registered".to_string())?;
+-    let vault = Vault::open(&rv.path, &password).map_err(|e| e.to_string())?;
++    // ASYNC ON PURPOSE. A synchronous #[tauri::command] runs on the MAIN
++    // thread, and unlock is the heaviest thing this app does: an Argon2 KDF by
++    // design, then socket round-trips to the OS agent (one per key, each with
++    // its own timeout) and file writes. Doing that on the main thread freezes
++    // the window; doing it while holding the state mutex freezes every other
++    // command behind it too. So: never hold the lock across an await, and keep
++    // the CPU-bound open off the runtime's own threads.
++    let path = {
++        let guard = state.lock().map_err(poisoned)?;
++        guard
++            .vaults
++            .get(&id)
++            .ok_or_else(|| "vault is not registered".to_string())?
++            .path
++            .clone()
++    };
++
++    step(&app, "open", "pending", "decrypting");
++    let open_path = path.clone();
++    let vault = tauri::async_runtime::spawn_blocking(move || Vault::open(&open_path, &password))
++        .await
++        .map_err(|e| format!("unlock task panicked: {e}"))?
++        .map_err(|e| {
++            step(&app, "open", "failed", "wrong password");
++            e.to_string()
++        })?;
++    step(&app, "open", "done", "");
++
++    step(&app, "entries", "pending", "");
+     let entries = build_entry_dtos(&vault);
++    step(
++        &app,
++        "entries",
++        "done",
++        format!("{} entries", entries.len()),
++    );
+ 
+     // Unlocking here does what unlocking in the daemon does: keys into the
+-    // system agent (the only route to applications and terminals that can't
+-    // be pointed at our own socket) and materialized files onto disk. Both
+-    // are settings-gated and both are undone by `lock_vault`.
++    // system agent (the only route to applications and terminals that can't be
++    // pointed at our own socket) and materialized files onto disk. Both are
++    // settings-gated and both are undone by `lock_vault`.
+     let settings = load_settings(&app);
+-    rv.exported_keys = export_keys(&vault, &settings);
+-    materialize_all(&vault, &rv.path.clone(), &rv.materialized, &settings);
+ 
+-    rv.vault = Some(vault);
++    if settings.system_agent {
++        step(&app, "agent", "pending", "");
++    } else {
++        step(&app, "agent", "skipped", "turned off");
++    }
++    let (exported, keys_expire_at) = export_keys(&vault, &settings).await;
++    if settings.system_agent {
++        step(
++            &app,
++            "agent",
++            "done",
++            match exported.len() {
++                0 => "no keys marked for the agent".to_string(),
++                1 => "1 key".to_string(),
++                n => format!("{n} keys"),
++            },
++        );
++    }
++
++    let materialized = MaterializedStore::default();
++    if settings.materialize {
++        step(&app, "files", "pending", "");
++    } else {
++        step(&app, "files", "skipped", "turned off");
++    }
++    materialize_all(&vault, &path, &materialized, &settings);
++    if settings.materialize {
++        let n = materialized.read().await.len();
++        step(&app, "files", "done", format!("{n} written"));
++    }
++
++    {
++        let mut guard = state.lock().map_err(poisoned)?;
++        let rv = guard
++            .vaults
++            .get_mut(&id)
++            .ok_or_else(|| "vault vanished while unlocking".to_string())?;
++        rv.exported_keys = exported;
++        rv.keys_expire_at = keys_expire_at;
++        rv.materialized = materialized;
++        rv.vault = Some(vault);
++    }
+     Ok(entries)
+ }
+ 
+ /// Drop the decrypted vault (keep it registered), marking it locked.
+ #[tauri::command]
+-pub fn lock_vault(id: String, state: State<'_, VaultState>) -> Result<(), String> {
+-    let mut guard = state.lock().map_err(poisoned)?;
+-    let rv = guard
+-        .vaults
+-        .get_mut(&id)
+-        .ok_or_else(|| "vault is not registered".to_string())?;
+-    undo_side_effects(rv);
+-    rv.vault = None;
++/// `retract_keys` decides whether what trove handed the machine comes back:
++/// keys out of the OS agent, materialized files off disk.
++/// An EXPLICIT lock does (KeePassXC parity, honouring each entry's
++/// `RemoveAtDatabaseClose`). The idle timer does NOT: it exists to blank a
++/// window left untouched, and revoking machine-wide credentials because nobody
++/// clicked the app for five minutes pulls keys out from under a running
++/// `git push`. Absent ⇒ true, so an older caller keeps the safer behaviour.
++pub async fn lock_vault(
++    id: String,
++    retract_keys: Option<bool>,
++    state: State<'_, VaultState>,
++) -> Result<(), String> {
++    // Same reasoning as `unlock_vault`: retracting keys from the OS agent and
++    // wiping files is I/O, and a sync command would do it on the main thread.
++    // Take what has to be undone out under a short lock, drop the vault so it
++    // reads as locked immediately, then do the undoing without the lock held.
++    // One rule, both kinds of handover: an app lock HIDES (window locks, vault
++    // forgotten, nothing outside the app is touched); an explicit lock PUTS
++    // EVERYTHING BACK (keys retracted, files wiped). Wiping files on an idle
++    // timer while leaving keys was the inconsistency — the timer says nobody
++    // clicked the window, which says nothing about what the terminal is doing,
++    // and a kubeconfig yanked mid-`kubectl` fails the same way a key does.
++    // Both handovers have their own expiry for the "after a while" case.
++    let put_back = retract_keys.unwrap_or(true);
++    let (exported, materialized) = {
++        let mut guard = state.lock().map_err(poisoned)?;
++        let rv = guard
++            .vaults
++            .get_mut(&id)
++            .ok_or_else(|| "vault is not registered".to_string())?;
++        rv.vault = None;
++        if put_back {
++            rv.keys_expire_at = None;
++            (
++                std::mem::take(&mut rv.exported_keys),
++                std::mem::take(&mut rv.materialized),
++            )
++        } else {
++            (Vec::new(), MaterializedStore::default())
++        }
++    };
++    undo_side_effects(exported, materialized).await;
+     Ok(())
+ }
+ 
+ /// Current app settings, for the settings UI.
+ #[tauri::command]
+-pub fn get_settings(app: AppHandle) -> Settings {
+-    load_settings(&app)
++pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
++    off_main(app, |a| Ok(load_settings(a))).await
+ }
+ 
+ /// Persist app settings. Takes effect on the next unlock; already-exported
+ /// keys stay in the agent until the vault locks.
+ #[tauri::command]
+-pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+-    save_settings(&app, &settings)
++pub async fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
++    off_main(app, move |a| save_settings(a, &settings)).await
+ }
+ 
+ /// Re-read the entry list for an unlocked vault.
+ #[tauri::command]
+-pub fn list_entries(id: String, state: State<'_, VaultState>) -> Result<Vec<EntryDto>, String> {
+-    with_open(&state, &id, |v| Ok(build_entry_dtos(v)))
++pub async fn list_entries(app: AppHandle, id: String) -> Result<Vec<EntryDto>, String> {
++    on_vault(app, id, |v| Ok(build_entry_dtos(v))).await
+ }
+ 
+ // --- commands: reading one entry -------------------------------------------
+ 
+ /// Read a single field (e.g. `Password`) for one entry, on demand.
+ #[tauri::command]
+-pub fn get_field(
++pub async fn get_field(
++    app: AppHandle,
+     id: String,
+     entry_id: String,
+     field: String,
+-    state: State<'_, VaultState>,
+ ) -> Result<Option<String>, String> {
+-    let eid = EntryId::from_str(&entry_id).unwrap();
+-    with_open(&state, &id, |v| {
++    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
++    on_vault(app, id, move |v| {
+         v.get_field(&eid, &field).map_err(|e| e.to_string())
+     })
++    .await
+ }
+ 
+ /// Notes + custom fields + password for the selected entry.
+ #[tauri::command]
+-pub fn get_entry_detail(
++pub async fn get_entry_detail(
++    app: AppHandle,
+     id: String,
+     entry_id: String,
+-    state: State<'_, VaultState>,
+ ) -> Result<EntryDetailDto, String> {
+-    let eid = EntryId::from_str(&entry_id).unwrap();
+-    with_open(&state, &id, |v| entry_detail(v, &eid))
++    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
++    on_vault(app, id, move |v| entry_detail(v, &eid)).await
+ }
+ 
+ // --- commands: mutations ----------------------------------------------------
+ 
+ /// Create or update an entry, save the vault, return the fresh list + saved id.
+ #[tauri::command]
+-pub fn save_entry(
++pub async fn save_entry(
++    app: AppHandle,
+     id: String,
+     input: EntryInput,
+-    state: State<'_, VaultState>,
+ ) -> Result<SaveResult, String> {
+-    with_open_mut(&state, &id, |vault| {
++    on_vault_mut(app, id, move |vault| {
+         let entry_id = apply_save_entry(vault, &input)?;
+         Ok(SaveResult {
+             entries: build_entry_dtos(vault),
+             id: entry_id.as_str().to_string(),
+         })
+     })
++    .await
+ }
+ 
+ /// Move an entry to the recycle bin, save, return the fresh list.
+ #[tauri::command]
+-pub fn delete_entry(
++pub async fn delete_entry(
++    app: AppHandle,
+     id: String,
+     entry_id: String,
+-    state: State<'_, VaultState>,
+ ) -> Result<Vec<EntryDto>, String> {
+-    let eid = EntryId::from_str(&entry_id).unwrap();
+-    with_open_mut(&state, &id, |vault| {
++    // Not `unwrap`: a malformed id would panic the command, and a panic inside
++    // the blocking task surfaces as an unhelpful "task panicked".
++    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
++    on_vault_mut(app, id, move |vault| {
+         apply_delete(vault, &eid)?;
+         Ok(build_entry_dtos(vault))
+     })
++    .await
+ }
+ 
+ /// Set/clear the favorite flag, save, return the fresh list.
+ #[tauri::command]
+-pub fn set_favorite(
++pub async fn set_favorite(
++    app: AppHandle,
+     id: String,
+     entry_id: String,
+     fav: bool,
+-    state: State<'_, VaultState>,
+ ) -> Result<Vec<EntryDto>, String> {
+-    let eid = EntryId::from_str(&entry_id).unwrap();
+-    with_open_mut(&state, &id, |vault| {
++    let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
++    on_vault_mut(app, id, move |vault| {
+         apply_set_favorite(vault, &eid, fav)?;
+         Ok(build_entry_dtos(vault))
+     })
++    .await
+ }
+ 
+-/// Pick whether this entry's SSH key is added to the system agent on unlock.
++/// Set this entry's SSH-agent policy: whether the key is added on unlock, how
++/// long the agent should keep it, whether to confirm each use, and whether a
++/// lock takes it back.
+ ///
+ /// Writes the same `KeeAgent.settings` bytes KeePassXC reads, so the choice
+ /// travels with the vault file and both tools agree. Applies immediately as
+-/// well as on the next unlock: enabling exports the key now, disabling takes
+-/// it back out of the agent.
++/// well as on the next unlock.
++///
++/// `lifetime` is seconds, or `null` for "use the app default" — the same
++/// meaning `UseLifetimeConstraintWhenAdding=false` has in the file.
+ #[tauri::command]
+-pub fn set_agent_key(
++pub async fn set_agent_key(
+     app: AppHandle,
+     id: String,
+     entry_id: String,
+     enabled: bool,
+-    state: State<'_, VaultState>,
++    lifetime: Option<u32>,
++    confirm: Option<bool>,
++    remove_on_close: Option<bool>,
+ ) -> Result<Vec<EntryDto>, String> {
+     let eid = EntryId::from_str(&entry_id).map_err(|e| format!("bad entry id: {e}"))?;
+     let settings = load_settings(&app);
++    let policy = keeagent::AgentPolicy {
++        allow: enabled,
++        lifetime_secs: lifetime.filter(|n| *n > 0),
++        confirm: confirm.unwrap_or(false),
++        remove_at_close: remove_on_close.unwrap_or(true),
++    };
+ 
+-    let mut guard = state.lock().map_err(poisoned)?;
+-    let rv = guard
+-        .vaults
+-        .get_mut(&id)
+-        .ok_or_else(|| "vault is not registered".to_string())?;
+-    let vault = rv
+-        .vault
+-        .as_mut()
+-        .ok_or_else(|| "vault is locked".to_string())?;
+-
+-    let summary = vault
+-        .list_entries()
+-        .into_iter()
+-        .find(|s| s.id == eid)
+-        .ok_or_else(|| "entry not found".to_string())?;
+-    let (attachment, _) = agent_key_state(vault, &eid, &summary.attachment_names);
+-    if attachment.is_empty() {
+-        return Err("this entry has no SSH private key attachment".to_string());
+-    }
+-
+-    let key_bytes = vault
+-        .read_binary(&eid, &attachment)
+-        .map_err(|e| e.to_string())?
+-        .ok_or_else(|| format!("attachment '{attachment}' is missing"))?;
+-    // Parsed once up front, purely to learn this entry's public blob — it's how
+-    // we find the same key again after the write, and how the agent addresses
+-    // it. Refuse early if the attachment isn't a key we can serve.
+-    let probe = troved::ssh_agent::keys::parse_private_key(&key_bytes, &summary.title)
+-        .map_err(|e| format!("attachment '{attachment}' is not a usable SSH key: {e}"))?;
+-
+-    vault
+-        .attach_binary(
+-            &eid,
+-            troved::ssh_agent::keeagent::ATTACHMENT_NAME,
+-            &troved::ssh_agent::keeagent::settings_xml_with(&attachment, enabled),
+-        )
+-        .map_err(|e| e.to_string())?;
+-    vault.save().map_err(|e| e.to_string())?;
++    // Phase 1 — vault write, under the lock, on a blocking thread. Returns the
++    // key so the agent work can happen with the lock released.
++    let write = {
++        let app = app.clone();
++        let id = id.clone();
++        tauri::async_runtime::spawn_blocking(move || {
++            let state = app.state::<VaultState>();
++            with_open_mut(&state, &id, move |vault| {
++                let summary = vault
++                    .list_entries()
++                    .into_iter()
++                    .find(|s| s.id == eid)
++                    .ok_or_else(|| "entry not found".to_string())?;
++                let (attachment, _, _) = agent_key_state(vault, &eid, &summary.attachment_names);
++                if attachment.is_empty() {
++                    return Err("this entry has no SSH private key attachment".to_string());
++                }
++                let key_bytes = vault
++                    .read_binary(&eid, &attachment)
++                    .map_err(|e| e.to_string())?
++                    .ok_or_else(|| format!("attachment '{attachment}' is missing"))?;
++                // Parsed up front to learn the public blob — how the agent
++                // addresses this key — and to refuse early if it isn't usable.
++                let probe = troved::ssh_agent::keys::parse_private_key(&key_bytes, &summary.title)
++                    .map_err(|e| {
++                        format!("attachment '{attachment}' is not a usable SSH key: {e}")
++                    })?;
++                vault
++                    .attach_binary(
++                        &eid,
++                        keeagent::ATTACHMENT_NAME,
++                        &keeagent::settings_xml_policy(
++                            &attachment,
++                            policy,
++                            keeagent::Encoding::Utf8,
++                        ),
++                    )
++                    .map_err(|e| e.to_string())?;
++                vault.save().map_err(|e| e.to_string())?;
++                // Re-read so the key carries the policy just written. On
++                // disable the loader no longer returns it, so fall back to the
++                // probe — the agent still has to be told to drop it.
++                let key = troved::handler::load_ssh_keys_from_vault(vault)
++                    .into_iter()
++                    .find(|k| k.public_blob == probe.public_blob)
++                    .unwrap_or(probe);
++                Ok(key)
++            })
++        })
++        .await
++        .map_err(|e| format!("vault task panicked: {e}"))??
++    };
+ 
+-    // Reflect the change in the running agent, so the toggle does what it says
+-    // without waiting for a lock/unlock cycle.
++    // Phase 2 — agent I/O with NO lock held. A round trip per key with its own
++    // timeout; holding the state mutex across it would block every other
++    // command, which is what the sync version did.
+     if settings.system_agent {
+-        // Re-read the entry so the key carries the policy we just wrote, then
+-        // apply it to the live agent — the toggle should do what it says
+-        // without waiting for a lock/unlock cycle.
+-        // On enable the reloaded key carries the settings we just wrote; on
+-        // disable the loader no longer returns it at all, so fall back to the
+-        // probe — we still have to tell the agent to drop it.
+-        let key = troved::handler::load_ssh_keys_from_vault(vault)
+-            .into_iter()
+-            .find(|k| k.public_blob == probe.public_blob)
+-            .unwrap_or(probe);
+-        {
+-            let forwarded = ssh_agent::keys_to_unforward(std::slice::from_ref(&key));
+-            tauri::async_runtime::block_on(async {
+-                if enabled {
+-                    for w in ssh_agent::forward_on_unlock_when(
+-                        true,
+-                        std::slice::from_ref(&key),
+-                        u64::from(settings.system_agent_lifetime),
+-                    )
+-                    .await
+-                    {
+-                        eprintln!("trove: ssh-agent: {w}");
+-                    }
+-                } else {
+-                    // Not keys_to_unforward: that honours RemoveAtDatabaseClose,
+-                    // and this is an explicit "take it out now" regardless.
+-                    ssh_agent::unforward_on_lock(&[ForwardedKey::from(&key)]).await;
+-                }
+-            });
+-            if enabled {
+-                for f in forwarded {
+-                    if !rv
+-                        .exported_keys
+-                        .iter()
+-                        .any(|k| k.public_blob == f.public_blob)
+-                    {
+-                        rv.exported_keys.push(f);
+-                    }
+-                }
+-            } else {
+-                rv.exported_keys
+-                    .retain(|k| k.public_blob != key.public_blob);
++        if enabled {
++            for w in ssh_agent::forward_on_unlock_when(
++                true,
++                std::slice::from_ref(&write),
++                u64::from(settings.system_agent_lifetime),
++            )
++            .await
++            {
++                eprintln!("trove: ssh-agent: {w}");
+             }
++        } else {
++            // Not `keys_to_unforward`: that honours RemoveAtDatabaseClose, and
++            // this is an explicit "take it out now" regardless.
++            ssh_agent::unforward_on_lock(&[ForwardedKey::from(&write)]).await;
+         }
+     }
+ 
+-    Ok(build_entry_dtos(vault))
++    // Phase 3 — bookkeeping + the fresh list, under the lock again.
++    let blob = write.public_blob.clone();
++    let forwarded = ssh_agent::keys_to_unforward(std::slice::from_ref(&write));
++    tauri::async_runtime::spawn_blocking(move || {
++        let state = app.state::<VaultState>();
++        let mut guard = state.lock().map_err(poisoned)?;
++        let rv = guard
++            .vaults
++            .get_mut(&id)
++            .ok_or_else(|| "vault is not registered".to_string())?;
++        if enabled {
++            for f in forwarded {
++                if !rv
++                    .exported_keys
++                    .iter()
++                    .any(|k| k.public_blob == f.public_blob)
++                {
++                    rv.exported_keys.push(f);
++                }
++            }
++        } else {
++            rv.exported_keys.retain(|k| k.public_blob != blob);
++        }
++        let vault = rv
++            .vault
++            .as_ref()
++            .ok_or_else(|| "vault is locked".to_string())?;
++        Ok(build_entry_dtos(vault))
++    })
++    .await
++    .map_err(|e| format!("vault task panicked: {e}"))?
+ }
+ 
+ // --- tests -----------------------------------------------------------------
+diff --git a/trove-desktop/src-tauri/src/lib.rs b/trove-desktop/src-tauri/src/lib.rs
+index e147bac..85f9570 100644
+--- a/trove-desktop/src-tauri/src/lib.rs
++++ b/trove-desktop/src-tauri/src/lib.rs
+@@ -38,6 +38,7 @@ pub fn run() {
+             commands::register_vault,
+             commands::create_vault,
+             commands::unlock_vault,
++            commands::build_info,
+             commands::get_settings,
+             commands::set_agent_key,
+             commands::set_settings,
+diff --git a/trove-desktop/src-tauri/tauri.conf.json b/trove-desktop/src-tauri/tauri.conf.json
+index b58c3e0..f463e73 100644
+--- a/trove-desktop/src-tauri/tauri.conf.json
++++ b/trove-desktop/src-tauri/tauri.conf.json
+@@ -26,7 +26,13 @@
+   },
+   "bundle": {
+     "active": true,
+-    "targets": ["app", "dmg", "deb", "appimage", "nsis"],
++    "targets": [
++      "app",
++      "dmg",
++      "deb",
++      "appimage",
++      "nsis"
++    ],
+     "icon": [
+       "icons/32x32.png",
+       "icons/128x128.png",
+diff --git a/trove-desktop/src/App.jsx b/trove-desktop/src/App.jsx
+index 748098d..44355fa 100644
+--- a/trove-desktop/src/App.jsx
++++ b/trove-desktop/src/App.jsx
+@@ -57,6 +57,22 @@ function ResizeHandle({ onDelta, onReset, label }) {
+ 
+ // Placeholder so the chrome renders before any vault is registered (fresh
+ // install with no persisted recents). It reads as a locked, empty vault.
++// Countdown text. Coarse while it is far away (nobody reads "1:04:59" as
++// anything but "about an hour") and precise under a minute, when it does start
++// to matter.
++function fmtLeft(ms) {
++  const s = Math.ceil(ms / 1000);
++  if (s >= 3600) {
++    // Floor, not round: rounding the remainder produces "24h60m" at 90000s
++    // instead of carrying into "25h".
++    const h = Math.floor(s / 3600);
++    const m = Math.floor((s % 3600) / 60);
++    return m ? `${h}h${m}m` : `${h}h`;
++  }
++  if (s >= 60) return `${Math.floor(s / 60)}m`;
++  return `${s}s`;
++}
++
+ const NO_VAULT = { id: null, name: "No vault", file: "—", path: "", locked: true, entries: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
+ 
+ // Give a fetched VaultDto the per-vault view state the UI layers on top.
+@@ -90,6 +106,9 @@ function App() {
+   const [themeMenu, setThemeMenu] = useState(false);
+   const [switcher, setSwitcher] = useState(false);
+   const [openVault, setOpenVault] = useState(false);
++  // Which build this is. A dev window and an installed one look identical
++  // otherwise, which makes "is this even my change?" a guess.
++  const [build, setBuild] = useState(null);
+   const [newVaultPath, setNewVaultPath] = useState(null);
+   const [revealed, setRevealed] = useState(false);
+   // Secret detail for the selected entry, fetched on selection (get_entry_detail).
+@@ -114,6 +133,51 @@ function App() {
+   // nothing on the main screen needs them, and a promise resolving at mount
+   // lands a state update in the middle of whatever else is starting up — which
+   // made the unlock tests flaky on a loaded machine.
++  useEffect(() => {
++    api.buildInfo().then(setBuild).catch(() => {});
++    api.getSettings().then(setSettings).catch(() => {});
++  }, []);
++
++  // A production build is just its version; anything else carries the mode and
++  // the commit, so "which build is this?" is answerable from the title bar.
++  const buildLabel = !build
++    ? ""
++    : build.mode
++      ? `${build.version}-${build.mode}${build.commit ? ` · ${build.commit}` : ""}`
++      : build.version;
++
++  // The pill says what the timer actually does, so changing the setting is
++  // visible without opening the panel again.
++  // One second-tick drives both countdowns; two intervals would drift apart.
++  const appLockAt = useRef(null);
++  const [now, setNow] = useState(() => Date.now());
++  useEffect(() => {
++    if (vault.locked) return undefined;
++    const t = setInterval(() => setNow(Date.now()), 1000);
++    return () => clearInterval(t);
++  }, [vault.locked]);
++
++  const openCount = vaults.filter((v) => !v.locked).length;
++  const agentKeys = vaults.reduce((n, v) => n + (v.agentKeys || 0), 0);
++  const idleMins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
++  // Counts down to the window locking; resets on every interaction, so it also
++  // shows that trove noticed you are still here.
++  const appLockLeft = idleMins > 0 && !locked && appLockAt.current
++    ? Math.max(0, appLockAt.current - now)
++    : null;
++  const idleLabel = idleMins > 0
++    ? `App lock ${appLockLeft == null ? `${idleMins}m` : fmtLeft(appLockLeft)}`
++    : "No app lock";
++
++  // Counts down to the first forwarded key dropping out of the agent. Not a
++  // "data lock" timer — a data lock is something you do, not something that
++  // happens — this is the expiry those keys were given.
++  const expireAt = vaults.reduce(
++    (soonest, v) => (v.keysExpireAt && (!soonest || v.keysExpireAt < soonest) ? v.keysExpireAt : soonest),
++    null
++  );
++  const keysLeft = expireAt ? Math.max(0, expireAt * 1000 - now) : null;
++
+   const openSettings = useCallback(() => {
+     setSettingsOpen(true);
+     if (settings) return;
+@@ -249,20 +313,47 @@ function App() {
+   }, [selected, copyPassword]);
+ 
+   // ---- vault actions ----
+-  const lock = useCallback(async () => {
++  // `retractKeys` decides whether forwarded keys come back out of the OS agent.
++  // An explicit lock says yes; the idle timer says no — see the auto-lock below.
++  // Lock ONE vault. `retractKeys` false is the app-lock case: hide it, leave
++  // what it handed the machine alone.
++  const lockOne = useCallback(async (id, retractKeys) => {
++    if (id == null) return;
++    try { await api.lockVault(id, retractKeys); } catch (e) {}
++    setVaults((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], loaded: false, selId: null } : v));
++  }, []);
++
++  // Data lock: this database only. Its keys come out of the agent and its files
++  // go, and if another vault is still open you land on that one rather than at
++  // a login screen — you have not finished with the app, only with this vault.
++  const dataLock = useCallback(async () => {
+     stopClip();
+     setPalette(false); setForm(null); setDel(null);
+     const id = activeId;
+-    if (id == null) return;
+-    try { await api.lockVault(id); } catch (e) {}
+-    setVaults((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], loaded: false, selId: null } : v));
+-  }, [activeId, stopClip]);
++    await lockOne(id, true);
++    const next = vaults.find((v) => v.id !== id && !v.locked);
++    if (next) setActiveId(next.id);
++  }, [activeId, vaults, lockOne, stopClip]);
++
++  // App lock: the whole app steps away, so every open vault hides. Nothing is
++  // taken back from the machine — that is what the data lock is for.
++  const appLock = useCallback(async () => {
++    stopClip();
++    setPalette(false); setForm(null); setDel(null);
++    const open = vaults.filter((v) => !v.locked).map((v) => v.id);
++    for (const id of open) await lockOne(id, false);
++  }, [vaults, lockOne, stopClip]);
++
++  // Kept for callers that just mean "lock what I am looking at".
++  const lock = useCallback((retractKeys = true) => (retractKeys ? dataLock() : appLock()), [dataLock, appLock]);
+   // Async: decrypt via the backend. Resolves on success (parent unmounts Unlock),
+   // rejects (bad password) so <Unlock> can surface the error.
+-  const unlock = async (pw) => {
+-    const list = await api.unlockVault(vault.id, pw);
++  // Resolves with the entry list and deliberately does NOT flip the view:
++  // <Unlock> shows a progress checklist while the backend works, and flipping
++  // here would unmount it mid-list. It calls `unlockReady` when it's finished.
++  const unlock = async (pw) => await api.unlockVault(vault.id, pw);
++  const unlockReady = (list) =>
+     patch({ locked: false, entries: list, loaded: true, group: "__all", selId: list[0] ? list[0].id : null });
+-  };
+   const switchVault = (id) => {
+     setActiveId(id); setSwitcher(false);
+     setPalette(false); setForm(null); setDel(null); setRevealed(false);
+@@ -316,9 +407,9 @@ function App() {
+ 
+   // Per-key opt-in. The backend writes KeeAgent.settings into the vault and
+   // adds/removes the key in the running agent, then hands back a fresh list.
+-  const toggleAgentKey = async (entryId, enabled) => {
++  const toggleAgentKey = async (entryId, enabled, policy) => {
+     try {
+-      const list = await api.setAgentKey(vault.id, entryId, enabled);
++      const list = await api.setAgentKey(vault.id, entryId, enabled, policy);
+       patch({ entries: list });
+     } catch (e) {
+       console.error("agent key toggle failed", e);
+@@ -350,21 +441,31 @@ function App() {
+     setDel(null); setForm(null); flashPlain("Entry deleted");
+   };
+ 
+-  // ---- idle auto-lock (5 minutes) ----
++  // ---- app lock (idle) ----
++  // Locks the APP: closes the vault view and drops the decrypted database. It
++  // deliberately leaves keys in the OS agent. Those are machine-wide credentials with their own expiry;
++  // yanking them because nobody clicked this window for five minutes would kill
++  // a `git push` running in a terminal. An explicit Lock still retracts them.
+   useEffect(() => {
+     if (vault.locked || vault.id == null) return;
+     let t;
+-    const reset = () => { clearTimeout(t); t = setTimeout(() => { lock(); }, 5 * 60 * 1000); };
++    const mins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
++    if (mins <= 0) return undefined; // 0 = never lock on idle
++    const reset = () => {
++      clearTimeout(t);
++      appLockAt.current = Date.now() + mins * 60 * 1000;
++      t = setTimeout(() => { appLock(); }, mins * 60 * 1000);
++    };
+     const evs = ["mousemove", "mousedown", "keydown", "wheel", "touchstart"];
+     evs.forEach((ev) => window.addEventListener(ev, reset, { passive: true }));
+     reset();
+     return () => { clearTimeout(t); evs.forEach((ev) => window.removeEventListener(ev, reset)); };
+-  }, [vault.locked, vault.id, lock]);
++  }, [vault.locked, vault.id, appLock, settings]);
+ 
+   const paletteActions = [
+     { label: "New entry", icon: "plus", kbd: "⌘N", run: openNew },
+     { label: "Copy password", icon: "key", kbd: "⌘C", run: () => copy(null, null, "password") },
+-    { label: "Lock vault", icon: "lock", kbd: "⌘L", run: lock },
++    { label: "Data lock — remove keys + files", icon: "lock", kbd: "⌘L", run: dataLock },
+     ...vaults.filter((v) => v.id !== activeId).map((v) => ({
+       label: "Switch to " + v.name + (v.locked ? " (locked)" : ""), icon: "shield",
+       kbd: "⌘" + (vaults.indexOf(v) + 1), run: () => switchVault(v.id),
+@@ -373,7 +474,7 @@ function App() {
+     { label: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", icon: theme === "dark" ? "sun" : "moon", kbd: "⌘J", run: toggleTheme },
+     { label: "Change color theme…", icon: "droplet", run: () => setThemeMenu(true) },
+     { label: "Keyboard shortcuts", icon: "command", kbd: "?", run: () => setHelp(true) },
+-    { label: "Settings…", icon: "key", run: openSettings },
++    { label: "Settings…", icon: "gear", run: openSettings },
+     { label: "New vault…", icon: "plus", run: () => newVault() },
+   ];
+ 
+@@ -405,7 +506,7 @@ function App() {
+       if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); if (!locked) setPalette((p) => !p); return; }
+       if (locked) return;
+ 
+-      if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); return lock(); }
++      if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); return dataLock(); }
+       if (mod && e.key.toLowerCase() === "n") { e.preventDefault(); return openNew(); }
+       if (anyOverlay || switcher || themeMenu) return;
+       if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); if (selected) copy(null, null, "password"); return; }
+@@ -434,54 +535,66 @@ function App() {
+   const groupSub = (query ? filtered.length + " of " + entries.length + " match “" + query + "”" : filtered.length + (filtered.length === 1 ? " entry" : " entries"))
+     + (group !== "__all" && group !== "__fav" ? " · " + group : "");
+ 
++
++  // The old toolbar row held these; they sit at the top of the detail column now.
++  const appActions = (
++    <>
++      <button className="icon-btn" onClick={() => setPalette(true)} title="Command palette (⌘K)"><Icon name="command" size={17} /></button>
++      <div className="divider-v" />
++      <button className="icon-btn" onClick={toggleTheme} title="Toggle theme (⌘J)"><Icon name={theme === "dark" ? "sun" : "moon"} size={17} /></button>
++      <button className={"icon-btn" + (themeMenu ? " active" : "")} onClick={() => setThemeMenu((m) => !m)} title="Appearance"><Icon name="droplet" size={17} /></button>
++      <button className="icon-btn" onClick={openSettings} title="Settings"><Icon name="gear" size={17} /></button>
++      <button className="icon-btn" onClick={() => setHelp(true)} title="Shortcuts (?)" style={{ fontWeight: 700, fontSize: 15 }}>?</button>
++    </>
++  );
++
+   return (
+     <div className="desk">
+       <div className="window">
+         {/* titlebar */}
++        {/* The OS draws the window buttons and owns dragging. An overlay title
++            bar was tried and reverted: it hands the drag region to the webview,
++            and every variant either dragged once per focus or turned the press
++            into a text selection. This strip carries the build stamp and vault
++            name only. */}
+         <div className="titlebar">
+-          <div className="traffic"><span className="tl r" /><span className="tl y" /><span className="tl g" /></div>
+-          <div className="win-title"><span className={"dot" + (locked ? " locked" : "")} /> Trove — {vault.file}</div>
+-          <div className="rgt" />
+-        </div>
+-
+-        {/* toolbar */}
+-        <div className="toolbar">
+-          <div className="status-pill">
+-            <Icon name={locked ? "lock" : "unlock"} size={15} className={"lk" + (locked ? " amber" : "")} />
+-            <span>{locked ? "Locked" : "Unlocked"}</span>
+-            {!locked && <span className="sub">· auto‑lock 5m</span>}
++          {/* Left: who this is. */}
++          <div className="win-brand">
++            <img src="/favicon.svg" alt="" width="15" height="15" />
++            <span>Trove</span>
++          </div>
++          {/* Centre: which vault you are looking at, of possibly several. */}
++          <div className="win-title">
++            <span className={"dot" + (locked ? " locked" : "")} />
++            {vault.file}
++            {openCount > 1 && <span className="win-of"> · {openCount} open</span>}
+           </div>
+-          {!locked ? (
+-            <div className="search" onClick={() => searchRef.current && searchRef.current.focus()}>
+-              <Icon name="search" size={16} className="si" />
+-              <input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={"Search " + vault.name.toLowerCase() + "…"} spellCheck="false" />
+-              {query ? (
+-                <button className="icon-btn" style={{ width: 24, height: 24 }} onClick={(e) => { e.stopPropagation(); setQuery(""); }}><Icon name="x" size={14} /></button>
+-              ) : (
+-                <span className="kbd">/</span>
+-              )}
+-            </div>
+-          ) : (
+-            <div style={{ flex: 1 }} />
+-          )}
+-          <div className="tbar-actions">
+-            {!locked && <button className="btn-accent" onClick={openNew}><Icon name="plus" size={16} />New</button>}
+-            {!locked && <button className="icon-btn" onClick={() => setPalette(true)} title="Command palette (⌘K)"><Icon name="command" size={17} /></button>}
+-            <div className="divider-v" />
+-            <button className="icon-btn" onClick={toggleTheme} title="Toggle theme (⌘J)"><Icon name={theme === "dark" ? "sun" : "moon"} size={17} /></button>
+-            <button className={"icon-btn" + (themeMenu ? " active" : "")} onClick={() => setThemeMenu((m) => !m)} title="Appearance"><Icon name="droplet" size={17} /></button>
+-            <button className="icon-btn" onClick={openSettings} title="Settings"><Icon name="key" size={17} /></button>
+-            <button className="icon-btn" onClick={() => setHelp(true)} title="Shortcuts (?)" style={{ fontWeight: 700, fontSize: 15 }}>?</button>
+-            {!locked && <button className="icon-btn" onClick={lock} title="Lock (⌘L)"><Icon name="lock" size={17} /></button>}
++          {/* Right: what trove is currently doing to the machine, then which
++              build is doing it. The key count is the only view anyone has of
++              the system agent without opening a terminal. */}
++          <div className="rgt">
++            {agentKeys > 0 && (
++              <span
++                className="win-keys"
++                title={
++                  `${agentKeys} key${agentKeys === 1 ? "" : "s"} in the system agent` +
++                  (keysLeft == null ? " · no expiry" : ` · expires in ${fmtLeft(keysLeft)}`)
++                }
++              >
++                <Icon name="key" size={12} /> {agentKeys}
++                {keysLeft != null && <span className="win-keys-left">{fmtLeft(keysLeft)}</span>}
++              </span>
++            )}
++            <span className="win-ver">{buildLabel}</span>
+           </div>
+         </div>
+ 
+         {/* body */}
+         {locked ? (
+-          <Unlock vault={vault} onUnlock={unlock} onChange={() => setSwitcher(true)} />
++          <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} />
+         ) : (
+           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
+-            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} />
++            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
+             <ResizeHandle
+               label="Resize sidebar"
+               onDelta={(inc) => setSidebarW((w) => clampW(w + inc, SIDEBAR_MIN, SIDEBAR_MAX))}
+@@ -490,6 +603,7 @@ function App() {
+             <EntryList
+               entries={filtered} selectedId={selId} onSelect={setSelId}
+               title={groupTitle} subtitle={groupSub} sort={sort} onCycleSort={cycleSort}
++              query={query} onQuery={setQuery} searchRef={searchRef} vaultName={vault.name}
+             />
+             <ResizeHandle
+               label="Resize entry list"
+@@ -497,6 +611,7 @@ function App() {
+               onReset={() => setListW(DEFAULT_LIST_W)}
+             />
+             <Detail
++              appActions={appActions}
+               entry={selected} notes={detail.notes} fields={detail.fields} password={detail.password}
+               onCopy={copy} copiedKey={copiedKey}
+               onEdit={openEdit} onDelete={(e) => setDel(e)} onToggleFav={toggleFav}
+diff --git a/trove-desktop/src/api.js b/trove-desktop/src/api.js
+index 87ab70c..6198437 100644
+--- a/trove-desktop/src/api.js
++++ b/trove-desktop/src/api.js
+@@ -38,8 +38,11 @@ export function unlockVault(id, password) {
+ }
+ 
+ // lock_vault(id) -> ()
+-export function lockVault(id) {
+-  return invoke('lock_vault', { id });
++// lock_vault(id, retractKeys) -> ()
++// retractKeys=false leaves forwarded keys in the OS agent — used by the idle
++// timer, which should blank the window without revoking credentials.
++export function lockVault(id, retractKeys = true) {
++  return invoke('lock_vault', { id, retractKeys });
+ }
+ 
+ // list_entries(id) -> Vec<EntryDto>  (re-read an already-unlocked vault)
+@@ -95,6 +98,18 @@ export function setSettings(settings) {
+ 
+ // set_agent_key(id, entryId, enabled) -> Vec<EntryDto>
+ // Picks whether this entry's SSH key is added to the system agent on unlock.
+-export function setAgentKey(id, entryId, enabled) {
+-  return invoke('set_agent_key', { id, entryId, enabled }).then(normEntries);
++// policy = { lifetime: number|null, confirm: bool, removeOnClose: bool }
++// lifetime null (or 0) means "use the app default" — the same thing
++// UseLifetimeConstraintWhenAdding=false means in the file.
++export function setAgentKey(id, entryId, enabled, policy = {}) {
++  const { lifetime = null, confirm = false, removeOnClose = true } = policy;
++  return invoke('set_agent_key', { id, entryId, enabled, lifetime, confirm, removeOnClose })
++    .then(normEntries);
++}
++
++/* ---- Build identity ---- */
++
++// build_info() -> { version, commit, dev }
++export function buildInfo() {
++  return invoke('build_info');
+ }
+diff --git a/trove-desktop/src/overlays.jsx b/trove-desktop/src/overlays.jsx
+index 084a594..470e7fc 100644
+--- a/trove-desktop/src/overlays.jsx
++++ b/trove-desktop/src/overlays.jsx
+@@ -1,14 +1,103 @@
+ import React from 'react';
++import { listen } from '@tauri-apps/api/event';
+ import { Icon, TYPE_ICON } from './icons.jsx';
+ // Trove — overlays: unlock, command palette, entry form, toast, help
+ 
+ /* ============ UNLOCK ============ */
+-function Unlock({ vault, onUnlock, onChange }) {
++// The steps an unlock goes through, in the order the backend reports them.
++// Listed up front so the checklist appears complete from the first frame
++// rather than growing as events arrive.
++// Floor on how long each step stays visible. Below roughly this, a change
++// isn't perceived as a change — the list just blinks.
++const MIN_STEP_MS = 220;
++
++const UNLOCK_STEPS = [
++  { step: "open", label: "Decrypting the vault" },
++  { step: "entries", label: "Reading entries" },
++  { step: "agent", label: "Adding keys to the system agent" },
++  { step: "files", label: "Writing materialized files" },
++];
++
++function UnlockProgress({ progress }) {
++  return (
++    <ul className="unlock-steps">
++      {UNLOCK_STEPS.map(({ step, label }) => {
++        const st = progress[step];
++        const state = st ? st.state : "waiting";
++        return (
++          <li key={step} className={"ustep " + state}>
++            <span className="umark">
++              {state === "done" ? <Icon name="check" size={13} />
++                : state === "failed" ? <Icon name="x" size={13} />
++                : state === "skipped" ? <span className="udash" />
++                : state === "pending" ? <span className="uspin" />
++                : <span className="udot" />}
++            </span>
++            <span className="ulabel">{label}</span>
++            {st && st.detail ? <span className="udetail">{st.detail}</span> : null}
++          </li>
++        );
++      })}
++    </ul>
++  );
++}
++
++function Unlock({ vault, onUnlock, onReady, onChange }) {
+   const [pw, setPw] = React.useState("");
+   const [show, setShow] = React.useState(false);
+   const [err, setErr] = React.useState(false);
+   const [busy, setBusy] = React.useState(false);
++  // step id → { state, detail }, filled in by `unlock-progress` events.
++  const [progress, setProgress] = React.useState({});
+   const ref = React.useRef(null);
++
++  // Only listen while an unlock is actually running: the backend emits to the
++  // whole window, and a stale listener would repaint a card nobody is looking
++  // at. `listen` resolves to its own unlisten function.
++  // Events are applied through a queue with a floor on how fast the list may
++  // advance. Without it a fast unlock paints every step in one frame and reads
++  // as "nothing happened, then it vanished" — which is exactly what it looked
++  // like when the backend blocked and flushed all its events at once.
++  const queue = React.useRef([]);
++  const draining = React.useRef(false);
++  // Registered on MOUNT, not when `busy` flips. `listen` is itself an async IPC
++  // round trip, and unlock starts emitting immediately — registering at submit
++  // time loses every step that fires before the registration lands, which
++  // looked exactly like "nothing happens, then it vanishes".
++  React.useEffect(() => {
++    let stop = null, dead = false;
++
++    const drain = () => {
++      if (dead) return;
++      const next = queue.current.shift();
++      if (!next) { draining.current = false; return; }
++      setProgress((p) => ({ ...p, [next.step]: { state: next.state, detail: next.detail } }));
++      setTimeout(drain, MIN_STEP_MS);
++    };
++
++    listen("unlock-progress", (e) => {
++      const { step, state, detail } = e.payload || {};
++      if (!step) return;
++      queue.current.push({ step, state, detail });
++      if (!draining.current) { draining.current = true; drain(); }
++    }).then((fn) => { if (dead) fn(); else stop = fn; }).catch(() => {});
++
++    return () => { dead = true; stop && stop(); };
++  }, []);
++
++  // Resolves once every queued step has been applied, plus a beat so the last
++  // tick is on screen rather than replaced in the same frame.
++  const drained = React.useCallback(
++    () =>
++      new Promise((resolve) => {
++        const check = () => {
++          if (!queue.current.length && !draining.current) setTimeout(resolve, MIN_STEP_MS);
++          else setTimeout(check, MIN_STEP_MS / 2);
++        };
++        check();
++      }),
++    []
++  );
+   React.useEffect(() => { ref.current && ref.current.focus(); }, [vault.id]);
+   // Reset transient state when the target vault changes.
+   React.useEffect(() => { setPw(""); setErr(false); setBusy(false); }, [vault.id]);
+@@ -16,12 +105,17 @@ function Unlock({ vault, onUnlock, onChange }) {
+   const submit = async (e) => {
+     e && e.preventDefault();
+     if (!pw || busy) return;
+-    setBusy(true); setErr(false);
++    setBusy(true); setErr(false); setProgress({});
++    queue.current = []; draining.current = false;
+     try {
+-      // onUnlock decrypts the vault via the backend; it rejects on a bad
+-      // password. On success the parent flips to the unlocked body and this
+-      // component unmounts, so there is nothing more to do here.
+-      await onUnlock(pw);
++      // onUnlock decrypts the vault and RESOLVES WITH THE ENTRY LIST — it does
++      // not flip the parent itself. Deliberate: the backend has finished by the
++      // time it resolves, but the checklist may still be draining, and an
++      // immediate unmount would bin the last few ticks.
++      const list = await onUnlock(pw);
++      await drained();
++      onReady(list);
++      return;
+     } catch (e2) {
+       setErr(e2 && typeof e2 === "string" ? e2 : (e2 && e2.message) || true);
+       setBusy(false);
+@@ -38,6 +132,22 @@ function Unlock({ vault, onUnlock, onChange }) {
+   const pathDir = lastSlash > 0 ? fullPath.slice(0, lastSlash) : "";
+   const pathFile = lastSlash >= 0 ? fullPath.slice(lastSlash) : fullPath;
+ 
++  // Once the password is accepted the form has done its job, so the card
++  // becomes the progress view outright rather than growing a list underneath a
++  // dead password field. A rejected password is the only way back.
++  if (busy) {
++    return (
++      <div className="unlock-desk embed">
++        <div className="unlock-card">
++          <div className="ul-lock working"><Icon name="unlock" size={28} /></div>
++          <div className="ul-h">Unlocking {vault.name}</div>
++          <div className="ul-sub">Decrypting and handing your keys to the machine.</div>
++          <UnlockProgress progress={progress} />
++        </div>
++      </div>
++    );
++  }
++
+   return (
+     <div className="unlock-desk embed">
+       <form className="unlock-card" onSubmit={submit}>
+@@ -69,8 +179,8 @@ function Unlock({ vault, onUnlock, onChange }) {
+         </div>
+         <div className="ul-err">{err && (<><Icon name="x" size={13} /> {typeof err === "string" ? err : "Incorrect master password. Try again."}</>)}</div>
+ 
+-        <button type="submit" className="ul-unlock" disabled={busy}>
+-          {busy ? <><Icon name="refresh" size={17} /> Decrypting…</> : <><Icon name="unlock" size={17} /> Unlock</>}
++        <button type="submit" className="ul-unlock">
++          <Icon name="unlock" size={17} /> Unlock
+         </button>
+ 
+         <div className="ul-foot"><Icon name="shield" size={13} /> Local‑only · never leaves this device</div>
+@@ -412,18 +522,27 @@ function SettingsModal({ settings, onChange, onClose }) {
+     <div className="scrim center" onMouseDown={onClose}>
+       <div className="modal" style={{ width: "min(560px, 94%)" }} onMouseDown={(e) => e.stopPropagation()}>
+         <div className="modal-head">
+-          <div className="mh-badge"><Icon name="key" size={18} /></div>
++          <div className="mh-badge"><Icon name="gear" size={18} /></div>
+           <div><h2>Settings</h2><p>What unlocking a vault does to the rest of your machine.</p></div>
+           <button className="icon-btn" style={{ marginLeft: "auto" }} onClick={onClose}><Icon name="x" size={18} /></button>
+         </div>
+ 
+         <div className="modal-body">
++          {/* The one rule worth stating outright, because two different locks
++              with two different scopes is exactly what confused this before. */}
++          <p className="set-note" style={{ margin: "0 2px 4px" }}>
++            <b>App lock</b> locks this window and forgets the decrypted vault.
++            Your data stays where it is. <b>Data lock</b> is the padlock button:
++            it removes the keys from the system agent and dematerializes the
++            files.
++          </p>
++
+           <div className="set-group">
+             <div className="set-group-head"><div className="sgt">SSH keys</div></div>
+ 
+             <SetRow
+               title="Add keys to the system agent on unlock"
+-              desc="Your terminal, your editor and anything launched from the Dock can then use them. Trove takes them back out when the vault locks.">
++              desc="Your terminal, your editor and anything launched from the Dock can then use them. A data lock takes them back out.">
+               <Switch checked={agent} onChange={(v) => set({ systemAgent: v })} />
+             </SetRow>
+ 
+@@ -439,6 +558,20 @@ function SettingsModal({ settings, onChange, onClose }) {
+             </SetRow>
+           </div>
+ 
++          <div className="set-group">
++            <div className="set-group-head"><div className="sgt">App lock</div></div>
++            <SetRow
++              title="Lock the app after"
++              desc="Minutes of no interaction before the window locks and the decrypted vault is forgotten. Keys and materialized files are left alone — they expire on their own clocks. 0 never locks.">
++              <span className="set-num">
++                <input className="inp" type="number" min="0" step="1"
++                       value={settings.idleLockMinutes ?? 5}
++                       onChange={(e) => set({ idleLockMinutes: Math.max(0, Number(e.target.value) || 0) })} />
++                <span className="unit">min</span>
++              </span>
++            </SetRow>
++          </div>
++
+           <div className="set-group">
+             <div className="set-group-head"><div className="sgt">Files</div></div>
+             <SetRow
+@@ -452,7 +585,7 @@ function SettingsModal({ settings, onChange, onClose }) {
+           <p className="set-note">
+             Which keys are eligible is decided per entry — open a key and use
+             “Add this key to the system agent”. Changes here apply at the next
+-            unlock; keys already handed to the agent stay until the vault locks.
++            unlock; keys already handed to the agent stay until a data lock.
+           </p>
+         </div>
+       </div>
+@@ -596,4 +729,4 @@ function OpenVaultModal({ recents, activeId, onPick, onBrowse, onClose }) {
+   );
+ }
+ 
+-export { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal};
++export { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ClipboardToast, PlainToast, genPassword, ThemeMenu, THEMES, VaultSwitcher, OpenVaultModal, SettingsModal, NewVaultModal, UnlockProgress, Switch };
+diff --git a/trove-desktop/src/styles.css b/trove-desktop/src/styles.css
+index 058ae1f..d719a19 100644
+--- a/trove-desktop/src/styles.css
++++ b/trove-desktop/src/styles.css
+@@ -124,24 +124,32 @@ input { font-family: inherit; }
+   padding: 0 14px;
+   border-bottom: 1px solid var(--border-soft);
+   background: linear-gradient(var(--raise), var(--raise)), var(--bg-1);
+-  -webkit-app-region: drag;
+-}
+-.traffic { display: flex; gap: 8px; align-items: center; }
+-.tl { width: 12px; height: 12px; border-radius: 50%; }
+-.tl.r { background: #ff5f57; } .tl.y { background: #febc2e; } .tl.g { background: #28c840; }
++  /* The OS title bar above this strip owns dragging. Nothing here needs
++     -webkit-app-region (a Chromium property WKWebView ignores anyway), but the
++     strip is still chrome, so it should not be selectable text. */
++  -webkit-user-select: none; user-select: none; cursor: default;
++}
++/* Build stamp beside the app name: quiet, monospaced, and never the widest
++   thing in the bar — it is for identification, not decoration. */
++/* Title-bar text is chrome, but it still has to be READABLE: --text-ghost is
++   0.44 lightness on a 0.185 ground, roughly 2:1, which is unreadable rather
++   than subtle. Hierarchy comes from size and weight here, not from fading the
++   text into the background. */
++.win-ver { font-family: var(--font-mono); font-size: 11px; color: var(--text); letter-spacing: -.01em; }
+ [data-theme="light"] .tl { box-shadow: inset 0 0 0 1px oklch(0 0 0 / 0.12); }
+-.win-title { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim); font-weight: 500; }
++.win-title { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text); font-weight: 500; }
+ .win-title .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+-.titlebar .rgt { justify-self: end; display: flex; gap: 6px; }
++.titlebar .rgt { justify-self: end; display: flex; gap: 10px; align-items: center; }
++/* Left: logo + wordmark. Quiet — it identifies the window, it is not a banner. */
++.win-brand { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--text); }
++.win-brand img { opacity: .9; border-radius: 3px; }
++/* Centre: the vault in view, and how many others are open. */
++.win-of { color: var(--text-dim); font-weight: 400; }
++/* Right: live count of this app's keys in the system agent. */
++.win-keys-left { font-variant-numeric: tabular-nums; margin-left: 1px; }
++.win-keys { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--accent-strong); background: var(--accent-dim); border: 1px solid var(--accent-line); border-radius: 999px; padding: 1px 7px 1px 6px; }
+ 
+ /* ============ TOOLBAR ============ */
+-.toolbar {
+-  height: 54px; flex: none;
+-  display: flex; align-items: center; gap: 12px;
+-  padding: 0 12px 0 14px;
+-  border-bottom: 1px solid var(--border);
+-  background: var(--bg-0);
+-}
+ .status-pill {
+   display: flex; align-items: center; gap: 8px;
+   height: 32px; padding: 0 12px 0 10px;
+@@ -152,10 +160,10 @@ input { font-family: inherit; }
+   font-size: 12.5px; font-weight: 500;
+ }
+ .status-pill .lk { color: var(--green); }
+-.status-pill .sub { color: var(--text-faint); font-size: 11px; }
++.status-pill .sub { font-variant-numeric: tabular-nums; color: var(--text-dim); font-size: 11px; }
+ 
+ .search {
+-  flex: 1; max-width: 620px; margin: 0 auto;
++  flex: 1; max-width: 520px;
+   position: relative; display: flex; align-items: center;
+   height: 34px; padding: 0 10px 0 34px;
+   border-radius: 9px;
+@@ -179,7 +187,6 @@ input { font-family: inherit; }
+ }
+ .kbd.solo { min-width: 20px; justify-content: center; }
+ 
+-.tbar-actions { display: flex; align-items: center; gap: 6px; }
+ .icon-btn {
+   width: 34px; height: 34px; display: grid; place-items: center;
+   border-radius: 8px; border: 1px solid transparent; background: transparent;
+@@ -244,6 +251,32 @@ input { font-family: inherit; }
+ .tree-row.sel .tfic { color: var(--accent); }
+ .tr-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
+ .tr-count { font-size: 11px; color: var(--text-ghost); font-variant-numeric: tabular-nums; }
++/* New entry, pinned above the sidebar footer: it acts on the vault this pane
++   represents, so it lives here rather than in a global toolbar. */
++/* Lock state on the vault chip: the badge carries the colour, so the state is
++   legible at a glance without reading anything. */
++.sb-vault.is-unlocked .vbadge { color: var(--green); border-color: oklch(0.78 0.14 150 / 0.35); background: oklch(0.78 0.14 150 / 0.12); }
++.sb-vault.is-locked .vbadge { color: var(--amber); border-color: oklch(0.80 0.13 78 / 0.35); background: oklch(0.80 0.13 78 / 0.12); }
++.sb-vault .vsub { display: block; color: var(--text-faint); font-variant-numeric: tabular-nums; }
++.sb-vault .vmeta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
++
++.sb-new { padding: 10px 12px; border-top: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 8px; }
++.sb-new .btn-accent, .sb-new .btn-lock { width: 100%; justify-content: center; height: 34px; }
++
++/* Search at the head of the list it filters. */
++.list-search {
++  position: relative; display: flex; align-items: center; gap: 6px;
++  margin: 10px 12px 0; height: 32px; padding: 0 8px 0 30px;
++  border-radius: 8px; background: var(--bg-0); border: 1px solid var(--border);
++}
++.list-search:focus-within { border-color: var(--accent-line); }
++.list-search .si { position: absolute; left: 9px; color: var(--text-faint); }
++.list-search input {
++  flex: 1; min-width: 0; background: none; border: none; outline: none;
++  color: var(--text); font-size: 12.5px; font-family: inherit;
++}
++.list-search input::placeholder { color: var(--text-faint); }
++
+ .sb-foot { flex: none; border-top: 1px solid var(--border-soft); padding: 10px 14px; display: flex; align-items: center; gap: 8px; color: var(--text-faint); font-size: 11px; font-family: var(--font-mono); }
+ 
+ /* ---- entry list ---- */
+@@ -285,6 +318,12 @@ input { font-family: inherit; }
+ 
+ /* ---- detail ---- */
+ .detail { background: linear-gradient(var(--raise), var(--raise)), var(--bg-0); }
++.detail-bar {
++  height: 46px; flex: none;
++  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
++  padding: 0 12px;
++  border-bottom: 1px solid var(--border);
++}
+ .detail-scroll { flex: 1; overflow-y: auto; }
+ .dt-hero { padding: 22px 24px 18px; border-bottom: 1px solid var(--border); }
+ .dt-crumb { display: flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); margin-bottom: 12px; flex-wrap: wrap; }
+@@ -382,6 +421,11 @@ input { font-family: inherit; }
+ .modal-head h2 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+ .modal-head p { font-size: 12px; color: var(--text-faint); margin-top: 1px; }
+ .modal-body { padding: 18px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
++/* Flex children shrink by default, and `.set-group` clips what it cannot fit —
++   so a tall panel silently guillotined its rows (a description cut mid-sentence,
++   a whole control gone) instead of scrolling. Keep every child its natural
++   height and let the body scroll, which is what `overflow-y: auto` is for. */
++.modal-body > * { flex-shrink: 0; }
+ .fld { display: flex; flex-direction: column; gap: 6px; }
+ .fld > label { font-size: 11.5px; font-weight: 600; color: var(--text-dim); letter-spacing: .01em; }
+ .inp {
+@@ -401,6 +445,16 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height:
+    their intrinsic width instead of being squeezed until the text wraps. */
+ .modal-foot > button { flex-shrink: 0; }
+ .modal-foot .grow { flex: 1; }
++/* The data-lock action carries its name. The app lock is a countdown in the
++   status pill; this one is a thing you press, and the two need to be told
++   apart at a glance rather than by hovering. */
++.btn-lock {
++  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px;
++  border-radius: 8px; border: 1px solid var(--border); background: var(--bg-2);
++  color: var(--text); font-size: 12.5px; font-weight: 500; white-space: nowrap;
++}
++.btn-lock:hover { border-color: var(--border-strong); background: var(--bg-3); }
++
+ .btn-ghost { height: 36px; padding: 0 15px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); font-size: 13px; font-weight: 500; }
+ .btn-ghost:hover { color: var(--text); border-color: var(--border-strong); }
+ .btn-primary { height: 36px; padding: 0 18px; border-radius: 8px; border: 1px solid var(--accent-line); background: var(--accent); color: var(--accent-ink); font-size: 13px; font-weight: 600; }
+@@ -477,6 +531,40 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height:
+ .toast-check { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--teal-dim); color: var(--teal); }
+ 
+ /* shortcuts help */
++/* ---- unlock progress -----------------------------------------------------
++   Unlock is slow on purpose (the KDF) and then talks to the OS agent per key,
++   so the dialog has to say what it is doing or it reads as a hang. Steps are
++   listed up front and tick over in place — the list never grows or reflows. */
++.unlock-steps {
++  list-style: none; margin: 14px 0 2px; padding: 12px 14px; text-align: left;
++  display: flex; flex-direction: column; gap: 9px;
++  background: var(--bg-0); border: 1px solid var(--border-soft); border-radius: 11px;
++}
++.ustep { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text-ghost); transition: color .15s; }
++.ustep .umark { width: 15px; height: 15px; display: grid; place-items: center; flex-shrink: 0; color: inherit; }
++.ustep .ulabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.ustep .udetail { margin-left: auto; font-size: 11.5px; color: var(--text-ghost); flex-shrink: 0; }
++.ustep.pending { color: var(--text); }
++.ustep.done { color: var(--text-dim); }
++.ustep.done .umark { color: var(--green); }
++.ustep.failed { color: var(--red); }
++.ustep.failed .umark { color: var(--red); }
++.ustep.skipped { opacity: .45; }
++
++/* A waiting step still shows a mark, so the list reads as a checklist before
++   anything has happened rather than as four lines of grey text. */
++.udot { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
++.udash { width: 8px; height: 1.5px; background: var(--text-ghost); border-radius: 1px; }
++
++/* The one moving part: a ring on the step currently running. */
++.uspin {
++  width: 11px; height: 11px; border-radius: 50%;
++  border: 1.6px solid var(--accent-line); border-top-color: var(--accent);
++  animation: uspin .7s linear infinite;
++}
++@keyframes uspin { to { transform: rotate(360deg); } }
++@media (prefers-reduced-motion: reduce) { .uspin { animation: none; } }
++
+ /* ---- settings ------------------------------------------------------------
+    A settings row is a switch, a name, and the sentence explaining what turning
+    it on actually does to your machine — these settings hand private keys to
+@@ -495,8 +583,10 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height:
+ .set-row .srd { font-size: 12px; color: var(--text-faint); line-height: 1.55; margin-top: 3px; }
+ .set-row .srd code { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-dim); }
+ 
+-/* Dependent rows: indented under their parent, dimmed and inert when off. */
+-.set-sub { padding-left: 30px; background: var(--bg-desk); }
++/* Dependent rows share the parent's left edge — stepping them inwards made the
++   panel look ragged for no gain, since the dimming already says what depends on
++   what. Only the background and the inert state distinguish them. */
++.set-sub { background: var(--bg-desk); }
+ .set-sub.off { opacity: .42; pointer-events: none; }
+ 
+ /* Numeric setting: the input sits with its unit, right-aligned to the switches
+diff --git a/trove-desktop/src/views.jsx b/trove-desktop/src/views.jsx
+index 205f24f..4d2765d 100644
+--- a/trove-desktop/src/views.jsx
++++ b/trove-desktop/src/views.jsx
+@@ -1,5 +1,6 @@
+ import React from 'react';
+ import { Icon, TYPE_ICON } from './icons.jsx';
++import { Switch } from './overlays.jsx';
+ import { buildTree } from './tree.js';
+ // Trove — helpers + three-pane views
+ 
+@@ -60,17 +61,31 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect }) {
+   );
+ }
+ 
+-function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, onSwitcher }) {
++function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, onSwitcher, onNew, onDataLock, idleLabel }) {
+   const [open, setOpenState] = React.useState({ inpace: true, personal: true, infra: false });
+   const setOpen = (p) => setOpenState((o) => ({ ...o, [p]: !o[p] }));
+   return (
+     <div className="pane sidebar">
+       <div className="sb-scroll">
+-        <button className="sb-vault" onClick={onSwitcher} title="Switch vault">
+-          <div className="vbadge"><Icon name="shield" size={17} /></div>
++        {/* The vault chip carries its own lock state: green unlocked, amber
++            locked. State belongs on the thing it describes, not in a separate
++            pill across the window — and with several vaults registered, "which
++            one is unlocked" is a per-vault fact. */}
++        <button
++          className={"sb-vault" + (vault.locked ? " is-locked" : " is-unlocked")}
++          onClick={onSwitcher}
++          title={(vault.locked ? "Locked" : "Unlocked") + " — click to switch vault"}
++        >
++          <div className="vbadge">
++            <Icon name={vault.locked ? "lock" : "unlock"} size={16} />
++          </div>
+           <div style={{ minWidth: 0, flex: 1, textAlign: "left" }}>
+             <div className="vname">{vault.name}</div>
+-            <div className="vmeta">{vault.file}</div>
++            <div className="vmeta">
++              {vault.locked ? "Locked" : "Unlocked"}
++              {/* Countdown on its own line: mid-phrase wrapping read badly. */}
++              {!vault.locked && idleLabel ? <span className="vsub">{idleLabel}</span> : null}
++            </div>
+           </div>
+           <Icon name="chevronDown" size={15} className="vchev" />
+         </button>
+@@ -94,6 +109,22 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, o
+           <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} />
+         ))}
+       </div>
++      {/* Pinned to the bottom of the sidebar: a new entry goes into the vault
++          this pane belongs to, so the action lives with its target rather than
++          floating in a global toolbar. */}
++      {/* Both act on the vault this pane represents: put its keys and files
++          back, or add something to it. Neither is a global toolbar concern. */}
++      <div className="sb-new">
++        {!vault.locked && (
++          <button className="btn-lock" onClick={onDataLock}
++                  title="Removes keys from the system agent and dematerializes files (⌘L)">
++            <Icon name="lock" size={15} /> Data lock
++          </button>
++        )}
++        <button className="btn-accent" onClick={onNew}>
++          <Icon name="plus" size={16} />New entry
++        </button>
++      </div>
+       <div className="sb-foot">
+         <Icon name="lock" size={13} />
+         <span>AES‑256 · Argon2id</span>
+@@ -103,7 +134,7 @@ function Sidebar({ tree, total, selectedGroup, onSelectGroup, favCount, vault, o
+ }
+ 
+ /* ============ ENTRY LIST ============ */
+-function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort }) {
++function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCycleSort, query, onQuery, searchRef, vaultName }) {
+   const listRef = React.useRef(null);
+   React.useEffect(() => {
+     const el = listRef.current && listRef.current.querySelector(".erow.sel");
+@@ -121,6 +152,23 @@ function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCyc
+   const sortLabel = { title: "Title", modified: "Recently modified", strength: "Weakest first" }[sort];
+   return (
+     <div className="pane list">
++      {/* Search sits above the list it filters — in the toolbar it was a global
++          control that happened to change this pane. */}
++      <div className="list-search" onClick={() => searchRef && searchRef.current && searchRef.current.focus()}>
++        <Icon name="search" size={15} className="si" />
++        <input
++          ref={searchRef} value={query} spellCheck="false"
++          onChange={(e) => onQuery(e.target.value)}
++          placeholder={"Search " + (vaultName || "vault").toLowerCase() + "…"}
++        />
++        {query ? (
++          <button className="icon-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); onQuery(""); }}>
++            <Icon name="x" size={13} />
++          </button>
++        ) : (
++          <span className="kbd">/</span>
++        )}
++      </div>
+       <div className="list-head">
+         <div>
+           <div className="lh-title">{title}</div>
+@@ -191,10 +239,90 @@ function Field({ k, value, secret, revealed, onReveal, link, onCopy, copiedKey,
+   );
+ }
+ 
+-function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey }) {
++// Per-key agent policy. These write KeeAgent.settings, the same bytes
++// KeePassXC reads, so a key configured here behaves identically in both tools.
++// Expiry left blank means "use the app default" — which is what
++// UseLifetimeConstraintWhenAdding=false means in the file.
++function AgentSection({ entry, onChange }) {
++  const on = !!entry.agentKey;
++  const [lifetime, setLifetime] = React.useState(
++    entry.agentLifetime == null ? "" : String(entry.agentLifetime)
++  );
++  // Re-sync when a different entry is selected, or the backend hands back new
++  // values after a save.
++  React.useEffect(() => {
++    setLifetime(entry.agentLifetime == null ? "" : String(entry.agentLifetime));
++  }, [entry.id, entry.agentLifetime]);
++
++  const push = (patch) =>
++    onChange(entry.id, patch.enabled ?? on, {
++      lifetime: patch.lifetime !== undefined ? patch.lifetime : (lifetime === "" ? null : Number(lifetime)),
++      confirm: patch.confirm ?? !!entry.agentConfirm,
++      removeOnClose: patch.removeOnClose ?? entry.agentRemoveOnClose !== false,
++    });
++
++  return (
++    <div className="dt-section">
++      <div className="dt-sec-label">SSH agent</div>
++      <div className="set-group">
++        <div className="set-row">
++          <div className="srb">
++            <div className="srt">Add this key to the system agent</div>
++            <div className="srd">
++              Unlocking loads <code>{entry.sshKeyAttachment}</code> into your SSH agent,
++              so every application can use it.
++            </div>
++          </div>
++          <Switch checked={on} onChange={(v) => push({ enabled: v })} />
++        </div>
++
++        <div className={"set-row set-sub" + (on ? "" : " off")}>
++          <div className="srb">
++            <div className="srt">Expire after</div>
++            <div className="srd">
++              The agent drops this key once this long has passed. Leave blank to use
++              the app default from Settings.
++            </div>
++          </div>
++          <span className="set-num">
++            <input className="inp" type="number" min="0" step="60" disabled={!on}
++                   placeholder="default" value={lifetime}
++                   onChange={(e) => setLifetime(e.target.value)}
++                   onBlur={() => push({ lifetime: lifetime === "" ? null : Math.max(0, Number(lifetime) || 0) })} />
++            <span className="unit">sec</span>
++          </span>
++        </div>
++
++        <div className={"set-row set-sub" + (on ? "" : " off")}>
++          <div className="srb">
++            <div className="srt">Confirm before each use</div>
++            <div className="srd">The agent asks before every signature. Needs an askpass helper.</div>
++          </div>
++          <Switch checked={!!entry.agentConfirm} disabled={!on}
++                  onChange={(v) => push({ confirm: v })} />
++        </div>
++
++        <div className={"set-row set-sub" + (on ? "" : " off")}>
++          <div className="srb">
++            <div className="srt">Remove on data lock</div>
++            <div className="srd">
++              Off keeps this key in the agent even after a data lock, until it
++              expires.
++            </div>
++          </div>
++          <Switch checked={entry.agentRemoveOnClose !== false} disabled={!on}
++                  onChange={(v) => push({ removeOnClose: v })} />
++        </div>
++      </div>
++    </div>
++  );
++}
++
++function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, appActions }) {
+   if (!entry) {
+     return (
+       <div className="pane detail">
++        <div className="detail-bar">{appActions}</div>
+         <div className="empty">
+           <div className="eglyph"><Icon name="key" size={30} /></div>
+           <h3>No entry selected</h3>
+@@ -206,6 +334,9 @@ function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onD
+   const si = strengthInfo(entry.strength);
+   return (
+     <div className="pane detail">
++      {/* App-level controls live at the top of this column now; there is no
++          global toolbar row above the three panes. */}
++      <div className="detail-bar">{appActions}</div>
+       <div className="detail-scroll">
+         <div className="dt-hero">
+           <div className="dt-crumb">
+@@ -231,20 +362,7 @@ function Detail({ entry, notes, fields, password, onCopy, copiedKey, onEdit, onD
+         </div>
+ 
+         {entry.sshKeyAttachment && (
+-          <div className="dt-section">
+-            <div className="dt-sec-label">SSH agent</div>
+-            <label className="set-row">
+-              <input type="checkbox" checked={!!entry.agentKey}
+-                     onChange={(e) => onToggleAgentKey(entry.id, e.target.checked)} />
+-              <span>
+-                <b>Add this key to the system agent</b>
+-                <em>
+-                  Unlocking loads <code>{entry.sshKeyAttachment}</code> into your SSH
+-                  agent, so every app can use it. Removed again when the vault locks.
+-                </em>
+-              </span>
+-            </label>
+-          </div>
++          <AgentSection entry={entry} onChange={onToggleAgentKey} />
+         )}
+ 
+         <div className="dt-section">
+diff --git a/trove-desktop/tests/App.test.jsx b/trove-desktop/tests/App.test.jsx
+index 00fc784..c5f3c32 100644
+--- a/trove-desktop/tests/App.test.jsx
++++ b/trove-desktop/tests/App.test.jsx
+@@ -8,6 +8,24 @@ import { render, fireEvent, waitFor } from '@testing-library/react';
+ // The native file dialog is unavailable under happy-dom; stub it.
+ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
+ // api.js is the ONLY module that talks to the backend — mock the whole surface.
++// overlays.jsx listens for unlock progress events. There is no Tauri IPC in a
++// test process, so stub the bridge rather than letting the real one reject
++// asynchronously in the middle of an unlock assertion.
++vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve()) }));
++
++vi.mock('@tauri-apps/api/event', () => ({
++  listen: vi.fn(() => Promise.resolve(() => {})),
++}));
++
++// The titlebar starts window drags through this; there is no window to drag in
++// a test process.
++vi.mock('@tauri-apps/api/window', () => ({
++  getCurrentWindow: () => ({
++    startDragging: () => Promise.resolve(),
++    toggleMaximize: () => Promise.resolve(),
++  }),
++}));
++
+ vi.mock('../src/api.js', () => ({
+   listVaults: vi.fn(),
+   registerVault: vi.fn(),
+@@ -21,6 +39,7 @@ vi.mock('../src/api.js', () => ({
+   deleteEntry: vi.fn(),
+   setFavorite: vi.fn(),
+   getSettings: vi.fn(),
++  buildInfo: vi.fn(),
+   setAgentKey: vi.fn(),
+   setSettings: vi.fn(),
+ }));
+@@ -36,6 +55,7 @@ const DETAIL = { notes: 'primary db', fields: [{ k: 'Host', v: 'db.prod' }], pas
+ const LOCKED_VAULT = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/vaults/personal.kdbx', locked: true };
+ 
+ beforeEach(() => {
++  api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
+   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
+   api.setSettings.mockResolvedValue(undefined);
+   vi.clearAllMocks();
+@@ -56,12 +76,17 @@ describe('app chrome + theme', () => {
+     expect(document.documentElement.dataset.accent).toBe('brass');
+   });
+ 
+-  it('renders the windowed chrome: titlebar with three traffic lights + status pill', async () => {
++  it('renders the windowed chrome: titlebar without drawn window buttons, and no toolbar row', async () => {
+     const { container: c } = render(<App />);
+     await waitFor(() => expect(c.querySelector('.window')).toBeTruthy());
+     expect(c.querySelector('.titlebar')).toBeTruthy();
+-    expect(c.querySelectorAll('.titlebar .traffic .tl')).toHaveLength(3);
+-    expect(c.querySelector('.toolbar .status-pill')).toBeTruthy();
++    // No drawn traffic lights: the OS draws the window buttons, and our own
++    // put a second, dead set below the working ones.
++    expect(c.querySelectorAll('.titlebar .tl')).toHaveLength(0);
++    // The toolbar row is gone: lock state moved onto the vault chip, search
++    // above the list it filters, and the app controls to the detail column.
++    expect(c.querySelector('.toolbar')).toBeFalsy();
++    expect(c.querySelector('.status-pill')).toBeFalsy();
+   });
+ 
+   it('a fresh boot with no registered vaults opens the Open-vault modal', async () => {
+diff --git a/trove-desktop/tests/VaultView.test.jsx b/trove-desktop/tests/VaultView.test.jsx
+index 05591b7..5db7775 100644
+--- a/trove-desktop/tests/VaultView.test.jsx
++++ b/trove-desktop/tests/VaultView.test.jsx
+@@ -7,6 +7,24 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
+ import { render, fireEvent, waitFor } from '@testing-library/react';
+ 
+ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
++// overlays.jsx listens for unlock progress events. There is no Tauri IPC in a
++// test process, so stub the bridge rather than letting the real one reject
++// asynchronously in the middle of an unlock assertion.
++vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve()) }));
++
++vi.mock('@tauri-apps/api/event', () => ({
++  listen: vi.fn(() => Promise.resolve(() => {})),
++}));
++
++// The titlebar starts window drags through this; there is no window to drag in
++// a test process.
++vi.mock('@tauri-apps/api/window', () => ({
++  getCurrentWindow: () => ({
++    startDragging: () => Promise.resolve(),
++    toggleMaximize: () => Promise.resolve(),
++  }),
++}));
++
+ vi.mock('../src/api.js', () => ({
+   listVaults: vi.fn(),
+   registerVault: vi.fn(),
+@@ -20,6 +38,7 @@ vi.mock('../src/api.js', () => ({
+   deleteEntry: vi.fn(),
+   setFavorite: vi.fn(),
+   getSettings: vi.fn(),
++  buildInfo: vi.fn(),
+   setAgentKey: vi.fn(),
+   setSettings: vi.fn(),
+ }));
+@@ -43,6 +62,7 @@ async function mountUnlocked() {
+ }
+ 
+ beforeEach(() => {
++  api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
+   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
+   api.setSettings.mockResolvedValue(undefined);
+   vi.clearAllMocks();
+-- 
+2.54.0 (Apple Git-157)
+

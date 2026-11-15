@@ -1,0 +1,875 @@
+From fcb5b47738a8605776e876b946b7cebfe738ec66 Mon Sep 17 00:00:00 2001
+From: Chris Thomas <chris.thomas@antimatter-studios.com>
+Date: Wed, 9 Sep 2026 15:19:24 +0200
+Subject: [PATCH] feat(desktop): Touch ID unlock, and the bundle identifier the
+ app should have had
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Unlocking asks for a fingerprint instead of a typed password, when the vault
+has one stored for it. `LAContext.evaluatePolicy` shows the system prompt and
+the password comes out of the login keychain — the same entry `trove keychain
+save` writes, so enrolling in either place serves both.
+
+Deliberately honest about what this is: the fingerprint is a gate in this
+application's code, not a cryptographic binding. Anything that can already read
+your login keychain can reach the password without a prompt. The strong version
+puts the password in the data-protection keychain behind
+`kSecAttrAccessControl`, where the Secure Enclave itself refuses to release it —
+and that needs a team-prefixed `keychain-access-groups` entitlement, which needs
+a provisioning profile. Measured, not assumed: an .app signed Developer ID with
+that entitlement and no profile is SIGKILLed at exec, exactly as a bare binary
+is. Only the storage layer changes when the profile exists; the prompt and
+everything above it stay.
+
+The button appears only when the Mac can do biometrics AND this vault is
+enrolled, both asked when the screen draws — biometry goes away with the lid
+shut on a clamshell setup, and the entry can be removed from Keychain Access at
+any time. Enrolment happens after a password the vault has just accepted, never
+from what someone typed into a box, and a cancelled prompt returns to the
+password field rather than showing an error, because cancelling is a decision.
+
+The bundle identifier becomes `com.antimatterstudios.trove`, matching the other
+applications in this account. macOS keys an app's config directory by that
+identifier, so the rename would have orphaned the registered-vault list and the
+agent settings — the app would have come up looking factory-new with the user's
+vaults apparently gone. `migrate_legacy_config` copies both files across on
+first run, copying rather than moving so an older build still works and nothing
+is destroyed if it goes wrong.
+
+Claude-Session: https://claude.ai/code/session_01WUWwBLxZG6iVEcmzDrTCsQ
+---
+ .gitignore                               |   6 +
+ trove-desktop/src-tauri/Cargo.lock       |  51 ++++++++
+ trove-desktop/src-tauri/Cargo.toml       |  10 ++
+ trove-desktop/src-tauri/src/biometric.rs | 159 +++++++++++++++++++++++
+ trove-desktop/src-tauri/src/commands.rs  | 152 ++++++++++++++++++++++
+ trove-desktop/src-tauri/src/lib.rs       |   9 ++
+ trove-desktop/src-tauri/tauri.conf.json  |   2 +-
+ trove-desktop/src/App.jsx                |   8 +-
+ trove-desktop/src/api.js                 |  21 +++
+ trove-desktop/src/icons.jsx              |   3 +
+ trove-desktop/src/overlays.jsx           |  59 ++++++++-
+ trove-desktop/src/styles.css             |  22 ++++
+ trove-desktop/tests/App.test.jsx         |  51 ++++++++
+ trove-desktop/tests/VaultView.test.jsx   |   6 +
+ 14 files changed, 556 insertions(+), 3 deletions(-)
+ create mode 100644 trove-desktop/src-tauri/src/biometric.rs
+
+diff --git a/.gitignore b/.gitignore
+index a5cae5c..aa97086 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -17,3 +17,9 @@
+ 
+ # gpg writes these next to the cwd when a signing test goes sideways.
+ dbgmd-*
++
++# Apple provisioning profiles. Not secret in the way a .p12 is — they carry no
++# private key — but they are per-machine, they expire, and a stale one in the
++# tree is worse than none. Keep them out.
++*.provisionprofile
++*.mobileprovision
+diff --git a/trove-desktop/src-tauri/Cargo.lock b/trove-desktop/src-tauri/Cargo.lock
+index 170a9ad..51bdc5d 100644
+--- a/trove-desktop/src-tauri/Cargo.lock
++++ b/trove-desktop/src-tauri/Cargo.lock
+@@ -2543,6 +2543,18 @@ dependencies = [
+  "objc2-core-foundation",
+ ]
+ 
++[[package]]
++name = "objc2-local-authentication"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e48e0b8b339e0d9d2ed4416b7f93f9d4daadff7d4dd797f89867cde11aeac607"
++dependencies = [
++ "block2",
++ "objc2",
++ "objc2-foundation",
++ "objc2-security",
++]
++
+ [[package]]
+ name = "objc2-quartz-core"
+ version = "0.3.2"
+@@ -2555,6 +2567,17 @@ dependencies = [
+  "objc2-foundation",
+ ]
+ 
++[[package]]
++name = "objc2-security"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
++dependencies = [
++ "bitflags 2.13.1",
++ "objc2",
++ "objc2-core-foundation",
++]
++
+ [[package]]
+ name = "objc2-ui-kit"
+ version = "0.3.2"
+@@ -3309,6 +3332,29 @@ dependencies = [
+  "zeroize",
+ ]
+ 
++[[package]]
++name = "security-framework"
++version = "3.7.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
++dependencies = [
++ "bitflags 2.13.1",
++ "core-foundation",
++ "core-foundation-sys",
++ "libc",
++ "security-framework-sys",
++]
++
++[[package]]
++name = "security-framework-sys"
++version = "2.17.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
++dependencies = [
++ "core-foundation-sys",
++ "libc",
++]
++
+ [[package]]
+ name = "selectors"
+ version = "0.36.1"
+@@ -4517,6 +4563,11 @@ dependencies = [
+ name = "trove-desktop"
+ version = "0.13.0"
+ dependencies = [
++ "block2",
++ "objc2",
++ "objc2-foundation",
++ "objc2-local-authentication",
++ "security-framework",
+  "serde",
+  "serde_json",
+  "tauri",
+diff --git a/trove-desktop/src-tauri/Cargo.toml b/trove-desktop/src-tauri/Cargo.toml
+index 2e2bc8b..0a695fa 100644
+--- a/trove-desktop/src-tauri/Cargo.toml
++++ b/trove-desktop/src-tauri/Cargo.toml
+@@ -53,3 +53,13 @@ opt-level = 3
+ 
+ [profile.dev.package.troved]
+ opt-level = 3
++
++# macOS only: Touch ID (LocalAuthentication) plus the login keychain that holds
++# the password it gates. `LAContext` needs no entitlement — verified from an
++# unsigned binary — so the prompt works without a provisioning profile.
++[target.'cfg(target_os = "macos")'.dependencies]
++objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError"] }
++objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
++objc2 = "0.6"
++block2 = "0.6"
++security-framework = "3"
+diff --git a/trove-desktop/src-tauri/src/biometric.rs b/trove-desktop/src-tauri/src/biometric.rs
+new file mode 100644
+index 0000000..e80e131
+--- /dev/null
++++ b/trove-desktop/src-tauri/src/biometric.rs
+@@ -0,0 +1,159 @@
++//! Touch ID for the desktop app: a fingerprint gate in front of a vault
++//! password kept in the macOS login keychain.
++//!
++//! **What this is and is not.** The fingerprint is checked by
++//! `LAContext.evaluatePolicy`, and on success the password is read from the
++//! login keychain. The biometry is therefore a gate in this application's own
++//! code, not a cryptographic binding: a process that can already read your
++//! login keychain can reach the same password without ever showing a prompt.
++//!
++//! The stronger version — `kSecAttrAccessControl` on the data-protection
++//! keychain, where the Secure Enclave itself refuses to release the bytes
++//! without a live finger — needs a team-prefixed `keychain-access-groups`
++//! entitlement, which under Developer ID needs a provisioning profile embedded
++//! in the bundle. When that profile exists, only [`keychain`] changes; the
++//! prompt and everything above it stay as they are.
++//!
++//! `LAContext` needs neither, which is why the prompt works today: verified
++//! from an unsigned binary with no bundle at all.
++//!
++//! The keychain entry is deliberately the same one the CLI writes — same
++//! service, same account — so enrolling a vault in either place serves both.
++
++#[cfg(target_os = "macos")]
++mod imp {
++    use objc2_foundation::{NSError, NSString};
++    use objc2_local_authentication::{LAContext, LAPolicy};
++    use security_framework::passwords::{
++        delete_generic_password, get_generic_password, set_generic_password,
++    };
++    use std::path::Path;
++    use std::time::Duration;
++
++    /// Must match `trove-cli`'s `keychain::SERVICE`, so a vault enrolled from
++    /// the CLI unlocks with Touch ID here and vice versa.
++    const SERVICE: &str = "trove vault password";
++
++    /// `errSecItemNotFound` — nothing stored, which is a state rather than a
++    /// failure.
++    const NOT_FOUND: i32 = -25300;
++
++    /// A vault is addressed by its canonical path, matching the CLI.
++    fn account(vault: &Path) -> Result<String, String> {
++        let canonical = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
++        canonical
++            .to_str()
++            .map(str::to_string)
++            .ok_or_else(|| format!("vault path is not valid UTF-8: {}", vault.display()))
++    }
++
++    /// Is there a fingerprint reader with an enrolled finger, right now?
++    ///
++    /// False also covers "the lid is shut and this is an external keyboard" and
++    /// "biometry is locked out after too many failures", so it is asked at the
++    /// moment the UI is drawn rather than cached.
++    pub fn available() -> bool {
++        let ctx = unsafe { LAContext::new() };
++        unsafe {
++            ctx.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics)
++                .is_ok()
++        }
++    }
++
++    /// Show the system fingerprint prompt. `Ok(false)` is a refusal or a
++    /// cancel — an ordinary outcome, not an error.
++    pub fn authenticate(reason: &str) -> Result<bool, String> {
++        let ctx = unsafe { LAContext::new() };
++        let policy = LAPolicy::DeviceOwnerAuthenticationWithBiometrics;
++        if unsafe { ctx.canEvaluatePolicy_error(policy) }.is_err() {
++            return Err("Touch ID is not available on this Mac".to_string());
++        }
++
++        let reason = NSString::from_str(reason);
++        let (tx, rx) = std::sync::mpsc::channel();
++        let handler = block2::RcBlock::new(move |ok: objc2::runtime::Bool, _e: *mut NSError| {
++            // A send failure means the receiver gave up waiting; nothing to do
++            // about it here, and the prompt is already gone.
++            let _ = tx.send(ok.as_bool());
++        });
++        unsafe { ctx.evaluatePolicy_localizedReason_reply(policy, &reason, &handler) };
++
++        // Bounded: the prompt can be dismissed in ways that never call back
++        // (the display sleeping, say), and a GUI thread waiting forever on that
++        // is the freeze this app already had once.
++        rx.recv_timeout(Duration::from_secs(120))
++            .map_err(|_| "Touch ID prompt timed out".to_string())
++    }
++
++    pub fn is_enrolled(vault: &Path) -> Result<bool, String> {
++        let account = account(vault)?;
++        match get_generic_password(SERVICE, &account) {
++            Ok(_) => Ok(true),
++            Err(e) if e.code() == NOT_FOUND => Ok(false),
++            Err(e) => Err(format!("looking for a stored password: {e}")),
++        }
++    }
++
++    pub fn enroll(vault: &Path, password: &str) -> Result<(), String> {
++        let account = account(vault)?;
++        set_generic_password(SERVICE, &account, password.as_bytes())
++            .map_err(|e| format!("storing the password in the keychain: {e}"))
++    }
++
++    pub fn forget(vault: &Path) -> Result<bool, String> {
++        let account = account(vault)?;
++        match delete_generic_password(SERVICE, &account) {
++            Ok(()) => Ok(true),
++            Err(e) if e.code() == NOT_FOUND => Ok(false),
++            Err(e) => Err(format!("removing the stored password: {e}")),
++        }
++    }
++
++    /// The stored password, released only after a successful fingerprint.
++    pub fn unlock(vault: &Path, reason: &str) -> Result<Option<String>, String> {
++        let account = account(vault)?;
++        // Look before prompting: asking for a fingerprint and then admitting
++        // there is nothing stored wastes the gesture and reads as a bug.
++        if !is_enrolled(vault)? {
++            return Ok(None);
++        }
++        if !authenticate(reason)? {
++            return Ok(None);
++        }
++        let bytes = get_generic_password(SERVICE, &account)
++            .map_err(|e| format!("reading the stored password after authenticating: {e}"))?;
++        String::from_utf8(bytes)
++            .map(Some)
++            .map_err(|_| "the stored password is not valid UTF-8".to_string())
++    }
++}
++
++#[cfg(not(target_os = "macos"))]
++mod imp {
++    use std::path::Path;
++
++    fn unsupported() -> String {
++        "Touch ID is macOS only".to_string()
++    }
++
++    pub fn available() -> bool {
++        false
++    }
++    pub fn authenticate(_reason: &str) -> Result<bool, String> {
++        Err(unsupported())
++    }
++    pub fn is_enrolled(_vault: &Path) -> Result<bool, String> {
++        Ok(false)
++    }
++    pub fn enroll(_vault: &Path, _password: &str) -> Result<(), String> {
++        Err(unsupported())
++    }
++    pub fn forget(_vault: &Path) -> Result<bool, String> {
++        Ok(false)
++    }
++    pub fn unlock(_vault: &Path, _reason: &str) -> Result<Option<String>, String> {
++        Ok(None)
++    }
++}
++
++pub use imp::{available, enroll, forget, is_enrolled, unlock};
+diff --git a/trove-desktop/src-tauri/src/commands.rs b/trove-desktop/src-tauri/src/commands.rs
+index c1133e3..751f1a4 100644
+--- a/trove-desktop/src-tauri/src/commands.rs
++++ b/trove-desktop/src-tauri/src/commands.rs
+@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
+ use std::str::FromStr;
+ use std::sync::Mutex;
+ 
++use crate::biometric;
+ use serde::{Deserialize, Serialize};
+ use tauri::{AppHandle, Emitter as _, Manager, State};
+ use trove_core::{EntryId, Vault};
+@@ -130,6 +131,15 @@ struct RecentEntry {
+ // --- DTOs (serialized names are what the frontend sees) --------------------
+ 
+ /// A registered vault as the switcher sees it.
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct BiometricDto {
++    /// A fingerprint reader with an enrolled finger, usable right now.
++    pub available: bool,
++    /// This vault has a password stored for Touch ID to release.
++    pub enrolled: bool,
++}
++
+ #[derive(Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct VaultDto {
+@@ -324,6 +334,48 @@ fn ensure_no_id_collision(state: &AppState, id: &str, cpath: &Path) -> Result<bo
+ 
+ // --- persistence -----------------------------------------------------------
+ 
++/// What the bundle identifier used to be, and therefore what the app's config
++/// directory used to be called.
++const LEGACY_BUNDLE_ID: &str = "com.trove.desktop";
++
++/// Move settings and the vault list over from the old identifier's directory,
++/// once.
++///
++/// macOS keys an app's data directory by bundle identifier, so renaming the
++/// bundle orphans everything the app had written — for trove that is the list
++/// of registered vaults and the agent settings, i.e. the app comes up looking
++/// factory-new with the user's vaults apparently gone. Copying rather than
++/// moving leaves the old directory intact, so an older build still works and
++/// nothing is destroyed if this goes wrong.
++///
++/// Only runs when the new directory has no file of that name yet, so it can
++/// never overwrite newer state, and it is safe to call on every start.
++pub fn migrate_legacy_config(app: &AppHandle) {
++    let Ok(new_dir) = app.path().app_config_dir() else {
++        return;
++    };
++    let Some(old_dir) = new_dir.parent().map(|parent| parent.join(LEGACY_BUNDLE_ID)) else {
++        return;
++    };
++    if !old_dir.is_dir() || old_dir == new_dir {
++        return;
++    }
++    for name in [RECENTS_FILE, SETTINGS_FILE] {
++        let (from, to) = (old_dir.join(name), new_dir.join(name));
++        if !from.is_file() || to.exists() {
++            continue;
++        }
++        if std::fs::create_dir_all(&new_dir).is_err() {
++            return;
++        }
++        match std::fs::copy(&from, &to) {
++            Ok(_) => eprintln!("trove: carried {name} over from {LEGACY_BUNDLE_ID}"),
++            // Not fatal: the app still opens, the user re-adds their vaults.
++            Err(e) => eprintln!("trove: could not carry {name} over: {e}"),
++        }
++    }
++}
++
+ fn recents_path(app: &AppHandle) -> Result<PathBuf, String> {
+     let dir = app
+         .path()
+@@ -1069,6 +1121,106 @@ pub fn create_vault(
+ }
+ 
+ /// Decrypt a registered vault, store the open `Vault`, return its entry list.
++/// The registered vault's path, or an error naming the id that is not known.
++///
++/// The lock is taken and released here rather than held across the work that
++/// follows: every command in this file learned that lesson when holding it
++/// across an unlock froze the window.
++fn vault_path(id: &str, state: &State<'_, VaultState>) -> Result<PathBuf, String> {
++    let guard = state.lock().map_err(poisoned)?;
++    guard
++        .vaults
++        .get(id)
++        .map(|v| v.path.clone())
++        .ok_or_else(|| format!("vault is not registered: {id}"))
++}
++
++/// Whether this Mac can do Touch ID at all, and whether THIS vault has a
++/// password stored for it.
++///
++/// Both are asked at the moment the unlock screen draws, because both change
++/// underneath you: biometry goes away when the lid is shut on a clamshell
++/// setup or after too many failed attempts, and the entry can be removed from
++/// Keychain Access or by the CLI at any time.
++#[tauri::command]
++pub async fn biometric_status(
++    id: String,
++    state: State<'_, VaultState>,
++) -> Result<BiometricDto, String> {
++    let path = vault_path(&id, &state)?;
++    let enrolled = tauri::async_runtime::spawn_blocking(move || biometric::is_enrolled(&path))
++        .await
++        .map_err(|e| e.to_string())?
++        .map_err(|e| e.to_string())?;
++    Ok(BiometricDto {
++        available: biometric::available(),
++        enrolled,
++    })
++}
++
++/// Unlock with a fingerprint instead of a typed password.
++///
++/// Returns `Ok(None)` when the prompt was cancelled or nothing is stored —
++/// both are ordinary outcomes that leave the password field waiting, not
++/// errors to put in front of someone.
++#[tauri::command]
++pub async fn biometric_unlock(
++    app: AppHandle,
++    id: String,
++    state: State<'_, VaultState>,
++) -> Result<Option<Vec<EntryDto>>, String> {
++    let path = vault_path(&id, &state)?;
++    let name = path
++        .file_stem()
++        .map(|s: &std::ffi::OsStr| s.to_string_lossy().to_string())
++        .unwrap_or_else(|| "your vault".to_string());
++    let reason = format!("unlock {name}");
++
++    // Off the main thread: the prompt blocks until the user answers it, and
++    // that is exactly the freeze this app was fixed for.
++    let password = {
++        let path = path.clone();
++        tauri::async_runtime::spawn_blocking(move || biometric::unlock(&path, &reason))
++            .await
++            .map_err(|e| e.to_string())?
++            .map_err(|e| e.to_string())?
++    };
++    let Some(password) = password else {
++        return Ok(None);
++    };
++    unlock_vault(app, id, password, state).await.map(Some)
++}
++
++/// Remember this vault's password for Touch ID.
++///
++/// The password is proved against the vault first: an entry that does not open
++/// it is worse than none, because it fails later and somewhere else.
++#[tauri::command]
++pub async fn biometric_enroll(
++    id: String,
++    password: String,
++    state: State<'_, VaultState>,
++) -> Result<(), String> {
++    let path = vault_path(&id, &state)?;
++    tauri::async_runtime::spawn_blocking(move || {
++        trove_core::Vault::open(&path, &password)
++            .map_err(|e| format!("that password does not open this vault: {e}"))?;
++        biometric::enroll(&path, &password).map_err(|e| e.to_string())
++    })
++    .await
++    .map_err(|e| e.to_string())?
++}
++
++/// Forget this vault's stored password.
++#[tauri::command]
++pub async fn biometric_forget(id: String, state: State<'_, VaultState>) -> Result<bool, String> {
++    let path = vault_path(&id, &state)?;
++    tauri::async_runtime::spawn_blocking(move || biometric::forget(&path))
++        .await
++        .map_err(|e| e.to_string())?
++        .map_err(|e| e.to_string())
++}
++
+ #[tauri::command]
+ pub async fn unlock_vault(
+     app: AppHandle,
+diff --git a/trove-desktop/src-tauri/src/lib.rs b/trove-desktop/src-tauri/src/lib.rs
+index 85f9570..60cfcf3 100644
+--- a/trove-desktop/src-tauri/src/lib.rs
++++ b/trove-desktop/src-tauri/src/lib.rs
+@@ -1,3 +1,4 @@
++mod biometric;
+ mod commands;
+ 
+ use commands::{AppState, VaultState};
+@@ -13,6 +14,10 @@ pub fn run() {
+         .plugin(tauri_plugin_dialog::init())
+         .manage(VaultState::new(AppState::default()))
+         .setup(|app| {
++            // Before anything reads settings or the vault list: the bundle
++            // identifier changed, and macOS keys the config directory by it.
++            commands::migrate_legacy_config(app.handle());
++
+             // System tray: the Trove icon in the menu bar / system tray, with a
+             // small menu. Additive — it does not change the window's close
+             // behavior. Uses the app's own window icon so it tracks the bundle.
+@@ -49,6 +54,10 @@ pub fn run() {
+             commands::save_entry,
+             commands::delete_entry,
+             commands::set_favorite,
++            commands::biometric_status,
++            commands::biometric_unlock,
++            commands::biometric_enroll,
++            commands::biometric_forget,
+         ])
+         .run(tauri::generate_context!())
+         .expect("error while running tauri application");
+diff --git a/trove-desktop/src-tauri/tauri.conf.json b/trove-desktop/src-tauri/tauri.conf.json
+index cda966e..496c0b1 100644
+--- a/trove-desktop/src-tauri/tauri.conf.json
++++ b/trove-desktop/src-tauri/tauri.conf.json
+@@ -2,7 +2,7 @@
+   "$schema": "https://schema.tauri.app/config/2",
+   "productName": "Trove",
+   "version": "0.13.0",
+-  "identifier": "com.trove.desktop",
++  "identifier": "com.antimatterstudios.trove",
+   "build": {
+     "beforeDevCommand": "npm run dev",
+     "devUrl": "http://localhost:1420",
+diff --git a/trove-desktop/src/App.jsx b/trove-desktop/src/App.jsx
+index 44355fa..c6b9332 100644
+--- a/trove-desktop/src/App.jsx
++++ b/trove-desktop/src/App.jsx
+@@ -352,6 +352,12 @@ function App() {
+   // <Unlock> shows a progress checklist while the backend works, and flipping
+   // here would unmount it mid-list. It calls `unlockReady` when it's finished.
+   const unlock = async (pw) => await api.unlockVault(vault.id, pw);
++  // Same contract as `unlock`, except it can resolve with null: a cancelled
++  // fingerprint prompt is a decision, not a failure, and <Unlock> puts the
++  // password field back rather than showing an error.
++  const touchIdUnlock = async () => await api.biometricUnlock(vault.id);
++  // Called after a successful password unlock, with the password that worked.
++  const touchIdRemember = async (pw) => await api.biometricEnroll(vault.id, pw);
+   const unlockReady = (list) =>
+     patch({ locked: false, entries: list, loaded: true, group: "__all", selId: list[0] ? list[0].id : null });
+   const switchVault = (id) => {
+@@ -591,7 +597,7 @@ function App() {
+ 
+         {/* body */}
+         {locked ? (
+-          <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} />
++          <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} onTouchId={touchIdUnlock} onRemember={touchIdRemember} />
+         ) : (
+           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
+             <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
+diff --git a/trove-desktop/src/api.js b/trove-desktop/src/api.js
+index 6198437..59ce3d9 100644
+--- a/trove-desktop/src/api.js
++++ b/trove-desktop/src/api.js
+@@ -113,3 +113,24 @@ export function setAgentKey(id, entryId, enabled, policy = {}) {
+ export function buildInfo() {
+   return invoke('build_info');
+ }
++
++/* ---- Touch ID (macOS) ---- */
++
++// biometric_status(id) -> { available, enrolled }
++// Asked when the unlock screen draws rather than cached: biometry disappears
++// when the lid is shut on a clamshell setup or after too many failed attempts,
++// and the stored password can be removed from Keychain Access or the CLI.
++export const biometricStatus = (id) =>
++  invoke('biometric_status', { id }).catch(() => ({ available: false, enrolled: false }));
++
++// biometric_unlock(id) -> entries | null
++// `null` means the prompt was cancelled or nothing is stored — ordinary
++// outcomes that leave the password field waiting, not errors to shout about.
++export const biometricUnlock = (id) =>
++  invoke('biometric_unlock', { id }).then((list) => (list ? normEntries(list) : null));
++
++// biometric_enroll(id, password) — proves the password opens the vault first.
++export const biometricEnroll = (id, password) => invoke('biometric_enroll', { id, password });
++
++// biometric_forget(id) -> bool (false when there was nothing stored)
++export const biometricForget = (id) => invoke('biometric_forget', { id });
+diff --git a/trove-desktop/src/icons.jsx b/trove-desktop/src/icons.jsx
+index d65820e..945e124 100644
+--- a/trove-desktop/src/icons.jsx
++++ b/trove-desktop/src/icons.jsx
+@@ -3,6 +3,9 @@ import React from 'react';
+ const ICON_PATHS = {
+   shield: 'M12 3l7 3v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3z',
+   lock: 'M6 10V8a6 6 0 0 1 12 0v2 M5 10h14v10H5z M12 14v3',
++  // Concentric arcs, widest at the bottom — reads as a fingerprint at 17px
++  // without trying to draw actual ridges, which turn to mud at this size.
++  fingerprint: 'M12 11v4 M9 9.5a3.5 3.5 0 0 1 6 0v3a6 6 0 0 1-.6 2.6 M6.2 8.2a7 7 0 0 1 11.6 0 M15 15.5a9 9 0 0 1-.5 3 M9 12.5v2.5a9 9 0 0 0 .6 3.2 M4.4 12a8 8 0 0 1 .5-3.4',
+   unlock: 'M7 10V8a5 5 0 0 1 9.6-2 M5 10h14v10H5z M12 14v3',
+   search: 'M11 11m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0 M20 20l-4-4',
+   plus: 'M12 5v14 M5 12h14',
+diff --git a/trove-desktop/src/overlays.jsx b/trove-desktop/src/overlays.jsx
+index 470e7fc..7e47e6b 100644
+--- a/trove-desktop/src/overlays.jsx
++++ b/trove-desktop/src/overlays.jsx
+@@ -1,6 +1,7 @@
+ import React from 'react';
+ import { listen } from '@tauri-apps/api/event';
+ import { Icon, TYPE_ICON } from './icons.jsx';
++import * as api from './api.js';
+ // Trove — overlays: unlock, command palette, entry form, toast, help
+ 
+ /* ============ UNLOCK ============ */
+@@ -42,8 +43,14 @@ function UnlockProgress({ progress }) {
+   );
+ }
+ 
+-function Unlock({ vault, onUnlock, onReady, onChange }) {
++function Unlock({ vault, onUnlock, onReady, onChange, onTouchId, onRemember }) {
+   const [pw, setPw] = React.useState("");
++  // { available, enrolled } — asked per vault, and again whenever this screen
++  // is shown, because both halves change without the app being told.
++  const [bio, setBio] = React.useState({ available: false, enrolled: false });
++  // Ticked before typing the password: enrolment needs a password that is
++  // known to work, and the only moment we have one is a successful unlock.
++  const [remember, setRemember] = React.useState(false);
+   const [show, setShow] = React.useState(false);
+   const [err, setErr] = React.useState(false);
+   const [busy, setBusy] = React.useState(false);
+@@ -98,6 +105,11 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
+       }),
+     []
+   );
++  React.useEffect(() => {
++    let dead = false;
++    api.biometricStatus(vault.id).then((b) => { if (!dead) setBio(b); });
++    return () => { dead = true; };
++  }, [vault.id]);
+   React.useEffect(() => { ref.current && ref.current.focus(); }, [vault.id]);
+   // Reset transient state when the target vault changes.
+   React.useEffect(() => { setPw(""); setErr(false); setBusy(false); }, [vault.id]);
+@@ -113,6 +125,16 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
+       // time it resolves, but the checklist may still be draining, and an
+       // immediate unmount would bin the last few ticks.
+       const list = await onUnlock(pw);
++      // Enrol only now, with a password the vault has just accepted. Failing
++      // here must not fail the unlock — the vault is open either way, and the
++      // worst case is that the offer comes back next time.
++      if (remember && bio.available && !bio.enrolled) {
++        try {
++          await onRemember(pw);
++        } catch (e3) {
++          console.warn("could not remember this password for Touch ID", e3);
++        }
++      }
+       await drained();
+       onReady(list);
+       return;
+@@ -124,6 +146,25 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
+     }
+   };
+ 
++  // Touch ID: the fingerprint releases a password kept in the login keychain,
++  // and from there this is an ordinary unlock. A cancelled prompt is not an
++  // error — it returns null and leaves the password field exactly as it was.
++  const touchId = async () => {
++    if (busy) return;
++    setBusy(true); setErr(false); setProgress({});
++    queue.current = []; draining.current = false;
++    try {
++      const list = await onTouchId();
++      if (!list) { setBusy(false); ref.current && ref.current.focus(); return; }
++      await drained();
++      onReady(list);
++    } catch (e2) {
++      setErr(e2 && typeof e2 === "string" ? e2 : (e2 && e2.message) || true);
++      setBusy(false);
++      ref.current && ref.current.focus();
++    }
++  };
++
+   // Split the path so the chip truncates the *directory* (ellipsis) while
+   // always keeping the filename visible — right-truncating the whole path
+   // would hide the .kdbx name, which is the part that identifies the vault.
+@@ -183,6 +224,22 @@ function Unlock({ vault, onUnlock, onReady, onChange }) {
+           <Icon name="unlock" size={17} /> Unlock
+         </button>
+ 
++        {bio.available && !bio.enrolled && (
++          <label className="ul-remember">
++            <input
++              type="checkbox" checked={remember}
++              onChange={(e) => setRemember(e.target.checked)}
++            />
++            <span><Icon name="fingerprint" size={14} /> Remember with Touch ID</span>
++          </label>
++        )}
++
++        {bio.available && bio.enrolled && (
++          <button type="button" className="ul-touchid" onClick={touchId}>
++            <Icon name="fingerprint" size={17} /> Unlock with Touch ID
++          </button>
++        )}
++
+         <div className="ul-foot"><Icon name="shield" size={13} /> Local‑only · never leaves this device</div>
+       </form>
+     </div>
+diff --git a/trove-desktop/src/styles.css b/trove-desktop/src/styles.css
+index d719a19..3d0c35d 100644
+--- a/trove-desktop/src/styles.css
++++ b/trove-desktop/src/styles.css
+@@ -669,3 +669,25 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; line-height:
+ /* ---- desktop-app overrides: fill the native window, drop the fake frame ---- */
+ .desk { padding: 0; }
+ .window { width: 100%; height: 100vh; max-width: none; border: none; border-radius: 0; box-shadow: none; }
++
++/* Touch ID sits under the primary Unlock: same width so the card keeps its
++   rhythm, quieter fill so it never competes with the action people expect. */
++.ul-touchid {
++  width: 100%; height: 40px; margin-top: 8px;
++  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
++  border-radius: 10px; border: 1px solid var(--border);
++  background: var(--bg-2); color: var(--text);
++  font-size: 13.5px; font-weight: 600;
++  transition: background .12s, border-color .12s;
++}
++.ul-touchid:hover { background: var(--bg-3, var(--bg-2)); border-color: var(--accent-line); }
++
++/* Sits between the password field and the buttons: an offer, not a control
++   competing with Unlock. */
++.ul-remember {
++  display: flex; align-items: center; gap: 8px;
++  margin: 2px 0 8px; font-size: 12.5px; color: var(--text-dim);
++  cursor: pointer; user-select: none;
++}
++.ul-remember span { display: inline-flex; align-items: center; gap: 6px; }
++.ul-remember input { accent-color: var(--accent-strong); }
+diff --git a/trove-desktop/tests/App.test.jsx b/trove-desktop/tests/App.test.jsx
+index c5f3c32..235c01f 100644
+--- a/trove-desktop/tests/App.test.jsx
++++ b/trove-desktop/tests/App.test.jsx
+@@ -42,6 +42,10 @@ vi.mock('../src/api.js', () => ({
+   buildInfo: vi.fn(),
+   setAgentKey: vi.fn(),
+   setSettings: vi.fn(),
++  biometricStatus: vi.fn(),
++  biometricUnlock: vi.fn(),
++  biometricEnroll: vi.fn(),
++  biometricForget: vi.fn(),
+ }));
+ 
+ import * as api from '../src/api.js';
+@@ -58,6 +62,8 @@ beforeEach(() => {
+   api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
+   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
+   api.setSettings.mockResolvedValue(undefined);
++  // Touch ID absent by default; the tests that care set it themselves.
++  api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
+   vi.clearAllMocks();
+   document.documentElement.removeAttribute('data-theme');
+   document.documentElement.removeAttribute('data-accent');
+@@ -116,6 +122,51 @@ describe('real unlock flow', () => {
+     expect(c.querySelectorAll('.list .erow').length).toBe(2);
+   });
+ 
++  it('offers Touch ID only when the Mac can do it AND this vault is enrolled', async () => {
++    api.listVaults.mockResolvedValue([LOCKED_VAULT]);
++
++    // Neither: no button. A machine without a reader must not advertise one.
++    api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
++    const { container: a, unmount } = render(<App />);
++    await waitFor(() => expect(a.querySelector('.unlock-card')).toBeTruthy());
++    expect(a.querySelector('.ul-touchid')).toBeFalsy();
++    unmount();
++
++    // Available but nothing stored: still no button — prompting for a finger
++    // and then admitting there is no password would read as a bug.
++    api.biometricStatus.mockResolvedValue({ available: true, enrolled: false });
++    const { container: b, unmount: unmountB } = render(<App />);
++    await waitFor(() => expect(b.querySelector('.unlock-card')).toBeTruthy());
++    expect(b.querySelector('.ul-touchid')).toBeFalsy();
++    unmountB();
++
++    // Both: the button appears.
++    api.biometricStatus.mockResolvedValue({ available: true, enrolled: true });
++    const { container: c } = render(<App />);
++    await waitFor(() => expect(c.querySelector('.ul-touchid')).toBeTruthy());
++  });
++
++  it('a cancelled Touch ID prompt leaves the password field, not an error', async () => {
++    api.listVaults.mockResolvedValue([LOCKED_VAULT]);
++    api.biometricStatus.mockResolvedValue({ available: true, enrolled: true });
++    // null is the cancel signal — a decision, not a failure.
++    api.biometricUnlock.mockResolvedValue(null);
++
++    const { container: c } = render(<App />);
++    const button = await waitFor(() => {
++      const el = c.querySelector('.ul-touchid');
++      if (!el) throw new Error('no touch id button yet');
++      return el;
++    });
++    fireEvent.click(button);
++
++    await waitFor(() => expect(api.biometricUnlock).toHaveBeenCalledWith('v1'));
++    // Still locked, still asking for a password, and nothing red.
++    await waitFor(() => expect(c.querySelector('.unlock-card .ul-field input')).toBeTruthy());
++    expect(c.querySelector('.ul-err').textContent.trim()).toBe('');
++    expect(c.querySelector('.body .pane.sidebar')).toBeFalsy();
++  });
++
+   it('a wrong password surfaces the backend error and stays locked', async () => {
+     api.listVaults.mockResolvedValue([LOCKED_VAULT]);
+     api.unlockVault.mockRejectedValue('Incorrect master password');
+diff --git a/trove-desktop/tests/VaultView.test.jsx b/trove-desktop/tests/VaultView.test.jsx
+index 5db7775..c0aee45 100644
+--- a/trove-desktop/tests/VaultView.test.jsx
++++ b/trove-desktop/tests/VaultView.test.jsx
+@@ -41,6 +41,10 @@ vi.mock('../src/api.js', () => ({
+   buildInfo: vi.fn(),
+   setAgentKey: vi.fn(),
+   setSettings: vi.fn(),
++  biometricStatus: vi.fn(),
++  biometricUnlock: vi.fn(),
++  biometricEnroll: vi.fn(),
++  biometricForget: vi.fn(),
+ }));
+ 
+ import * as api from '../src/api.js';
+@@ -65,6 +69,8 @@ beforeEach(() => {
+   api.buildInfo.mockResolvedValue({ version: '0.8.0', mode: 'dev', commit: 'abc12345' });
+   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
+   api.setSettings.mockResolvedValue(undefined);
++  // Touch ID absent by default; the tests that care set it themselves.
++  api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
+   vi.clearAllMocks();
+   try { localStorage.clear(); } catch { /* ignore */ }
+   api.listVaults.mockResolvedValue([OPEN_VAULT]);
+-- 
+2.54.0 (Apple Git-157)
+
