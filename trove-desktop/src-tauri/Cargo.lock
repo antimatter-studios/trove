@@ -5092,6 +5092,8 @@ version = "0.27.1"
 dependencies = [
  "base64 0.22.1",
  "block2",
+ "chrono",
+ "keepass",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
@@ -5103,6 +5105,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "trove-core",
  "troved",
+ "zeroize",
  "zxcvbn",
 ]
 
@@ -5139,6 +5142,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",
+ "zxcvbn",
 ]
 
 [[package]]

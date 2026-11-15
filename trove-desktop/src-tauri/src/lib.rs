@@ -73,6 +73,7 @@ pub fn run() {
             commands::set_group_default,
             commands::database_changed_on_disk,
             commands::reload_database,
+            commands::database_health,
             commands::get_field,
             commands::get_entry_detail,
             commands::get_entry_revisions,

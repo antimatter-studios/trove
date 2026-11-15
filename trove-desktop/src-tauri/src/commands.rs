@@ -32,8 +32,10 @@ use troved::materialize::{self, MaterializedFile, MaterializedStore};
 use troved::ssh_agent::{self, keeagent, ForwardedKey, LoadedKey};
 use zxcvbn::zxcvbn;
 
+mod health;
 mod lifecycle;
 mod revisions;
+pub use health::*;
 pub use lifecycle::*;
 pub use revisions::*;
 

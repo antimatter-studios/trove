@@ -2951,6 +2951,7 @@ dependencies = [
  "windows-sys",
  "x25519-dalek",
  "zeroize",
+ "zxcvbn",
 ]
 
 [[package]]
