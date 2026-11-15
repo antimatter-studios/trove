@@ -1,0 +1,170 @@
+{
+  "encrypted": false,
+  "folders": [
+    { "id": "f0000000-0000-4000-8000-000000000001", "name": "Work" },
+    { "id": "f0000000-0000-4000-8000-000000000002", "name": "Work/Infra" }
+  ],
+  "items": [
+    {
+      "id": "a0000000-0000-4000-8000-000000000001",
+      "organizationId": null,
+      "folderId": "f0000000-0000-4000-8000-000000000001",
+      "type": 1,
+      "reprompt": 0,
+      "name": "Example Login",
+      "notes": "dummy login notes",
+      "favorite": true,
+      "fields": [
+        { "name": "Plain Field", "value": "plain value", "type": 0, "linkedId": null },
+        { "name": "Hidden Field", "value": "hidden value", "type": 1, "linkedId": null },
+        { "name": "Bool Field", "value": "true", "type": 2, "linkedId": null },
+        { "name": "Linked Field", "value": null, "type": 3, "linkedId": 100 }
+      ],
+      "login": {
+        "uris": [
+          { "match": null, "uri": "https://example.com/login" },
+          { "match": null, "uri": "https://alt.example.com" },
+          { "match": null, "uri": "https://third.example.com" }
+        ],
+        "username": "dummy-user",
+        "password": "dummy-password-1",
+        "totp": "JBSWY3DPEHPK3PXP",
+        "fido2Credentials": [
+          {
+            "credentialId": "4f7a1c2e-8d3b-4a5f-9e6d-0b1c2d3e4f5a",
+            "keyType": "public-key",
+            "keyAlgorithm": "ECDSA",
+            "keyCurve": "P-256",
+            "keyValue": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUOhRANCAAQDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY",
+            "rpId": "example.com",
+            "userHandle": "ZHVtbXktdXNlci1oYW5kbGU",
+            "userName": "dummy-user",
+            "counter": "0",
+            "rpName": "Example",
+            "userDisplayName": "Dummy User",
+            "discoverable": "true",
+            "creationDate": "2026-01-02T03:04:05.000Z"
+          }
+        ]
+      },
+      "collectionIds": null,
+      "passwordHistory": [
+        { "lastUsedDate": "2025-06-01T10:00:00.000Z", "password": "dummy-old-password-a" },
+        { "lastUsedDate": "2025-09-01T10:00:00.000Z", "password": "dummy-old-password-b" }
+      ],
+      "revisionDate": "2026-01-02T03:04:05.000Z",
+      "creationDate": "2025-01-02T03:04:05.000Z",
+      "deletedDate": null
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000002",
+      "organizationId": null,
+      "folderId": "f0000000-0000-4000-8000-000000000002",
+      "type": 1,
+      "reprompt": 0,
+      "name": "Server",
+      "notes": null,
+      "favorite": false,
+      "login": {
+        "uris": [],
+        "username": "root",
+        "password": "dummy-password-2",
+        "totp": "otpauth://totp/Server:root?secret=GEZDGNBVGY3TQOJQ&issuer=Server&digits=8"
+      },
+      "collectionIds": null,
+      "revisionDate": "2026-01-02T03:04:05.000Z",
+      "creationDate": "2025-01-02T03:04:05.000Z",
+      "deletedDate": null
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000003",
+      "organizationId": null,
+      "folderId": null,
+      "type": 2,
+      "reprompt": 0,
+      "name": "Dummy Note",
+      "notes": "a secure note body",
+      "favorite": false,
+      "secureNote": { "type": 0 },
+      "collectionIds": null,
+      "revisionDate": "2026-01-02T03:04:05.000Z",
+      "creationDate": "2025-01-02T03:04:05.000Z",
+      "deletedDate": null
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000004",
+      "organizationId": null,
+      "folderId": null,
+      "type": 3,
+      "reprompt": 0,
+      "name": "Dummy Card",
+      "notes": null,
+      "favorite": false,
+      "card": {
+        "cardholderName": "Dummy Holder",
+        "brand": "Visa",
+        "number": "4111111111111111",
+        "expMonth": "12",
+        "expYear": "2030",
+        "code": "123"
+      },
+      "collectionIds": null,
+      "revisionDate": "2026-01-02T03:04:05.000Z",
+      "creationDate": "2025-01-02T03:04:05.000Z",
+      "deletedDate": null
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000005",
+      "organizationId": null,
+      "folderId": null,
+      "type": 4,
+      "reprompt": 0,
+      "name": "Dummy Identity",
+      "notes": null,
+      "favorite": false,
+      "identity": {
+        "title": "Mx",
+        "firstName": "Dummy",
+        "middleName": null,
+        "lastName": "Person",
+        "address1": "1 Example Street",
+        "address2": null,
+        "address3": null,
+        "city": "Exampletown",
+        "state": null,
+        "postalCode": "00000",
+        "country": "XX",
+        "company": null,
+        "email": "dummy@example.com",
+        "phone": "+00 0000 000000",
+        "ssn": "000-00-0000",
+        "username": "dummy",
+        "passportNumber": "X0000000",
+        "licenseNumber": "L0000000"
+      },
+      "collectionIds": null,
+      "revisionDate": "2026-01-02T03:04:05.000Z",
+      "creationDate": "2025-01-02T03:04:05.000Z",
+      "deletedDate": null
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000006",
+      "organizationId": null,
+      "folderId": null,
+      "type": 5,
+      "reprompt": 0,
+      "name": "Dummy SSH Key",
+      "notes": null,
+      "favorite": false,
+      "sshKey": {
+        "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nDUMMY-NOT-A-REAL-KEY\n-----END OPENSSH PRIVATE KEY-----\n",
+        "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDU",
+        "keyFingerprint": "SHA256:DUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUM"
+      },
+      "collectionIds": null,
+      "revisionDate": "2026-01-02T03:04:05.000Z",
+      "creationDate": "2025-01-02T03:04:05.000Z",
+      "deletedDate": null
+    }
+  ]
+}
