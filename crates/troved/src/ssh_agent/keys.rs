@@ -105,6 +105,10 @@ pub struct LoadedKey {
     private_key: PrivateKey,
 }
 
+// The private key is ssh-key's `PrivateKey`, whose key data (Ed25519, RSA,
+// ECDSA, DSA) zeroizes itself on drop; nothing else here is secret.
+impl zeroize::ZeroizeOnDrop for LoadedKey {}
+
 /// A key we handed to an agent we don't own, reduced to what's needed to ask
 /// for it back: the public blob (the agent's identity for it) and the comment
 /// (for warnings). Deliberately not a [`LoadedKey`] — nothing that outlives the

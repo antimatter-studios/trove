@@ -1,0 +1,1 @@
+{"cmd": "rmdir", "path": "Infra", "permanent": true, "recursive": true, "code": "guess"}

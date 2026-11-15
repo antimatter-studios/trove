@@ -168,8 +168,8 @@ All payloads round-trip byte-identical.
 | Reject malformed: truncated payload            | **PARSER BUG (panics)** |
 | Reject malformed: missing UUIDs / no root / empty XML / malformed UTF-8 / dangling Binary Ref | ignored — needs XML-injection harness |
 | Cross-impl interop (keepassxc-cli reads our writes) | pass-if-present |
-| Cross-impl golden (KeePassXC-generated kdbx)   | not implemented (clean-room: would need clean-room re-derivation, see `vendor/keepass/fuzz/` follow-up) |
-| Fuzz harness                                   | not implemented (follow-up)         |
+| Cross-impl golden (KeePassXC-generated kdbx)   | not implemented (clean-room: would need clean-room re-derivation) |
+| Fuzz harness                                   | `kdbx_open` and `keyfile_parse` in `crates/troved/fuzz` (nightly, see its README); crash inputs replay in `crates/troved/tests/fuzz_corpus_replay.rs` |
 | Property-based round-trip                      | not implemented (follow-up)         |
 
 ## Migration triggers
@@ -179,6 +179,6 @@ The following are the gates for un-ignoring tests / closing gaps. Each is a cand
 1. **Fix `TruncatedAtHeader` panic** (`format/kdbx4/parse.rs:165`). Bound-check the slice access. Likely already fixed upstream — verify against master before re-implementing.
 2. **Fix `TruncatedAtPayload` panic** (`hmac_block_stream.rs:22`). Same shape — slice access without length check.
 3. **Add an XML-injection test harness** (private API or `#[cfg(test)] pub`) so we can express `NoRootGroup`, `MultipleRootGroups`, `EmptyXml`, `MalformedUtf8`, `DanglingBinaryRef`, `MissingEntryUuid`, `MissingGroupUuid`, `BadXmlInnerHeader` directly. Once present, the eight `#[ignore]`d XML mutations can be unignored.
-4. **Add a `vendor/keepass/fuzz/` harness** with `cargo-fuzz` targets `fuzz_parse_kdbx4`, `fuzz_variant_dictionary`, `fuzz_inner_header`. This catches the same class of slice-OOB bugs as #1 and #2.
+4. **Fuzzing.** Done in `crates/troved/fuzz` rather than a vendored copy: `kdbx_open` feeds arbitrary bytes to `keepass::Database::open` (the header, VariantDictionary and payload parsers), `keyfile_parse` the keyfile parsers. It found the same class of bug as #1 and #2: a header field shorter than its integer type panics in `byteorder`. trove-core now turns any keepass-rs panic on open into an error; the upstream fix is still open.
 5. **KDBX 3 round-trip matrix.** 0.7.33's writer is KDBX4 only; un-ignore once 0.12.x's KDBX3 writer is in.
 6. **Property-based round-trip** (`proptest`). Generate arbitrary `Database` shapes, save, reopen, assert equal.

@@ -1,14 +1,29 @@
 # troved fuzz harnesses
 
-Coverage-guided libfuzzer harnesses for the two hand-rolled parsers in
-`troved` that ingest bytes from any process able to connect to the daemon's
-Unix sockets:
+Coverage-guided libfuzzer harnesses for the parsers that take input trove
+doesn't control: bytes from any process that can connect to the daemon's
+sockets, and database files, keyfiles and fields written by other clients.
 
 | Target                  | Parser                                       | What it asserts                                                       |
 | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
 | `ssh_wire_parse`        | `troved::ssh_agent::wire::parse_request`      | No panic / hang on arbitrary bytes.                                   |
 | `ssh_wire_round_trip`   | wire encode + decode                          | `decode(encode(x)) == x` for arbitrary structured `SignRequest`.      |
 | `assuan_line_parse`     | `Line::parse` + `percent_decode`             | No panic; encode/decode is idempotent on accepted inputs.             |
+| `kdbx_open`             | `keepass::Database::open`, fixed password     | No panic / hang on arbitrary database files (KDB, KDBX 3.1, KDBX 4).  |
+| `keyfile_parse`         | keepass-rs keyfile parsers                    | No panic on arbitrary keyfiles (XML v1/v2, raw, hex, hashed).         |
+| `ipc_request`           | control-socket JSON + `handler::handle`       | No panic, locked or unlocked; code-gated requests refused without the session code. |
+| `otpauth_uri`           | `set_totp_uri` + `totp_at`                    | No panic or overflow at any time, including `period=0` and huge `digits`. |
+| `trove_ref_resolve`     | `Database::resolve_ref`                       | No panic; `Ok` only for a field of an entry that exists, with its value. |
+
+The bodies of the five newer targets live in `harness/`, which
+`crates/troved/tests/fuzz_corpus_replay.rs` includes too, so the seeds replay
+on stable through the same code.
+
+`kdbx_open` skips inputs whose header asks for very expensive KDF settings
+(huge Argon2 memory, billions of AES rounds) or that hit a known keepass-rs
+panic on short header fields. Both are recorded findings; see
+`harness/header_screen.rs`. Without the skip every run would stop in the first
+few seconds.
 
 This crate is **standalone** — not a workspace member. The parent workspace
 builds on stable Rust; libfuzzer-sys requires nightly. Building this crate
@@ -28,6 +43,11 @@ cargo +nightly fuzz run ssh_wire_parse
 # Other targets:
 cargo +nightly fuzz run ssh_wire_round_trip
 cargo +nightly fuzz run assuan_line_parse
+cargo +nightly fuzz run kdbx_open
+cargo +nightly fuzz run keyfile_parse
+cargo +nightly fuzz run ipc_request
+cargo +nightly fuzz run otpauth_uri
+cargo +nightly fuzz run trove_ref_resolve
 ```
 
 A long fuzzing run is `cargo +nightly fuzz run <target> -- -max_total_time=3600`

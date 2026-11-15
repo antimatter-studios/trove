@@ -148,6 +148,17 @@ pub struct LoadedCv25519Key {
     secret_le: Zeroizing<[u8; 32]>,
 }
 
+// Every secret field is `ZeroizeOnDrop` (checked below), so dropping a key
+// wipes it.
+impl zeroize::ZeroizeOnDrop for LoadedGpgKey {}
+
+const _: () = {
+    fn zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    let _ = zeroize_on_drop::<SigningKey>;
+    let _ = zeroize_on_drop::<Zeroizing<Vec<u8>>>;
+    let _ = zeroize_on_drop::<Zeroizing<[u8; 32]>>;
+};
+
 impl LoadedGpgKey {
     /// Hex form of the 20-byte keygrip (lowercase). Matches the form GPG
     /// puts on the wire in the `S KEYINFO` line, lowercased.

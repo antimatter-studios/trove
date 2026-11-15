@@ -351,6 +351,26 @@ fn refuse_hotp(uri: &str) -> Result<()> {
     Ok(())
 }
 
+/// Digits keepass-rs can render: the code is `value % 10^digits`, and 10^20
+/// overflows a `u64`. RFC 6238 allows 6 to 8; ten covers every 31-bit value.
+const MAX_TOTP_DIGITS: u32 = 10;
+
+/// Refuse TOTP parameters keepass-rs would panic on (a zero `period` divides
+/// by zero) or that make no code (zero or too many `digits`). Checked when a
+/// URI is stored and again when a code is computed, since another KeePass
+/// client may have written the field.
+fn check_totp_params(totp: &keepass::db::TOTP) -> Result<()> {
+    if totp.period == 0 {
+        return Err(Error::Totp("TOTP period must be at least 1 second".into()));
+    }
+    if !(1..=MAX_TOTP_DIGITS).contains(&totp.digits) {
+        return Err(Error::Totp(format!(
+            "TOTP digits must be between 1 and {MAX_TOTP_DIGITS}"
+        )));
+    }
+    Ok(())
+}
+
 /// One query parameter of an `otpauth://` URI, undecoded.
 fn otp_param<'a>(uri: &'a str, name: &str) -> Option<&'a str> {
     let (_, query) = uri.split_once('?')?;
@@ -585,6 +605,10 @@ impl FileStamp {
 /// How many times `save()` merges and writes again when other writers keep
 /// replacing the file under it, before giving up with [`Error::StaleWrite`].
 const SAVE_ATTEMPTS: usize = 5;
+
+// The master password and keyfile bytes are wiped when the database is
+// dropped (see `Drop for DatabaseInner`), which is what this marker promises.
+impl zeroize::ZeroizeOnDrop for Database {}
 
 impl Drop for DatabaseInner {
     fn drop(&mut self) {
@@ -834,6 +858,27 @@ fn write_temp_file(
 
 /// Build the composite `DatabaseKey` from a password and optional keyfile
 /// bytes — the one place the two are combined, shared by open/create/save.
+/// `keepass::Database::open`, with a parser panic turned into an error.
+///
+/// keepass-rs panics on some malformed files (a header field shorter than the
+/// integer it holds, a history entry that names another entry). A database
+/// file is untrusted input, so that must not take down the CLI, the daemon or
+/// the desktop app; it is reported as an unreadable file instead.
+fn keepass_open(
+    source: &mut dyn std::io::Read,
+    key: keepass::DatabaseKey,
+) -> std::result::Result<keepass::Database, keepass::error::DatabaseOpenError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        keepass::Database::open(source, key)
+    }))
+    .unwrap_or_else(|_| {
+        Err(keepass::error::DatabaseOpenError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "malformed database file",
+        )))
+    })
+}
+
 fn database_key(password: &str, keyfile: Option<&[u8]>) -> Result<keepass::DatabaseKey> {
     let mut key = keepass::DatabaseKey::new().with_password(password);
     if let Some(bytes) = keyfile {
@@ -1020,7 +1065,7 @@ impl Database {
         let stamp = Some(FileStamp::of(&file.metadata()?));
         let key =
             database_key(password, keyfile)?.with_challenge_response_key(challenge_response.key());
-        let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
+        let db = keepass_open(&mut file, key).map_err(open_err_to_error)?;
         Ok(Database {
             inner: DatabaseInner {
                 path: path.to_path_buf(),
@@ -1056,7 +1101,7 @@ impl Database {
         #[cfg(test)]
         save_race_tests::run_hook(&save_race_tests::OPENED, path);
         let key = database_key(password, keyfile)?;
-        let db = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
+        let db = keepass_open(&mut file, key).map_err(open_err_to_error)?;
         Ok(Database {
             inner: DatabaseInner {
                 path: path.to_path_buf(),
@@ -1298,7 +1343,7 @@ impl Database {
         };
         std::fs::File::open(&self.inner.path)
             .ok()
-            .is_some_and(|mut file| keepass::Database::open(&mut file, key).is_ok())
+            .is_some_and(|mut file| keepass_open(&mut file, key).is_ok())
     }
 
     /// The key the database file is written with: password, keyfile, and the
@@ -1337,7 +1382,7 @@ impl Database {
             return Ok(None);
         }
         let stale = || Error::StaleWrite(self.inner.path.clone());
-        let other = keepass::Database::open(&mut file, self.current_key()?).map_err(|e| {
+        let other = keepass_open(&mut file, self.current_key()?).map_err(|e| {
             match open_err_to_error(e) {
                 // Not about the file: a disk error, or a hardware key that did
                 // not answer. Say that rather than blame the file.
@@ -2947,6 +2992,7 @@ impl Database {
         refuse_hotp(uri)?;
         let steam = otp_param(uri, "encoder").is_some_and(|e| e.eq_ignore_ascii_case("steam"));
         let totp = entry.get_otp().map_err(|e| Error::Totp(e.to_string()))?;
+        check_totp_params(&totp)?;
         let code = totp.value_at(unix_secs);
         let code_text = if steam {
             steam_code(&totp.get_secret(), totp.period, unix_secs)?
@@ -2965,8 +3011,10 @@ impl Database {
     /// field is stored Protected (KeePassXC's own treatment).
     pub fn set_totp_uri(&mut self, id: &EntryId, uri: &str) -> Result<()> {
         refuse_hotp(uri)?;
-        uri.parse::<keepass::db::TOTP>()
+        let totp = uri
+            .parse::<keepass::db::TOTP>()
             .map_err(|e| Error::Totp(format!("invalid otpauth URI: {e}")))?;
+        check_totp_params(&totp)?;
         self.set_field(id, "otp", uri)
     }
 
@@ -2985,7 +3033,7 @@ impl Database {
         }
         let mut file = std::fs::File::open(source)?;
         let key = database_key(source_password, source_keyfile)?;
-        let other = keepass::Database::open(&mut file, key).map_err(open_err_to_error)?;
+        let other = keepass_open(&mut file, key).map_err(open_err_to_error)?;
         // The KDBX merge algorithm reconciles DIVERGED COPIES of one database
         // (shared UUIDs). Two unrelated databases have different root UUIDs and
         // the upstream merge panics on them — refuse cleanly instead.
@@ -3050,8 +3098,8 @@ impl Database {
             let (theirs, stamp) = match std::fs::File::open(other) {
                 Ok(mut file) => {
                     let stamp = FileStamp::of(&file.metadata()?);
-                    let theirs = keepass::Database::open(&mut file, other_key()?)
-                        .map_err(open_err_to_error)?;
+                    let theirs =
+                        keepass_open(&mut file, other_key()?).map_err(open_err_to_error)?;
                     if theirs.root().id() != self.inner.db.root().id() {
                         return Err(Error::Kdbx(
                             "the other file is not a copy of this database (different root \

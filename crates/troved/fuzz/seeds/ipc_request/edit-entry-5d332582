@@ -1,0 +1,1 @@
+{"cmd": "edit-entry", "path": "loose", "title": "renamed", "sets": {"Password": "x"}, "unsets": ["Custom"], "add_tags": ["t"], "remove_tags": ["u"], "clear_tags": true, "code": "guess"}

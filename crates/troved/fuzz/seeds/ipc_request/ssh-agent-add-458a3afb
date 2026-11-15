@@ -1,0 +1,1 @@
+{"cmd": "ssh-agent-add", "socket": "/nonexistent/agent.sock", "entry": "Infra/git/github"}

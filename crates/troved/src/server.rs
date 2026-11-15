@@ -150,6 +150,21 @@ fn resolve_socket_path() -> PathBuf {
     PathBuf::from(tmp).join(format!("trove-{uid}.sock"))
 }
 
+/// The uid on the other end of a control connection (`SO_PEERCRED` /
+/// `getpeereid`). Code-gated requests are served only to the uid that
+/// unlocked. Windows named pipes carry no peer uid, so there this is a
+/// sentinel that never matches a real uid and code-gated requests stay
+/// Unix-only; an unreadable peer gets the same sentinel.
+pub fn peer_uid(stream: &ipc::Stream) -> u32 {
+    #[cfg(unix)]
+    return stream.peer_cred().map(|c| c.uid()).unwrap_or(u32::MAX);
+    #[cfg(windows)]
+    {
+        let _ = stream;
+        u32::MAX
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     stream: ipc::Stream,
@@ -162,16 +177,9 @@ async fn handle_connection(
     idle: Arc<IdleTracker>,
     shutdown: Arc<Notify>,
 ) {
-    // SO_PEERCRED: the uid on the other end. Code-gated extraction (`Get`) is
-    // served only to the uid that unlocked. Unix sockets carry peer creds;
-    // Windows named pipes don't, so the uid check is Unix-only — Windows uses a
-    // sentinel that never matches a real uid (extraction stays Unix-gated). The
-    // stream is split cross-platform via `tokio::io::split` (an `ipc::Stream` is
-    // a `UnixStream` on Unix, a `NamedPipeServer` on Windows).
-    #[cfg(unix)]
-    let peer_uid = stream.peer_cred().map(|c| c.uid()).unwrap_or(u32::MAX);
-    #[cfg(windows)]
-    let peer_uid = u32::MAX;
+    let peer_uid = peer_uid(&stream);
+    // Split cross-platform via `tokio::io::split` (an `ipc::Stream` is a
+    // `UnixStream` on Unix, a `NamedPipeServer` on Windows).
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
 
