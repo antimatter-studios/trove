@@ -322,7 +322,7 @@ impl LoadedRsaKey {
     /// reach the gpg socket. Going through the checked path means a malformed
     /// ciphertext is rejected rather than answered.
     pub fn decrypt_session_key_block(&self, ciphertext_be: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-        use rand::RngCore;
+        use rand::Rng;
         let key = self.to_rsa_private_key()?;
         // Checked, constant-time PKCS#1 v1.5 decryption — this is the part that
         // must not be hand-rolled or bypassed.
@@ -343,7 +343,7 @@ impl LoadedRsaKey {
         block.push(0x02);
         // PS must be non-zero bytes, or gpg would find the separator early.
         let mut ps = vec![0u8; ps_len];
-        rand::thread_rng().fill_bytes(&mut ps);
+        rand::rng().fill_bytes(&mut ps);
         for b in ps.iter_mut() {
             if *b == 0 {
                 *b = 1;

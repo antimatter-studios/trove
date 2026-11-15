@@ -548,8 +548,8 @@ pub fn wipe_dir(dir: &Path) {
 /// if the path already exists, so even on a collision we never adopt an
 /// attacker-owned directory.
 pub fn private_tmp_dir() -> Result<PathBuf> {
-    use rand::RngCore;
-    let mut rng = rand::rngs::OsRng;
+    use rand::TryRng;
+    let mut rng = rand::rngs::SysRng;
     let suffix =
         private_tmp_suffix(|bytes| rng.try_fill_bytes(bytes).map_err(anyhow::Error::from))?;
     let dir = base_dir().join(format!("trove-exec-{}-{suffix}", std::process::id()));
