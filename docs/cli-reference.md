@@ -669,7 +669,7 @@ the `TROVE_SESSION` code from `trove unlock` and no password.
 ## trove merge
 
 ```
-trove --database <TARGET> merge <SOURCE> [--source-key-file <PATH>]
+trove --database <TARGET> merge <SOURCE> [--source-key-file <PATH>] [--json]
 ```
 
 KDBX-standard merge of diverged copies of one database (last-write-wins by
@@ -681,10 +681,22 @@ password (line 2). The global `--key-file` applies to the target;
 refused with a clean error — merge reconciles copies, it doesn't import.
 Offline-only.
 
+After the counts line, merge prints one line per entry or group it changed,
+sorted by path: `created`, `updated`, `relocated` or `deleted`, then the path
+(a group's path is prefixed with `group`, a custom icon is shown by UUID). An
+update also says which side's version is now current and its modification
+time, as in `updated    Web/github  (source, modified 2026-08-01T14:22:03+00:00)`.
+When the target's version is newer, it stays and the source's version goes
+into the entry's history (`destination`). A deleted entry is shown at the path
+it had before the merge. What the merge could not reconcile cleanly, such as an
+entry changed on both sides within the same second, is printed as a
+`warning:` line on stderr. No output names a field value. `--json` prints the
+same as one document: see [`trove merge --json`](#trove-merge---json).
+
 ## trove sync
 
 ```
-trove --database <DATABASE> sync <OTHER> [--other-key-file <PATH>]
+trove --database <DATABASE> sync <OTHER> [--other-key-file <PATH>] [--json]
 ```
 
 Two-way sync with another copy of the same database, such as one in a synced
@@ -698,7 +710,9 @@ KeePassXC-Browser keys, its recycle bin, deletions) is kept. For an existing
 copy two secrets arrive in order: `--database`'s password (line 1 with
 `--password-stdin`), then the other copy's (line 2). The global `--key-file` applies to `--database`;
 `--other-key-file` to the other copy. Prints what was pulled and what was
-pushed. Offline-only.
+pushed, then one line per changed entry or group in the `trove merge` format,
+prefixed with `pulled` or `pushed`. `--json` prints the same as one document:
+see [`trove sync --json`](#trove-sync---json). Offline-only.
 
 A sync service that could not merge two edits leaves a second file next to
 the database, such as Dropbox's `database (… conflicted copy …).kdbx` or Syncthing's
@@ -812,10 +826,10 @@ remains nonzero in that case.
 
 ## JSON output
 
-Seventeen commands take `--json`: `list`, `search`, `show`, `describe`,
-`group list`, `db-info`, `estimate`, `analyze`, `status`, `doctor`, `idle get`,
-`materialize-status`, `ssh-agent list`, `ssh-agent sockets`, `gpg-agent list`,
-`daemons list` and `keychain status`. Each prints one pretty-printed JSON
+Nineteen commands take `--json`: `list`, `search`, `show`, `describe`,
+`group list`, `db-info`, `merge`, `sync`, `estimate`, `analyze`, `status`,
+`doctor`, `idle get`, `materialize-status`, `ssh-agent list`,
+`ssh-agent sockets`, `gpg-agent list`, `daemons list` and `keychain status`. Each prints one pretty-printed JSON
 document on stdout; errors still go to stderr with the usual
 [exit codes](#exit-codes).
 
@@ -1294,6 +1308,65 @@ Unix only. One object per daemon found; `[]` when there are none.
     "socket_exists": true
   }
 ]
+```
+
+### `trove merge --json`
+
+What the merge changed: the counts, one record per changed entry, group or
+custom icon, and the merge's warnings. Paths, UUIDs, kinds and times only;
+never a field value.
+
+```
+{
+  "source": string,       // the SOURCE path as given
+  "created": integer,
+  "updated": integer,
+  "relocated": integer,
+  "deleted": integer,
+  "events": [{
+    "kind": string,       // "created", "updated", "relocated" or "deleted"
+    "target": string,     // "entry", "group" or "icon"
+    "id": string,         // UUID
+    "path": string | null,  // after the merge; a deletion's path before it;
+                            // null for an icon
+    "modified"?: string,  // updates only: LastModificationTime after the
+                          // merge, RFC 3339 UTC
+    "winner"?: string     // updates only: "source" when the source's newer
+                          // version was taken, "destination" when the
+                          // target's stayed and the source's went to history
+  }],
+  "warnings": [string]
+}
+```
+
+```json
+{
+  "source": "laptop.kdbx",
+  "created": 1, "updated": 1, "relocated": 0, "deleted": 0,
+  "events": [
+    {"kind": "created", "target": "entry", "id": "6f1c…", "path": "Web/new"},
+    {"kind": "updated", "target": "entry", "id": "0a9e…", "path": "Web/github",
+     "modified": "2026-08-01T14:22:03+00:00", "winner": "source"}
+  ],
+  "warnings": []
+}
+```
+
+### `trove sync --json`
+
+Both directions, each in the `trove merge --json` shape without `source`.
+`pulled` is what the other copy brought into `--database`; `pushed` is what
+`--database` brought into the other copy, with the other copy as the
+destination.
+
+```
+{
+  "other": string,          // the OTHER path as given
+  "created": bool,          // the other copy did not exist and was created
+  "other_written": bool,    // false when the other copy already had everything
+  "pulled": {"created", "updated", "relocated", "deleted", "events", "warnings"},
+  "pushed": {"created", "updated", "relocated", "deleted", "events", "warnings"}
+}
 ```
 
 ### `trove keychain status --json`

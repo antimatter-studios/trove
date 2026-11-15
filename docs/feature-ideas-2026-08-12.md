@@ -1,5 +1,12 @@
 # Colleague feature ideas — 2026-08-12
 
+> **Status.** This is a point-in-time write-up. Entry history on trove writes
+> (#225) shipped in #326, before `trove sync` (#229) shipped in #336, so the
+> ordering this doc argues for happened. The "roadmap #N" numbers below refer to
+> the retired [status.md](status.md), not to GitHub issues. Remaining history
+> work is tracked in #438; each step of the
+> [suggested ordering](#suggested-ordering) names its issue.
+
 Four ideas, checked against the code and the KDBX format. Short version: #1 is
 mostly already in the format and half-wired in trove, #2 already ships in one
 direction, #3 needs a server to be honest, and #1 turns out to be a
@@ -93,8 +100,8 @@ self-hosted server).
 **The important bit — #1 is a prerequisite for #2.** The KDBX merge algorithm
 resolves conflicts *using entry history*: keepass-rs merges the two histories and
 raises `DuplicateHistoryEntries` when two snapshots share a timestamp but
-diverged. Because trove writes no history, merging two trove-edited copies has
-nothing to reconcile — last-write-wins picks the newer mtime and the other
+diverged. Because trove wrote no history at the time, merging two trove-edited
+copies had nothing to reconcile — last-write-wins picks the newer mtime and the other
 person's edit disappears with no record it ever existed. Shipping sync before
 history means shipping silent data loss. So #27 should move ahead of #14 on the
 roadmap, not because it's user-visible, but because it's load-bearing.
@@ -838,27 +845,30 @@ makes them the right place to start.
 
 1. **Entry history on trove writes** — small, self-contained, uses an existing
    keepass-rs API, unblocks sync. Needs pruning + attachment-orphan handling.
+   (#225, shipped in #326)
 2. **Sketch the native format's data model on paper** — *before* the trait, not
    after. It's cheap, and it's the only way the trait gets shaped by two formats
-   instead of one. The full spec can come later; the model can't.
+   instead of one. The full spec can come later; the model can't. (#238)
 3. **Extract `DatabaseBackend` + `Caps`** — pure refactor of one file, kdbx4 as the
-   sole implementation, kept crate-private, existing 306 tests prove it.
+   sole implementation, kept crate-private, existing 306 tests prove it. (#239)
 4. **`trove send <entry> --to <database>`** — the missing cross-database operation
    `merge_from` already points at. Needs only multi-database (shipped), so it lands
    early and cheaply. Copy-then-verify-then-recycle; resolve `{REF:…}` on the way
-   out; flatten history by default.
+   out; flatten history by default. (#248)
 5. **`trove sync`** — two-way merge + atomic write-back + sidecar lock, on top of
    the existing `merge_from`. Still whole-file; delta sync needs the native
-   format.
+   format. (#229, shipped in #336; per-entry merge reporting is #228)
 6. **Per-user identity** — member keypairs registered in the database, reusing the
-   OpenPGP keys trove already serves. Prerequisite for everything below.
+   OpenPGP keys trove already serves. Prerequisite for everything below. (#231)
 7. **Native format spec, then implementation** — per-field history, sealed
    metadata, record-oriented encryption for delta sync, signed write log. Plus
-   `trove convert` both ways with a lossiness report.
+   `trove convert` both ways with a lossiness report. (#241, #243, #244, #245,
+   #246, #230, #234, #247)
 8. **Sealed fields + group keyring** — real read-ACLs, no server. On kdbx4 via
    `CustomData` (interop-visible as opaque tokens); native gets sealed metadata
    too. Ships with an honest README about rotation-on-revoke. Unlocks *send to a
    person* — an entry sealed to a recipient's public key, no shared database needed.
+   (#232, #233, #235)
 9. **Read auditing and write *prevention*** — only alongside #15. These are the
    two pieces that genuinely require a mediator; scope them as server features
-   rather than approximating them locally.
+   rather than approximating them locally. (#236)

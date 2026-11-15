@@ -816,6 +816,9 @@ enum Command {
         /// (The global --key-file applies to the TARGET database.)
         #[arg(long = "source-key-file", value_name = "PATH")]
         source_key_file: Option<PathBuf>,
+        /// Print the counts and one record per changed entry or group as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Two-way sync `--database` with another copy of it — one in a synced
@@ -833,6 +836,10 @@ enum Command {
         /// (The global --key-file applies to `--database`.)
         #[arg(long = "other-key-file", value_name = "PATH")]
         other_key_file: Option<PathBuf>,
+        /// Print what was pulled and pushed, one record per changed entry or
+        /// group, as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Export the database: `xml` (the decrypted KeePass XML, importable by any
@@ -2186,20 +2193,24 @@ fn run(cli: Cli) -> Result<()> {
         Command::Merge {
             source,
             source_key_file,
+            json,
         } => cmd_merge(
             require_database(database)?,
             &source,
             source_key_file.as_deref(),
             pw_stdin,
+            json,
         ),
         Command::Sync {
             other,
             other_key_file,
+            json,
         } => cmd_sync(
             require_database(database)?,
             &other,
             other_key_file.as_deref(),
             pw_stdin,
+            json,
         ),
         Command::Export { format } => cmd_export(require_database(database)?, format, pw_stdin),
         Command::DbEdit {
@@ -6975,6 +6986,7 @@ fn cmd_merge(
     source: &Path,
     source_key_file: Option<&Path>,
     pw_stdin: bool,
+    json: bool,
 ) -> Result<()> {
     let mut v = open_database(database_path, pw_stdin)?;
     let source_password = if pw_stdin {
@@ -6990,9 +7002,16 @@ fn cmd_merge(
         ),
         None => None,
     };
-    let s = v
-        .merge_from(source, &source_password, source_keyfile.as_deref())
+    let report = v
+        .merge_from_report(source, &source_password, source_keyfile.as_deref())
         .context("merging")?;
+    if json {
+        let mut out = merge_report_json(&report);
+        out["source"] = Value::from(source.display().to_string());
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    let s = report.counts;
     println!(
         "merged {}: {} created, {} updated, {} relocated, {} deleted",
         source.display(),
@@ -7001,7 +7020,62 @@ fn cmd_merge(
         s.relocated,
         s.deleted
     );
+    print_merge_events(&report, "");
     Ok(())
+}
+
+/// One line per merge event on stdout, then one per warning on stderr. Paths,
+/// UUIDs, kinds and times only: a merge report never carries a value.
+fn print_merge_events(report: &trove_core::MergeReport, prefix: &str) {
+    for event in &report.events {
+        let what = match (event.target, &event.path) {
+            (trove_core::MergeTarget::Group, Some(path)) => format!("group {path}"),
+            (_, Some(path)) => path.clone(),
+            (target, None) => format!("{} {}", target.as_str(), event.id),
+        };
+        let detail = match (event.winner, &event.modified) {
+            (Some(winner), Some(modified)) => {
+                format!("  ({}, modified {modified})", winner.as_str())
+            }
+            _ => String::new(),
+        };
+        println!("{prefix}{:<9}  {what}{detail}", event.kind.as_str());
+    }
+    for warning in &report.warnings {
+        eprintln!("warning: {prefix}{warning}");
+    }
+}
+
+/// `--json` form of a merge report: counts, events and warnings.
+fn merge_report_json(report: &trove_core::MergeReport) -> Value {
+    let events: Vec<Value> = report
+        .events
+        .iter()
+        .map(|event| {
+            let mut out = serde_json::json!({
+                "kind": event.kind.as_str(),
+                "target": event.target.as_str(),
+                "id": event.id,
+                "path": event.path,
+            });
+            if let Some(modified) = &event.modified {
+                out["modified"] = Value::from(modified.as_str());
+            }
+            if let Some(winner) = event.winner {
+                out["winner"] = Value::from(winner.as_str());
+            }
+            out
+        })
+        .collect();
+    let counts = report.counts;
+    serde_json::json!({
+        "created": counts.created,
+        "updated": counts.updated,
+        "relocated": counts.relocated,
+        "deleted": counts.deleted,
+        "events": events,
+        "warnings": report.warnings,
+    })
 }
 
 /// `trove sync` — two-way merge with another copy, leaving both equal.
@@ -7010,6 +7084,7 @@ fn cmd_sync(
     other: &Path,
     other_key_file: Option<&Path>,
     pw_stdin: bool,
+    json: bool,
 ) -> Result<()> {
     let mut v = open_database(database_path, pw_stdin)?;
     // A new copy is an exact copy: same password and key file, so it is
@@ -7036,9 +7111,21 @@ fn cmd_sync(
         };
         (password, keyfile)
     };
-    let s = v
-        .sync_with(other, &other_password, other_keyfile.as_deref())
+    let report = v
+        .sync_with_report(other, &other_password, other_keyfile.as_deref())
         .with_context(|| format!("syncing with {}", other.display()))?;
+    if json {
+        let out = serde_json::json!({
+            "other": other.display().to_string(),
+            "created": report.created,
+            "other_written": report.other_written,
+            "pulled": merge_report_json(&report.pulled),
+            "pushed": merge_report_json(&report.pushed),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    let s = report.summary();
     let counts = |m: trove_core::MergeSummary| {
         format!(
             "{} created, {} updated, {} relocated, {} deleted",
@@ -7064,6 +7151,8 @@ fn cmd_sync(
             counts(s.pulled)
         );
     }
+    print_merge_events(&report.pulled, "pulled  ");
+    print_merge_events(&report.pushed, "pushed  ");
     Ok(())
 }
 

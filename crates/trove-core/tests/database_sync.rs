@@ -4,7 +4,7 @@
 
 use std::path::Path;
 use std::time::Duration;
-use trove_core::{Database, MergeSummary};
+use trove_core::{Database, MergeEventKind, MergeReport, MergeSide, MergeSummary, MergeTarget};
 
 const PASSWORD: &str = "local password";
 
@@ -246,4 +246,150 @@ fn the_other_copys_custom_data_is_kept() {
     assert!(!summary.other_written);
     assert_eq!(std::fs::read(&local).expect("read"), local_before);
     assert_eq!(std::fs::read(&copy).expect("read"), copy_before);
+}
+
+/// A database with entries to update, move and delete, and a fork of it in
+/// which each of those happens and one entry is added.
+fn diverged_fork(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = dir.join("base.kdbx");
+    let fork = dir.join("fork.kdbx");
+    let mut database = Database::create(&base, PASSWORD).expect("create");
+    database.add_group("Archive").expect("group");
+    for title in ["to-update", "to-move", "to-delete"] {
+        database.add_entry(title).expect("add");
+    }
+    database.save().expect("save");
+    drop(database);
+    std::fs::copy(&base, &fork).expect("copy");
+
+    next_second();
+    let mut other = Database::open(&fork, PASSWORD).expect("open fork");
+    other.add_entry("added").expect("add");
+    let id = other.find_by_title("to-update").expect("to-update");
+    other
+        .set_field(&id, "Password", "merge-report-canary")
+        .expect("edit");
+    let id = other.find_by_title("to-move").expect("to-move");
+    other.move_entry(&id, "Archive").expect("move");
+    let id = other.find_by_title("to-delete").expect("to-delete");
+    other.delete_entry(&id).expect("delete");
+    other.save().expect("save fork");
+    (base, fork)
+}
+
+fn entry_events(report: &MergeReport) -> Vec<(MergeEventKind, String)> {
+    let mut events: Vec<_> = report
+        .events
+        .iter()
+        .filter(|e| e.target == MergeTarget::Entry)
+        .map(|e| (e.kind, e.path.clone().expect("entry path")))
+        .collect();
+    events.sort_by(|a, b| a.1.cmp(&b.1));
+    events
+}
+
+#[test]
+fn merge_reports_each_changed_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (base, fork) = diverged_fork(dir.path());
+    let mut database = Database::open(&base, PASSWORD).expect("open");
+    let ids: std::collections::HashMap<String, String> = database
+        .list_entries()
+        .into_iter()
+        .map(|e| (e.title.clone(), e.id.to_string()))
+        .collect();
+
+    let report = database
+        .merge_from_report(&fork, PASSWORD, None)
+        .expect("merge");
+    assert_eq!(
+        entry_events(&report),
+        [
+            (MergeEventKind::Relocated, "Archive/to-move".to_string()),
+            (MergeEventKind::Created, "added".to_string()),
+            (MergeEventKind::Deleted, "to-delete".to_string()),
+            (MergeEventKind::Updated, "to-update".to_string()),
+        ]
+    );
+    for event in report
+        .events
+        .iter()
+        .filter(|e| e.target == MergeTarget::Entry)
+    {
+        let title = event.path.as_deref().unwrap().rsplit('/').next().unwrap();
+        if let Some(id) = ids.get(title) {
+            assert_eq!(&event.id, id, "{event:?}");
+        }
+        if event.kind == MergeEventKind::Updated {
+            assert_eq!(event.winner, Some(MergeSide::Source));
+            assert!(event.modified.as_deref().is_some_and(|m| m.contains('T')));
+        } else {
+            assert_eq!((event.winner, event.modified.as_deref()), (None, None));
+        }
+    }
+    assert_eq!(report.counts.created, 1);
+    assert_eq!(report.counts.deleted, 1);
+    assert!(format!("{report:?}").find("merge-report-canary").is_none());
+}
+
+#[test]
+fn merge_report_keeps_path_of_deleted_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("base.kdbx");
+    let fork = dir.path().join("fork.kdbx");
+    let mut database = Database::create(&base, PASSWORD).expect("create");
+    database.add_group("Team/Ops").expect("group");
+    let id = database.add_entry("doomed").expect("add");
+    database.move_entry(&id, "Team/Ops").expect("move");
+    database.save().expect("save");
+    drop(database);
+    std::fs::copy(&base, &fork).expect("copy");
+
+    next_second();
+    let mut other = Database::open(&fork, PASSWORD).expect("open fork");
+    other.delete_entry(&id).expect("delete");
+    other.save().expect("save fork");
+
+    let mut database = Database::open(&base, PASSWORD).expect("open");
+    let report = database
+        .merge_from_report(&fork, PASSWORD, None)
+        .expect("merge");
+    assert_eq!(
+        entry_events(&report),
+        [(MergeEventKind::Deleted, "Team/Ops/doomed".to_string())]
+    );
+    assert_eq!(report.events[0].id, id.to_string());
+}
+
+#[test]
+fn sync_reports_pulled_and_pushed_events() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (local, copy) = local_and_copy(dir.path());
+
+    let mut other = Database::open(&copy, PASSWORD).expect("open copy");
+    other.add_entry("from-the-other-machine").expect("add");
+    other.save().expect("save");
+    drop(other);
+
+    let mut database = Database::open(&local, PASSWORD).expect("open");
+    database.add_entry("from-this-machine").expect("add");
+    database.save().expect("save");
+
+    let report = database
+        .sync_with_report(&copy, PASSWORD, None)
+        .expect("sync");
+    assert_eq!(
+        entry_events(&report.pulled),
+        [(
+            MergeEventKind::Created,
+            "from-the-other-machine".to_string()
+        )]
+    );
+    assert_eq!(
+        entry_events(&report.pushed),
+        [(MergeEventKind::Created, "from-this-machine".to_string())]
+    );
+    assert!(report.other_written && !report.created);
+    assert_eq!(report.summary().pulled.created, 1);
+    assert_eq!(report.summary().pushed.created, 1);
 }

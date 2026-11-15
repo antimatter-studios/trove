@@ -428,6 +428,82 @@ fn offline_json_shapes() {
         });
         assert_shape("estimate", &est, &spec);
     }
+
+    // A copy with one entry added, one edited and one moved, merged back.
+    let copy = tmp.path().join("copy.kdbx");
+    std::fs::copy(&database, &copy).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut other = Database::open(&copy, PW).expect("open copy");
+    other.add_entry("Web/added").expect("add");
+    let id = other.find_by_title("bare").expect("bare");
+    other.set_field(&id, "UserName", "someone").unwrap();
+    let id = other.find_by_title("kube").expect("kube");
+    other.move_entry(&id, "Web").unwrap();
+    other.save().expect("save copy");
+    drop(other);
+    let two = format!("{PW}\n{PW}\n");
+    let cs = copy.to_str().unwrap();
+    let merge = json_out(
+        &run(
+            &trove,
+            &[],
+            &["--database", vs, "--password-stdin", "merge", cs, "--json"],
+            &two,
+        ),
+        "merge",
+        true,
+    );
+    assert_has("merge", &merge["events"], "kind", "updated");
+    assert_has("merge", &merge["events"], "kind", "created");
+    let report = |source: &str| {
+        let mut spec = json!({
+            "created": "integer",
+            "updated": "integer",
+            "relocated": "integer",
+            "deleted": "integer",
+            "events": [
+                {"kind": "string", "target": "string", "id": "string", "path": "string|null"},
+                {
+                    "kind": "string",
+                    "target": "string",
+                    "id": "string",
+                    "path": "string|null",
+                    "modified": "string",
+                    "winner": "string",
+                },
+            ],
+            "warnings": ["string"],
+        });
+        if !source.is_empty() {
+            spec["source"] = json!(source);
+        }
+        spec
+    };
+    assert_shape("merge", &merge, &report("string"));
+
+    let mut other = Database::open(&copy, PW).expect("open copy");
+    other.add_entry("Web/added-again").expect("add");
+    other.save().expect("save copy");
+    drop(other);
+    let sync = json_out(
+        &run(
+            &trove,
+            &[],
+            &["--database", vs, "--password-stdin", "sync", cs, "--json"],
+            &two,
+        ),
+        "sync",
+        true,
+    );
+    assert_has("sync", &sync["pulled"]["events"], "path", "Web/added-again");
+    let spec = json!({
+        "other": "string",
+        "created": "bool",
+        "other_written": "bool",
+        "pulled": report(""),
+        "pushed": report(""),
+    });
+    assert_shape("sync", &sync, &spec);
 }
 
 #[cfg(unix)]

@@ -311,6 +311,145 @@ pub struct SyncSummary {
     pub other_written: bool,
 }
 
+/// What a merge changed: the [`MergeSummary`] counts plus one record per
+/// change, from [`Database::merge_from_report`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MergeReport {
+    /// The counts, as [`Database::merge_from`] returns them.
+    pub counts: MergeSummary,
+    /// One record per change, sorted by path.
+    pub events: Vec<MergeEvent>,
+    /// What the merge could not reconcile cleanly, such as an entry changed
+    /// on both sides within the same second. Names UUIDs, never values.
+    pub warnings: Vec<String>,
+}
+
+impl MergeReport {
+    fn add(
+        &mut self,
+        before: &keepass::Database,
+        after: &keepass::Database,
+        log: &keepass::db::merge::MergeLog,
+    ) {
+        self.counts.count(log);
+        self.events.extend(merge_events(before, after, log));
+        self.events.sort_by(|a, b| a.path.cmp(&b.path));
+        self.warnings.extend(log.warnings.iter().cloned());
+    }
+}
+
+/// One change a merge made. Carries paths, UUIDs, kinds and times, never
+/// field values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MergeEvent {
+    pub kind: MergeEventKind,
+    pub target: MergeTarget,
+    /// The UUID of the entry, group or custom icon.
+    pub id: String,
+    /// `Group/Sub/Title` for an entry, `Group/Sub` for a group, after the
+    /// merge. For a deletion, the last path the object had before the merge.
+    /// `None` for a custom icon.
+    pub path: Option<String>,
+    /// For an updated entry or group, its `LastModificationTime` after the
+    /// merge, as an RFC 3339 UTC string.
+    pub modified: Option<String>,
+    /// For an updated entry or group, the side whose version is now current.
+    /// When it is the destination, the source's version was filed in the
+    /// entry's history.
+    pub winner: Option<MergeSide>,
+}
+
+/// The kind of change a [`MergeEvent`] records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MergeEventKind {
+    Created,
+    Updated,
+    Relocated,
+    Deleted,
+}
+
+impl MergeEventKind {
+    /// Lower-case name, as the CLI prints it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Relocated => "relocated",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// What a [`MergeEvent`] changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MergeTarget {
+    Entry,
+    Group,
+    Icon,
+}
+
+impl MergeTarget {
+    /// Lower-case name, as the CLI prints it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Entry => "entry",
+            Self::Group => "group",
+            Self::Icon => "icon",
+        }
+    }
+}
+
+/// One side of a merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MergeSide {
+    /// The database merged in.
+    Source,
+    /// The database merged into.
+    Destination,
+}
+
+impl MergeSide {
+    /// Lower-case name, as the CLI prints it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Destination => "destination",
+        }
+    }
+}
+
+/// What a [`Database::sync_with_report`] did in each direction, with one
+/// record per change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SyncReport {
+    /// Changes the other copy brought into this database.
+    pub pulled: MergeReport,
+    /// Changes this database brought into the other copy.
+    pub pushed: MergeReport,
+    /// The other copy did not exist, and was created from this database.
+    pub created: bool,
+    /// The other copy was rewritten. False when it already held everything.
+    pub other_written: bool,
+}
+
+impl SyncReport {
+    /// The counts, as [`Database::sync_with`] returns them.
+    pub fn summary(&self) -> SyncSummary {
+        SyncSummary {
+            pulled: self.pulled.counts,
+            pushed: self.pushed.counts,
+            created: self.created,
+            other_written: self.other_written,
+        }
+    }
+}
+
 /// Non-secret database facts for `db-info`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -2980,6 +3119,18 @@ impl Database {
         source_password: &str,
         source_keyfile: Option<&[u8]>,
     ) -> Result<MergeSummary> {
+        self.merge_from_report(source, source_password, source_keyfile)
+            .map(|report| report.counts)
+    }
+
+    /// [`merge_from`](Self::merge_from), reporting each entry and group the
+    /// merge changed, and the merge's warnings, as well as the counts.
+    pub fn merge_from_report(
+        &mut self,
+        source: &Path,
+        source_password: &str,
+        source_keyfile: Option<&[u8]>,
+    ) -> Result<MergeReport> {
         if !source.exists() {
             return Err(Error::NotFound(source.to_path_buf()));
         }
@@ -2997,16 +3148,17 @@ impl Database {
                     .to_string(),
             ));
         }
+        let before = self.inner.db.clone();
         let log = self
             .inner
             .db
             .merge(&other)
             .map_err(|e| Error::Kdbx(format!("merge: {e}")))?;
         self.settle_merged_histories(&log);
-        let mut summary = MergeSummary::default();
-        summary.count(&log);
+        let mut report = MergeReport::default();
+        report.add(&before, &self.inner.db, &log);
         self.save()?;
-        Ok(summary)
+        Ok(report)
     }
 
     /// Two-way sync with another copy of this database: one in a synced folder,
@@ -3031,6 +3183,18 @@ impl Database {
         other_password: &str,
         other_keyfile: Option<&[u8]>,
     ) -> Result<SyncSummary> {
+        self.sync_with_report(other, other_password, other_keyfile)
+            .map(|report| report.summary())
+    }
+
+    /// [`sync_with`](Self::sync_with), reporting each entry and group changed
+    /// in each direction, and the merges' warnings, as well as the counts.
+    pub fn sync_with_report(
+        &mut self,
+        other: &Path,
+        other_password: &str,
+        other_keyfile: Option<&[u8]>,
+    ) -> Result<SyncReport> {
         #[cfg(feature = "yubikey")]
         let challenge_response = self.inner.challenge_response.clone();
         let other_key = || -> Result<keepass::DatabaseKey> {
@@ -3045,7 +3209,7 @@ impl Database {
         if !self.inner.history.before.is_empty() || !self.inner.history.created.is_empty() {
             self.save()?;
         }
-        let mut summary = SyncSummary::default();
+        let mut summary = SyncReport::default();
         for _ in 0..SAVE_ATTEMPTS {
             let (theirs, stamp) = match std::fs::File::open(other) {
                 Ok(mut file) => {
@@ -3077,9 +3241,9 @@ impl Database {
                 let brought = !log.events.is_empty()
                     || merged.meta != meta_before
                     || merged.deleted_objects.len() != deletions_before;
-                self.inner.db = merged;
+                let before = std::mem::replace(&mut self.inner.db, merged);
                 self.settle_merged_histories(&log);
-                summary.pulled.count(&log);
+                summary.pulled.add(&before, &self.inner.db, &log);
                 if brought {
                     self.save()?;
                 }
@@ -3088,11 +3252,11 @@ impl Database {
                 }
             }
 
-            let mut pushing = MergeSummary::default();
+            let mut pushing = MergeReport::default();
             if let Some(theirs) = &theirs {
                 let mut probe = theirs.clone();
                 if let Ok(log) = probe.merge(&self.inner.db) {
-                    pushing.count(&log);
+                    pushing.add(theirs, &probe, &log);
                 }
             }
             let (tmp_path, written) = write_temp_file(&self.inner.db, other, other_key()?)?;
@@ -3272,6 +3436,74 @@ impl Database {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+/// One [`MergeEvent`] per entry, group or icon event in `log`. `before` is the
+/// destination as it was before the merge, `after` as it is now.
+fn merge_events(
+    before: &keepass::Database,
+    after: &keepass::Database,
+    log: &keepass::db::merge::MergeLog,
+) -> Vec<MergeEvent> {
+    use keepass::db::merge::{MergeEventTarget, MergeEventType};
+    log.events
+        .iter()
+        .filter_map(|event| {
+            let kind = match event.event_type {
+                MergeEventType::Created => MergeEventKind::Created,
+                MergeEventType::LocationUpdated => MergeEventKind::Relocated,
+                MergeEventType::Deleted => MergeEventKind::Deleted,
+                // MergeSummary counts anything else as an update too.
+                _ => MergeEventKind::Updated,
+            };
+            // A deleted object is only in `before`.
+            let db = if kind == MergeEventKind::Deleted {
+                before
+            } else {
+                after
+            };
+            let (target, id, path, times) = match &event.target {
+                MergeEventTarget::Entry(id) => (
+                    MergeTarget::Entry,
+                    id.uuid(),
+                    db.entry(*id).map(|e| summarise(&e).display_path()),
+                    (
+                        before.entry(*id).and_then(|e| e.times.last_modification),
+                        after.entry(*id).and_then(|e| e.times.last_modification),
+                    ),
+                ),
+                MergeEventTarget::Group(id) => (
+                    MergeTarget::Group,
+                    id.uuid(),
+                    db.group(*id).map(|g| summarise_group(&g).display_path()),
+                    (
+                        before.group(*id).and_then(|g| g.times.last_modification),
+                        after.group(*id).and_then(|g| g.times.last_modification),
+                    ),
+                ),
+                MergeEventTarget::Icon(id) => (MergeTarget::Icon, id.uuid(), None, (None, None)),
+                _ => return None,
+            };
+            let (previous, current) = times;
+            let updated = kind == MergeEventKind::Updated && target != MergeTarget::Icon;
+            Some(MergeEvent {
+                kind,
+                target,
+                id: id.to_string(),
+                path,
+                modified: current
+                    .filter(|_| updated)
+                    .map(|t| t.and_utc().to_rfc3339()),
+                // The merge takes the source's version only when it is newer,
+                // which moves the modification time to the source's.
+                winner: updated.then_some(if current != previous {
+                    MergeSide::Source
+                } else {
+                    MergeSide::Destination
+                }),
+            })
+        })
+        .collect()
+}
 
 fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
     let attachment_names: Vec<String> = e
