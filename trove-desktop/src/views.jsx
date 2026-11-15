@@ -259,6 +259,7 @@ function EntryList({ entries, selectedId, onSelect, title, subtitle, sort, onCyc
                 <div className="etitle">
                   <span className="etitle-txt">{e.title}</span>
                   {e.fav && <Icon name="star" size={12} className="fav" />}
+                  {e.passkey && <span className="passkey-mark" title="Passkey" aria-label="Passkey"><Icon name="fingerprint" size={12} /></span>}
                   {e.strength < 45 && <span className="weakdot" title="Weak password" />}
                 </div>
                 <div className="egroup"><span>{e.username}</span><span className="eg-path">{"  ·  " + e.groupPath}</span></div>
@@ -1006,7 +1007,7 @@ function AttachmentsSection({ databaseId, entry }) {
   );
 }
 
-function Detail({ databaseId, entry, notes, fields, password, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, onSaveAttribute, onDeleteAttribute, onHistory, appActions }) {
+function Detail({ databaseId, entry, notes, fields, password, passkey, onCopy, copiedKey, onEdit, onDelete, onToggleFav, revealed, onToggleReveal, onToggleAgentKey, onSaveAttribute, onDeleteAttribute, onHistory, appActions }) {
   if (!entry) {
     return (
       <div className="pane detail">
@@ -1074,6 +1075,14 @@ function Detail({ databaseId, entry, notes, fields, password, onCopy, copiedKey,
           {entry.url && <div style={{ height: 8 }} />}
           {entry.url && <Field k="URL" value={entry.url} link onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":url"} />}
         </div>
+
+        {passkey && (
+          <div className="dt-section" aria-label="Passkey">
+            <div className="dt-sec-label">Passkey</div>
+            <Field k="Relying party" value={passkey.relyingParty} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":passkey-rp"} />
+            <Field k="Username" value={passkey.username} onCopy={onCopy} copiedKey={copiedKey} copyId={entry.id + ":passkey-user"} />
+          </div>
+        )}
 
         {entry.sshKeyAttachment && (
           <AgentSection entry={entry} onChange={onToggleAgentKey} />

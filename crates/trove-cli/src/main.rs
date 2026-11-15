@@ -3465,6 +3465,7 @@ fn entry_summary_json(e: &trove_core::EntrySummary) -> Value {
         "group_path": e.group_path,
         "tags": e.tags,
         "inherited_tags": e.inherited_tags,
+        "passkey": e.passkey,
     })
 }
 
@@ -5327,11 +5328,20 @@ fn daemon_call(req: &daemon::Request) -> Result<Value> {
     Ok(resp)
 }
 
-/// The fields trove-core stores with the kdbx Protected flag (see
-/// `Database::set_field`): `Password` and `otp` — the same pair KeePassXC
-/// memory-protects by default.
+/// Fields that are always secret: `Password` and `otp`, which trove-core stores
+/// with the kdbx Protected flag (see `Database::set_field`), the same pair
+/// KeePassXC memory-protects by default; and a passkey's private key, which
+/// KeePassXC protects. Offline, any field stored Protected is treated the same
+/// way as well (see [`is_secret_field`]).
 fn is_protected_field(name: &str) -> bool {
-    name.eq_ignore_ascii_case("password") || name.eq_ignore_ascii_case("otp")
+    name.eq_ignore_ascii_case("password")
+        || name.eq_ignore_ascii_case("otp")
+        || name == trove_core::passkey_fields::PRIVATE_KEY_PEM
+}
+
+/// [`is_protected_field`], or stored with the Protected flag in this database.
+fn is_secret_field(database: &Database, id: &trove_core::EntryId, name: &str) -> bool {
+    is_protected_field(name) || database.is_field_protected(id, name).ok().flatten() == Some(true)
 }
 
 /// Prompt (hidden) for an entry password, twice, requiring a non-empty match.
@@ -5494,6 +5504,7 @@ fn print_show_summary(
     inherited_tags: &[String],
     expires: Option<&str>,
     icon: Option<usize>,
+    passkey: Option<(&str, &str)>,
 ) {
     println!("Path: {display_path}");
     println!("Title: {title}");
@@ -5515,6 +5526,9 @@ fn print_show_summary(
     }
     if !inherited_tags.is_empty() {
         println!("Inherited tags: {}", inherited_tags.join(", "));
+    }
+    if let Some((relying_party, username)) = passkey {
+        println!("Passkey: {relying_party} ({username})");
     }
     if let Some(n) = icon {
         println!("Icon: {n}");
@@ -5584,6 +5598,8 @@ struct ShowJson<'a> {
     inherited_tags: &'a [String],
     expires: Option<&'a str>,
     icon: Option<usize>,
+    /// The passkey object, or `Value::Null`.
+    passkey: Value,
 }
 
 fn entry_show_json(e: ShowJson<'_>) -> Value {
@@ -5608,6 +5624,7 @@ fn entry_show_json(e: ShowJson<'_>) -> Value {
     );
     out.insert("expires".into(), e.expires.map_or(Value::Null, Value::from));
     out.insert("icon".into(), e.icon.map_or(Value::Null, Value::from));
+    out.insert("passkey".into(), e.passkey);
     Value::Object(out)
 }
 
@@ -5756,6 +5773,13 @@ fn cmd_show(
                 .find_by_title(entry_path)
                 .ok_or_else(|| anyhow!("entry not found: {entry_path}"))?;
             if !attrs.is_empty() {
+                if let Some(p) = attrs.iter().find(|a| is_secret_field(&v, &id, a)) {
+                    if !show_protected {
+                        return Err(anyhow!(
+                            "attribute '{p}' is protected; pass --show-protected to print it"
+                        ));
+                    }
+                }
                 for attr in attrs {
                     let value = v
                         .get_field(&id, attr)
@@ -5777,13 +5801,14 @@ fn cmd_show(
                 None
             };
             let custom = v.custom_field_names(&id).unwrap_or_default();
+            let passkey = v.passkey(&id).context("reading passkey")?;
             if json {
                 // Custom fields carry VALUES here, unlike the human listing
                 // which only names them — a program asking for an entry wants
                 // what is in it. Protected ones stay behind --show-protected.
                 let mut fields = serde_json::Map::new();
                 for name in &custom {
-                    if is_protected_field(name) && !show_protected {
+                    if is_secret_field(&v, &id, name) && !show_protected {
                         continue;
                     }
                     if let Ok(Some(value)) = v.get_field(&id, name) {
@@ -5805,6 +5830,10 @@ fn cmd_show(
                         inherited_tags: &summary.inherited_tags,
                         expires: summary.expires.as_deref(),
                         icon: summary.icon,
+                        passkey: passkey.clone().map_or(Value::Null, |p| {
+                            serde_json::to_value(troved::protocol::PasskeyDto::from(p))
+                                .unwrap_or(Value::Null)
+                        }),
                     }))?
                 );
                 return Ok(());
@@ -5822,6 +5851,9 @@ fn cmd_show(
                 &summary.inherited_tags,
                 summary.expires.as_deref(),
                 summary.icon,
+                passkey
+                    .as_ref()
+                    .map(|p| (p.relying_party.as_str(), p.username.as_str())),
             );
         }
         None => {
@@ -5918,6 +5950,7 @@ fn cmd_show(
                             .get("icon")
                             .and_then(Value::as_u64)
                             .and_then(|n| usize::try_from(n).ok()),
+                        passkey: entry.get("passkey").cloned().unwrap_or(Value::Null),
                     }))?
                 );
                 return Ok(());
@@ -5938,6 +5971,12 @@ fn cmd_show(
                     .get("icon")
                     .and_then(Value::as_u64)
                     .and_then(|n| usize::try_from(n).ok()),
+                entry.get("passkey").and_then(|p| {
+                    Some((
+                        p.get("relying_party")?.as_str()?,
+                        p.get("username")?.as_str()?,
+                    ))
+                }),
             );
         }
     }
@@ -6058,6 +6097,7 @@ fn cmd_describe(database: Option<&Path>, path: &str, pw_stdin: bool, json: bool)
                             "name": attachment.name,
                             "size": attachment.size,
                         })).collect::<Vec<_>>(),
+                        "has_passkey": description.has_passkey,
                     })
                 })
                 .collect::<Vec<_>>()

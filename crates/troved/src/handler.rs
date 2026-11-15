@@ -470,17 +470,7 @@ async fn handle_request(
             let entries: Vec<EntryDto> = guard
                 .iter()
                 .flat_map(|database| database.list_entries())
-                .map(|s| EntryDto {
-                    id: s.id.to_string(),
-                    title: s.title,
-                    username: s.username,
-                    url: s.url,
-                    attachments: s.attachment_names,
-                    group_path: s.group_path,
-                    tags: s.tags,
-                    inherited_tags: s.inherited_tags,
-                    matched: Vec::new(),
-                })
+                .map(entry_dto)
                 .collect();
             Handled {
                 response: Response::ok_list(entries),
@@ -1107,6 +1097,7 @@ async fn handle_request(
                                 size: attachment.size,
                             })
                             .collect(),
+                        has_passkey: description.has_passkey,
                     })
                     .collect(),
             ))
@@ -1828,6 +1819,7 @@ fn entry_dto(s: EntrySummary) -> EntryDto {
         group_path: s.group_path,
         tags: s.tags,
         inherited_tags: s.inherited_tags,
+        passkey: s.passkey,
         matched: Vec::new(),
     }
 }
@@ -1863,6 +1855,11 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
     let summary = database.get_entry(&id).expect("entry just resolved");
     let notes = database.get_field(&id, "Notes").ok().flatten();
     let custom_fields = database.custom_field_names(&id).unwrap_or_default();
+    let passkey = database
+        .passkey(&id)
+        .ok()
+        .flatten()
+        .map(|p| Box::new(crate::protocol::PasskeyDto::from(p)));
     ok_handled(Response::ok_show(crate::protocol::ShowDto {
         id: summary.id.to_string(),
         title: summary.title,
@@ -1876,6 +1873,7 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
         inherited_tags: summary.inherited_tags,
         expires: summary.expires,
         icon: summary.icon,
+        passkey,
     }))
 }
 

@@ -113,6 +113,73 @@ pub struct EntrySummary {
     /// The entry's built-in KeePass icon (0-68), if it uses one. A custom
     /// icon or none at all is `None`.
     pub icon: Option<usize>,
+    /// The entry holds a passkey (see [`Passkey`]).
+    pub passkey: bool,
+}
+
+/// Attribute names KeePassXC's browser integration gives a passkey. They are
+/// ordinary entry attributes; see docs/passkeys.md for encodings and which are
+/// Protected.
+pub mod passkey_fields {
+    /// Prefix every KeePassXC passkey attribute shares.
+    pub const PREFIX: &str = "KPEX_PASSKEY_";
+    /// The account name on the site (unprotected).
+    pub const USERNAME: &str = "KPEX_PASSKEY_USERNAME";
+    /// Credential id, base64url without padding (protected).
+    pub const CREDENTIAL_ID: &str = "KPEX_PASSKEY_CREDENTIAL_ID";
+    /// PKCS#8 private key, PEM (protected).
+    pub const PRIVATE_KEY_PEM: &str = "KPEX_PASSKEY_PRIVATE_KEY_PEM";
+    /// Relying party id, e.g. `webauthn.io` (unprotected).
+    pub const RELYING_PARTY: &str = "KPEX_PASSKEY_RELYING_PARTY";
+    /// User handle, base64url without padding (protected).
+    pub const USER_HANDLE: &str = "KPEX_PASSKEY_USER_HANDLE";
+    /// Backup Eligible flag, `1` or `true` (unprotected).
+    pub const FLAG_BE: &str = "KPEX_PASSKEY_FLAG_BE";
+    /// Backup State flag, `1` or `true` (unprotected).
+    pub const FLAG_BS: &str = "KPEX_PASSKEY_FLAG_BS";
+    /// StrongBox's credential id, which KeePassXC prefers over
+    /// [`CREDENTIAL_ID`] when present.
+    pub const GENERATED_USER_ID: &str = "KPEX_PASSKEY_GENERATED_USER_ID";
+    /// StrongBox's username, which KeePassXC prefers over [`USERNAME`].
+    pub const KPXC_USERNAME: &str = "KPXC_PASSKEY_USERNAME";
+}
+
+/// The public parts of a passkey stored on an entry. Never carries the
+/// private key.
+///
+/// An entry holds a passkey when it has both `KPEX_PASSKEY_PRIVATE_KEY_PEM`
+/// and `KPEX_PASSKEY_RELYING_PARTY`. `username` and `credential_id` follow
+/// KeePassXC, which reads StrongBox's `KPXC_PASSKEY_USERNAME` and
+/// `KPEX_PASSKEY_GENERATED_USER_ID` first when they exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Passkey {
+    pub relying_party: String,
+    pub username: String,
+    pub credential_id: String,
+    pub user_handle: String,
+}
+
+fn entry_has_passkey(entry: &keepass::db::Entry) -> bool {
+    entry.fields.contains_key(passkey_fields::PRIVATE_KEY_PEM)
+        && entry.fields.contains_key(passkey_fields::RELYING_PARTY)
+}
+
+fn passkey_of(entry: &keepass::db::Entry) -> Option<Passkey> {
+    if !entry_has_passkey(entry) {
+        return None;
+    }
+    let get = |name: &str| entry.get(name).map(str::to_string);
+    let first = |a: &str, b: &str| get(a).or_else(|| get(b)).unwrap_or_default();
+    Some(Passkey {
+        relying_party: get(passkey_fields::RELYING_PARTY).unwrap_or_default(),
+        username: first(passkey_fields::KPXC_USERNAME, passkey_fields::USERNAME),
+        credential_id: first(
+            passkey_fields::GENERATED_USER_ID,
+            passkey_fields::CREDENTIAL_ID,
+        ),
+        user_handle: get(passkey_fields::USER_HANDLE).unwrap_or_default(),
+    })
 }
 
 /// Exact field constraint for a database search. Names compare without case;
@@ -211,6 +278,8 @@ pub struct EntryDescription {
     pub has_password: bool,
     pub attributes: BTreeMap<String, String>,
     pub attachments: Vec<AttachmentDescription>,
+    /// The entry holds a passkey (see [`Passkey`]).
+    pub has_passkey: bool,
 }
 
 /// Attachment name and byte size, without the attachment contents.
@@ -1627,6 +1696,7 @@ impl Database {
                     has_password: entry.get("Password").is_some(),
                     attributes,
                     attachments,
+                    has_passkey: summary.passkey,
                 })
             })
             .collect()
@@ -1926,8 +1996,16 @@ impl Database {
     /// `"Title"`, `"UserName"`, `"Password"`, `"URL"`, `"Notes"`. Custom fields permitted.
     ///
     /// `Password` and `otp` are stored with the kdbx Protected flag —
-    /// matching KeePassXC, which memory-protects both by default.
+    /// matching KeePassXC, which memory-protects both by default. Any other
+    /// field keeps the flag it already has, so overwriting a field another
+    /// client protected (a passkey's private key, say) leaves it protected;
+    /// a new field is unprotected.
     pub fn set_field(&mut self, id: &EntryId, field: &str, value: &str) -> Result<()> {
+        self.put_field(id, field, value, false)
+    }
+
+    /// [`Database::set_field`], with `protect` forcing the Protected flag on.
+    fn put_field(&mut self, id: &EntryId, field: &str, value: &str, protect: bool) -> Result<()> {
         const PROTECTED_FIELDS: [&str; 2] = ["Password", "otp"];
         let entry_id = self.lookup_entry_id(id)?;
         self.remember_before_edit(entry_id);
@@ -1936,7 +2014,11 @@ impl Database {
             .db
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        if PROTECTED_FIELDS.contains(&field) {
+        let already_protected = entry
+            .fields
+            .get(field)
+            .is_some_and(|existing| existing.is_protected());
+        if protect || already_protected || PROTECTED_FIELDS.contains(&field) {
             entry.set_protected(field, value);
         } else {
             entry.set_unprotected(field, value);
@@ -2522,13 +2604,14 @@ impl Database {
         // Read everything out first: the writes below re-borrow the database
         // mutably, and a half-copied entry would be worse than none.
         let fields = self.fields_with_prefix(src, "")?;
-        let mut values: Vec<(String, String)> = Vec::with_capacity(fields.len());
+        let mut values: Vec<(String, String, bool)> = Vec::with_capacity(fields.len());
         for name in fields {
             if name == "Title" {
                 continue;
             }
             if let Some(v) = self.get_field(src, &name)? {
-                values.push((name, v));
+                let protected = self.is_field_protected(src, &name)?.unwrap_or(false);
+                values.push((name, v, protected));
             }
         }
         let attachments = self
@@ -2544,8 +2627,10 @@ impl Database {
 
         // The parent is known to exist, so `add_entry`'s mkdir -p never fires.
         let dst_id = self.add_entry(&target)?;
-        for (name, value) in values {
-            self.set_field(&dst_id, &name, &value)?;
+        // Each field keeps its Protected flag, as KeePassXC's clone does: a
+        // copied passkey's private key stays protected.
+        for (name, value, protected) in values {
+            self.put_field(&dst_id, &name, &value, protected)?;
         }
         for (name, bytes) in blobs {
             self.attach_binary(&dst_id, &name, &bytes)?;
@@ -3269,6 +3354,30 @@ impl Database {
         names.sort();
         Ok(names)
     }
+
+    /// Whether a field is stored with the kdbx Protected flag. `None` when the
+    /// entry has no such field.
+    pub fn is_field_protected(&self, id: &EntryId, field: &str) -> Result<Option<bool>> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let entry = self
+            .inner
+            .db
+            .entry(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        Ok(entry.fields.get(field).map(Value::is_protected))
+    }
+
+    /// The passkey stored on an entry, without its private key. `None` when
+    /// the entry holds no passkey.
+    pub fn passkey(&self, id: &EntryId) -> Result<Option<Passkey>> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let entry = self
+            .inner
+            .db
+            .entry(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        Ok(passkey_of(&entry))
+    }
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -3306,6 +3415,7 @@ fn summarise(e: &keepass::db::EntryRef<'_>) -> EntrySummary {
             Some(keepass::db::Icon::BuiltIn(id)) => Some(*id),
             _ => None,
         },
+        passkey: entry_has_passkey(e),
     }
 }
 

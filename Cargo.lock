@@ -2881,6 +2881,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "keepass",
  "libc",
  "rand 0.10.4",
  "rpassword",

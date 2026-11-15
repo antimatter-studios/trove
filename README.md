@@ -300,9 +300,9 @@ bigger ideas, grouped:
   entry to a person (#235), admin audit review (#327), SSO/OIDC unlock (#286).
 - **Automation:** a documented, versioned RPC API for scripts (#309), a browser
   native-messaging host without the GUI (#289).
-- **Passkeys, one-time codes, hardware:** passkeys in KeePassXC's format
-  (#310), HOTP, Steam and Yandex codes (#311), FIDO2 as a primary unlock factor
-  (#312).
+- **Passkeys, one-time codes, hardware:** signing in with passkeys stored in
+  KeePassXC's format (#310; trove already keeps and shows them), HOTP, Steam and
+  Yandex codes (#311), FIDO2 as a primary unlock factor (#312).
 - **Extensibility:** a sandboxed plugin host (#288), custom entry types (#292).
 - **Audit and health:** scheduled breach checks and a health report (#284),
   cross-entry analytics (#285).
