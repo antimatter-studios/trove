@@ -21,7 +21,7 @@ pub mod daemons;
 pub mod databases;
 pub mod gpg_agent;
 pub mod handler;
-/// Process-level hardening (non-dumpable on Linux).
+/// Process-level hardening: no core dumps or crash reports.
 pub mod hardening;
 pub mod idle;
 pub mod ipc;

@@ -371,3 +371,86 @@ fn json_outputs_parse_with_expected_fields() {
     assert_eq!(info["entries"], 2);
     assert!(info["kdf"].as_str().unwrap().contains("Argon2"));
 }
+
+/// The directory `trove exec` writes attachments into, read back through the
+/// `KUBECONFIG` path the child sees.
+fn exec_kubeconfig_dir(trove: &std::path::Path, vs: &str) -> (Output, PathBuf) {
+    let out = run_trove(
+        trove,
+        &[
+            "--database",
+            vs,
+            "--password-stdin",
+            "exec",
+            "Infra/kubeconfig-prod",
+            "--",
+            "sh",
+            "-c",
+            "printf '%s' \"$KUBECONFIG\"",
+        ],
+        &format!("{PW}\n"),
+    );
+    let path = PathBuf::from(ok(&out, "exec kubeconfig").trim());
+    let dir = path
+        .parent()
+        .expect("attachment has a parent dir")
+        .to_path_buf();
+    (out, dir)
+}
+
+#[test]
+fn exec_warns_when_attachments_land_on_disk() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vs = seed(&trove, &dir);
+    let (out, exec_dir) = exec_kubeconfig_dir(&trove, &vs);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let warning = "is not memory-backed, so the attachments written there can reach the disk";
+    if troved::materialize::paths::is_tmpfs_backed(&exec_dir) {
+        // Linux with a tmpfs runtime dir or /dev/shm: nothing to warn about.
+        assert!(!stderr.contains(warning), "unexpected warning: {stderr}");
+    } else {
+        // macOS and Windows always land here; so does Linux without tmpfs.
+        assert!(
+            stderr.contains(&format!("trove: exec: {} ", exec_dir.display()))
+                && stderr.contains(warning),
+            "exec must warn that {} is disk-backed; stderr: {stderr}",
+            exec_dir.display()
+        );
+    }
+    assert_eq!(out.status.code(), Some(0), "exit code is still the child's");
+}
+
+#[test]
+fn exec_is_quiet_without_attachments() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vs = seed(&trove, &dir);
+    let out = run_trove(
+        &trove,
+        &[
+            "--database",
+            &vs,
+            "--password-stdin",
+            "exec",
+            "Infra/stripe",
+            "--",
+            "sh",
+            "-c",
+            "exit 3",
+        ],
+        &format!("{PW}\n"),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("memory-backed"),
+        "no attachment written, so no disk warning: {stderr}"
+    );
+    assert_eq!(out.status.code(), Some(3), "exit code is still the child's");
+}
