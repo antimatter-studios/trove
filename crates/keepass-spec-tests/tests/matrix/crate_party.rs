@@ -22,7 +22,7 @@ macro_rules! crate_impl {
     ($mod:ident, $kp:ident) => {
         pub mod $mod {
             use crate::matrix::{
-                Compression, Config, EntryRepr, Kdf, OuterCipher, DatabaseRepr, DatabaseSpec,
+                Compression, Config, DatabaseRepr, DatabaseSpec, EntryRepr, Kdf, OuterCipher,
             };
 
             use $kp::{
@@ -268,3 +268,4 @@ macro_rules! crate_impl {
 
 crate_impl!(kp012, keepass);
 crate_impl!(kp013, keepass_013);
+crate_impl!(kp017, keepass_017);

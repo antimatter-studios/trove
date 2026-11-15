@@ -2,7 +2,8 @@
 
 The conformance matrix in [`crates/keepass-spec-tests`](../crates/keepass-spec-tests/)
 mints `.kdbx` databases with one tool and reads them back with another, across the
-`keepass` Rust crate (0.12.5 and 0.13.10), `keepassxc-cli`, and the `trove` CLI.
+`keepass` Rust crate (0.12.5, 0.13.13 and 0.17.0, the version trove ships),
+`keepassxc-cli`, pykeepass, and the `trove` CLI.
 Several mismatches it surfaced are genuine **upstream bugs** rather than
 expected behavior. Each is recorded in the matrix's `expect()` table as an
 `Xfail` (so the suite stays green and *notices* if the bug is later fixed — an
@@ -10,22 +11,23 @@ expected behavior. Each is recorded in the matrix's `expect()` table as an
 
 Each entry lists the **product**, the **affected versions**, the **symptom**,
 the **root cause** (with the exact source location), how to **reproduce**, and a
-**suggested fix**. Bugs A and B are present in the *current* `keepass` 0.13.10
-and are the best PR candidates.
+**suggested fix**. Bugs A and B were fixed upstream in `keepass` 0.17.0. Bugs E
+and F are still open in the latest release.
 
 Crate source referenced below is the published crate, e.g.
-`~/.cargo/registry/src/*/keepass-0.13.10/`.
+`~/.cargo/registry/src/*/keepass-0.13.13/`. The write-ups of A to D were done
+against 0.13.10; the matrix now links 0.13.13, which behaves the same.
 
 ---
 
 ## Bug A — KDBX-3.1 reader collapses every attachment to id 0
 
-**Status:** fixed on the antimatter-studios/keepass-rs `trove` branch that trove
-pins, and sent upstream as sseemayer/keepass-rs#384. The matrix still links the
-published crates, so its `Xfail` stays until a release carries the fix.
+**Status:** fixed upstream in keepass 0.17.0 (sseemayer/keepass-rs#384). The
+matrix's `Xfail` applies only to the 0.12.5 and 0.13.13 consumers; keepassxc →
+0.17.0 passes.
 
 - **Product:** `keepass` crate (keepass-rs)
-- **Affected versions:** 0.12.5 **and** 0.13.10 (current)
+- **Affected versions:** 0.12.5 **and** 0.13.10 (fixed in 0.17.0)
 - **Severity:** high — silent data loss / corruption: a database written by
   KeePassXC/KeePass2 in KDBX 3.1 with **two or more attachments** loses or
   misreads them when opened with the crate. KDBX 4 (header-stored attachments)
@@ -91,12 +93,12 @@ Producer `keepassxc-cli` (writes KDBX 3.1) → consumer `keepass` crate, fixture
 
 ## Bug B — KDBX-3.1 reader can't open a database containing a zero-byte attachment
 
-**Status:** fixed on the antimatter-studios/keepass-rs `trove` branch that trove
-pins, and sent upstream as sseemayer/keepass-rs#384. The matrix still links the
-published crates, so its `Xfail` stays until a release carries the fix.
+**Status:** fixed upstream in keepass 0.17.0 (sseemayer/keepass-rs#384). The
+matrix's `Xfail` applies only to the 0.12.5 and 0.13.13 consumers; keepassxc →
+0.17.0 passes.
 
 - **Product:** `keepass` crate (keepass-rs)
-- **Affected versions:** 0.12.5 **and** 0.13.10 (current)
+- **Affected versions:** 0.12.5 **and** 0.13.10 (fixed in 0.17.0)
 - **Severity:** high — the **entire database fails to open** (not just the one
   attachment) with `Error parsing XML inside KDBX: missing field $value`.
 
@@ -173,8 +175,13 @@ Producer `keepass` crate **0.12.5** → consumer `keepassxc-cli`, *any* fixture.
 
 ## Bug D — entry `<Tags>` separator changed between crate versions
 
+**Status:** affects only the EOL 0.12.5 reader. Not reported. keepass 0.17.0
+splits `<Tags>` on `;`, `,` and tab
+(`comma_separated_tags_are_split_by_the_shipped_crate` in
+`conformance_matrix.rs`); 0.12.5 splits on `,` but not `;`.
+
 - **Product:** `keepass` crate (keepass-rs)
-- **Affected versions:** writer 0.13.10 ↔ reader 0.12.5
+- **Affected versions:** writer 0.13.10 / 0.17.0 / pykeepass ↔ reader 0.12.5
 - **Severity:** medium — tags written by 0.13.10 read back as a single mangled
   tag under 0.12.5.
 
@@ -196,6 +203,78 @@ and **`tags-and-custom`**.
 
 ---
 
+## Bug E — 0.17.0 panics on an empty `<ExpiryTime>`
+
+**Status:** fixed on the antimatter-studios/keepass-rs `trove` branch
+(`886a4ab9`). Not reported upstream yet.
+
+- **Product:** `keepass` crate (keepass-rs)
+- **Affected versions:** 0.17.0
+- **Severity:** high — the reader panics, so a program opening the file crashes.
+
+### Symptom
+keepass 0.12.5 writes `<ExpiryTime></ExpiryTime>` for entries that don't
+expire. 0.17.0 panics opening such a KDBX 4.0 file:
+`range end index 8 out of range for slice of length 0`
+(`src/format/xml_db/timestamp.rs:78`).
+
+### Suggested fix
+Treat an empty timestamp as absent, and return an error for one that is too
+short or out of range instead of slicing it.
+
+### Reproduce in the matrix
+Producer `keepass` 0.12.5 → consumer `keepass` 0.17.0, any fixture.
+
+---
+
+## Bug F — `<String>` after `<Times>` fails the whole file
+
+**Status:** fixed on the antimatter-studios/keepass-rs fork by
+antimatter-studios/keepass-rs#1. Not reported upstream yet.
+
+- **Product:** `keepass` crate (keepass-rs)
+- **Affected versions:** 0.12.5, 0.13.13 and 0.17.0
+- **Severity:** high — the database fails to open. Any vault pykeepass has
+  edited is affected, since pykeepass appends each field it sets to the end of
+  `<Entry>`.
+
+### Symptom
+`Error parsing XML inside KDBX: duplicate field `String``.
+
+### Root cause
+`Entry::string_fields` is a `Vec<StringField>` read by quick-xml's serde
+deserializer, which without the `overlapped-lists` feature only collects a list
+from adjacent elements. KeePass and KeePassXC read elements in any order.
+
+### Suggested fix
+Enable quick-xml's `overlapped-lists` feature. It also covers `<Binary>`.
+
+### Reproduce in the matrix
+Producer pykeepass → consumer any `keepass` crate, fixtures with custom fields
+(`custom-*`, `tags-and-custom`, `entry-references`). `interop_pykeepass.rs`
+shows the trove side: trove can't open a vault pykeepass edited.
+
+---
+
+## Bug G — pykeepass doesn't know the KDBX 4 AES-KDF UUID
+
+**Status:** not reported.
+
+- **Product:** pykeepass
+- **Affected versions:** 4.2.0
+- **Severity:** medium — the database fails to open with
+  `Unsupported key derivation method`.
+
+KDBX 4 has two AES-KDF UUIDs: `c9d9f39a-…` (KDBX 3) and `7c02bb82-…` (KDBX 4).
+keepass 0.12.5 and 0.13.13 write the KDBX 4 one; pykeepass's
+`kdbx_parsing/kdbx4.py` only accepts the KDBX 3 one. keepass 0.17.0 writes the
+KDBX 3 UUID, so trove's own files are unaffected.
+
+### Reproduce in the matrix
+Producer `keepass` 0.12.5 or 0.13.13 → consumer pykeepass, `cfg-aeskdf-*`.
+
+---
+
 ## Not bugs (documented so they aren't mistaken for bugs)
 
 - **KeePassXC resolves `{REF:...}` placeholders on `show`.** A custom field whose
@@ -203,7 +282,7 @@ and **`tags-and-custom`**.
   doesn't exist), not literal. This is correct KeePass reference behavior; the
   literal is preserved in storage (the crate reads it verbatim). Use
   `export -f xml` if you need the unresolved literal from keepassxc.
-- **`keepass` 0.13.10 writes KDBX 4.1 only.** It can't *save* a forced KDBX 4.0
+- **`keepass` 0.13.10 and 0.17.0 write KDBX 4.1 only.** It can't *save* a forced KDBX 4.0
   (`DatabaseVersion::KDB4(0)` → `UnsupportedVersion`); 0.12.5 saves 4.0. A
   limitation/feature-gap, not a correctness bug. KeePassXC reads both 4.0 and 4.1.
 - **`keepassxc-cli` cannot write KDBX 4 on import/create.** It always emits KDBX

@@ -49,3 +49,5 @@ rust-argon2 = "3"
 # `keepass` above (0.12.5) is NOT also aliased here. Pinned exactly (`=`) for a
 # reproducible version axis. Extend the axis by adding another `keepass_0XY` line.
 keepass_013 = { package = "keepass", version = "=0.13.13", features = ["save_kdbx4"] }
+# The version trove itself ships.
+keepass_017 = { package = "keepass", version = "=0.17.0", features = ["save_kdbx4"] }

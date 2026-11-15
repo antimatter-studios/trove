@@ -84,9 +84,19 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: brew install --cask keepassxc
 
+      # pykeepass is the third KeePass implementation in the conformance
+      # matrix and interop tests. Pinned; a venv first on PATH keeps it off the
+      # runner's system Python, which refuses pip installs on Ubuntu.
+      - name: Install pykeepass
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pykeepass"
+          "$RUNNER_TEMP/pykeepass/bin/pip" install pykeepass==4.2.0
+          echo "$RUNNER_TEMP/pykeepass/bin" >> "$GITHUB_PATH"
+
       - name: Verify required system tools
         run: |
           set -eux
+          python3 -c 'import pykeepass; print(pykeepass.__version__)'
           command -v gpg
           command -v git
           command -v ssh-keygen
@@ -114,6 +124,8 @@ jobs:
         # app's audited graph). `--workspace` above doesn't reach it, so run it
         # by manifest. It drives the trove CLI as a subprocess, so build that
         # binary into the repo-root target dir and point TROVE_BIN at it.
+        env:
+          TROVE_REQUIRE_PYKEEPASS: "1"
         run: |
           cargo build --locked -p trove-cli
           TROVE_BIN="$PWD/target/debug/trove" \

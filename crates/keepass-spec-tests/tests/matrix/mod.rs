@@ -1,8 +1,9 @@
 //! Conformance-matrix harness: mint a logical database spec with one *producer*,
 //! read it back with one *consumer*, and assert the recovered content matches —
 //! across every (producer × consumer × fixture) cell. Producers/consumers are
-//! "participants": linked `keepass` crate versions (0.12.5, 0.13.13) and the
-//! external `keepassxc-cli` oracle (every version discovered on the box).
+//! "participants": linked `keepass` crate versions (0.12.5, 0.13.13, 0.17.0),
+//! the external `keepassxc-cli` oracle (every version discovered on the box)
+//! and pykeepass, when installed.
 //!
 //! Each cell has a *version-tagged expectation* (`expect()`), so a known
 //! incompatibility (e.g. keepass 0.12.5 output is unreadable by keepassxc) is
@@ -18,6 +19,7 @@
 pub mod crate_party;
 pub mod fixtures;
 pub mod keepassxc_party;
+pub mod pykeepass_party;
 pub mod trove_party;
 
 use std::collections::BTreeMap;
@@ -215,6 +217,10 @@ pub fn expected_repr(spec: &DatabaseSpec) -> DatabaseRepr {
 /// scatter of hardcoded strings that silently go stale.
 const KEEPASS_013: &str = "0.13.13";
 
+/// The exact `keepass_017` version, in lockstep with the `=0.17.0` pin. This
+/// is the version trove itself ships.
+const KEEPASS_017: &str = "0.17.0";
+
 /// A tool that can produce and/or consume a `.kdbx`.
 #[derive(Clone)]
 pub enum Participant {
@@ -222,8 +228,12 @@ pub enum Participant {
     Crate012,
     /// keepass crate 0.13.13 (linked as `keepass_013`).
     Crate013,
+    /// keepass crate 0.17.0 (linked as `keepass_017`).
+    Crate017,
     /// An external `keepassxc-cli` binary (one per discovered version).
     Keepassxc(keepassxc_party::Oracle),
+    /// pykeepass, through `pykeepass_party.py`.
+    Pykeepass(pykeepass_party::Pykeepass),
 }
 
 /// What dimensions a consumer can faithfully report, so the comparator ignores
@@ -241,14 +251,16 @@ impl Participant {
         match self {
             Participant::Crate012 => "keepass-crate@0.12.5".to_string(),
             Participant::Crate013 => format!("keepass-crate@{KEEPASS_013}"),
+            Participant::Crate017 => format!("keepass-crate@{KEEPASS_017}"),
             Participant::Keepassxc(o) => format!("keepassxc-cli@{}", o.version),
+            Participant::Pykeepass(p) => format!("pykeepass@{}", p.version),
         }
     }
 
     pub fn consumer_caps(&self) -> Caps {
         match self {
             // Linked crates read everything back with full fidelity.
-            Participant::Crate012 | Participant::Crate013 => Caps {
+            Participant::Crate012 | Participant::Crate013 | Participant::Crate017 => Caps {
                 fields: true,
                 attachment_bytes: true,
                 custom_fields: true,
@@ -257,6 +269,13 @@ impl Participant {
             // keepassxc: standard fields via CSV, custom fields + tags via
             // `show -s`, attachment bytes via attachment-export.
             Participant::Keepassxc(_) => Caps {
+                fields: true,
+                attachment_bytes: true,
+                custom_fields: true,
+                tags: true,
+            },
+            // pykeepass reads the decrypted XML directly.
+            Participant::Pykeepass(_) => Caps {
                 fields: true,
                 attachment_bytes: true,
                 custom_fields: true,
@@ -280,9 +299,12 @@ pub fn produce(p: &Participant, spec: &DatabaseSpec) -> Produced {
     let r = match p {
         Participant::Crate012 => crate_party::kp012::produce(spec),
         Participant::Crate013 => crate_party::kp013::produce(spec),
+        Participant::Crate017 => crate_party::kp017::produce(spec),
         // keepassxc mints via KeePass-XML import (always KDBX 3.1; it ignores the
         // crypto Config, but reproduces the content faithfully).
         Participant::Keepassxc(o) => keepassxc_party::produce(o, spec),
+        // pykeepass mints from its own blank KDBX 4 template, ignoring Config.
+        Participant::Pykeepass(p) => pykeepass_party::produce(p, spec),
     };
     match r {
         Ok(b) => Produced::Bytes(b),
@@ -294,10 +316,29 @@ pub fn produce(p: &Participant, spec: &DatabaseSpec) -> Produced {
 /// (failed to open / read). `spec` is passed so consumers that can't enumerate
 /// attachments on their own (keepassxc) know which names to export and verify.
 pub fn consume(p: &Participant, bytes: &[u8], spec: &DatabaseSpec) -> Result<DatabaseRepr, String> {
+    // A reader that panics on bad input is a read error for this cell, not a
+    // crash of the whole matrix (keepass 0.17.0 panics on an empty timestamp).
+    std::panic::catch_unwind(|| consume_inner(p, bytes, spec)).unwrap_or_else(|panic| {
+        let msg = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic payload");
+        Err(format!("reader panicked: {msg}"))
+    })
+}
+
+fn consume_inner(
+    p: &Participant,
+    bytes: &[u8],
+    spec: &DatabaseSpec,
+) -> Result<DatabaseRepr, String> {
     match p {
         Participant::Crate012 => crate_party::kp012::consume(bytes, spec),
         Participant::Crate013 => crate_party::kp013::consume(bytes, spec),
+        Participant::Crate017 => crate_party::kp017::consume(bytes, spec),
         Participant::Keepassxc(o) => keepassxc_party::consume(o, bytes, spec),
+        Participant::Pykeepass(p) => pykeepass_party::consume(p, bytes, spec),
     }
 }
 
@@ -339,13 +380,19 @@ pub fn expect_produce(producer: &Participant, spec: &DatabaseSpec) -> ProduceExp
             "keepass 0.13.13 dumps KDBX 4.1 only; forced minor=0 (4.0) is rejected at save",
         );
     }
+    // keepass 0.17.0 keeps the 4.1-only dumper.
+    if matches!(producer, Participant::Crate017) && spec.config.kdbx4_minor == Some(0) {
+        return ProduceExpectation::CannotProduce(
+            "keepass 0.17.0 dumps KDBX 4.1 only; forced minor=0 (4.0) is rejected at save",
+        );
+    }
     ProduceExpectation::CanProduce
 }
 
 /// Version-tagged expectation table. Default is `Pass`; encode known
 /// incompatibilities here with a human-readable reason.
 ///
-/// The genuine upstream bugs among these (findings A–D) are written up for
+/// The genuine upstream bugs among these (Bugs A–G) are written up for
 /// reporting in [`docs/keepass-bugs.md`](../../../../docs/keepass-bugs.md).
 pub fn expect(producer: &Participant, consumer: &Participant, spec: &DatabaseSpec) -> Expectation {
     use Participant::*;
@@ -361,16 +408,28 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &DatabaseSpe
         );
     }
 
-    // Finding #3: keepass 0.13.13 serializes entry <Tags> joined with ';', which
-    // keepass 0.12.5 does NOT split on read (it stores the whole string as a
-    // single tag). keepassxc and 0.13.13 split it fine; only 0.13.13 → 0.12.5
-    // breaks, and only when an entry actually has tags.
-    if matches!(producer, Crate013)
+    // Finding #7: keepass 0.12.5 writes an empty <ExpiryTime></ExpiryTime> for
+    // entries without an expiry, and keepass 0.17.0's timestamp parser panics
+    // slicing it ("range end index 8 out of range for slice of length 0").
+    // Config-independent: every 0.12.5 database has entries or groups with
+    // times. Fixed on the antimatter-studios/keepass-rs `trove` branch trove
+    // pins (886a4ab9); not in any upstream release yet.
+    if matches!(producer, Crate012) && matches!(consumer, Crate017) {
+        return Expectation::Xfail(
+            "keepass 0.17.0 panics parsing the empty <ExpiryTime> keepass 0.12.5 writes",
+        );
+    }
+
+    // Finding #3: keepass 0.13.13 and 0.17.0 serialize entry <Tags> joined with
+    // ';', which keepass 0.12.5 does NOT split on read (it stores the whole
+    // string as a single tag). keepassxc and the newer crates split it fine;
+    // only newer → 0.12.5 breaks, and only when an entry actually has tags.
+    if matches!(producer, Crate013 | Crate017 | Pykeepass(_))
         && matches!(consumer, Crate012)
         && spec.entries.iter().any(|e| !e.tags.is_empty())
     {
         return Expectation::Xfail(
-            "keepass 0.13.13 joins entry Tags with ';'; keepass 0.12.5 doesn't split on ';' (reads them as one tag)",
+            "keepass >= 0.13 and pykeepass join entry Tags with ';'; keepass 0.12.5 doesn't split on ';' (reads them as one tag)",
         );
     }
 
@@ -401,6 +460,8 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &DatabaseSpe
     //      and attachments drop/misread.
     // keepassxc->keepassxc is fine, and KDBX-4 header-stored attachments are fine,
     // so this is specifically the crate's 3.1 binary-pool reader (upstream bug).
+    // Fixed upstream in keepass 0.17.0 (sseemayer/keepass-rs#384), so
+    // keepassxc → Crate017 is Pass.
     if matches!(producer, Keepassxc(_)) && matches!(consumer, Crate012 | Crate013) {
         let has_empty_attachment = spec
             .entries
@@ -417,6 +478,33 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &DatabaseSpe
                 "keepass crate's KDBX-3.1 reader assigns all <Binaries> pool ids to 0 (next_free on empty db) -> multiple attachments collide/drop",
             );
         }
+    }
+
+    // Finding #8: pykeepass appends each field set after an entry is created
+    // (here: custom fields) to the end of <Entry>, after <Times>. keepass-rs
+    // reads <String> with serde, which without quick-xml's `overlapped-lists`
+    // feature rejects a second run of them: "duplicate field `String`", and
+    // the whole file fails to open. Fixed on the trove fork by
+    // antimatter-studios/keepass-rs#1; no crates.io release has it yet.
+    if matches!(producer, Pykeepass(_))
+        && matches!(consumer, Crate012 | Crate013 | Crate017)
+        && spec.entries.iter().any(|e| !e.custom_fields.is_empty())
+    {
+        return Expectation::Xfail(
+            "keepass-rs can't read a <String> after <Times> (pykeepass appends custom fields); 'duplicate field String'",
+        );
+    }
+
+    // Finding #9: KDBX 4 has two AES-KDF UUIDs. keepass 0.12.5 and 0.13.13
+    // write the KDBX 4 one (7c02bb82-...); pykeepass 4.2.0 knows only the
+    // KDBX 3 one (c9d9f39a-...), which keepass 0.17.0 writes again.
+    if matches!(producer, Crate012 | Crate013)
+        && matches!(consumer, Pykeepass(_))
+        && spec.config.kdf == Kdf::Aes
+    {
+        return Expectation::Xfail(
+            "pykeepass 4.2.0 doesn't know the KDBX 4 AES-KDF UUID that keepass < 0.17 writes: 'Unsupported key derivation method'",
+        );
     }
 
     Expectation::Pass
