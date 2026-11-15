@@ -119,6 +119,41 @@ struct Session {
     /// digest as the payload.
     #[allow(dead_code)]
     hash_algo: Option<String>,
+    /// What the client says the next key operation is for (`SETKEYDESC`),
+    /// cleaned by [`client_text`]. Shown in the approval prompt of a
+    /// confirm-gated key. Cleared on `RESET`.
+    keydesc: Option<String>,
+}
+
+/// The longest client-supplied text put into an approval prompt.
+const MAX_CLIENT_TEXT: usize = 200;
+
+/// Text a client sends for a prompt (`SETKEYDESC`, `GET_CONFIRMATION`), made
+/// safe to show: Assuan escaping undone (`+` is a space, `%XX` a byte),
+/// control characters turned into spaces, runs of spaces collapsed, and the
+/// whole capped at [`MAX_CLIENT_TEXT`] characters.
+fn client_text(raw: &str) -> String {
+    let plus = raw.replace('+', " ");
+    let bytes = assuan::percent_decode(&plus).unwrap_or_else(|_| plus.into_bytes());
+    let text = String::from_utf8_lossy(&bytes);
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_CLIENT_TEXT)
+        .collect()
+}
+
+impl Session {
+    /// Forget everything the client set: `RESET`.
+    fn reset(&mut self) {
+        *self = Session::default();
+    }
 }
 
 async fn serve_connection(
@@ -206,7 +241,7 @@ async fn handle_command(
         }
 
         "RESET" => {
-            *session = Session::default();
+            session.reset();
             send!(write_ok(w));
         }
 
@@ -380,9 +415,12 @@ async fn handle_command(
             }
         }
 
-        // SETKEYDESC: text shown in the pinentry prompt. We don't have a
-        // pinentry, so we just acknowledge.
+        // SETKEYDESC: text gpg would show in its pinentry prompt. There is no
+        // pinentry; the text goes into the approval prompt of a confirm-gated
+        // key instead.
         "SETKEYDESC" => {
+            let text = client_text(cmd.rest.trim());
+            session.keydesc = (!text.is_empty()).then_some(text);
             send!(write_ok(w));
         }
 
@@ -451,7 +489,9 @@ async fn handle_command(
             // A key whose GpgAgent.settings says confirm="true" signs only
             // after Touch ID.
             if let Some(gate) = crate::approval::gpg_gate(&grip) {
-                if let Err(why) = crate::approval::require(&[gate]).await {
+                if let Err(why) =
+                    crate::approval::require_described(&[gate], session.keydesc.as_deref()).await
+                {
                     eprintln!("gpg-agent: PKSIGN refused: {why}");
                     send!(write_err(w, ERR_NOT_CONFIRMED, "not confirmed"));
                     return CommandOutcome::Continue;
@@ -548,7 +588,9 @@ async fn handle_command(
             }
 
             if let Some(gate) = crate::approval::gpg_gate(&grip) {
-                if let Err(why) = crate::approval::require(&[gate]).await {
+                if let Err(why) =
+                    crate::approval::require_described(&[gate], session.keydesc.as_deref()).await
+                {
                     eprintln!("gpg-agent: PKDECRYPT refused: {why}");
                     send!(write_err(w, ERR_NOT_CONFIRMED, "not confirmed"));
                     return CommandOutcome::Continue;
@@ -659,8 +701,26 @@ async fn handle_command(
             send!(write_err(w, ERR_NO_SCDAEMON, "No_SmartCard_Daemon"));
         }
 
-        // Pinentry-related — never invoked because we never prompt.
-        "PRESET_PASSPHRASE" | "CLEAR_PASSPHRASE" | "GET_PASSPHRASE" | "GET_CONFIRMATION" => {
+        // GET_CONFIRMATION <description>: the client asks the user a yes/no
+        // question. Answered by the approver, never assumed: no approver
+        // means no.
+        "GET_CONFIRMATION" => {
+            let mut text = client_text(cmd.rest.trim());
+            if text.is_empty() {
+                text = "confirm a gpg request".to_string();
+            }
+            match crate::approval::confirm(text).await {
+                Ok(()) => send!(write_ok(w)),
+                Err(why) => {
+                    eprintln!("gpg-agent: GET_CONFIRMATION refused: {why}");
+                    send!(write_err(w, ERR_NOT_CONFIRMED, "not confirmed"));
+                }
+            }
+        }
+
+        // Pinentry-related — never invoked because we never ask for a
+        // passphrase.
+        "PRESET_PASSPHRASE" | "CLEAR_PASSPHRASE" | "GET_PASSPHRASE" => {
             send!(write_ok(w));
         }
 
@@ -936,6 +996,27 @@ mod tests {
             .unwrap();
         let r_start = r_pos + r_marker.len();
         assert_eq!(&blob[r_start..r_start + 32], &sig[..32]);
+    }
+
+    #[test]
+    fn setkeydesc_text_is_decoded_cleaned_and_capped() {
+        assert_eq!(
+            client_text("Please+enter%0Athe%20passphrase%07now"),
+            "Please enter the passphrase now"
+        );
+        let long = "a".repeat(500);
+        assert_eq!(client_text(&long).chars().count(), MAX_CLIENT_TEXT);
+    }
+
+    #[test]
+    fn setkeydesc_cleared_by_reset() {
+        let mut session = Session {
+            keydesc: Some(client_text("sign+commit")),
+            ..Session::default()
+        };
+        assert_eq!(session.keydesc.as_deref(), Some("sign commit"));
+        session.reset();
+        assert_eq!(session.keydesc, None);
     }
 
     #[test]

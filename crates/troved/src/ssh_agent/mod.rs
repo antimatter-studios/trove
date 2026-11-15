@@ -539,6 +539,31 @@ async fn serve_connection(
                 // and ECDSA this comes from `ssh_key::Signature`'s Encode
                 // impl; for RSA we pick the hash from `flags` per RFC 8332
                 // §3.3 / draft-miller-ssh-agent §4.5.1.
+                // A key whose entry asks for confirmation signs only after the
+                // approver says yes, once per signature like OpenSSH's own
+                // confirm constraint. The prompt runs with no lock held.
+                let confirm_for: Option<String> = {
+                    let guard = store.read().await;
+                    let now = Instant::now();
+                    guard
+                        .iter()
+                        .find(|k| k.public_blob == key_blob && !k.is_expired(now))
+                        .filter(|k| k.forward.confirm)
+                        .map(|k| k.comment.clone())
+                };
+                if let Some(comment) = confirm_for {
+                    let reason = format!("sign with SSH key {comment}");
+                    if let Err(why) = crate::approval::confirm(reason).await {
+                        eprintln!("ssh-agent: sign refused for {comment}: {why}");
+                        if write_message(&mut write_half, SSH_AGENT_FAILURE, &[])
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                }
                 let sig_blob: Option<Vec<u8>> = {
                     let guard = store.read().await;
                     let now = Instant::now();

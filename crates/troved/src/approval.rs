@@ -12,6 +12,8 @@
 //!   looking non-interactive, which an agent always does.
 //! * **An approval lasts the item's `lifetime`.** With `lifetime="600"`, one
 //!   fingerprint covers that item for ten minutes; without one, every use asks.
+//!   SSH keys set to confirm are the exception: OpenSSH asks once per
+//!   signature, and so does [`confirm`], whatever the key's lifetime.
 //! * **Prompts happen outside the daemon's locks.** A prompt can wait for a
 //!   minute, and holding the database lock through it would stall every other
 //!   request. A prompt waits up to a minute for a finger.
@@ -43,6 +45,15 @@ impl Gate {
             self.capability,
             self.item.clone(),
         )
+    }
+
+    /// The prompt text, with the client's own description of the operation
+    /// (gpg's `SETKEYDESC`) after it when there is one.
+    pub fn reason_with(&self, description: Option<&str>) -> String {
+        match description {
+            Some(d) if !d.is_empty() => format!("{}: {d}", self.reason()),
+            _ => self.reason(),
+        }
     }
 
     fn reason(&self) -> String {
@@ -145,6 +156,11 @@ pub fn gate(
 /// Ask for every gate that has no live approval. `Err` names why the secret
 /// stays shut: a refusal, a timeout, or no way to ask.
 pub async fn require(gates: &[Gate]) -> Result<(), String> {
+    require_described(gates, None).await
+}
+
+/// [`require`], with `description` added to each prompt's reason.
+pub async fn require_described(gates: &[Gate], description: Option<&str>) -> Result<(), String> {
     for g in gates {
         let now = Instant::now();
         let live = grants()
@@ -155,16 +171,7 @@ pub async fn require(gates: &[Gate]) -> Result<(), String> {
         if live {
             continue;
         }
-        let reason = g.reason();
-        let approved = tokio::task::spawn_blocking(move || approve(&reason))
-            .await
-            .map_err(|e| format!("approval prompt failed: {e}"))??;
-        if !approved {
-            return Err(format!(
-                "{}: Touch ID approval was refused or timed out",
-                g.reason()
-            ));
-        }
+        confirm(g.reason_with(description)).await?;
         if let Some(secs) = g.lifetime {
             grants()
                 .lock()
@@ -173,6 +180,22 @@ pub async fn require(gates: &[Gate]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Ask once, with no grant kept: the next use asks again. `Err` says why the
+/// operation is refused.
+pub async fn confirm(reason: String) -> Result<(), String> {
+    let asked = reason.clone();
+    let approved = tokio::task::spawn_blocking(move || approve(&asked))
+        .await
+        .map_err(|e| format!("approval prompt failed: {e}"))??;
+    if approved {
+        Ok(())
+    } else {
+        Err(format!(
+            "{reason}: Touch ID approval was refused or timed out"
+        ))
+    }
 }
 
 /// Show the Touch ID prompt. `Ok(false)` is a refusal or timeout; `Err` means
@@ -191,9 +214,15 @@ pub fn approve(reason: &str) -> Result<bool, String> {
 }
 
 fn no_approver() -> String {
-    "this needs Touch ID approval, and none can be asked for here (no Touch ID, \
-     or no one at the Mac); it is refused rather than allowed"
-        .to_string()
+    if cfg!(target_os = "macos") {
+        "this needs Touch ID approval, and none can be asked for here (no Touch ID, \
+         or no one at the Mac); it is refused rather than allowed"
+            .to_string()
+    } else {
+        "this needs Touch ID approval, which only macOS can ask for; it is refused \
+         rather than allowed"
+            .to_string()
+    }
 }
 
 // objc2's LocalAuthentication bindings are generated `unsafe` calls; the
@@ -253,6 +282,18 @@ mod tests {
         let mut k = g("gpg-priv", None);
         k.capability = Capability::GpgAgent;
         assert_eq!(k.reason(), "use the GPG key in e");
+    }
+
+    #[test]
+    fn reason_includes_setkeydesc() {
+        let mut k = g("gpg-priv", None);
+        k.capability = Capability::GpgAgent;
+        assert_eq!(
+            k.reason_with(Some("sign commit abc")),
+            "use the GPG key in e: sign commit abc"
+        );
+        assert_eq!(k.reason_with(Some("")), "use the GPG key in e");
+        assert_eq!(k.reason_with(None), "use the GPG key in e");
     }
 
     #[test]

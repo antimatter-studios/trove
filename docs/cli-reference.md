@@ -1616,6 +1616,14 @@ settings don't yet. `disable` writes `AllowUseOfSshKey=false` rather than
 deleting the file, because an entry without one has every key-shaped attachment
 probed and loaded.
 
+`--confirm` gates every signature, wherever the key is served: trove's own
+socket, `\\.\pipe\openssh-ssh-agent` on Windows, and private sockets filled by
+`ssh-agent add`. The key is still listed; signing waits for Touch ID (the
+prompt reads `trove: sign with SSH key <comment>`, as `ssh-add -l` shows it),
+and a refusal, a timeout or a machine with no Touch ID fails the signature
+with `SSH_AGENT_FAILURE`. Each signature asks again. A copy forwarded into
+another agent carries the confirm constraint, so that agent asks instead.
+
 ## trove gpg-agent
 
 ```
@@ -2153,7 +2161,11 @@ The rules:
 - **Approval.** An item with `confirm="true"` hands its secret over only after
   Touch ID: the daemon asks before `GetField` or `Get` returns a field or
   attachment such an item names, and before the GPG agent signs or decrypts
-  with such a key (refused with `GPG_ERR_NOT_CONFIRMED` otherwise). A
+  with such a key (refused with `GPG_ERR_NOT_CONFIRMED` otherwise). The GPG
+  agent's prompt adds the description gpg sends (`SETKEYDESC`), and gpg's own
+  yes/no questions (`GET_CONFIRMATION`) are asked the same way. An SSH key set
+  with `trove ssh-agent enable --confirm` asks before every signature on
+  trove's own sockets too, whatever its lifetime. A
   fingerprint, not a dialog, because software running as you can click a
   dialog. Where no approval can be asked — another platform, no reader, no one
   at the Mac — the secret is refused, never handed over on the strength of the

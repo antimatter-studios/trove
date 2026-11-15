@@ -4,6 +4,15 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## Unreleased
+
+- An SSH key set with `trove ssh-agent enable --confirm` asks for Touch ID
+  before every signature on trove's own sockets, not only in agents it is
+  forwarded to; refused, timed out or unasked, the signature fails. gpg's
+  `GET_CONFIRMATION` is asked the same way instead of always answering yes,
+  and the description gpg sends with `SETKEYDESC` appears in the Touch ID
+  prompt of a confirm-gated GPG key. (#441)
+
 ## v0.27.1 — 2026-11-01
 
 **Maintenance release; trove's behaviour is unchanged from v0.27.0.** Scheduled
