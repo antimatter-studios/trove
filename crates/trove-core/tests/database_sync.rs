@@ -1,15 +1,15 @@
-//! `Vault::sync_with`: two copies of one vault, say a laptop copy and one in a
+//! `Database::sync_with`: two copies of one database, say a laptop copy and one in a
 //! synced folder, end equal and nothing either side changed is lost.
 #![allow(missing_docs)]
 
 use std::path::Path;
 use std::time::Duration;
-use trove_core::{MergeSummary, Vault};
+use trove_core::{Database, MergeSummary};
 
 const PASSWORD: &str = "local password";
 
 fn titles(path: &Path, password: &str) -> Vec<String> {
-    let mut titles: Vec<String> = Vault::open(path, password)
+    let mut titles: Vec<String> = Database::open(path, password)
         .expect("open")
         .list_entries()
         .into_iter()
@@ -23,13 +23,13 @@ fn next_second() {
     std::thread::sleep(Duration::from_millis(1100));
 }
 
-/// A local vault and a copy of it in `dir`.
+/// A local database and a copy of it in `dir`.
 fn local_and_copy(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let local = dir.join("local.kdbx");
     let copy = dir.join("synced.kdbx");
-    let mut vault = Vault::create(&local, PASSWORD).expect("create");
-    vault.add_entry("shared").expect("add");
-    vault.save().expect("save");
+    let mut database = Database::create(&local, PASSWORD).expect("create");
+    database.add_entry("shared").expect("add");
+    database.save().expect("save");
     std::fs::copy(&local, &copy).expect("copy");
     (local, copy)
 }
@@ -39,16 +39,16 @@ fn both_copies_end_with_both_sides_changes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (local, copy) = local_and_copy(dir.path());
 
-    let mut other = Vault::open(&copy, PASSWORD).expect("open copy");
+    let mut other = Database::open(&copy, PASSWORD).expect("open copy");
     other.add_entry("from-the-other-machine").expect("add");
     other.save().expect("save");
     drop(other);
 
-    let mut vault = Vault::open(&local, PASSWORD).expect("open");
-    vault.add_entry("from-this-machine").expect("add");
-    vault.save().expect("save");
+    let mut database = Database::open(&local, PASSWORD).expect("open");
+    database.add_entry("from-this-machine").expect("add");
+    database.save().expect("save");
 
-    let summary = vault.sync_with(&copy, PASSWORD, None).expect("sync");
+    let summary = database.sync_with(&copy, PASSWORD, None).expect("sync");
     assert_eq!(summary.pulled.created, 1);
     assert_eq!(summary.pushed.created, 1);
     assert!(!summary.created);
@@ -58,7 +58,9 @@ fn both_copies_end_with_both_sides_changes() {
 
     // Syncing again finds nothing to do, and leaves the copy alone.
     let before = std::fs::read(&copy).expect("read");
-    let summary = vault.sync_with(&copy, PASSWORD, None).expect("sync again");
+    let summary = database
+        .sync_with(&copy, PASSWORD, None)
+        .expect("sync again");
     assert_eq!(summary.pulled, MergeSummary::default());
     assert_eq!(summary.pushed, MergeSummary::default());
     assert_eq!(std::fs::read(&copy).expect("read"), before);
@@ -69,16 +71,18 @@ fn a_missing_copy_is_created_with_its_own_password() {
     let dir = tempfile::tempdir().expect("tempdir");
     let local = dir.path().join("local.kdbx");
     let copy = dir.path().join("new-copy.kdbx");
-    let mut vault = Vault::create(&local, PASSWORD).expect("create");
-    vault.add_entry("shared").expect("add");
-    vault.save().expect("save");
+    let mut database = Database::create(&local, PASSWORD).expect("create");
+    database.add_entry("shared").expect("add");
+    database.save().expect("save");
 
-    let summary = vault.sync_with(&copy, "copy password", None).expect("sync");
+    let summary = database
+        .sync_with(&copy, "copy password", None)
+        .expect("sync");
     assert!(summary.created);
     assert!(summary.other_written);
     assert_eq!(titles(&copy, "copy password"), ["shared"]);
     assert!(
-        Vault::open(&copy, PASSWORD).is_err(),
+        Database::open(&copy, PASSWORD).is_err(),
         "not the local password"
     );
 }
@@ -87,21 +91,21 @@ fn a_missing_copy_is_created_with_its_own_password() {
 fn the_same_entry_changed_on_both_sides_keeps_both_values() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (local, copy) = local_and_copy(dir.path());
-    let mut vault = Vault::open(&local, PASSWORD).expect("open");
-    let id = vault.find_by_title("shared").expect("entry");
+    let mut database = Database::open(&local, PASSWORD).expect("open");
+    let id = database.find_by_title("shared").expect("entry");
 
     next_second();
-    let mut other = Vault::open(&copy, PASSWORD).expect("open copy");
+    let mut other = Database::open(&copy, PASSWORD).expect("open copy");
     other.set_field(&id, "Password", "older").expect("set");
     other.save().expect("save");
     drop(other);
     next_second();
-    vault.set_field(&id, "Password", "newer").expect("set");
-    vault.save().expect("save");
+    database.set_field(&id, "Password", "newer").expect("set");
+    database.save().expect("save");
 
-    vault.sync_with(&copy, PASSWORD, None).expect("sync");
+    database.sync_with(&copy, PASSWORD, None).expect("sync");
     for path in [&local, &copy] {
-        let reopened = Vault::open(path, PASSWORD).expect("open");
+        let reopened = Database::open(path, PASSWORD).expect("open");
         assert_eq!(
             reopened.get_field(&id, "Password").expect("get").as_deref(),
             Some("newer")
@@ -132,27 +136,27 @@ fn the_same_entry_changed_on_both_sides_keeps_both_values() {
 fn a_deletion_on_one_side_reaches_the_other() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (local, copy) = local_and_copy(dir.path());
-    let mut vault = Vault::open(&local, PASSWORD).expect("open");
-    let id = vault.find_by_title("shared").expect("entry");
+    let mut database = Database::open(&local, PASSWORD).expect("open");
+    let id = database.find_by_title("shared").expect("entry");
     next_second();
-    vault.delete_entry(&id).expect("delete");
-    vault.save().expect("save");
+    database.delete_entry(&id).expect("delete");
+    database.save().expect("save");
 
-    vault.sync_with(&copy, PASSWORD, None).expect("sync");
+    database.sync_with(&copy, PASSWORD, None).expect("sync");
     assert!(titles(&copy, PASSWORD).is_empty());
     assert!(titles(&local, PASSWORD).is_empty());
 }
 
 #[test]
-fn a_different_vault_is_refused_and_left_alone() {
+fn a_different_database_is_refused_and_left_alone() {
     let dir = tempfile::tempdir().expect("tempdir");
     let local = dir.path().join("local.kdbx");
     let unrelated = dir.path().join("unrelated.kdbx");
-    let mut vault = Vault::create(&local, PASSWORD).expect("create");
-    Vault::create(&unrelated, PASSWORD).expect("create unrelated");
+    let mut database = Database::create(&local, PASSWORD).expect("create");
+    Database::create(&unrelated, PASSWORD).expect("create unrelated");
     let before = std::fs::read(&unrelated).expect("read");
 
-    let err = vault
+    let err = database
         .sync_with(&unrelated, PASSWORD, None)
         .expect_err("refused");
     assert!(err.to_string().contains("not a copy"), "{err}");
@@ -160,7 +164,7 @@ fn a_different_vault_is_refused_and_left_alone() {
 }
 
 fn open_raw(path: &Path) -> keepass::Database {
-    let mut file = std::fs::File::open(path).expect("open vault file");
+    let mut file = std::fs::File::open(path).expect("open database file");
     keepass::Database::open(
         &mut file,
         keepass::DatabaseKey::new().with_password(PASSWORD),
@@ -168,16 +172,16 @@ fn open_raw(path: &Path) -> keepass::Database {
     .expect("open")
 }
 
-/// A deletion made on another machine, for an entry this vault never had,
+/// A deletion made on another machine, for an entry this database never had,
 /// stays recorded in the synced copy: a third machine that still has the entry
 /// drops it on its next sync instead of bringing it back.
 #[test]
-fn a_deletion_this_vault_never_saw_still_reaches_a_third_copy() {
+fn a_deletion_this_database_never_saw_still_reaches_a_third_copy() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (local, copy) = local_and_copy(dir.path());
 
     // Machine B adds x to the synced copy; machine C copies it while x exists.
-    let mut b = Vault::open(&copy, PASSWORD).expect("open");
+    let mut b = Database::open(&copy, PASSWORD).expect("open");
     let x = b.add_entry("x").expect("add");
     b.save().expect("save");
     let third = dir.path().join("third.kdbx");
@@ -187,19 +191,19 @@ fn a_deletion_this_vault_never_saw_still_reaches_a_third_copy() {
     b.save().expect("save");
     drop(b);
 
-    // This vault never had x.
-    let mut vault = Vault::open(&local, PASSWORD).expect("open");
-    vault.add_entry("from-a").expect("add");
-    vault.save().expect("save");
-    vault.sync_with(&copy, PASSWORD, None).expect("sync");
+    // This database never had x.
+    let mut database = Database::open(&local, PASSWORD).expect("open");
+    database.add_entry("from-a").expect("add");
+    database.save().expect("save");
+    database.sync_with(&copy, PASSWORD, None).expect("sync");
 
-    let mut c = Vault::open(&third, PASSWORD).expect("open third");
+    let mut c = Database::open(&third, PASSWORD).expect("open third");
     c.sync_with(&copy, PASSWORD, None).expect("third syncs");
     assert_eq!(titles(&copy, PASSWORD), ["from-a", "shared"]);
     assert_eq!(titles(&third, PASSWORD), ["from-a", "shared"]);
 }
 
-/// Settings the other copy has and this vault lacks, such as a
+/// Settings the other copy has and this database lacks, such as a
 /// KeePassXC-Browser key in custom data, survive the sync; a sync that brings
 /// nothing leaves both files alone.
 #[test]
@@ -220,8 +224,8 @@ fn the_other_copys_custom_data_is_kept() {
     )
     .expect("raw save");
 
-    let mut vault = Vault::open(&local, PASSWORD).expect("open");
-    vault.sync_with(&copy, PASSWORD, None).expect("sync");
+    let mut database = Database::open(&local, PASSWORD).expect("open");
+    database.sync_with(&copy, PASSWORD, None).expect("sync");
     assert!(open_raw(&copy)
         .meta
         .custom_data
@@ -235,8 +239,10 @@ fn the_other_copys_custom_data_is_kept() {
         std::fs::read(&local).expect("read"),
         std::fs::read(&copy).expect("read"),
     );
-    let mut vault = Vault::open(&local, PASSWORD).expect("open");
-    let summary = vault.sync_with(&copy, PASSWORD, None).expect("sync again");
+    let mut database = Database::open(&local, PASSWORD).expect("open");
+    let summary = database
+        .sync_with(&copy, PASSWORD, None)
+        .expect("sync again");
     assert!(!summary.other_written);
     assert_eq!(std::fs::read(&local).expect("read"), local_before);
     assert_eq!(std::fs::read(&copy).expect("read"), copy_before);

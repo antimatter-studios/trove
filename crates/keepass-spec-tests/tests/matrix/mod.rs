@@ -1,4 +1,4 @@
-//! Conformance-matrix harness: mint a logical vault spec with one *producer*,
+//! Conformance-matrix harness: mint a logical database spec with one *producer*,
 //! read it back with one *consumer*, and assert the recovered content matches —
 //! across every (producer × consumer × fixture) cell. Producers/consumers are
 //! "participants": linked `keepass` crate versions (0.12.5, 0.13.13) and the
@@ -22,17 +22,17 @@ pub mod trove_party;
 
 use std::collections::BTreeMap;
 
-// ─────────────────────────── vault spec (producer input) ───────────────────
+// ─────────────────────────── database spec (producer input) ───────────────────
 
-/// A producer-agnostic description of a vault's content + crypto config.
+/// A producer-agnostic description of a database's content + crypto config.
 #[derive(Clone)]
-pub struct VaultSpec {
+pub struct DatabaseSpec {
     /// Short stable identifier, used in the report and the expectation table.
     /// `String` (not `&'static str`) so combinatorial fixtures can name
     /// themselves, e.g. `cfg-argon2id-chacha20-none-v41`.
     pub name: String,
     pub password: &'static str,
-    /// How the vault is locked beyond the password. The credential axis —
+    /// How the database is locked beyond the password. The credential axis —
     /// keepassxc, the crate, and trove (`--key-file`, since parity G2) must
     /// all derive the same composite key; see `interop_keyfile.rs` for the
     /// trove↔keepassxc directions.
@@ -43,10 +43,10 @@ pub struct VaultSpec {
     pub entries: Vec<EntrySpec>,
 }
 
-/// The credential(s) that lock a vault, beyond the always-present password.
+/// The credential(s) that lock a database, beyond the always-present password.
 #[derive(Clone)]
 pub enum KeyMaterial {
-    /// Password only (`VaultSpec::password`).
+    /// Password only (`DatabaseSpec::password`).
     Password,
     /// Password + a keyfile of the given raw bytes (composite key). The bytes
     /// are written to a file for subprocess tools and fed as a reader to the
@@ -126,7 +126,7 @@ pub enum Compression {
     None,
 }
 
-/// Crypto/format configuration for a produced vault.
+/// Crypto/format configuration for a produced database.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// KDBX4 minor version to *force* (0 → 4.0, 1 → 4.1), or `None` to use the
@@ -171,13 +171,13 @@ pub struct EntryRepr {
     pub attachments: BTreeMap<String, String>,
 }
 
-/// A whole vault as recovered by a consumer: path → entry. `BTreeMap` so key
+/// A whole database as recovered by a consumer: path → entry. `BTreeMap` so key
 /// iteration is sorted and `==` is order-independent.
-pub type VaultRepr = BTreeMap<String, EntryRepr>;
+pub type DatabaseRepr = BTreeMap<String, EntryRepr>;
 
 /// The ground-truth representation derived directly from a spec.
-pub fn expected_repr(spec: &VaultSpec) -> VaultRepr {
-    let mut m = VaultRepr::new();
+pub fn expected_repr(spec: &DatabaseSpec) -> DatabaseRepr {
+    let mut m = DatabaseRepr::new();
     for e in &spec.entries {
         m.insert(
             e.path(),
@@ -266,7 +266,7 @@ impl Participant {
     }
 }
 
-/// Outcome of asking a participant to mint a vault.
+/// Outcome of asking a participant to mint a database.
 pub enum Produced {
     Bytes(Vec<u8>),
     /// The participant tried but failed (e.g. the crate can't dump this config).
@@ -276,7 +276,7 @@ pub enum Produced {
 }
 
 /// Produce a `.kdbx` for `spec`.
-pub fn produce(p: &Participant, spec: &VaultSpec) -> Produced {
+pub fn produce(p: &Participant, spec: &DatabaseSpec) -> Produced {
     let r = match p {
         Participant::Crate012 => crate_party::kp012::produce(spec),
         Participant::Crate013 => crate_party::kp013::produce(spec),
@@ -293,7 +293,7 @@ pub fn produce(p: &Participant, spec: &VaultSpec) -> Produced {
 /// Consume a `.kdbx`, recovering a normalized representation, or an error string
 /// (failed to open / read). `spec` is passed so consumers that can't enumerate
 /// attachments on their own (keepassxc) know which names to export and verify.
-pub fn consume(p: &Participant, bytes: &[u8], spec: &VaultSpec) -> Result<VaultRepr, String> {
+pub fn consume(p: &Participant, bytes: &[u8], spec: &DatabaseSpec) -> Result<DatabaseRepr, String> {
     match p {
         Participant::Crate012 => crate_party::kp012::consume(bytes, spec),
         Participant::Crate013 => crate_party::kp013::consume(bytes, spec),
@@ -305,7 +305,7 @@ pub fn consume(p: &Participant, bytes: &[u8], spec: &VaultSpec) -> Result<VaultR
 
 /// The recorded expectation for a (producer, consumer, fixture) cell.
 pub enum Expectation {
-    /// Consumer should open the vault and recover the expected content.
+    /// Consumer should open the database and recover the expected content.
     Pass,
     /// Known incompatibility — consumer is expected to fail (open or content).
     Xfail(&'static str),
@@ -329,7 +329,7 @@ pub enum ProduceExpectation {
 /// Producer-side expectation table (independent of any consumer): records when
 /// a producer cannot even mint a fixture. Keyed off the *config*, so it holds
 /// for every combinatorial fixture, not a hardcoded name.
-pub fn expect_produce(producer: &Participant, spec: &VaultSpec) -> ProduceExpectation {
+pub fn expect_produce(producer: &Participant, spec: &DatabaseSpec) -> ProduceExpectation {
     // keepass 0.13.13's KDBX4 dumper writes minor 1 (4.1) only; any fixture
     // forcing minor 0 (4.0) is rejected at save with "Unsupported database
     // version". keepass 0.12.5 saves 4.0 fine — so this is expected, not a
@@ -347,7 +347,7 @@ pub fn expect_produce(producer: &Participant, spec: &VaultSpec) -> ProduceExpect
 ///
 /// The genuine upstream bugs among these (findings A–D) are written up for
 /// reporting in [`docs/keepass-bugs.md`](../../../../docs/keepass-bugs.md).
-pub fn expect(producer: &Participant, consumer: &Participant, spec: &VaultSpec) -> Expectation {
+pub fn expect(producer: &Participant, consumer: &Participant, spec: &DatabaseSpec) -> Expectation {
     use Participant::*;
 
     // Finding #1: keepass 0.12.5 serializes unset numeric <Meta> elements as
@@ -392,10 +392,10 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &VaultSpec) 
 
     // Findings #5 & #6: the keepass crate's KDBX-3.1 reader mishandles keepassxc's
     // <Binaries> attachment pool. keepassxc-cli can only write KDBX 3.1, so a
-    // keepassxc-produced vault consumed by the crate hits:
+    // keepassxc-produced database consumed by the crate hits:
     //   #6 (zero-byte attachment): keepassxc serializes it self-closing
     //      (`<Binary ID=n Compressed=True/>`, no text); the crate's serde wants a
-    //      `$value` node and fails to OPEN the whole vault ("missing field $value").
+    //      `$value` node and fails to OPEN the whole database ("missing field $value").
     //   #5 (>=2 attachments): the crate assigns every pool binary id 0
     //      (`next_free` against a still-empty `db.attachments`), so they collide
     //      and attachments drop/misread.
@@ -409,7 +409,7 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &VaultSpec) 
         let total_attachments: usize = spec.entries.iter().map(|e| e.attachments.len()).sum();
         if has_empty_attachment {
             return Expectation::Xfail(
-                "keepass crate can't OPEN a KDBX-3.1 vault with a zero-byte <Binary> (keepassxc writes it self-closing -> serde 'missing field $value')",
+                "keepass crate can't OPEN a KDBX-3.1 database with a zero-byte <Binary> (keepassxc writes it self-closing -> serde 'missing field $value')",
             );
         }
         if total_attachments >= 2 {
@@ -427,7 +427,7 @@ pub fn expect(producer: &Participant, consumer: &Participant, spec: &VaultSpec) 
 /// Compare a recovered repr against the expected one, honoring consumer caps.
 /// Entry *paths* are always compared; field values and attachment bytes only
 /// when the consumer can report them.
-pub fn compare(expected: &VaultRepr, actual: &VaultRepr, caps: Caps) -> Result<(), String> {
+pub fn compare(expected: &DatabaseRepr, actual: &DatabaseRepr, caps: Caps) -> Result<(), String> {
     let exp_paths: Vec<&String> = expected.keys().collect();
     let act_paths: Vec<&String> = actual.keys().collect();
     if exp_paths != act_paths {
@@ -497,7 +497,7 @@ pub struct RunResult {
 pub fn run_matrix(
     producers: &[Participant],
     consumers: &[Participant],
-    specs: &[VaultSpec],
+    specs: &[DatabaseSpec],
 ) -> RunResult {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -537,7 +537,7 @@ pub fn run_matrix(
 /// Run all (producer × consumer) cells for ONE fixture; returns its report chunk
 /// and any expectation surprises. Pure w.r.t. shared state, so it parallelizes.
 fn run_one_fixture(
-    spec: &VaultSpec,
+    spec: &DatabaseSpec,
     producers: &[Participant],
     consumers: &[Participant],
 ) -> FixtureRun {

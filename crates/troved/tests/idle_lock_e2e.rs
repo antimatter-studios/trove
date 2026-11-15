@@ -5,7 +5,7 @@
 //!
 //!   1. After a configured idle period with no activity, the timer fires
 //!      and EVERY piece of secret material is gone:
-//!        * the in-memory `Vault` is dropped (List returns "no vault");
+//!        * the in-memory `Database` is dropped (List returns "no database");
 //!        * the SSH key store is empty;
 //!        * the GPG key store is empty;
 //!        * all materialized files have been wiped from disk.
@@ -28,7 +28,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -57,7 +57,7 @@ struct Harness {
 
 impl Harness {
     fn new(default_timeout: Duration) -> Self {
-        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+        let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -127,8 +127,8 @@ impl Harness {
     }
 }
 
-fn create_vault_with_materialize(vault_path: &Path, target: &Path) {
-    let mut v = Vault::create(vault_path, PASSWORD).expect("create vault");
+fn create_database_with_materialize(database_path: &Path, target: &Path) {
+    let mut v = Database::create(database_path, PASSWORD).expect("create database");
     let id = v.add_entry("idle-test-entry").expect("add entry");
     v.attach_binary(&id, "blob", b"idle-test-payload\n")
         .expect("attach");
@@ -144,9 +144,9 @@ fn create_vault_with_materialize(vault_path: &Path, target: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_expiry_clears_all_secret_material() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("materialized");
-    create_vault_with_materialize(&vault_path, &target);
+    create_database_with_materialize(&database_path, &target);
 
     // Default 5 minutes — we'll override via set-idle-timeout below.
     let h = Harness::new(Duration::from_secs(300));
@@ -159,13 +159,13 @@ async fn idle_expiry_clears_all_secret_material() {
     let resp = h.handle(Request::GetIdleTimeout).await;
     let body = serde_json::to_value(&resp).unwrap();
     assert_eq!(body["seconds"], 1);
-    // Vault not unlocked yet → remaining is null.
+    // Database not unlocked yet → remaining is null.
     assert!(body.get("remaining").map(|v| v.is_null()).unwrap_or(true));
 
-    // Unlock — vault is now in memory and the materialized file is on disk.
+    // Unlock — database is now in memory and the materialized file is on disk.
     let resp = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -197,12 +197,12 @@ async fn idle_expiry_clears_all_secret_material() {
     let _ = h.handle(Request::Ping).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    // Vault dropped — List should report no vault unlocked.
+    // Database dropped — List should report no database unlocked.
     let resp = h.handle(Request::List).await;
     match resp {
         Response::Err { error } => assert!(
-            error.contains("no vault"),
-            "expected 'no vault unlocked'; got {error}"
+            error.contains("no database"),
+            "expected 'no database unlocked'; got {error}"
         ),
         other => panic!("expected Err; got {other:?}"),
     }
@@ -236,14 +236,14 @@ async fn idle_expiry_clears_all_secret_material() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_lock_cancels_timer() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("m");
-    create_vault_with_materialize(&vault_path, &target);
+    create_database_with_materialize(&database_path, &target);
 
     let h = Harness::new(Duration::from_secs(1));
     let _ = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -254,18 +254,18 @@ async fn explicit_lock_cancels_timer() {
     assert!(target.exists());
 
     // Explicit lock — timer should be cancelled.
-    let _ = h.handle(Request::Lock { vault: None }).await;
+    let _ = h.handle(Request::Lock { database: None }).await;
     assert!(!target.exists());
 
     // Wait past the would-be deadline; nothing should happen (no panic, no
-    // new state). Re-locking a non-unlocked vault is a no-op.
+    // new state). Re-locking a non-unlocked database is a no-op.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let resp = h.handle(Request::List).await;
     assert!(matches!(resp, Response::Err { .. }));
 }
 
-/// Activity from a "real action" RPC resets the timer. `List` reads vault
+/// Activity from a "real action" RPC resets the timer. `List` reads database
 /// contents and counts as activity per the handler — at 500ms intervals the
 /// 1s timer should never fire. Stop the activity, wait past the deadline,
 /// fire.
@@ -274,16 +274,16 @@ async fn explicit_lock_cancels_timer() {
 /// `GetIdleTimeout` deliberately do NOT bump — covered by
 /// `status_request_does_not_bump_idle_timer` in status_rpc_e2e.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn control_rpc_activity_keeps_vault_unlocked() {
+async fn control_rpc_activity_keeps_database_unlocked() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("m");
-    create_vault_with_materialize(&vault_path, &target);
+    create_database_with_materialize(&database_path, &target);
 
     let h = Harness::new(Duration::from_secs(1));
     let _ = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -302,7 +302,7 @@ async fn control_rpc_activity_keeps_vault_unlocked() {
     let resp = h.handle(Request::List).await;
     assert!(
         matches!(resp, Response::Ok(_)),
-        "vault must still be unlocked after activity-only window"
+        "database must still be unlocked after activity-only window"
     );
 
     // Now go quiet for 1.5s past the timeout.
@@ -310,7 +310,7 @@ async fn control_rpc_activity_keeps_vault_unlocked() {
     let resp = h.handle(Request::List).await;
     assert!(
         matches!(resp, Response::Err { .. }),
-        "vault should auto-lock once activity stops"
+        "database should auto-lock once activity stops"
     );
     assert!(!target.exists(), "materialized file gone");
 }
@@ -321,10 +321,10 @@ async fn control_rpc_activity_keeps_vault_unlocked() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_agent_traffic_resets_idle_timer() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("m");
     let agent_sock = tmp.path().join("ssh.sock");
-    create_vault_with_materialize(&vault_path, &target);
+    create_database_with_materialize(&database_path, &target);
 
     let h = Harness::new(Duration::from_secs(1));
 
@@ -349,7 +349,7 @@ async fn ssh_agent_traffic_resets_idle_timer() {
 
     let _ = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,
@@ -368,7 +368,7 @@ async fn ssh_agent_traffic_resets_idle_timer() {
     let resp = h.handle(Request::List).await;
     assert!(
         matches!(resp, Response::Ok(_)),
-        "vault should still be unlocked after 3s of SSH activity"
+        "database should still be unlocked after 3s of SSH activity"
     );
 
     // Stop the activity. After 1.5s the timer must have fired.
@@ -376,7 +376,7 @@ async fn ssh_agent_traffic_resets_idle_timer() {
     let resp = h.handle(Request::List).await;
     assert!(
         matches!(resp, Response::Err { .. }),
-        "vault should be locked after SSH traffic stops past timeout"
+        "database should be locked after SSH traffic stops past timeout"
     );
     assert!(!target.exists());
 }
@@ -411,9 +411,9 @@ async fn send_request_identities(sock: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unlock_timeout_overrides_configured_value() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("m");
-    create_vault_with_materialize(&vault_path, &target);
+    create_database_with_materialize(&database_path, &target);
 
     // Daemon comes up with a long default — the unlock request must override.
     let h = Harness::new(Duration::from_secs(300));
@@ -426,7 +426,7 @@ async fn unlock_timeout_overrides_configured_value() {
     // Unlock with timeout=1 second. Should arm the timer at 1s, not 300s.
     let resp = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: Some(1),
             keyfile: None,
@@ -447,13 +447,13 @@ async fn unlock_timeout_overrides_configured_value() {
     assert!(body["remaining"].is_number());
 
     // Wait past the 1s deadline with no activity. If the override didn't
-    // take, the original 300s would keep the vault live and this assertion
+    // take, the original 300s would keep the database live and this assertion
     // would fail.
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let resp = h.handle(Request::List).await;
     assert!(
         matches!(resp, Response::Err { .. }),
-        "vault should have auto-locked at the overridden 1s timeout"
+        "database should have auto-locked at the overridden 1s timeout"
     );
     assert!(!target.exists());
 }
@@ -463,9 +463,9 @@ async fn unlock_timeout_overrides_configured_value() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unlock_without_timeout_preserves_configured_value() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault_path = tmp.path().join("v.kdbx");
+    let database_path = tmp.path().join("v.kdbx");
     let target = tmp.path().join("m");
-    create_vault_with_materialize(&vault_path, &target);
+    create_database_with_materialize(&database_path, &target);
 
     // Default 300s — but we'll reduce via SetIdleTimeout, then unlock without
     // a flag, and check that the daemon still uses the prior value.
@@ -474,7 +474,7 @@ async fn unlock_without_timeout_preserves_configured_value() {
 
     let resp = h
         .handle(Request::Unlock {
-            path: vault_path.to_string_lossy().into_owned(),
+            path: database_path.to_string_lossy().into_owned(),
             password: PASSWORD.to_string(),
             timeout: None,
             keyfile: None,

@@ -195,7 +195,7 @@ checksum = "144e573728da132683b9488acd528274c790e07fc06ff81ee29f9d8f8b1041e0"
 dependencies = [
  "blowfish",
  "pbkdf2",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -1179,7 +1179,7 @@ checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "ed25519 3.0.0",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "subtle",
 ]
 
@@ -2262,7 +2262,7 @@ dependencies = [
  "salsa20",
  "secrecy",
  "serde",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "thiserror 2.0.19",
  "totp-lite",
  "twofish",
@@ -2800,7 +2800,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2814,7 +2814,7 @@ dependencies = [
  "fiat-crypto 0.3.0",
  "primefield",
  "primeorder",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2828,7 +2828,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -3449,7 +3449,7 @@ dependencies = [
  "pkcs1 0.8.0-rc.5",
  "pkcs8 0.11.0",
  "rand_core 0.10.1",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "signature 3.0.0",
  "spki 0.8.1",
  "zeroize",
@@ -3844,9 +3844,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -4044,7 +4044,7 @@ dependencies = [
  "rand_core 0.10.1",
  "rsa 0.10.0-rc.19",
  "sec1",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "signature 3.0.0",
  "ssh-cipher",
  "ssh-encoding",
@@ -4864,11 +4864,14 @@ name = "trove-core"
 version = "0.27.1"
 dependencies = [
  "base32",
+ "chrono",
  "hmac 0.12.1",
  "keepass",
  "quick-xml 0.42.0",
  "sha1",
+ "sha2 0.11.1",
  "thiserror 1.0.69",
+ "uuid",
  "zeroize",
 ]
 

@@ -185,12 +185,16 @@ fn analyze_flags_breached_and_gates_exit_code() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("v.kdbx");
-    let vault = vault.to_str().unwrap();
+    let database = dir.path().join("v.kdbx");
+    let database = database.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
 
     ok(
-        &run_trove(&trove, &["--vault", vault, "--password-stdin", "init"], &pw),
+        &run_trove(
+            &trove,
+            &["--database", database, "--password-stdin", "init"],
+            &pw,
+        ),
         "init",
     );
     for (entry, secret) in [
@@ -201,8 +205,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
             &run_trove(
                 &trove,
                 &[
-                    "--vault",
-                    vault,
+                    "--database",
+                    database,
                     "--password-stdin",
                     "add",
                     "password",
@@ -231,8 +235,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "analyze",
             "--hibp",
@@ -256,13 +260,13 @@ fn analyze_flags_breached_and_gates_exit_code() {
     assert_eq!(value["findings"][0]["entry_path"], "breached-one");
     assert_eq!(value["findings"][0]["breach_count"], 1337);
 
-    // Clean vault → exit 0.
+    // Clean database → exit 0.
     ok(
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "rm",
                 "breached-one",
@@ -275,8 +279,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "analyze",
             "--hibp",
@@ -285,7 +289,7 @@ fn analyze_flags_breached_and_gates_exit_code() {
         ],
         &pw,
     );
-    assert_eq!(out.status.code(), Some(0), "clean vault must exit 0");
+    assert_eq!(out.status.code(), Some(0), "clean database must exit 0");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("clean analyze JSON");
     assert_eq!(value["checked_passwords"], 1);
     assert_eq!(value["breached_passwords"], 0);
@@ -298,8 +302,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
             &run_trove(
                 &trove,
                 &[
-                    "--vault",
-                    vault,
+                    "--database",
+                    database,
                     "--password-stdin",
                     "add",
                     "password",
@@ -312,8 +316,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
         );
         let edit_args = if edit_arg.is_empty() {
             vec![
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "edit",
                 entry,
@@ -322,8 +326,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
             ]
         } else {
             vec![
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "edit",
                 entry,
@@ -336,8 +340,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "analyze",
             "--hibp",
@@ -364,8 +368,8 @@ fn analyze_flags_breached_and_gates_exit_code() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "analyze",
             "--hibp",
@@ -383,11 +387,15 @@ fn analyze_reports_reuse_weakness_and_age_without_secrets() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("v.kdbx");
-    let vault = vault.to_str().unwrap();
+    let database = dir.path().join("v.kdbx");
+    let database = database.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
     ok(
-        &run_trove(&trove, &["--vault", vault, "--password-stdin", "init"], &pw),
+        &run_trove(
+            &trove,
+            &["--database", database, "--password-stdin", "init"],
+            &pw,
+        ),
         "init",
     );
     let shared = "Shared-secret-9f!Kq2#zz";
@@ -401,8 +409,8 @@ fn analyze_reports_reuse_weakness_and_age_without_secrets() {
             &run_trove(
                 &trove,
                 &[
-                    "--vault",
-                    vault,
+                    "--database",
+                    database,
                     "--password-stdin",
                     "add",
                     "password",
@@ -418,8 +426,8 @@ fn analyze_reports_reuse_weakness_and_age_without_secrets() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "analyze",
             "--reuse",
@@ -450,8 +458,8 @@ fn analyze_reports_reuse_weakness_and_age_without_secrets() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "analyze",
             "--age",
@@ -467,7 +475,7 @@ fn analyze_reports_reuse_weakness_and_age_without_secrets() {
     // At least one check is required.
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "analyze"],
+        &["--database", database, "--password-stdin", "analyze"],
         &pw,
     );
     assert!(!out.status.success());
@@ -482,7 +490,7 @@ fn health_runs_every_check_and_reports_expired_entries() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("h.kdbx");
     {
-        let mut v = trove_core::Vault::create(&path, PASSWORD).unwrap();
+        let mut v = trove_core::Database::create(&path, PASSWORD).unwrap();
         let old = v.add_entry("Certs/old").unwrap();
         v.set_entry_expiry(&old, Some("2001-01-01")).unwrap();
         let fine = v.add_entry("Web/fine").unwrap();
@@ -491,12 +499,18 @@ fn health_runs_every_check_and_reports_expired_entries() {
         v.set_entry_expiry(&fine, Some("2999-01-01")).unwrap();
         v.save().unwrap();
     }
-    let vault = path.to_str().unwrap();
+    let database = path.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
 
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "health", "--json"],
+        &[
+            "--database",
+            database,
+            "--password-stdin",
+            "health",
+            "--json",
+        ],
         &pw,
     );
     assert_eq!(out.status.code(), Some(1), "an expired entry fails health");
@@ -513,7 +527,13 @@ fn health_runs_every_check_and_reports_expired_entries() {
 
     let out = run_trove(
         &trove,
-        &["--vault", vault, "--password-stdin", "analyze", "--expired"],
+        &[
+            "--database",
+            database,
+            "--password-stdin",
+            "analyze",
+            "--expired",
+        ],
         &pw,
     );
     assert_eq!(out.status.code(), Some(1));

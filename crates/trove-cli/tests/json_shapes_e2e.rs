@@ -4,7 +4,7 @@
 //! fail here. A deliberate change updates the spec below and the "JSON output"
 //! section of docs/cli-reference.md together.
 //!
-//! Offline commands run against a seeded vault file. Daemon-backed commands run
+//! Offline commands run against a seeded database file. Daemon-backed commands run
 //! against the real `troved` binary with every socket isolated in a tempdir;
 //! that part skips when `troved` isn't built next to `trove` (`cargo test -p
 //! trove-cli` alone doesn't build it; `cargo test --workspace` and CI do).
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::{json, Value};
-use trove_core::Vault;
+use trove_core::Database;
 
 const PW: &str = "json-shapes-e2e-pw";
 
@@ -33,7 +33,7 @@ fn run(trove: &Path, env: &[(&str, &str)], args: &[&str], stdin: &str) -> Output
     let mut cmd = Command::new(trove);
     cmd.args(args)
         .env_remove("TROVE_SESSION")
-        .env_remove("TROVE_VAULT")
+        .env_remove("TROVE_DATABASE")
         .env_remove("SSH_AUTH_SOCK")
         .env("TROVE_NO_AUTOSPAWN", "1")
         .stdin(Stdio::piped())
@@ -237,7 +237,7 @@ fn ssh_key_spec() -> Value {
 fn status_spec() -> Value {
     json!({
         "daemon_running": "bool",
-        "vault_paths": ["string"],
+        "database_paths": ["string"],
         "idle_timeout_seconds": "integer|null",
         "idle_remaining_seconds": "integer|null",
         "ssh_key_count": "integer",
@@ -245,7 +245,7 @@ fn status_spec() -> Value {
         "materialized_file_count": "integer",
         "skipped_keys": [{
             "agent": "string",
-            "vault": "string",
+            "database": "string",
             "entry": "string",
             "attachment": "string",
             "reason": "string",
@@ -261,12 +261,12 @@ fn sha1_hex(s: &str) -> String {
         .collect()
 }
 
-/// A vault exercising every field the JSON outputs can carry: an entry with
+/// A database exercising every field the JSON outputs can carry: an entry with
 /// everything set, one with nothing set, a materialized file, an SSH key and a
 /// GPG key. `out_dir` is where the file entry materializes.
 fn seed(trove: &Path, dir: &Path, out_dir: &Path) -> PathBuf {
     let path = dir.join("v.kdbx");
-    let mut v = Vault::create(&path, PW).expect("create vault");
+    let mut v = Database::create(&path, PW).expect("create database");
 
     let gh = v.add_entry("Web/github").expect("add github");
     v.set_field(&gh, "UserName", "octo").unwrap();
@@ -307,7 +307,7 @@ fn seed(trove: &Path, dir: &Path, out_dir: &Path) -> PathBuf {
         include_bytes!("../../troved/tests/fixtures/rsa2048-secret.gpg"),
     )
     .unwrap();
-    v.save().expect("save vault");
+    v.save().expect("save database");
     drop(v);
 
     let vs = path.to_str().unwrap();
@@ -315,7 +315,7 @@ fn seed(trove: &Path, dir: &Path, out_dir: &Path) -> PathBuf {
         trove,
         &[],
         &[
-            "--vault",
+            "--database",
             vs,
             "--password-stdin",
             "generate",
@@ -339,11 +339,11 @@ fn offline_json_shapes() {
         return;
     };
     let tmp = tempfile::tempdir().expect("tempdir");
-    let vault = seed(&trove, tmp.path(), tmp.path());
-    let vs = vault.to_str().unwrap();
+    let database = seed(&trove, tmp.path(), tmp.path());
+    let vs = database.to_str().unwrap();
     let pw = format!("{PW}\n");
     let offline = |args: &[&str]| {
-        let mut full = vec!["--vault", vs, "--password-stdin"];
+        let mut full = vec!["--database", vs, "--password-stdin"];
         full.extend_from_slice(args);
         run(&trove, &[], &full, &pw)
     };
@@ -476,8 +476,8 @@ mod daemon {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path();
         let out_dir = dir.join("out");
-        let vault = seed(&trove, dir, &out_dir);
-        let vs = vault.to_str().unwrap();
+        let database = seed(&trove, dir, &out_dir);
+        let vs = database.to_str().unwrap();
 
         let sock = dir.join("trove.sock");
         let sock_s = sock.to_str().unwrap();
@@ -561,14 +561,14 @@ mod daemon {
         assert_has("status", &status["skipped_keys"], "entry", "Infra/broken");
         assert_shape("status", &status, &status_spec());
 
-        // --verbose groups what is served per vault.
+        // --verbose groups what is served per database.
         let verbose = json_out(
             &daemon(&["status", "--verbose", "--json"]),
             "status --verbose",
             true,
         );
         let mut spec = status_spec();
-        spec["vaults"] = json!([{
+        spec["databases"] = json!([{
             "path": "string",
             "ssh_keys": ["string"],
             "materialized": [{"title": "string", "target_path": "string"}],
@@ -576,7 +576,7 @@ mod daemon {
         }]);
         spec["gpg_keys"] = json!(["string"]);
         assert_shape("status --verbose", &verbose, &spec);
-        let v0 = &verbose["vaults"][0];
+        let v0 = &verbose["databases"][0];
         assert!(
             v0["ssh_keys"]
                 .as_array()
@@ -608,7 +608,7 @@ mod daemon {
         let spec = json!({"materialized": [{
             "title": "string",
             "target_path": "string",
-            "vault": "string",
+            "database": "string",
             "ttl_remaining_seconds": "integer|null",
             "exists": "bool",
             "memory_backed": "bool",
@@ -665,7 +665,7 @@ mod daemon {
         let out = daemon(&["ssh-agent", "close", &filled]);
         assert!(out.status.success(), "ssh-agent close: {out:?}");
 
-        // `exec` reads the unlocked vault through the daemon: no --vault, no
+        // `exec` reads the unlocked database through the daemon: no --database, no
         // password, the session code is enough.
         let out = daemon(&[
             "edit",

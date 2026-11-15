@@ -87,9 +87,9 @@ pub struct LoadedKey {
     pub forward: ForwardPolicy,
     /// When this key stops being offered and signing with it is refused, if
     /// the entry set a lifetime. `None` until the key enters an agent's store
-    /// ([`Self::start_lifetime`]), and for keys without a lifetime. The vault
+    /// ([`Self::start_lifetime`]), and for keys without a lifetime. The database
     /// stays unlocked past it; an expired key is only hidden, since the
-    /// decrypted vault holds the same bytes anyway.
+    /// decrypted database holds the same bytes anyway.
     pub expires_at: Option<Instant>,
     /// Host keys the owning entry declares this key is for, as SHA-256 digests
     /// of the servers' public-key blobs. Read from the entry's
@@ -124,7 +124,7 @@ impl From<&LoadedKey> for ForwardedKey {
     }
 }
 
-/// Errors specific to parsing a vault attachment as an SSH key.
+/// Errors specific to parsing a database attachment as an SSH key.
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("not an OpenSSH private key: {0}")]
@@ -401,7 +401,7 @@ pub fn parse_private_key_with_passphrase(
 }
 
 /// Decrypt a passphrase-protected OpenSSH private key and re-encode it without
-/// a passphrase, for storing inside the (encrypted) vault.
+/// a passphrase, for storing inside the (encrypted) database.
 pub fn decrypt_to_openssh(
     bytes: &[u8],
     passphrase: &[u8],
@@ -536,7 +536,7 @@ pub enum GenerateError {
 /// [`parse_private_key`] (and so `add ssh`) accepts, so generation and import
 /// share one storage path. Keys are minted from the OS CSPRNG (`OsRng`).
 ///
-/// The key is unencrypted: the trove vault is the encryption boundary, matching
+/// The key is unencrypted: the trove database is the encryption boundary, matching
 /// how `add ssh` stores imported keys.
 pub fn generate_private_key(key_type: KeyType, comment: &str) -> Result<Vec<u8>, GenerateError> {
     let (algorithm, label) = match key_type {

@@ -1,4 +1,4 @@
-//! Vault fixtures for the cross-tool spec matrix.
+//! Database fixtures for the cross-tool spec matrix.
 //!
 //! Two families:
 //!   - CONTENT fixtures use each producer's native config and vary
@@ -9,7 +9,7 @@
 //!     exhaustively cover every combination a producer might emit.
 #![allow(missing_docs)]
 
-use crate::matrix::{Compression, Config, EntrySpec, Kdf, KeyMaterial, OuterCipher, VaultSpec};
+use crate::matrix::{Compression, Config, EntrySpec, Kdf, KeyMaterial, OuterCipher, DatabaseSpec};
 
 /// Common demo password used by every fixture.
 const PW: &str = "demopass";
@@ -29,9 +29,9 @@ fn entry(group_path: Vec<&'static str>, title: &'static str) -> EntrySpec {
     }
 }
 
-/// All vault fixtures exercised by the cross-tool matrix: the content set plus
+/// All database fixtures exercised by the cross-tool matrix: the content set plus
 /// the full crypto/format cartesian product.
-pub fn all() -> Vec<VaultSpec> {
+pub fn all() -> Vec<DatabaseSpec> {
     let mut v = vec![
         empty(),
         flat_fields(),
@@ -61,8 +61,8 @@ pub fn all() -> Vec<VaultSpec> {
 // CONTENT fixtures (native config, vary content)
 // ---------------------------------------------------------------------------
 
-fn empty() -> VaultSpec {
-    VaultSpec {
+fn empty() -> DatabaseSpec {
+    DatabaseSpec {
         name: "empty".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -71,7 +71,7 @@ fn empty() -> VaultSpec {
     }
 }
 
-fn flat_fields() -> VaultSpec {
+fn flat_fields() -> DatabaseSpec {
     let full = EntrySpec {
         username: "git",
         password: "s3cret-pw",
@@ -92,7 +92,7 @@ fn flat_fields() -> VaultSpec {
         notes: "line1\nline2\nline3",
         ..entry(vec![], "multiline")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "flat-fields".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -101,7 +101,7 @@ fn flat_fields() -> VaultSpec {
     }
 }
 
-fn nested_groups() -> VaultSpec {
+fn nested_groups() -> DatabaseSpec {
     let root_entry = EntrySpec {
         username: "r",
         ..entry(vec![], "root-entry")
@@ -121,7 +121,7 @@ fn nested_groups() -> VaultSpec {
         username: "stg",
         ..entry(vec!["work", "staging"], "stage-db")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "nested-groups".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -130,7 +130,7 @@ fn nested_groups() -> VaultSpec {
     }
 }
 
-fn attachments() -> VaultSpec {
+fn attachments() -> DatabaseSpec {
     let one_blob = EntrySpec {
         attachments: vec![(
             "blob.bin",
@@ -151,7 +151,7 @@ fn attachments() -> VaultSpec {
         attachments: vec![("k.pem", b"-----BEGIN-----\nabc\n-----END-----\n".to_vec())],
         ..entry(vec![], "entry-and-fields-and-attachment")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "attachments".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -169,7 +169,7 @@ fn attachments() -> VaultSpec {
 // ---------------------------------------------------------------------------
 
 /// A trove file-entry: `Materialize.*` instructions plus the source attachment.
-fn custom_materialize() -> VaultSpec {
+fn custom_materialize() -> DatabaseSpec {
     let kubeconfig = EntrySpec {
         custom_fields: vec![
             ("Materialize.Source", "kubeconfig", false),
@@ -184,7 +184,7 @@ fn custom_materialize() -> VaultSpec {
         )],
         ..entry(vec![], "kubeconfig-prod")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "custom-materialize".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -195,7 +195,7 @@ fn custom_materialize() -> VaultSpec {
 
 /// A KeeAgent-style entry: an SSH private key attachment plus a settings doc
 /// carried as an arbitrary custom STRING field (single line for CLI safety).
-fn custom_keeagent() -> VaultSpec {
+fn custom_keeagent() -> DatabaseSpec {
     let github = EntrySpec {
         username: "git",
         custom_fields: vec![(
@@ -210,7 +210,7 @@ fn custom_keeagent() -> VaultSpec {
         )],
         ..entry(vec![], "github.com")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "custom-keeagent".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -220,7 +220,7 @@ fn custom_keeagent() -> VaultSpec {
 }
 
 /// A protected custom field alongside an unprotected one.
-fn custom_protected() -> VaultSpec {
+fn custom_protected() -> DatabaseSpec {
     let secret = EntrySpec {
         custom_fields: vec![
             ("X-Api-Token", "tok_live_abc123", true),
@@ -228,7 +228,7 @@ fn custom_protected() -> VaultSpec {
         ],
         ..entry(vec![], "secret-config")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "custom-protected".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -238,7 +238,7 @@ fn custom_protected() -> VaultSpec {
 }
 
 /// Several custom fields at once.
-fn custom_many() -> VaultSpec {
+fn custom_many() -> DatabaseSpec {
     let many = EntrySpec {
         custom_fields: vec![
             ("F1", "v1", false),
@@ -250,7 +250,7 @@ fn custom_many() -> VaultSpec {
         ],
         ..entry(vec![], "many-fields")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "custom-many".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -260,13 +260,13 @@ fn custom_many() -> VaultSpec {
 }
 
 /// Tags only.
-fn tags_basic() -> VaultSpec {
+fn tags_basic() -> DatabaseSpec {
     let tagged = EntrySpec {
         username: "u",
         tags: vec!["work", "ssh", "prod"],
         ..entry(vec![], "tagged")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "tags-basic".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -276,7 +276,7 @@ fn tags_basic() -> VaultSpec {
 }
 
 /// Tags and custom fields together.
-fn tags_and_custom() -> VaultSpec {
+fn tags_and_custom() -> DatabaseSpec {
     let combo = EntrySpec {
         username: "u",
         tags: vec!["a", "b"],
@@ -286,7 +286,7 @@ fn tags_and_custom() -> VaultSpec {
         ],
         ..entry(vec![], "combo")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "tags-and-custom".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -305,7 +305,7 @@ fn tags_and_custom() -> VaultSpec {
 // ---------------------------------------------------------------------------
 
 /// 25 flat root entries, titles `e00`..`e24`, usernames `u00`..`u24`.
-fn scale_many_entries() -> VaultSpec {
+fn scale_many_entries() -> DatabaseSpec {
     // Titles/usernames must be `&'static str`, so map a fixed lookup table
     // rather than formatting at runtime.
     const TITLES: [&str; 25] = [
@@ -324,7 +324,7 @@ fn scale_many_entries() -> VaultSpec {
             ..entry(vec![], title)
         })
         .collect();
-    VaultSpec {
+    DatabaseSpec {
         name: "scale-many-entries".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -335,7 +335,7 @@ fn scale_many_entries() -> VaultSpec {
 
 /// A single entry six group levels deep, plus one at the first level to prove
 /// the intermediate groups are real and traversable.
-fn scale_deep_nesting() -> VaultSpec {
+fn scale_deep_nesting() -> DatabaseSpec {
     let deep = EntrySpec {
         username: "deep",
         ..entry(vec!["g1", "g2", "g3", "g4", "g5", "g6"], "deep-entry")
@@ -344,7 +344,7 @@ fn scale_deep_nesting() -> VaultSpec {
         username: "mid",
         ..entry(vec!["g1"], "mid-entry")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "scale-deep-nesting".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -354,13 +354,13 @@ fn scale_deep_nesting() -> VaultSpec {
 }
 
 /// One root entry carrying a ~256 KiB attachment built programmatically.
-fn scale_large_attachment() -> VaultSpec {
+fn scale_large_attachment() -> DatabaseSpec {
     let big_bytes: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
     let big = EntrySpec {
         attachments: vec![("big.bin", big_bytes)],
         ..entry(vec![], "big")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "scale-large-attachment".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -370,7 +370,7 @@ fn scale_large_attachment() -> VaultSpec {
 }
 
 /// One root entry with a zero-byte attachment plus several tiny distinct ones.
-fn scale_zero_and_many_attachments() -> VaultSpec {
+fn scale_zero_and_many_attachments() -> DatabaseSpec {
     let att_edge = EntrySpec {
         attachments: vec![
             ("empty.bin", Vec::new()),
@@ -382,7 +382,7 @@ fn scale_zero_and_many_attachments() -> VaultSpec {
         ],
         ..entry(vec![], "att-edge")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "scale-zero-and-many-attachments".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -401,7 +401,7 @@ fn scale_zero_and_many_attachments() -> VaultSpec {
 
 /// One root entry whose fields stress separator/quote/whitespace/unicode/length
 /// handling. The long value is a compile-time literal (no runtime `.repeat`).
-fn edge_field_values() -> VaultSpec {
+fn edge_field_values() -> DatabaseSpec {
     // ~500 'A's as a literal so the value stays `&'static str`.
     const LONG: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
@@ -424,7 +424,7 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         ],
         ..entry(vec![], "edgy")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "edge-field-values".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -441,7 +441,7 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 // ---------------------------------------------------------------------------
 
 /// A target entry plus a referrer whose fields hold literal `{REF:...}` strings.
-fn entry_references() -> VaultSpec {
+fn entry_references() -> DatabaseSpec {
     let target = EntrySpec {
         username: "real-user",
         password: "real-pass",
@@ -453,7 +453,7 @@ fn entry_references() -> VaultSpec {
         custom_fields: vec![("Note.ref", "{REF:A@I:0123456789ABCDEF}", false)],
         ..entry(vec![], "referrer")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "entry-references".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -470,7 +470,7 @@ fn entry_references() -> VaultSpec {
 // ---------------------------------------------------------------------------
 
 /// Title `dup` at root and again under `other`, distinguished by username.
-fn dup_titles_different_groups() -> VaultSpec {
+fn dup_titles_different_groups() -> DatabaseSpec {
     let root_dup = EntrySpec {
         username: "root-dup",
         ..entry(vec![], "dup")
@@ -479,7 +479,7 @@ fn dup_titles_different_groups() -> VaultSpec {
         username: "other-dup",
         ..entry(vec!["other"], "dup")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "dup-titles-different-groups".to_string(),
         password: PW,
         key: KeyMaterial::Password,
@@ -501,12 +501,12 @@ fn dup_titles_different_groups() -> VaultSpec {
 
 /// Composite key whose keyfile is hashed (content is neither 32 bytes nor
 /// hex/XML, so KDBX takes its SHA-256).
-fn keyfile_hashed_composite() -> VaultSpec {
+fn keyfile_hashed_composite() -> DatabaseSpec {
     let kf = EntrySpec {
         username: "k",
         ..entry(vec![], "kf")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "keyfile-hashed-composite".to_string(),
         password: PW,
         key: KeyMaterial::PasswordAndKeyfile(
@@ -519,12 +519,12 @@ fn keyfile_hashed_composite() -> VaultSpec {
 
 /// Composite key whose keyfile is exactly 32 bytes, used directly as the raw
 /// key (the "raw 32-byte" derivation path).
-fn keyfile_raw32_composite() -> VaultSpec {
+fn keyfile_raw32_composite() -> DatabaseSpec {
     let kf = EntrySpec {
         username: "k",
         ..entry(vec![], "kf")
     };
-    VaultSpec {
+    DatabaseSpec {
         name: "keyfile-raw32-composite".to_string(),
         password: PW,
         key: KeyMaterial::PasswordAndKeyfile((0u8..32).collect::<Vec<u8>>()),
@@ -549,7 +549,7 @@ fn cfg_entries() -> Vec<EntrySpec> {
 /// Every (KDF × outer cipher × compression × KDBX4 minor) combination:
 /// 3 × 3 × 2 × 3 = 54 fixtures. `minor` is `native` (producer default),
 /// `v40` (forced 4.0), or `v41` (forced 4.1).
-fn config_cartesian() -> Vec<VaultSpec> {
+fn config_cartesian() -> Vec<DatabaseSpec> {
     let kdfs = [
         (Kdf::Argon2d, "argon2d"),
         (Kdf::Argon2id, "argon2id"),
@@ -568,7 +568,7 @@ fn config_cartesian() -> Vec<VaultSpec> {
         for (outer, on) in outers {
             for (compression, cn) in comps {
                 for (minor, mn) in minors {
-                    out.push(VaultSpec {
+                    out.push(DatabaseSpec {
                         name: format!("cfg-{kn}-{on}-{cn}-{mn}"),
                         password: PW,
                         key: KeyMaterial::Password,

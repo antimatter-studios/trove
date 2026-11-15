@@ -1,7 +1,7 @@
 mod biometric;
 mod commands;
 
-use commands::{AppState, VaultState};
+use commands::{AppState, DatabaseState};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -12,9 +12,9 @@ use tauri::{
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(VaultState::new(AppState::default()))
+        .manage(DatabaseState::new(AppState::default()))
         .setup(|app| {
-            // Before anything reads settings or the vault list: the bundle
+            // Before anything reads settings or the database list: the bundle
             // identifier changed, and macOS keys the config directory by it.
             commands::migrate_legacy_config(app.handle());
 
@@ -39,18 +39,23 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::list_vaults,
-            commands::register_vault,
-            commands::create_vault,
-            commands::unlock_vault,
+            commands::list_databases,
+            commands::register_database,
+            commands::create_database,
+            commands::unlock_database,
             commands::build_info,
             commands::get_settings,
             commands::set_agent_key,
             commands::set_settings,
-            commands::lock_vault,
+            commands::lock_database,
+            commands::save_database,
+            commands::remove_database,
             commands::list_entries,
             commands::list_groups,
+            commands::get_database_metadata,
+            commands::set_database_metadata,
             commands::set_group_tags,
+            commands::create_group,
             commands::delete_group,
             commands::list_attachments,
             commands::read_attachment,
@@ -66,10 +71,15 @@ pub fn run() {
             commands::set_capability_on,
             commands::group_capabilities,
             commands::set_group_default,
-            commands::vault_changed_on_disk,
-            commands::reload_vault,
+            commands::database_changed_on_disk,
+            commands::reload_database,
             commands::get_field,
             commands::get_entry_detail,
+            commands::get_entry_revisions,
+            commands::list_revision_entries,
+            commands::apply_entry_revision,
+            commands::set_custom_attribute,
+            commands::remove_custom_attribute,
             commands::save_entry,
             commands::delete_entry,
             commands::drop_entry,

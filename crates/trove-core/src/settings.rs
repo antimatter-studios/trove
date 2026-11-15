@@ -41,7 +41,7 @@ use std::collections::BTreeMap;
 
 use quick_xml::events::Event;
 
-use crate::{EntryId, Error, Result, Vault};
+use crate::{Database, EntryId, Error, Result};
 
 /// The capabilities trove stores a settings document for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,7 +49,7 @@ use crate::{EntryId, Error, Result, Vault};
 pub enum Capability {
     /// Environment variables for `trove exec` and shell export.
     EnvAgent,
-    /// Attachments written to disk while the vault is unlocked.
+    /// Attachments written to disk while the database is unlocked.
     Materialize,
     /// GPG secret keys served by trove's GPG agent.
     GpgAgent,
@@ -865,7 +865,7 @@ pub const MATERIALIZE_ENTRY_LEVEL_MESSAGE: &str = "entry uses the removed entry-
      attachment, not to an entry, so an entry with several attachments can write several \
      files: rename them to 'Materialize.<attachment>.Target' (and .Mode / .TTL / .AllowDiskBacked)";
 
-impl Vault {
+impl Database {
     /// An entry's settings document for `capability`, if it has one.
     pub fn settings_document(
         &self,
@@ -1659,20 +1659,20 @@ mod tests {
 
     const PW: &str = "settings-test-pw";
 
-    fn vault() -> (tempfile::TempDir, Vault) {
+    fn database() -> (tempfile::TempDir, Database) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("v.kdbx");
-        let v = Vault::create(&path, PW).unwrap();
+        let v = Database::create(&path, PW).unwrap();
         (dir, v)
     }
 
-    fn reopen(dir: &tempfile::TempDir, mut v: Vault) -> Vault {
+    fn reopen(dir: &tempfile::TempDir, mut v: Database) -> Database {
         v.save().unwrap();
         drop(v);
-        Vault::open(&dir.path().join("v.kdbx"), PW).unwrap()
+        Database::open(&dir.path().join("v.kdbx"), PW).unwrap()
     }
 
-    fn entry_in(v: &mut Vault, group: &str, title: &str) -> EntryId {
+    fn entry_in(v: &mut Database, group: &str, title: &str) -> EntryId {
         if !group.is_empty() {
             v.add_group(group).unwrap();
         }
@@ -1685,7 +1685,7 @@ mod tests {
 
     #[test]
     fn no_document_means_off_and_a_stored_one_reads_back() {
-        let (dir, mut v) = vault();
+        let (dir, mut v) = database();
         let id = entry_in(&mut v, "", "gitea");
         assert_eq!(
             v.effective_settings(&id, Capability::EnvAgent).unwrap(),
@@ -1710,7 +1710,7 @@ mod tests {
 
     #[test]
     fn deleting_the_document_turns_the_capability_off() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "e");
         let doc = parse(Capability::EnvAgent, ENV).unwrap();
         v.set_settings_document(&id, Capability::EnvAgent, Some(&doc))
@@ -1725,7 +1725,7 @@ mod tests {
 
     #[test]
     fn a_broken_document_is_an_error_not_off() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "e");
         v.attach_binary(&id, "EnvAgent.settings", b"<EnvAgentSettings")
             .unwrap();
@@ -1737,7 +1737,7 @@ mod tests {
 
     #[test]
     fn group_and_database_defaults_live_in_custom_data_and_survive_a_save() {
-        let (dir, mut v) = vault();
+        let (dir, mut v) = database();
         let id = entry_in(&mut v, "Apple/Apps/rest-mail", "apns");
         let mut item = Document::new(Capability::Materialize);
         item.upsert_item(vec![("attachment".into(), "AuthKey.p8".into())])
@@ -1780,7 +1780,7 @@ mod tests {
 
     #[test]
     fn a_group_document_with_items_is_refused() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         v.add_group("antimatter-studios").unwrap();
         let doc = parse(Capability::EnvAgent, ENV).unwrap();
         let err = v
@@ -1797,7 +1797,7 @@ mod tests {
 
     #[test]
     fn group_defaults_alone_enable_nothing() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "G", "e");
         let group = defaults(Capability::EnvAgent, &[("confirm", "true")]);
         v.set_group_settings("G", Capability::EnvAgent, Some(&group))
@@ -1810,7 +1810,7 @@ mod tests {
 
     #[test]
     fn legacy_materialize_fields_convert_to_a_document() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "certs");
         v.attach_binary(&id, "app.cer.pem", b"x").unwrap();
         v.set_field(&id, "Materialize.app.cer.pem.Target", "/tmp/a.pem")
@@ -1837,7 +1837,7 @@ mod tests {
 
     #[test]
     fn a_gpg_priv_attachment_counts_as_a_document_during_the_transition() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "signing");
         assert_eq!(v.entry_settings(&id, Capability::GpgAgent).unwrap(), None);
         v.attach_binary(&id, "gpg-priv", b"x").unwrap();
@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn legacy_materialize_errors_are_kept() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "old");
         v.set_field(&id, "Materialize.Target", "/tmp/x").unwrap();
         let err = v.entry_settings(&id, Capability::Materialize).unwrap_err();
@@ -1877,7 +1877,7 @@ mod tests {
 
     #[test]
     fn legacy_exec_fields_convert_to_a_document() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "db");
         v.set_field(&id, "Exec.PGUSER", "UserName").unwrap();
         v.set_field(&id, "Exec.PGSSLROOTCERT", "@ca.pem").unwrap();
@@ -1902,7 +1902,7 @@ mod tests {
 
     #[test]
     fn legacy_exec_env_exports_a_sole_secret_attachment_ignoring_settings() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "kube");
         v.attach_binary(&id, "kubeconfig", b"x").unwrap();
         v.attach_binary(&id, "KeeAgent.settings", b"<x/>").unwrap();
@@ -1919,7 +1919,7 @@ mod tests {
 
     #[test]
     fn legacy_exec_refuses_bad_names_and_empty_mappings() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "bad");
         v.set_field(&id, "Exec.1BAD", "Password").unwrap();
         assert!(v.entry_settings(&id, Capability::EnvAgent).is_err());
@@ -1931,7 +1931,7 @@ mod tests {
 
     #[test]
     fn a_document_wins_over_legacy_fields() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "both");
         v.set_field(&id, "Exec.OLD", "Password").unwrap();
         let doc = parse(Capability::EnvAgent, ENV).unwrap();
@@ -1947,7 +1947,7 @@ mod tests {
 
     #[test]
     fn ensure_settings_item_creates_once_and_keeps_options() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "signing");
         assert!(v
             .ensure_settings_item(&id, Capability::GpgAgent, "gpg-priv")
@@ -1978,7 +1978,7 @@ mod tests {
 
     #[test]
     fn storing_a_document_drops_the_legacy_fields_it_replaces() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "db");
         v.set_field(&id, "Exec.PGUSER", "UserName").unwrap();
         let mut doc = v
@@ -2007,7 +2007,7 @@ mod tests {
 
     #[test]
     fn turning_off_a_legacy_gpg_entry_stores_an_empty_document() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "signing");
         v.attach_binary(&id, "gpg-priv", b"x").unwrap();
         v.store_settings(&id, Capability::GpgAgent, None).unwrap();
@@ -2020,7 +2020,7 @@ mod tests {
 
     #[test]
     fn forgetting_an_attachment_drops_the_items_that_name_it() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "kube");
         let doc = parse(Capability::EnvAgent, ENV).unwrap();
         v.set_settings_document(&id, Capability::EnvAgent, Some(&doc))
@@ -2040,7 +2040,7 @@ mod tests {
 
     #[test]
     fn renaming_an_attachment_rewrites_stored_documents() {
-        let (_dir, mut v) = vault();
+        let (_dir, mut v) = database();
         let id = entry_in(&mut v, "", "kube");
         v.attach_binary(&id, "kubeconfig", b"x").unwrap();
         let doc = parse(Capability::EnvAgent, ENV).unwrap();

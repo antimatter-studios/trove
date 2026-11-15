@@ -1,11 +1,11 @@
 //! Request -> Response handler. Pure modulo what trove-core does.
 //!
-//! Concurrency: a single shared `Mutex<VaultSet>` holding every unlocked
-//! vault. `Unlock` is **additive** — it adds to the set rather than replacing
-//! it, so several vaults serve keys at once; re-unlocking the same file
-//! replaces just that vault. Requests that address an entry by title route
-//! through [`crate::vaults::VaultSet`], which refuses instead of guessing when
-//! more than one open vault holds the title. See `docs/multi-vault.md`.
+//! Concurrency: a single shared `Mutex<DatabaseSet>` holding every unlocked
+//! database. `Unlock` is **additive** — it adds to the set rather than replacing
+//! it, so several databases serve keys at once; re-unlocking the same file
+//! replaces just that database. Requests that address an entry by title route
+//! through [`crate::databases::DatabaseSet`], which refuses instead of guessing when
+//! more than one open database holds the title. See `docs/multi-database.md`.
 //!
 //! v0.0.2.0: also owns the SSH agent key store. On `unlock`, every entry's
 //! `id` attachment is parsed as an OpenSSH ed25519 private key; successful
@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use trove_core::settings::{Capability, Document, EffectiveItem};
-use trove_core::{EntrySummary, SearchFieldFilter, SearchHit, SearchQuery, Vault};
+use trove_core::{Database, EntrySummary, SearchFieldFilter, SearchHit, SearchQuery};
 
+use crate::databases::DatabaseSet;
 use crate::gpg_agent::{keys as gpg_keys, GpgKeyStore, LoadedGpgKey};
 use crate::idle::{IdleState, IdleTracker};
 use crate::materialize::{self, MaterializedFile, MaterializedStore};
@@ -30,9 +31,8 @@ use crate::protocol::{
 };
 use crate::ssh_agent::scoped::{self, ScopedAgents};
 use crate::ssh_agent::{self, hostkey, keeagent, keys as ssh_keys, KeyStore, LoadedKey};
-use crate::vaults::VaultSet;
 
-pub type SharedState = Arc<Mutex<VaultSet>>;
+pub type SharedState = Arc<Mutex<DatabaseSet>>;
 
 /// A provisioning session: the one-time code minted at `Unlock` plus the uid
 /// that unlocked. Code-gated extraction (`Get`) requires presenting this code
@@ -60,7 +60,7 @@ pub struct Handled {
     pub shutdown: bool,
 }
 
-/// Handle one control request. A request that changes a vault is bracketed by
+/// Handle one control request. A request that changes a database is bracketed by
 /// a look at the materialization plans before and after, so a file an edit
 /// adds, moves, changes or removes is written or wiped at once rather than at
 /// the next unlock.
@@ -76,7 +76,7 @@ pub async fn handle(
     idle: &Arc<IdleTracker>,
     peer_uid: u32,
 ) -> Handled {
-    let before = if changes_vault(&req) {
+    let before = if changes_database(&req) {
         let live = materialize::claimed_targets(mat_store).await;
         Some(plan_snapshot(&*state.lock().await, &live))
     } else {
@@ -100,8 +100,8 @@ pub async fn handle(
     handled
 }
 
-/// Requests that can change what a vault asks to have materialized.
-fn changes_vault(req: &Request) -> bool {
+/// Requests that can change what a database asks to have materialized.
+fn changes_database(req: &Request) -> bool {
     matches!(
         req,
         Request::AddSsh { .. }
@@ -120,11 +120,11 @@ fn changes_vault(req: &Request) -> bool {
     )
 }
 
-/// One materialization plan in an open vault, with what makes it the same
+/// One materialization plan in an open database, with what makes it the same
 /// plan: the source, the target, the file's mode and TTL, and a digest of the
 /// bytes that would be written.
 struct LivePlan {
-    vault_key: PathBuf,
+    database_key: PathBuf,
     entry_id: String,
     attachment: String,
     target: PathBuf,
@@ -136,7 +136,7 @@ struct LivePlan {
 
 impl LivePlan {
     fn same_as(&self, other: &LivePlan) -> bool {
-        self.vault_key == other.vault_key
+        self.database_key == other.database_key
             && self.entry_id == other.entry_id
             && self.attachment == other.attachment
             && self.target == other.target
@@ -146,28 +146,28 @@ impl LivePlan {
     }
 }
 
-/// Every valid materialization plan across the open vaults. `live` is what
-/// is on disk now, per vault, so a plan whose file is already written still
+/// Every valid materialization plan across the open databases. `live` is what
+/// is on disk now, per database, so a plan whose file is already written still
 /// counts as valid.
-fn plan_snapshot(set: &VaultSet, live: &[(PathBuf, PathBuf)]) -> Vec<LivePlan> {
+fn plan_snapshot(set: &DatabaseSet, live: &[(PathBuf, PathBuf)]) -> Vec<LivePlan> {
     use sha2::Digest as _;
     let mut out = Vec::new();
-    for (vault, filter) in set.iter_with_filters() {
-        let vault_key = crate::vaults::canonical_key(vault.path());
+    for (database, filter) in set.iter_with_filters() {
+        let database_key = crate::databases::canonical_key(database.path());
         let mine: Vec<PathBuf> = live
             .iter()
-            .filter(|(_, owner)| *owner == vault_key)
+            .filter(|(_, owner)| *owner == database_key)
             .map(|(target, _)| target.clone())
             .collect();
-        let (plans, _errors) = materialize::build_plans_with_live(vault, filter, &mine);
+        let (plans, _errors) = materialize::build_plans_with_live(database, filter, &mine);
         for plan in plans {
-            let bytes = vault
+            let bytes = database
                 .read_binary(&plan.entry_id, &plan.source_attachment)
                 .ok()
                 .flatten()
                 .unwrap_or_default();
             out.push(LivePlan {
-                vault_key: vault_key.clone(),
+                database_key: database_key.clone(),
                 entry_id: plan.entry_id.to_string(),
                 attachment: plan.source_attachment.clone(),
                 target: plan.resolved_target.clone(),
@@ -197,7 +197,7 @@ async fn resync_materialized(
         .iter()
         .filter(|b| !after.iter().any(|a| a.same_as(b)))
     {
-        materialize::wipe_target(mat_store, &gone.vault_key, &gone.target).await;
+        materialize::wipe_target(mat_store, &gone.database_key, &gone.target).await;
     }
     let added: Vec<&LivePlan> = after
         .iter()
@@ -206,21 +206,26 @@ async fn resync_materialized(
     if added.is_empty() {
         return;
     }
-    for (vault, _) in guard.iter_with_filters() {
-        let vault_key = crate::vaults::canonical_key(vault.path());
-        for new in added.iter().filter(|p| p.vault_key == vault_key) {
+    for (database, _) in guard.iter_with_filters() {
+        let database_key = crate::databases::canonical_key(database.path());
+        for new in added.iter().filter(|p| p.database_key == database_key) {
             // First-wins, as at unlock: never write over a file that is live.
             let claimed = materialize::claimed_targets(mat_store).await;
             if let Some((_, owner)) = claimed.iter().find(|(t, _)| *t == new.target) {
                 eprintln!(
-                    "materialize: entry '{}': target {} is already materialized by vault {}; skipped",
+                    "materialize: entry '{}': target {} is already materialized by database {}; skipped",
                     new.plan.entry_title,
                     new.target.display(),
                     owner.display(),
                 );
                 continue;
             }
-            match materialize::materialize_one(vault, &vault_key, &new.plan, mat_store.clone()) {
+            match materialize::materialize_one(
+                database,
+                &database_key,
+                &new.plan,
+                mat_store.clone(),
+            ) {
                 Ok(m) => {
                     eprintln!(
                         "materialize: '{}' -> {} (mode {:o}, ttl {:?})",
@@ -305,40 +310,40 @@ async fn handle_request(
                 }
                 None => None,
             };
-            // trove-core's Vault::open is sync (and may do blocking file I/O +
+            // trove-core's Database::open is sync (and may do blocking file I/O +
             // KDF work). Wrap it in spawn_blocking to keep the runtime healthy.
             let result = tokio::task::spawn_blocking(move || {
-                Vault::open_with_key(&path_buf, &password, keyfile_bytes.as_deref())
+                Database::open_with_key(&path_buf, &password, keyfile_bytes.as_deref())
             })
             .await;
             match result {
-                Ok(Ok(vault)) => {
-                    let vault_key = crate::vaults::canonical_key(vault.path());
+                Ok(Ok(database)) => {
+                    let database_key = crate::databases::canonical_key(database.path());
 
-                    // Re-unlocking a vault that is already open: wipe what its
+                    // Re-unlocking a database that is already open: wipe what its
                     // previous incarnation put on disk first, so a target it no
                     // longer materializes doesn't linger untracked. No-op for a
-                    // vault being unlocked for the first time.
-                    materialize::wipe_for_vault(mat_store, &vault_key).await;
+                    // database being unlocked for the first time.
+                    materialize::wipe_for_database(mat_store, &database_key).await;
 
-                    // Targets other open vaults already own. Files are
-                    // first-wins, unlike keys: a second vault materializing
+                    // Targets other open databases already own. Files are
+                    // first-wins, unlike keys: a second database materializing
                     // over the same path would silently replace live data and
-                    // its lock would wipe a file the first vault still expects.
+                    // its lock would wipe a file the first database still expects.
                     // So we skip and warn rather than overwrite.
                     let claimed = materialize::claimed_targets(mat_store).await;
 
                     // Materialize opted-in entries while we still own the
-                    // vault locally. We do this BEFORE handing off the vault
+                    // database locally. We do this BEFORE handing off the database
                     // to shared state so we never hold the state mutex across
                     // file I/O. Per-entry failures are logged; the unlock
                     // still succeeds. The unlock RESPONSE goes out only after
                     // every materialize completes — so by the time the user
                     // sees `ok`, the files are on disk.
-                    let skipped_keys = skipped_keys_in(&vault, filter.as_deref());
-                    let (materialized, materialize_warnings) = materialize_from_vault(
-                        &vault,
-                        &vault_key,
+                    let skipped_keys = skipped_keys_in(&database, filter.as_deref());
+                    let (materialized, materialize_warnings) = materialize_from_database(
+                        &database,
+                        &database_key,
                         &claimed,
                         mat_store,
                         filter.as_deref(),
@@ -346,13 +351,13 @@ async fn handle_request(
                     .await;
                     {
                         let mut g = mat_store.write().await;
-                        // Append: other unlocked vaults' files stay tracked.
+                        // Append: other unlocked databases' files stay tracked.
                         g.extend(materialized);
                     }
 
-                    // Mint before publishing the new vault. Hold session before
+                    // Mint before publishing the new database. Hold session before
                     // state, matching protected requests and lock transitions,
-                    // so a lock cannot land between vault insertion and session
+                    // so a lock cannot land between database insertion and session
                     // update.
                     let code = if mint_session == Some(false) {
                         None
@@ -362,7 +367,7 @@ async fn handle_request(
                     let mut sess = session.lock().await;
                     let (mut ssh, gpg) = {
                         let mut guard = state.lock().await;
-                        guard.insert_with_filter(vault, filter.clone());
+                        guard.insert_with_filter(database, filter.clone());
                         if let Some(code) = &code {
                             *sess = Some(Session {
                                 code: code.clone(),
@@ -394,7 +399,7 @@ async fn handle_request(
                     // reads the key set we still own, so nothing has to be
                     // cloned out from behind the store's lock.
                     // What is in the external agent right now, before this
-                    // unlock changes the union. Re-unlocking a vault whose keys
+                    // unlock changes the union. Re-unlocking a database whose keys
                     // changed (an entry deleted, a key rotated) would otherwise
                     // leave the superseded copy live in that agent until its
                     // lifetime expired — trove's own store is replaced, so
@@ -410,7 +415,7 @@ async fn handle_request(
                     }
 
                     // Same diff the lock path uses: retract only what dropped
-                    // out of the union, so the other vaults' keys stay served.
+                    // out of the union, so the other databases' keys stay served.
                     {
                         let still_served = ssh_agent::keys_to_unforward(&key_store.read().await);
                         let dropped: Vec<_> = before_unlock
@@ -455,16 +460,16 @@ async fn handle_request(
             let guard = state.lock().await;
             if guard.is_empty() {
                 return Handled {
-                    response: Response::err("no vault unlocked"),
+                    response: Response::err("no database unlocked"),
                     shutdown: false,
                 };
             }
-            // The union across every open vault, in unlock order. Entries keep
-            // their own group path; nothing is prefixed by vault, so a
-            // single-vault listing is byte-identical to what it always was.
+            // The union across every open database, in unlock order. Entries keep
+            // their own group path; nothing is prefixed by database, so a
+            // single-database listing is byte-identical to what it always was.
             let entries: Vec<EntryDto> = guard
                 .iter()
-                .flat_map(|vault| vault.list_entries())
+                .flat_map(|database| database.list_entries())
                 .map(|s| EntryDto {
                     id: s.id.to_string(),
                     title: s.title,
@@ -483,14 +488,14 @@ async fn handle_request(
             }
         }
 
-        Request::Lock { vault } => {
+        Request::Lock { database } => {
             // Cancel the idle timer FIRST so a near-deadline tick can't
             // race us into a double-wipe. The timer-fire path also serializes
             // through the same lock callback, but cancelling here is cheaper
             // and clearer.
             idle.cancel();
             // Lock transitions serialize with code-gated operations. Lock order
-            // is session -> vault state everywhere these locks are combined.
+            // is session -> database state everywhere these locks are combined.
             let mut session_guard = session.lock().await;
 
             // What we may have to claw back out of the *user's own* ssh-agent.
@@ -499,37 +504,37 @@ async fn handle_request(
             // store is about to be emptied. Only public blobs are copied.
             let before_lock = ssh_agent::keys_to_unforward(&key_store.read().await);
 
-            match vault {
-                // Lock one vault: wipe only its materialized files, drop only
+            match database {
+                // Lock one database: wipe only its materialized files, drop only
                 // it, and rebuild the keyrings from whatever is still open.
                 Some(path) => {
-                    let key = crate::vaults::canonical_key(std::path::Path::new(&path));
+                    let key = crate::databases::canonical_key(std::path::Path::new(&path));
                     let was_open = {
                         let mut guard = state.lock().await;
                         guard.remove(&key).is_some()
                     };
                     if !was_open {
                         // We cancelled the timer above, before knowing whether
-                        // this vault was even open. Nothing was locked, so put
+                        // this database was even open. Nothing was locked, so put
                         // it back: otherwise a mistyped path silently disables
-                        // auto-lock for every vault that IS open, and normal
+                        // auto-lock for every database that IS open, and normal
                         // activity cannot restart a cancelled timer.
                         if !state.lock().await.is_empty() {
                             idle.start_or_reset(Duration::from_secs(idle.current_timeout_secs()));
                         }
                         return Handled {
-                            response: Response::err(format!("no vault unlocked at {path}")),
+                            response: Response::err(format!("no database unlocked at {path}")),
                             shutdown: false,
                         };
                     }
-                    materialize::wipe_for_vault(mat_store, &key).await;
+                    materialize::wipe_for_database(mat_store, &key).await;
                     {
                         let guard = state.lock().await;
                         rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
                     }
                 }
                 // Lock everything — a bare `trove lock`, and what the
-                // single-vault daemon always did.
+                // single-database daemon always did.
                 None => {
                     materialize::wipe_all(mat_store).await;
                     {
@@ -553,7 +558,7 @@ async fn handle_request(
             // Now that the key store reflects what's still unlocked, whatever
             // dropped out of it is what the external agent must forget too.
             // Diffing (rather than removing everything we snapshotted) is what
-            // makes `lock --vault` leave the other vaults' forwarded keys alone.
+            // makes `lock --database` leave the other databases' forwarded keys alone.
             let still_served = ssh_agent::keys_to_unforward(&key_store.read().await);
             let dropped: Vec<_> = before_lock
                 .into_iter()
@@ -563,16 +568,16 @@ async fn handle_request(
 
             // Scoped agents (`ssh-agent empty`) serve their own copies, so the
             // same reasoning applies to them: whatever just dropped out of the
-            // daemon's store has to drop out of theirs, or `lock --vault` would
-            // leave a private socket still offering the locked vault's key.
+            // daemon's store has to drop out of theirs, or `lock --database` would
+            // leave a private socket still offering the locked database's key.
             // With nothing left unlocked, the sockets go entirely — the daemon
             // owns their lifetime so the caller never has to clean up.
             //
-            // Held across the vault-state lock on purpose. `SshAgentAdd` takes
+            // Held across the database-state lock on purpose. `SshAgentAdd` takes
             // the same lock for the whole of its resolve-then-insert, so the
             // two cannot interleave; without that, an add that had already
-            // copied a key out of a vault could install it into a scoped agent
-            // after this teardown had run, leaving a locked vault's key
+            // copied a key out of a database could install it into a scoped agent
+            // after this teardown had run, leaving a locked database's key
             // signable.
             let still_open = {
                 let guard = state.lock().await;
@@ -589,25 +594,25 @@ async fn handle_request(
 
             if still_open {
                 // We cancelled the idle timer above to avoid racing the wipe,
-                // but other vaults are still unlocked and must keep auto-locking
-                // — re-arm it, or `lock --vault` would silently leave the rest
+                // but other databases are still unlocked and must keep auto-locking
+                // — re-arm it, or `lock --database` would silently leave the rest
                 // of the set open forever.
                 idle.start_or_reset(Duration::from_secs(idle.current_timeout_secs()));
             } else {
-                // The session code is a daemon-wide capability, not a per-vault
-                // one (docs/multi-vault.md), so it survives locking one of
-                // several vaults and dies only when nothing is left unlocked.
+                // The session code is a daemon-wide capability, not a per-database
+                // one (docs/multi-database.md), so it survives locking one of
+                // several databases and dies only when nothing is left unlocked.
                 *session_guard = None;
             }
-            // The daemon exists only to hold unlocked vaults and to clean up
-            // materialized files. Once the last vault is locked and its files
+            // The daemon exists only to hold unlocked databases and to clean up
+            // materialized files. Once the last database is locked and its files
             // wiped, nothing remains to serve — signal shutdown (the connection
             // loop acks first, then tears down) so the next `unlock` autospawns
             // a fresh process: always the current binary, no lingering keyless
             // daemon, no orphan pile-up.
             //
-            // It stays alive iff a vault is still open OR materialized files
-            // still need cleanup, so locking one of several vaults never exits.
+            // It stays alive iff a database is still open OR materialized files
+            // still need cleanup, so locking one of several databases never exits.
             let has_materialized = !mat_store.read().await.is_empty();
             Handled {
                 response: Response::ok_empty(),
@@ -630,7 +635,7 @@ async fn handle_request(
             // sitting on disk for an indefinite time.
             materialize::wipe_all(mat_store).await;
 
-            // Drop vaults and keys eagerly; main loop will also clean up.
+            // Drop databases and keys eagerly; main loop will also clean up.
             {
                 let mut guard = state.lock().await;
                 guard.drain();
@@ -675,7 +680,7 @@ async fn handle_request(
         }
 
         Request::SshAgentEmpty => {
-            // Under the vault-state lock, like every other registry mutation:
+            // Under the database-state lock, like every other registry mutation:
             // it is the lock `Lock` also holds while tearing scoped agents
             // down, so "created but not yet registered" is never a state a
             // teardown can observe.
@@ -695,7 +700,7 @@ async fn handle_request(
         }
 
         Request::SshAgentAdd { socket, entry } => {
-            // The vault-state lock is held for the whole of this: resolving the
+            // The database-state lock is held for the whole of this: resolving the
             // entry, and installing the key it yields. `Lock` takes the same
             // lock while it tears the scoped agents down, so a lock landing
             // mid-add either happens entirely before (and the resolve finds
@@ -783,7 +788,7 @@ async fn handle_request(
         }
 
         Request::SshAgentClose { socket } => {
-            // Under the vault-state lock, like `SshAgentEmpty`: every change to
+            // Under the database-state lock, like `SshAgentEmpty`: every change to
             // the registry is serialised against `Lock`'s teardown of it.
             let _state_guard = state.lock().await;
             match scoped::close(scoped_agents, std::path::Path::new(&socket)).await {
@@ -909,7 +914,7 @@ async fn handle_request(
             let guard = state.lock().await;
             let dtos = guard
                 .iter_with_filters()
-                .flat_map(|(vault, filter)| gpg_public_keys_from_vault(vault, filter))
+                .flat_map(|(database, filter)| gpg_public_keys_from_database(database, filter))
                 .map(|(entry, export)| crate::protocol::GpgPublicKeyDto {
                     entry,
                     export_b64: base64::engine::general_purpose::STANDARD.encode(export),
@@ -947,9 +952,9 @@ async fn handle_request(
         },
 
         Request::Status => {
-            // Capture every unlocked vault's path without holding the state
+            // Capture every unlocked database's path without holding the state
             // lock across the other reads.
-            let vault_paths = {
+            let database_paths = {
                 let guard = state.lock().await;
                 guard.paths()
             };
@@ -962,17 +967,17 @@ async fn handle_request(
             let gpg_keys = gpg_store.read().await.len();
             let materialized = mat_store.read().await.len();
             // Re-parsed on demand rather than kept: a handful of attachments
-            // per vault, and it can't go stale after an edit.
+            // per database, and it can't go stale after an edit.
             let skipped_keys = {
                 let guard = state.lock().await;
                 guard
                     .iter_with_filters()
-                    .flat_map(|(vault, filter)| skipped_keys_in(vault, filter))
+                    .flat_map(|(database, filter)| skipped_keys_in(database, filter))
                     .collect()
             };
             Handled {
                 response: Response::ok_status(
-                    vault_paths,
+                    database_paths,
                     idle_timeout_secs,
                     idle_remaining_secs,
                     ssh_keys,
@@ -1076,11 +1081,11 @@ async fn handle_request(
 
         Request::Describe { path } => {
             let mut guard = state.lock().await;
-            let vault = match guard.sole_mut() {
-                Ok(vault) => vault,
+            let database = match guard.sole_mut() {
+                Ok(database) => database,
                 Err(e) => return err_handled(e.to_string()),
             };
-            let descriptions = match vault.describe(&path) {
+            let descriptions = match database.describe(&path) {
                 Ok(descriptions) => descriptions,
                 Err(e) => return err_handled(e.to_string()),
             };
@@ -1230,16 +1235,16 @@ async fn handle_request(
                 return session_refused();
             }
             let mut guard = state.lock().await;
-            let vault = match guard.sole_mut() {
-                Ok(vault) => vault,
+            let database = match guard.sole_mut() {
+                Ok(database) => database,
                 Err(e) => return err_handled(e.to_string()),
             };
-            let plan = match vault.move_group_to_path(&path, &dest) {
+            let plan = match database.move_group_to_path(&path, &dest) {
                 Ok(plan) => plan,
                 Err(e) => return err_handled(format!("moving group: {e}")),
             };
-            if let Err(e) = vault.save() {
-                return err_handled(format!("saving vault: {e}"));
+            if let Err(e) = database.save() {
+                return err_handled(format!("saving database: {e}"));
             }
             rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
             ok_handled(Response::ok_group_transfer(plan))
@@ -1257,22 +1262,22 @@ async fn handle_request(
                 return session_refused();
             }
             let mut guard = state.lock().await;
-            let vault = match guard.sole_mut() {
-                Ok(vault) => vault,
+            let database = match guard.sole_mut() {
+                Ok(database) => database,
                 Err(e) => return err_handled(e.to_string()),
             };
             let plan = if dry_run {
-                vault.plan_group_transfer(&path, &dest)
+                database.plan_group_transfer(&path, &dest)
             } else {
-                vault.copy_group(&path, &dest, keep_materialize)
+                database.copy_group(&path, &dest, keep_materialize)
             };
             let plan = match plan {
                 Ok(plan) => plan,
                 Err(e) => return err_handled(format!("copying group: {e}")),
             };
             if !dry_run {
-                if let Err(e) = vault.save() {
-                    return err_handled(format!("saving vault: {e}"));
+                if let Err(e) = database.save() {
+                    return err_handled(format!("saving database: {e}"));
                 }
                 rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
             }
@@ -1322,9 +1327,9 @@ async fn handle_request(
 
 /// Code-gated extraction. Validates the session (unlocked + code matches + same
 /// uid as the unlocker), then reads `attachment` from the entry titled `title`
-/// out of the held vault and returns it base64-encoded. The error is
+/// out of the held database and returns it base64-encoded. The error is
 /// deliberately generic on a session-validation failure so it isn't an oracle
-/// for "is the vault unlocked?" vs "is the code wrong?".
+/// for "is the database unlocked?" vs "is the code wrong?".
 async fn get_secret(
     state: &SharedState,
     session: &SessionStore,
@@ -1333,13 +1338,13 @@ async fn get_secret(
     attachment: &str,
     code: &str,
 ) -> Handled {
-    // Keep authorization stable until the vault read completes.
+    // Keep authorization stable until the database read completes.
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let guard = state.lock().await;
-    let (vault, id) = match guard.find_entry(title) {
+    let (database, id) = match guard.find_entry(title) {
         Ok(found) => found,
         Err(e) => {
             return Handled {
@@ -1349,8 +1354,8 @@ async fn get_secret(
         }
     };
     let gates = crate::approval::gates_for(
-        vault,
-        vault.path(),
+        database,
+        database.path(),
         &id,
         title,
         crate::approval::Reads::Attachment(attachment),
@@ -1366,11 +1371,11 @@ async fn get_secret(
             return session_refused();
         }
         let guard = state.lock().await;
-        let (vault, id) = match guard.find_entry(title) {
+        let (database, id) = match guard.find_entry(title) {
             Ok(found) => found,
             Err(e) => return err_handled(e.to_string()),
         };
-        return match vault.read_binary(&id, attachment) {
+        return match database.read_binary(&id, attachment) {
             Ok(Some(bytes)) => {
                 use base64::Engine;
                 ok_handled(Response::ok_secret(
@@ -1381,7 +1386,7 @@ async fn get_secret(
             Err(e) => err_handled(format!("reading attachment: {e}")),
         };
     }
-    match vault.read_binary(&id, attachment) {
+    match database.read_binary(&id, attachment) {
         Ok(Some(bytes)) => {
             use base64::Engine;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -1401,13 +1406,13 @@ async fn get_secret(
     }
 }
 
-/// Code-gated write. Validates the session (same gate as `get_secret`: vault
+/// Code-gated write. Validates the session (same gate as `get_secret`: database
 /// unlocked + code matches + same uid as the unlocker), decodes the base64 key
 /// bytes, then stores them on the entry at `path` — creating the entry mkdir-p
 /// if absent, or replacing the `id` attachment in place if it exists. Writes a
 /// `KeeAgent.settings` blob so KeePassXC's agent loads it, sets `UserName` when
 /// given, persists with `save()`, and finally reloads the SSH agent key store
-/// from the updated vault so the new key is served without a re-unlock.
+/// from the updated database so the new key is served without a re-unlock.
 #[allow(clippy::too_many_arguments)]
 async fn add_ssh(
     state: &SharedState,
@@ -1420,7 +1425,7 @@ async fn add_ssh(
     user: Option<&str>,
     code: &str,
 ) -> Handled {
-    // Keep authorization stable through the vault mutation (session -> state).
+    // Keep authorization stable through the database mutation (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
@@ -1439,12 +1444,12 @@ async fn add_ssh(
         }
     };
 
-    // Mutate the held vault and persist, then reload the agent key set off the
-    // now-updated vault — all under the state lock, moving the reloaded Vec out
+    // Mutate the held database and persist, then reload the agent key set off the
+    // now-updated database — all under the state lock, moving the reloaded Vec out
     // so we never hold the state lock across the key_store write below.
     let mut reloaded = {
         let mut guard = state.lock().await;
-        let (vault, existing) = match guard.route_upsert(path) {
+        let (database, existing) = match guard.route_upsert(path) {
             Ok(found) => found,
             Err(e) => {
                 return Handled {
@@ -1455,7 +1460,7 @@ async fn add_ssh(
         };
         let id = match existing {
             Some(id) => id,
-            None => match vault.add_entry(path) {
+            None => match database.add_entry(path) {
                 Ok(id) => id,
                 Err(e) => {
                     return Handled {
@@ -1465,7 +1470,7 @@ async fn add_ssh(
                 }
             },
         };
-        if let Err(e) = vault.attach_binary(&id, "id", &key_bytes) {
+        if let Err(e) = database.attach_binary(&id, "id", &key_bytes) {
             return Handled {
                 response: Response::err(format!("attaching ssh key: {e}")),
                 shutdown: false,
@@ -1476,7 +1481,7 @@ async fn add_ssh(
         // comment (usually an email) defaults to the entry path when absent.
         match ssh_keys::openssh_public_line(&key_bytes, comment.unwrap_or(path)) {
             Ok(pub_line) => {
-                if let Err(e) = vault.attach_binary(&id, "id.pub", pub_line.as_bytes()) {
+                if let Err(e) = database.attach_binary(&id, "id.pub", pub_line.as_bytes()) {
                     return Handled {
                         response: Response::err(format!("attaching public key: {e}")),
                         shutdown: false,
@@ -1491,28 +1496,28 @@ async fn add_ssh(
             }
         }
         let settings = keeagent::settings_xml("id");
-        if let Err(e) = vault.attach_binary(&id, keeagent::ATTACHMENT_NAME, &settings) {
+        if let Err(e) = database.attach_binary(&id, keeagent::ATTACHMENT_NAME, &settings) {
             return Handled {
                 response: Response::err(format!("attaching KeeAgent.settings: {e}")),
                 shutdown: false,
             };
         }
         if let Some(user) = user {
-            if let Err(e) = vault.set_field(&id, "UserName", user) {
+            if let Err(e) = database.set_field(&id, "UserName", user) {
                 return Handled {
                     response: Response::err(format!("setting UserName: {e}")),
                     shutdown: false,
                 };
             }
         }
-        if let Err(e) = vault.save() {
+        if let Err(e) = database.save() {
             return Handled {
-                response: Response::err(format!("saving vault: {e}")),
+                response: Response::err(format!("saving database: {e}")),
                 shutdown: false,
             };
         }
-        // Rebuild from the whole open set, not just the vault we wrote to, so
-        // adding a key to one vault doesn't evict another vault's keys.
+        // Rebuild from the whole open set, not just the database we wrote to, so
+        // adding a key to one database doesn't evict another database's keys.
         union_agent_keys(&guard).0
     };
     {
@@ -1526,12 +1531,12 @@ async fn add_ssh(
     }
 }
 
-/// Code-gated write. Same session gate as `get_secret`/`add_ssh` (vault
+/// Code-gated write. Same session gate as `get_secret`/`add_ssh` (database
 /// unlocked + code matches + same uid as the unlocker), decodes the base64 key
 /// bytes, then stores them on the entry at `title` as the `gpg-priv`
 /// attachment — creating the entry mkdir-p if absent, or replacing in place if
 /// it exists — and persists with `save()`. Finally reloads the GPG agent key
-/// store from the updated vault so the new key is served without a re-unlock.
+/// store from the updated database so the new key is served without a re-unlock.
 #[allow(clippy::too_many_arguments)]
 async fn add_gpg(
     state: &SharedState,
@@ -1542,7 +1547,7 @@ async fn add_gpg(
     key_b64: &str,
     code: &str,
 ) -> Handled {
-    // Keep authorization stable through the vault mutation (session -> state).
+    // Keep authorization stable through the database mutation (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
@@ -1561,12 +1566,12 @@ async fn add_gpg(
         }
     };
 
-    // Mutate the held vault and persist, then reload the agent key set off the
-    // now-updated vault — all under the state lock, moving the reloaded Vec out
+    // Mutate the held database and persist, then reload the agent key set off the
+    // now-updated database — all under the state lock, moving the reloaded Vec out
     // so we never hold the state lock across the gpg_store write below.
     let reloaded_gpg = {
         let mut guard = state.lock().await;
-        let (vault, existing) = match guard.route_upsert(title) {
+        let (database, existing) = match guard.route_upsert(title) {
             Ok(found) => found,
             Err(e) => {
                 return Handled {
@@ -1577,7 +1582,7 @@ async fn add_gpg(
         };
         let id = match existing {
             Some(id) => id,
-            None => match vault.add_entry(title) {
+            None => match database.add_entry(title) {
                 Ok(id) => id,
                 Err(e) => {
                     return Handled {
@@ -1587,7 +1592,7 @@ async fn add_gpg(
                 }
             },
         };
-        if let Err(e) = vault.attach_binary(&id, "gpg-priv", &key_bytes) {
+        if let Err(e) = database.attach_binary(&id, "gpg-priv", &key_bytes) {
             return Handled {
                 response: Response::err(format!("attaching gpg key: {e}")),
                 shutdown: false,
@@ -1595,20 +1600,20 @@ async fn add_gpg(
         }
         // Name the key in the entry's GpgAgent.settings, so the agent serves it:
         // adding a GPG key is what turns the capability on for the entry.
-        if let Err(e) = vault.ensure_settings_item(&id, Capability::GpgAgent, "gpg-priv") {
+        if let Err(e) = database.ensure_settings_item(&id, Capability::GpgAgent, "gpg-priv") {
             return Handled {
                 response: Response::err(format!("writing GpgAgent.settings: {e}")),
                 shutdown: false,
             };
         }
-        if let Err(e) = vault.save() {
+        if let Err(e) = database.save() {
             return Handled {
-                response: Response::err(format!("saving vault: {e}")),
+                response: Response::err(format!("saving database: {e}")),
                 shutdown: false,
             };
         }
-        // Rebuild from the whole open set, so writing to one vault doesn't
-        // evict another vault's keys from the agent.
+        // Rebuild from the whole open set, so writing to one database doesn't
+        // evict another database's keys from the agent.
         union_agent_keys(&guard).1
     };
     {
@@ -1621,7 +1626,7 @@ async fn add_gpg(
     }
 }
 
-/// Code-gated write. Same session gate as `get_secret`/`add_ssh` (vault
+/// Code-gated write. Same session gate as `get_secret`/`add_ssh` (database
 /// unlocked + code matches + same uid as the unlocker), decodes the base64
 /// source bytes, then stores them on the entry at `title` as the `name`
 /// attachment — creating the entry mkdir-p if absent, or replacing in place if
@@ -1650,7 +1655,7 @@ async fn add_file(
         if !ok {
             return Handled {
                 response: Response::err(
-                    "refused: vault locked, or session code missing/invalid for this uid",
+                    "refused: database locked, or session code missing/invalid for this uid",
                 ),
                 shutdown: false,
             };
@@ -1672,7 +1677,7 @@ async fn add_file(
 
     {
         let mut guard = state.lock().await;
-        let (vault, existing) = match guard.route_upsert(title) {
+        let (database, existing) = match guard.route_upsert(title) {
             Ok(found) => found,
             Err(e) => {
                 return Handled {
@@ -1683,7 +1688,7 @@ async fn add_file(
         };
         let id = match existing {
             Some(id) => id,
-            None => match vault.add_entry(title) {
+            None => match database.add_entry(title) {
                 Ok(id) => id,
                 Err(e) => {
                     return Handled {
@@ -1693,7 +1698,7 @@ async fn add_file(
                 }
             },
         };
-        if let Err(e) = vault.attach_binary(&id, name, &src_bytes) {
+        if let Err(e) = database.attach_binary(&id, name, &src_bytes) {
             return Handled {
                 response: Response::err(format!("attaching file bytes: {e}")),
                 shutdown: false,
@@ -1710,15 +1715,15 @@ async fn add_file(
             item.push(("ttl".to_string(), ttl.to_string()));
         }
         item.push(("allowDiskBacked".to_string(), allow_disk_backed.to_string()));
-        if let Err(e) = vault.upsert_settings_item(&id, Capability::Materialize, item) {
+        if let Err(e) = database.upsert_settings_item(&id, Capability::Materialize, item) {
             return Handled {
                 response: Response::err(format!("writing Materialize.settings: {e}")),
                 shutdown: false,
             };
         }
-        if let Err(e) = vault.save() {
+        if let Err(e) = database.save() {
             return Handled {
-                response: Response::err(format!("saving vault: {e}")),
+                response: Response::err(format!("saving database: {e}")),
                 shutdown: false,
             };
         }
@@ -1729,23 +1734,23 @@ async fn add_file(
     }
 }
 
-/// Build the materialization plan for `vault` and execute every plan,
+/// Build the materialization plan for `database` and execute every plan,
 /// returning the bookkeeping handles for the ones that succeeded plus a list of
 /// human-readable warnings for the ones that failed.
 ///
 /// Per-entry failure (validation OR I/O) does NOT fail the unlock — the spec is
-/// explicit that a typo on one entry must not break the rest of the vault. But
+/// explicit that a typo on one entry must not break the rest of the database. But
 /// every failure is both logged to the daemon and returned as a warning so the
 /// CLI can surface it: unlock must never silently return `ok` with a configured
 /// materialized file missing (issue #56).
-async fn materialize_from_vault(
-    vault: &Vault,
-    vault_key: &std::path::Path,
+async fn materialize_from_database(
+    database: &Database,
+    database_key: &std::path::Path,
     claimed: &[(PathBuf, PathBuf)],
     store: &MaterializedStore,
     filter: Option<&str>,
 ) -> (Vec<MaterializedFile>, Vec<String>) {
-    let (plans, plan_errors) = materialize::build_plans_filtered(vault, filter);
+    let (plans, plan_errors) = materialize::build_plans_filtered(database, filter);
     let mut warnings = Vec::new();
     for (title, e) in plan_errors {
         let line = format!("entry '{title}': {e}");
@@ -1754,16 +1759,16 @@ async fn materialize_from_vault(
     }
     let mut materialized = Vec::with_capacity(plans.len());
     for plan in plans {
-        // First-wins across vaults: if another unlocked vault already
+        // First-wins across databases: if another unlocked database already
         // materialized this exact path, writing over it would destroy live
-        // data and hand two vaults a claim on one file. Skip loudly instead —
+        // data and hand two databases a claim on one file. Skip loudly instead —
         // the warning rides back on the unlock response.
         if let Some((_, owner)) = claimed
             .iter()
             .find(|(target, _)| *target == plan.resolved_target)
         {
             let line = format!(
-                "entry '{}': target {} is already materialized by vault {}; skipped",
+                "entry '{}': target {} is already materialized by database {}; skipped",
                 plan.entry_title,
                 plan.resolved_target.display(),
                 owner.display(),
@@ -1772,7 +1777,7 @@ async fn materialize_from_vault(
             warnings.push(line);
             continue;
         }
-        match materialize::materialize_one(vault, vault_key, &plan, store.clone()) {
+        match materialize::materialize_one(database, database_key, &plan, store.clone()) {
             Ok(m) => {
                 eprintln!(
                     "materialize: '{}' -> {} (mode {:o}, ttl {:?})",
@@ -1794,8 +1799,8 @@ async fn materialize_from_vault(
 }
 
 /// Check a session while its mutex remains held through the corresponding
-/// vault access. Protected requests and lock transitions acquire session before
-/// vault state, so authorization cannot change between check and use.
+/// database access. Protected requests and lock transitions acquire session before
+/// database state, so authorization cannot change between check and use.
 ///
 /// The code is compared in constant time: `==` stops at the first differing
 /// byte, which would let a local caller recover a code by timing refusals.
@@ -1807,7 +1812,7 @@ fn session_matches(sess: &Option<Session>, peer_uid: u32, code: &str) -> bool {
 fn session_refused() -> Handled {
     Handled {
         response: Response::err(
-            "refused: vault locked, or session code missing/invalid for this uid",
+            "refused: database locked, or session code missing/invalid for this uid",
         ),
         shutdown: false,
     }
@@ -1851,13 +1856,13 @@ fn ok_handled(response: Response) -> Handled {
 /// for anything custom; values require the code-gated `GetField`.
 async fn show_entry(state: &SharedState, path: &str) -> Handled {
     let guard = state.lock().await;
-    let (vault, id) = match guard.find_entry(path) {
+    let (database, id) = match guard.find_entry(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    let summary = vault.get_entry(&id).expect("entry just resolved");
-    let notes = vault.get_field(&id, "Notes").ok().flatten();
-    let custom_fields = vault.custom_field_names(&id).unwrap_or_default();
+    let summary = database.get_entry(&id).expect("entry just resolved");
+    let notes = database.get_field(&id, "Notes").ok().flatten();
+    let custom_fields = database.custom_field_names(&id).unwrap_or_default();
     ok_handled(Response::ok_show(crate::protocol::ShowDto {
         id: summary.id.to_string(),
         title: summary.title,
@@ -1879,11 +1884,11 @@ async fn show_entry(state: &SharedState, path: &str) -> Handled {
 async fn show_settings(state: &SharedState, path: &str, capability: &str, group: bool) -> Handled {
     if capability == "ssh-agent" && !group {
         let guard = state.lock().await;
-        let (vault, id) = match guard.find_entry(path) {
+        let (database, id) = match guard.find_entry(path) {
             Ok(found) => found,
             Err(e) => return err_handled(e.to_string()),
         };
-        return match crate::protocol::SettingsDto::for_keeagent(vault, &id, path) {
+        return match crate::protocol::SettingsDto::for_keeagent(database, &id, path) {
             Ok(dto) => ok_handled(Response::ok_settings(dto)),
             Err(e) => err_handled(e.to_string()),
         };
@@ -1895,33 +1900,34 @@ async fn show_settings(state: &SharedState, path: &str, capability: &str, group:
     };
     let guard = state.lock().await;
     if !group {
-        let (vault, id) = match guard.find_entry(path) {
+        let (database, id) = match guard.find_entry(path) {
             Ok(found) => found,
             Err(e) => return err_handled(e.to_string()),
         };
-        return match crate::protocol::SettingsDto::for_entry(vault, &id, path, cap) {
+        return match crate::protocol::SettingsDto::for_entry(database, &id, path, cap) {
             Ok(dto) => ok_handled(Response::ok_settings(dto)),
             Err(e) => err_handled(e.to_string()),
         };
     }
-    // A group (or the database, for an empty path) lives in one vault; with
+    // A group (or the database, for an empty path) lives in one database; with
     // several unlocked, the group must name exactly one of them.
-    let holders: Vec<&Vault> = guard
+    let holders: Vec<&Database> = guard
         .iter()
         .filter(|v| path.is_empty() || v.group_exists(path))
         .collect();
-    let vault = match holders.as_slice() {
+    let database = match holders.as_slice() {
         [one] => *one,
-        [] => return err_handled(format!("no unlocked vault has a group {path:?}")),
+        [] => return err_handled(format!("no unlocked database has a group {path:?}")),
         _ => {
             return err_handled(if path.is_empty() {
-                "several vaults are unlocked; database settings need one, or --vault".to_string()
+                "several databases are unlocked; database settings need one, or --database"
+                    .to_string()
             } else {
-                format!("group {path:?} exists in several unlocked vaults; use --vault")
+                format!("group {path:?} exists in several unlocked databases; use --database")
             })
         }
     };
-    match crate::protocol::SettingsDto::for_group(vault, path, cap) {
+    match crate::protocol::SettingsDto::for_group(database, path, cap) {
         Ok(dto) => ok_handled(Response::ok_settings(dto)),
         Err(e) => err_handled(e.to_string()),
     }
@@ -1959,8 +1965,8 @@ async fn set_settings(
             return err_handled("KeeAgent.settings belongs to an entry; groups have none");
         }
         match guard.find_entry_mut(w.path) {
-            Ok((vault, id)) => write_keeagent(vault, &id, w.document, w.utf16)
-                .and_then(|()| vault.save().map_err(|e| format!("saving vault: {e}"))),
+            Ok((database, id)) => write_keeagent(database, &id, w.document, w.utf16)
+                .and_then(|()| database.save().map_err(|e| format!("saving database: {e}"))),
             Err(e) => Err(e.to_string()),
         }
     } else {
@@ -1979,28 +1985,31 @@ async fn set_settings(
             Err(e) => return err_handled(e.to_string()),
         };
         if w.group {
-            let mut holders: Vec<&mut Vault> = guard
+            let mut holders: Vec<&mut Database> = guard
                 .iter_mut()
                 .filter(|v| w.path.is_empty() || v.group_exists(w.path))
                 .collect();
             if holders.len() != 1 {
                 return err_handled(if holders.is_empty() {
-                    format!("no unlocked vault has a group {:?}", w.path)
+                    format!("no unlocked database has a group {:?}", w.path)
                 } else {
-                    format!("{:?} is in several unlocked vaults; use --vault", w.path)
+                    format!(
+                        "{:?} is in several unlocked databases; use --database",
+                        w.path
+                    )
                 });
             }
-            let vault = holders.remove(0);
-            vault
+            let database = holders.remove(0);
+            database
                 .set_group_settings(w.path, cap, doc.as_ref())
                 .map_err(|e| e.to_string())
-                .and_then(|()| vault.save().map_err(|e| format!("saving vault: {e}")))
+                .and_then(|()| database.save().map_err(|e| format!("saving database: {e}")))
         } else {
             match guard.find_entry_mut(w.path) {
-                Ok((vault, id)) => vault
+                Ok((database, id)) => database
                     .store_settings(&id, cap, doc.as_ref())
                     .map_err(|e| e.to_string())
-                    .and_then(|()| vault.save().map_err(|e| format!("saving vault: {e}"))),
+                    .and_then(|()| database.save().map_err(|e| format!("saving database: {e}"))),
                 Err(e) => Err(e.to_string()),
             }
         }
@@ -2015,13 +2024,13 @@ async fn set_settings(
 /// Store (or with `None` remove) an entry's `KeeAgent.settings`, refusing a
 /// document that names a key the entry doesn't have.
 fn write_keeagent(
-    vault: &mut Vault,
+    database: &mut Database,
     id: &trove_core::EntryId,
     document: Option<&str>,
     utf16: bool,
 ) -> Result<(), String> {
     let Some(xml) = document else {
-        return vault
+        return database
             .remove_binary(id, "KeeAgent.settings")
             .map_err(|e| e.to_string());
     };
@@ -2039,7 +2048,7 @@ fn write_keeagent(
     {
         return Err(format!("KeeAgent.settings: {why}"));
     }
-    vault
+    database
         .attach_binary(id, "KeeAgent.settings", &bytes)
         .map_err(|e| e.to_string())
 }
@@ -2074,9 +2083,9 @@ async fn search(
     }
     let guard = state.lock().await;
     if guard.is_empty() {
-        return err_handled("no vault unlocked");
+        return err_handled("no database unlocked");
     }
-    // Searches the union — a hit in any unlocked vault counts. Unlike a
+    // Searches the union — a hit in any unlocked database counts. Unlike a
     // title-addressed read there is nothing to disambiguate: search returns
     // every match by design.
     let query = SearchQuery::default()
@@ -2086,7 +2095,7 @@ async fn search(
         .with_attachments(attachments.to_vec());
     let entries: Vec<EntryDto> = guard
         .iter()
-        .flat_map(|vault| vault.search_entries_with(&query))
+        .flat_map(|database| database.search_entries_with(&query))
         .map(search_hit_dto)
         .collect();
     ok_handled(Response::ok_list(entries))
@@ -2102,19 +2111,19 @@ async fn get_field(
     field: &str,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let guard = state.lock().await;
-    let (vault, id) = match guard.find_entry(path) {
+    let (database, id) = match guard.find_entry(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
     let gates = crate::approval::gates_for(
-        vault,
-        vault.path(),
+        database,
+        database.path(),
         &id,
         path,
         crate::approval::Reads::Field(field),
@@ -2132,17 +2141,17 @@ async fn get_field(
             return session_refused();
         }
         let guard = state.lock().await;
-        let (vault, id) = match guard.find_entry(path) {
+        let (database, id) = match guard.find_entry(path) {
             Ok(found) => found,
             Err(e) => return err_handled(e.to_string()),
         };
-        return match vault.get_field(&id, field) {
+        return match database.get_field(&id, field) {
             Ok(Some(value)) => ok_handled(Response::ok_value(value)),
             Ok(None) => err_handled(format!("entry '{path}' has no field '{field}'")),
             Err(e) => err_handled(format!("reading field: {e}")),
         };
     }
-    match vault.get_field(&id, field) {
+    match database.get_field(&id, field) {
         Ok(Some(value)) => ok_handled(Response::ok_value(value)),
         Ok(None) => err_handled(format!("entry '{path}' has no field '{field}'")),
         Err(e) => err_handled(format!("reading field: {e}")),
@@ -2150,7 +2159,7 @@ async fn get_field(
 }
 
 /// Code-gated HTTPS credential lookup used by Git's credential-helper
-/// protocol. The session guard stays held through the vault scan and secret
+/// protocol. The session guard stays held through the database scan and secret
 /// read, just like the other protected operations.
 async fn git_credential(
     state: &SharedState,
@@ -2165,15 +2174,15 @@ async fn git_credential(
     if !authorized {
         return Handled {
             response: Response::err(
-                "refused: vault locked, or session code missing/invalid for this uid",
+                "refused: database locked, or session code missing/invalid for this uid",
             ),
             shutdown: false,
         };
     }
     let guard = state.lock().await;
     let requested_host = host.to_lowercase();
-    for (vault, filter) in guard.iter_with_filters() {
-        for entry in vault.list_entries() {
+    for (database, filter) in guard.iter_with_filters() {
+        for entry in database.list_entries() {
             if !entry_matches_filter(&entry, filter) {
                 continue;
             }
@@ -2187,7 +2196,7 @@ async fn git_credential(
             if requested_user.is_some_and(|requested| requested != user) {
                 continue;
             }
-            let secret = match git_secret(vault, &entry.id) {
+            let secret = match git_secret(database, &entry.id) {
                 Ok(Some(secret)) if !secret.is_empty() => secret,
                 Ok(_) => continue,
                 Err(e) => return err_handled(format!("reading git credential: {e}")),
@@ -2209,17 +2218,19 @@ fn credential_url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_lowercase())
 }
 
-fn git_secret(vault: &Vault, id: &trove_core::EntryId) -> anyhow::Result<Option<String>> {
-    for name in vault.custom_field_names(id)? {
+fn git_secret(database: &Database, id: &trove_core::EntryId) -> anyhow::Result<Option<String>> {
+    for name in database.custom_field_names(id)? {
         if name.eq_ignore_ascii_case("git.token") {
-            if let Some(token) = vault.get_field(id, &name)? {
+            if let Some(token) = database.get_field(id, &name)? {
                 if !token.is_empty() {
                     return Ok(Some(token));
                 }
             }
         }
     }
-    Ok(vault.get_field(id, "Password")?.filter(|p| !p.is_empty()))
+    Ok(database
+        .get_field(id, "Password")?
+        .filter(|p| !p.is_empty()))
 }
 
 /// Code-gated write: create a password entry (groups mkdir-p) and persist.
@@ -2235,16 +2246,16 @@ async fn add_password(
     password: &str,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
     // `route_upsert` hands back the entry when it already exists — in ANY open
-    // vault, which is what "already exists" has to mean here, or `add` would
+    // database, which is what "already exists" has to mean here, or `add` would
     // create a duplicate that later reads then refuse as ambiguous.
-    let (vault, existing) = match guard.route_upsert(path) {
+    let (database, existing) = match guard.route_upsert(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
@@ -2253,7 +2264,7 @@ async fn add_password(
             "entry already exists: {path} (use `trove edit` to change it)"
         ));
     }
-    let id = match vault.add_entry(path) {
+    let id = match database.add_entry(path) {
         Ok(id) => id,
         Err(e) => return err_handled(format!("creating entry '{path}': {e}")),
     };
@@ -2265,43 +2276,43 @@ async fn add_password(
     ];
     for (name, value) in fields {
         if let Some(value) = value {
-            if let Err(e) = vault.set_field(&id, name, value) {
+            if let Err(e) = database.set_field(&id, name, value) {
                 return err_handled(format!("setting {name}: {e}"));
             }
         }
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     ok_handled(Response::ok_empty())
 }
 
-/// Union every open vault's agent keys, in unlock order.
+/// Union every open database's agent keys, in unlock order.
 ///
 /// Agents identify a key by public blob (SSH) or keygrip (GPG) — never by title
-/// or by which vault it came from — so unlocking several vaults simply grows
+/// or by which database it came from — so unlocking several databases simply grows
 /// the keyring and `ssh`/`gpg` pick whatever the peer accepts. The one genuine
-/// collision is the *same* keypair present in two vaults, which resolves
+/// collision is the *same* keypair present in two databases, which resolves
 /// last-unlock-wins: the signature is byte-identical either way, and only the
-/// comment shown by `ssh-add -l` differs. See `docs/multi-vault.md`.
-fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
+/// comment shown by `ssh-add -l` differs. See `docs/multi-database.md`.
+fn union_agent_keys(set: &DatabaseSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
     use std::collections::HashMap;
     let mut ssh: Vec<LoadedKey> = Vec::new();
     let mut ssh_seen: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut gpg: Vec<LoadedGpgKey> = Vec::new();
     let mut gpg_seen: HashMap<[u8; 20], usize> = HashMap::new();
     let mut gates = HashMap::new();
-    for (vault, filter) in set.iter_with_filters() {
-        let vault_label = vault
+    for (database, filter) in set.iter_with_filters() {
+        let database_label = database
             .path()
             .file_stem()
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
-            .unwrap_or("vault");
-        for mut key in load_ssh_keys_from_vault_filtered(vault, filter) {
+            .unwrap_or("database");
+        for mut key in load_ssh_keys_from_database_filtered(database, filter) {
             // Keep the source visible in ssh-add -l and trove ssh-agent list.
             // Entry lookup uses the unqualified loader in find_ssh_key above.
-            key.comment = format!("{vault_label}:{}", key.comment);
+            key.comment = format!("{database_label}:{}", key.comment);
             match ssh_seen.get(&key.public_blob) {
                 Some(&i) => ssh[i] = key,
                 None => {
@@ -2310,8 +2321,8 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
                 }
             }
         }
-        gates.extend(gpg_gates_for_vault(vault, filter));
-        for key in load_gpg_keys_from_vault_filtered(vault, filter) {
+        gates.extend(gpg_gates_for_database(database, filter));
+        for key in load_gpg_keys_from_database_filtered(database, filter) {
             let grip = gpg_keygrip(&key);
             match gpg_seen.get(&grip) {
                 Some(&i) => gpg[i] = key,
@@ -2328,27 +2339,27 @@ fn union_agent_keys(set: &VaultSet) -> (Vec<LoadedKey>, Vec<LoadedGpgKey>) {
 
 /// Which served GPG keys need Touch ID: those whose `<Key>` resolves
 /// `confirm="true"`, by keygrip.
-fn gpg_gates_for_vault(
-    vault: &Vault,
+fn gpg_gates_for_database(
+    database: &Database,
     filter: Option<&str>,
 ) -> std::collections::HashMap<String, crate::approval::Gate> {
     let mut out = std::collections::HashMap::new();
-    for entry in vault.list_entries() {
+    for entry in database.list_entries() {
         if !entry_matches_filter(&entry, filter) {
             continue;
         }
-        let Ok(Some(items)) = vault.effective_settings(&entry.id, Capability::GpgAgent) else {
+        let Ok(Some(items)) = database.effective_settings(&entry.id, Capability::GpgAgent) else {
             continue;
         };
         for item in items.iter().filter(|i| i.flag("confirm")) {
-            let Ok(Some(bytes)) = vault.read_binary(&entry.id, &item.key) else {
+            let Ok(Some(bytes)) = database.read_binary(&entry.id, &item.key) else {
                 continue;
             };
-            let Ok(keys) = gpg_keys_for_item(vault, &entry, item, &bytes) else {
+            let Ok(keys) = gpg_keys_for_item(database, &entry, item, &bytes) else {
                 continue;
             };
             let gate = crate::approval::gate(
-                vault.path(),
+                database.path(),
                 &entry.display_path(),
                 Capability::GpgAgent,
                 item,
@@ -2361,7 +2372,7 @@ fn gpg_gates_for_vault(
     out
 }
 
-/// Find the one SSH key across the open vaults that `entry` names.
+/// Find the one SSH key across the open databases that `entry` names.
 ///
 /// The agent comment is the entry's full path (`Work/SSH/github`) for the
 /// conventional `id` attachment and `<path>:<attachment>` for anything else, so
@@ -2371,17 +2382,17 @@ fn gpg_gates_for_vault(
 /// Ambiguity is an error rather than a guess. The whole point of `add` is that
 /// the caller states which key gets offered, so silently picking one of two
 /// would give back the uncertainty they came here to remove. The same keypair
-/// present in two vaults is not ambiguous — it is one key, and it resolves
-/// last-unlock-wins exactly as the main keyring does (docs/multi-vault.md).
-fn find_ssh_key(set: &VaultSet, entry: &str) -> Result<LoadedKey, String> {
+/// present in two databases is not ambiguous — it is one key, and it resolves
+/// last-unlock-wins exactly as the main keyring does (docs/multi-database.md).
+fn find_ssh_key(set: &DatabaseSet, entry: &str) -> Result<LoadedKey, String> {
     if set.is_empty() {
-        return Err("no vault is unlocked".to_string());
+        return Err("no database is unlocked".to_string());
     }
     let prefix = format!("{entry}:");
     let mut exact: Vec<LoadedKey> = Vec::new();
     let mut prefixed: Vec<LoadedKey> = Vec::new();
-    for (vault, filter) in set.iter_with_filters() {
-        for key in load_ssh_keys_from_vault_filtered(vault, filter) {
+    for (database, filter) in set.iter_with_filters() {
+        for key in load_ssh_keys_from_database_filtered(database, filter) {
             if key.comment == entry {
                 exact.push(key);
             } else if key.comment.starts_with(&prefix) {
@@ -2392,7 +2403,7 @@ fn find_ssh_key(set: &VaultSet, entry: &str) -> Result<LoadedKey, String> {
     // An exact hit beats an attachment-qualified one: on an entry holding both
     // `id` and `deploy`, the bare path means `id`.
     let mut candidates = if exact.is_empty() { prefixed } else { exact };
-    // Collapse the same keypair appearing in several vaults, keeping the last
+    // Collapse the same keypair appearing in several databases, keeping the last
     // seen — the signature is byte-identical either way.
     let mut seen: Vec<Vec<u8>> = Vec::new();
     candidates.reverse();
@@ -2407,7 +2418,7 @@ fn find_ssh_key(set: &VaultSet, entry: &str) -> Result<LoadedKey, String> {
     match candidates.len() {
         1 => Ok(candidates.remove(0)),
         0 => Err(format!(
-            "no SSH key in the unlocked vaults is named '{entry}'"
+            "no SSH key in the unlocked databases is named '{entry}'"
         )),
         _ => {
             let mut names: Vec<&str> = candidates.iter().map(|k| k.comment.as_str()).collect();
@@ -2421,12 +2432,12 @@ fn find_ssh_key(set: &VaultSet, entry: &str) -> Result<LoadedKey, String> {
     }
 }
 
-/// Every SSH key in the unlocked vaults whose entry matches `pattern` (a glob
+/// Every SSH key in the unlocked databases whose entry matches `pattern` (a glob
 /// over the key's entry path) and carries `tag`, sorted by comment, with the
-/// same keypair seen in several vaults collapsed to one. At least one of the
+/// same keypair seen in several databases collapsed to one. At least one of the
 /// two must be given, and something must match.
 fn find_ssh_keys_matching(
-    set: &VaultSet,
+    set: &DatabaseSet,
     pattern: Option<&str>,
     tag: Option<&str>,
 ) -> Result<Vec<LoadedKey>, String> {
@@ -2434,13 +2445,13 @@ fn find_ssh_keys_matching(
         return Err("name a pattern or a tag to add keys by".to_string());
     }
     if set.is_empty() {
-        return Err("no vault is unlocked".to_string());
+        return Err("no database is unlocked".to_string());
     }
     let mut found: Vec<LoadedKey> = Vec::new();
-    for (vault, filter) in set.iter_with_filters() {
-        let mut keys = load_ssh_keys_from_vault_filtered(vault, filter);
+    for (database, filter) in set.iter_with_filters() {
+        let mut keys = load_ssh_keys_from_database_filtered(database, filter);
         if let Some(tag) = tag {
-            let tagged: Vec<Vec<u8>> = load_ssh_keys_from_vault_filtered(vault, Some(tag))
+            let tagged: Vec<Vec<u8>> = load_ssh_keys_from_database_filtered(database, Some(tag))
                 .into_iter()
                 .map(|k| k.public_blob)
                 .collect();
@@ -2469,7 +2480,7 @@ fn find_ssh_keys_matching(
             (None, Some(t)) => format!("has tag '{t}'"),
             (None, None) => unreachable!("checked above"),
         };
-        return Err(format!("no SSH key in the unlocked vaults {what}"));
+        return Err(format!("no SSH key in the unlocked databases {what}"));
     }
     found.sort_by(|a, b| a.comment.cmp(&b.comment));
     Ok(found)
@@ -2526,10 +2537,10 @@ fn gpg_keygrip(key: &LoadedGpgKey) -> [u8; 20] {
 
 /// After a structural write (edit/remove/move/rmdir) the affected entries may
 /// have carried agent-served key material — rebuild both agent stores from the
-/// whole open set so they never serve stale keys, and so a write to one vault
-/// doesn't drop another vault's keys off the keyring.
+/// whole open set so they never serve stale keys, and so a write to one database
+/// doesn't drop another database's keys off the keyring.
 async fn rebuild_agent_stores(
-    set: &VaultSet,
+    set: &DatabaseSet,
     key_store: &KeyStore,
     gpg_store: &GpgKeyStore,
     scoped_agents: &ScopedAgents,
@@ -2545,7 +2556,7 @@ async fn rebuild_agent_stores(
         let mut keys = gpg_store.write().await;
         *keys = gpg;
     }
-    // Scoped agents hold their own copies, so a key the vault no longer has
+    // Scoped agents hold their own copies, so a key the database no longer has
     // would keep signing on a private socket until the next lock. Replacing an
     // entry's key, deleting the entry, or removing its group all land here, and
     // all three mean the old key is gone — for every agent, not just the main
@@ -2571,40 +2582,40 @@ async fn edit_entry(
     clear_tags: bool,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let (vault, id) = match guard.find_entry_mut(path) {
+    let (database, id) = match guard.find_entry_mut(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
     for field in unsets {
-        match vault.get_field(&id, field) {
+        match database.get_field(&id, field) {
             Ok(Some(_)) => {}
             Ok(None) => return err_handled(format!("entry '{path}' has no field '{field}'")),
             Err(e) => return err_handled(format!("checking field {field}: {e}")),
         }
     }
     for (field, value) in sets {
-        if let Err(e) = vault.set_field(&id, field, value) {
+        if let Err(e) = database.set_field(&id, field, value) {
             return err_handled(format!("setting {field}: {e}"));
         }
     }
     for field in unsets {
-        if let Err(e) = vault.remove_field(&id, field) {
+        if let Err(e) = database.remove_field(&id, field) {
             return err_handled(format!("unsetting {field}: {e}"));
         }
     }
     if let Some(new_title) = title {
-        if let Err(e) = vault.set_field(&id, "Title", new_title) {
+        if let Err(e) = database.set_field(&id, "Title", new_title) {
             return err_handled(format!("renaming: {e}"));
         }
     }
     if clear_tags || !add_tags.is_empty() || !remove_tags.is_empty() {
-        let mut tags = vault
+        let mut tags = database
             .get_entry(&id)
             .map(|entry| entry.tags)
             .unwrap_or_default();
@@ -2624,12 +2635,12 @@ async fn edit_entry(
                 tags.push(tag.clone());
             }
         }
-        if let Err(e) = vault.set_tags(&id, &tags) {
+        if let Err(e) = database.set_tags(&id, &tags) {
             return err_handled(format!("setting tags: {e}"));
         }
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_empty())
@@ -2648,22 +2659,22 @@ async fn remove_entry(
     permanent: bool,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let (vault, id) = match guard.find_entry_mut(path) {
+    let (database, id) = match guard.find_entry_mut(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    let recycled = match vault.recycle_entry(&id, permanent) {
+    let recycled = match database.recycle_entry(&id, permanent) {
         Ok(r) => r,
         Err(e) => return err_handled(format!("removing entry: {e}")),
     };
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_recycled(recycled))
@@ -2682,26 +2693,26 @@ async fn move_entry(
     group: &str,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let (vault, id) = match guard.find_entry_mut(path) {
+    let (database, id) = match guard.find_entry_mut(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    if let Err(e) = vault.move_entry_to_path(&id, group) {
+    if let Err(e) = database.move_entry_to_path(&id, group) {
         return err_handled(format!("moving entry: {e}"));
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     // A move changes the entry's group, and now its title too — and an SSH
     // key's agent comment IS its display path. Without this the agent keeps
     // announcing the old path until something else rebuilds the stores or the
-    // vault is unlocked again, so `ssh-add -l` names a path that no longer
+    // database is unlocked again, so `ssh-add -l` names a path that no longer
     // exists.
     rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_empty())
@@ -2710,7 +2721,7 @@ async fn move_entry(
 /// Code-gated write: duplicate an entry, whole, at another path.
 ///
 /// Rebuilds the agent stores afterwards, unlike `move_entry`: a move leaves the
-/// same key material in the vault under a different name, but a copy produces a
+/// same key material in the database under a different name, but a copy produces a
 /// second entry the agent should serve under its own comment. Without the
 /// rebuild the new name would not appear until the next unlock.
 #[allow(clippy::too_many_arguments)]
@@ -2725,21 +2736,21 @@ async fn copy_entry(
     dest: &str,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let (vault, id) = match guard.find_entry_mut(path) {
+    let (database, id) = match guard.find_entry_mut(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    if let Err(e) = vault.copy_entry(&id, dest) {
+    if let Err(e) = database.copy_entry(&id, dest) {
         return err_handled(format!("copying entry: {e}"));
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_empty())
@@ -2753,23 +2764,23 @@ async fn mkdir(
     path: &str,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
     // A group has no entry title to route on, so this needs an unambiguous
-    // target vault the same way `add` does.
-    let vault = match guard.sole_mut() {
+    // target database the same way `add` does.
+    let database = match guard.sole_mut() {
         Ok(v) => v,
         Err(e) => return err_handled(e.to_string()),
     };
-    if let Err(e) = vault.add_group(path) {
+    if let Err(e) = database.add_group(path) {
         return err_handled(format!("creating group: {e}"));
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     ok_handled(Response::ok_empty())
 }
@@ -2788,22 +2799,22 @@ async fn rmdir(
     recursive: bool,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let vault = match guard.sole_mut() {
+    let database = match guard.sole_mut() {
         Ok(v) => v,
         Err(e) => return err_handled(e.to_string()),
     };
-    let recycled = match vault.remove_group(path, permanent, recursive) {
+    let recycled = match database.remove_group(path, permanent, recursive) {
         Ok(r) => r,
         Err(e) => return err_handled(format!("removing group: {e}")),
     };
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     rebuild_agent_stores(&guard, key_store, gpg_store, scoped_agents).await;
     ok_handled(Response::ok_recycled(recycled))
@@ -2818,17 +2829,17 @@ async fn get_totp(
     path: &str,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let guard = state.lock().await;
-    let (vault, id) = match guard.find_entry(path) {
+    let (database, id) = match guard.find_entry(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    match vault.totp_now(&id) {
+    match database.totp_now(&id) {
         Ok(totp) => ok_handled(Response::ok_totp(totp)),
         Err(e) => err_handled(format!("totp: {e}")),
     }
@@ -2844,28 +2855,28 @@ async fn add_totp(
     uri: &str,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let (vault, existing) = match guard.route_upsert(path) {
+    let (database, existing) = match guard.route_upsert(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
     let id = match existing {
         Some(id) => id,
-        None => match vault.add_entry(path) {
+        None => match database.add_entry(path) {
             Ok(id) => id,
             Err(e) => return err_handled(format!("creating entry '{path}': {e}")),
         },
     };
-    if let Err(e) = vault.set_totp_uri(&id, uri) {
+    if let Err(e) = database.set_totp_uri(&id, uri) {
         return err_handled(format!("setting otp: {e}"));
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     ok_handled(Response::ok_empty())
 }
@@ -2874,20 +2885,23 @@ async fn add_totp(
 /// agent would serve, keyed by entry path. Entries it would skip are skipped
 /// here too, so `gpg-agent import` never hands gpg a key trove can't sign
 /// with.
-pub fn gpg_public_keys_from_vault(vault: &Vault, filter: Option<&str>) -> Vec<(String, Vec<u8>)> {
+pub fn gpg_public_keys_from_database(
+    database: &Database,
+    filter: Option<&str>,
+) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
-    for entry in vault.list_entries() {
+    for entry in database.list_entries() {
         if !entry_matches_filter(&entry, filter) {
             continue;
         }
-        let Ok(Some(items)) = vault.effective_settings(&entry.id, Capability::GpgAgent) else {
+        let Ok(Some(items)) = database.effective_settings(&entry.id, Capability::GpgAgent) else {
             continue;
         };
         for item in items {
-            let Ok(Some(bytes)) = vault.read_binary(&entry.id, &item.key) else {
+            let Ok(Some(bytes)) = database.read_binary(&entry.id, &item.key) else {
                 continue;
             };
-            if gpg_keys_for_item(vault, &entry, &item, &bytes).is_err() {
+            if gpg_keys_for_item(database, &entry, &item, &bytes).is_err() {
                 continue;
             }
             if let Ok(export) = gpg_keys::public_key_export(&bytes) {
@@ -2901,12 +2915,12 @@ pub fn gpg_public_keys_from_vault(vault: &Vault, filter: Option<&str>) -> Vec<(S
 /// The keys one `<Key>` of an entry's `GpgAgent.settings` serves: those its
 /// export holds, narrowed to the listed `keygrips` and to its `uses`.
 fn gpg_keys_for_item(
-    vault: &Vault,
+    database: &Database,
     entry: &EntrySummary,
     item: &EffectiveItem,
     bytes: &[u8],
 ) -> Result<Vec<LoadedGpgKey>, String> {
-    let mut keys = parse_gpg_entry(vault, entry, bytes).map_err(|e| match e {
+    let mut keys = parse_gpg_entry(database, entry, bytes).map_err(|e| match e {
         gpg_keys::ParseError::NoSigningKey => {
             "no signing key in this export (supported: ed25519, RSA)".to_string()
         }
@@ -2955,13 +2969,13 @@ fn gpg_keys_for_item(
 /// decrypted with the entry's Password, the convention KeePassXC uses for
 /// protected SSH keys; without a Password it stays `Encrypted`.
 fn parse_gpg_entry(
-    vault: &Vault,
+    database: &Database,
     entry: &EntrySummary,
     bytes: &[u8],
 ) -> Result<Vec<LoadedGpgKey>, gpg_keys::ParseError> {
     match gpg_keys::parse_gpg_export(bytes, &entry.title) {
         Err(gpg_keys::ParseError::Encrypted) => {
-            let password = vault
+            let password = database
                 .get_field(&entry.id, "Password")
                 .ok()
                 .flatten()
@@ -2984,21 +2998,21 @@ async fn set_icon(
     icon: Option<usize>,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let (vault, id) = match guard.find_entry_mut(path) {
+    let (database, id) = match guard.find_entry_mut(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    if let Err(e) = vault.set_entry_icon(&id, icon) {
+    if let Err(e) = database.set_entry_icon(&id, icon) {
         return err_handled(e.to_string());
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     ok_handled(Response::ok_empty())
 }
@@ -3012,50 +3026,53 @@ async fn set_expiry(
     expires: Option<&str>,
     code: &str,
 ) -> Handled {
-    // Hold authorization stable through vault access (session -> state).
+    // Hold authorization stable through database access (session -> state).
     let sess = session.lock().await;
     if !session_matches(&sess, peer_uid, code) {
         return session_refused();
     }
     let mut guard = state.lock().await;
-    let (vault, id) = match guard.find_entry_mut(path) {
+    let (database, id) = match guard.find_entry_mut(path) {
         Ok(found) => found,
         Err(e) => return err_handled(e.to_string()),
     };
-    if let Err(e) = vault.set_entry_expiry(&id, expires) {
+    if let Err(e) = database.set_entry_expiry(&id, expires) {
         return err_handled(e.to_string());
     }
-    if let Err(e) = vault.save() {
-        return err_handled(format!("saving vault: {e}"));
+    if let Err(e) = database.save() {
+        return err_handled(format!("saving database: {e}"));
     }
     ok_handled(Response::ok_empty())
 }
 
-/// Walk every entry in `vault`, look for a `gpg-priv` attachment, and try to
+/// Walk every entry in `database`, look for a `gpg-priv` attachment, and try to
 /// parse it as an OpenPGP secret-key export. Returns one `LoadedGpgKey` per
 /// ed25519 secret key found across all entries. Other algorithms and
 /// encrypted exports are skipped with a one-line warning. Never panics.
-pub fn load_gpg_keys_from_vault(vault: &Vault) -> Vec<LoadedGpgKey> {
-    load_gpg_keys_from_vault_filtered(vault, None)
+pub fn load_gpg_keys_from_database(database: &Database) -> Vec<LoadedGpgKey> {
+    load_gpg_keys_from_database_filtered(database, None)
 }
 
 /// Filtered variant used by an unlock that selected a tag.
-pub fn load_gpg_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) -> Vec<LoadedGpgKey> {
+pub fn load_gpg_keys_from_database_filtered(
+    database: &Database,
+    filter: Option<&str>,
+) -> Vec<LoadedGpgKey> {
     let mut skipped = Vec::new();
-    let out = load_gpg_keys_reporting(vault, filter, &mut skipped);
+    let out = load_gpg_keys_reporting(database, filter, &mut skipped);
     log_skipped(&skipped);
     out
 }
 
-/// [`load_gpg_keys_from_vault_filtered`], reporting what it skipped in
+/// [`load_gpg_keys_from_database_filtered`], reporting what it skipped in
 /// `skipped` instead of logging it.
 fn load_gpg_keys_reporting(
-    vault: &Vault,
+    database: &Database,
     filter: Option<&str>,
     skipped: &mut Vec<SkippedKeyDto>,
 ) -> Vec<LoadedGpgKey> {
     let mut out = Vec::new();
-    let entries: Vec<EntrySummary> = vault.list_entries();
+    let entries: Vec<EntrySummary> = database.list_entries();
     for entry in entries {
         if !entry_matches_filter(&entry, filter) {
             continue;
@@ -3063,13 +3080,13 @@ fn load_gpg_keys_reporting(
         // No `GpgAgent.settings` (and no legacy `gpg-priv`) means the entry
         // serves no GPG key; a broken document is reported, never skipped
         // silently.
-        let items = match vault.effective_settings(&entry.id, Capability::GpgAgent) {
+        let items = match database.effective_settings(&entry.id, Capability::GpgAgent) {
             Ok(Some(items)) => items,
             Ok(None) => continue,
             Err(e) => {
                 skipped.push(skipped_key(
                     "gpg",
-                    vault,
+                    database,
                     &entry,
                     Capability::GpgAgent.attachment_name(),
                     e.to_string(),
@@ -3079,9 +3096,9 @@ fn load_gpg_keys_reporting(
         };
         for item in items {
             let mut skip = |reason: String| {
-                skipped.push(skipped_key("gpg", vault, &entry, &item.key, reason));
+                skipped.push(skipped_key("gpg", database, &entry, &item.key, reason));
             };
-            let bytes = match vault.read_binary(&entry.id, &item.key) {
+            let bytes = match database.read_binary(&entry.id, &item.key) {
                 Ok(Some(b)) => b,
                 Ok(None) => {
                     skip(
@@ -3095,7 +3112,7 @@ fn load_gpg_keys_reporting(
                     continue;
                 }
             };
-            match gpg_keys_for_item(vault, &entry, &item, &bytes) {
+            match gpg_keys_for_item(database, &entry, &item, &bytes) {
                 Ok(loaded) => out.extend(loaded),
                 Err(reason) => skip(reason),
             }
@@ -3104,7 +3121,7 @@ fn load_gpg_keys_reporting(
     out
 }
 
-/// Walk every entry in `vault` and collect SSH private keys.
+/// Walk every entry in `database` and collect SSH private keys.
 ///
 /// If an entry has a `KeeAgent.settings` attachment, we follow it: load only
 /// the attachment it declares (if `AllowUseOfSshKey` + `AddAtDatabaseOpen`
@@ -3112,32 +3129,35 @@ fn load_gpg_keys_reporting(
 ///
 /// If no `KeeAgent.settings` is present we fall back to content scanning:
 /// every attachment is probed, and anything that parses as a private key is
-/// loaded. This keeps plain KeePassXC vaults working without any settings blob.
+/// loaded. This keeps plain KeePassXC databases working without any settings blob.
 ///
 /// The ssh-agent comment (`ssh-add -l`) is `<path>:<attachment>` (or just
 /// `<path>` for the conventional `id` attachment name) where `<path>` is the
 /// full group-prefixed title (`Work/SSH/github`).
-pub fn load_ssh_keys_from_vault(vault: &Vault) -> Vec<LoadedKey> {
-    load_ssh_keys_from_vault_filtered(vault, None)
+pub fn load_ssh_keys_from_database(database: &Database) -> Vec<LoadedKey> {
+    load_ssh_keys_from_database_filtered(database, None)
 }
 
 /// Filtered variant used by an unlock that selected a tag.
-pub fn load_ssh_keys_from_vault_filtered(vault: &Vault, filter: Option<&str>) -> Vec<LoadedKey> {
+pub fn load_ssh_keys_from_database_filtered(
+    database: &Database,
+    filter: Option<&str>,
+) -> Vec<LoadedKey> {
     let mut skipped = Vec::new();
-    let out = load_ssh_keys_reporting(vault, filter, &mut skipped);
+    let out = load_ssh_keys_reporting(database, filter, &mut skipped);
     log_skipped(&skipped);
     out
 }
 
-/// [`load_ssh_keys_from_vault_filtered`], reporting what it skipped in
+/// [`load_ssh_keys_from_database_filtered`], reporting what it skipped in
 /// `skipped` instead of logging it.
 fn load_ssh_keys_reporting(
-    vault: &Vault,
+    database: &Database,
     filter: Option<&str>,
     skipped: &mut Vec<SkippedKeyDto>,
 ) -> Vec<LoadedKey> {
     let mut out = Vec::new();
-    let entries: Vec<EntrySummary> = vault.list_entries();
+    let entries: Vec<EntrySummary> = database.list_entries();
     for entry in entries {
         if !entry_matches_filter(&entry, filter) {
             continue;
@@ -3148,13 +3168,13 @@ fn load_ssh_keys_reporting(
             .any(|a| a == keeagent::ATTACHMENT_NAME)
         {
             // KeeAgent.settings present — let it decide which attachment to load.
-            let settings_bytes = match vault.read_binary(&entry.id, keeagent::ATTACHMENT_NAME) {
+            let settings_bytes = match database.read_binary(&entry.id, keeagent::ATTACHMENT_NAME) {
                 Ok(Some(b)) => b,
                 Ok(None) => continue,
                 Err(e) => {
                     skipped.push(skipped_key(
                         "ssh",
-                        vault,
+                        database,
                         &entry,
                         keeagent::ATTACHMENT_NAME,
                         format!("failed to read the attachment: {e}"),
@@ -3167,7 +3187,7 @@ fn load_ssh_keys_reporting(
                 keeagent::Decision::Unusable(reason) => {
                     skipped.push(skipped_key(
                         "ssh",
-                        vault,
+                        database,
                         &entry,
                         keeagent::ATTACHMENT_NAME,
                         reason,
@@ -3178,12 +3198,12 @@ fn load_ssh_keys_reporting(
                     forward,
                 } => {
                     if let Some(mut k) =
-                        try_load_ssh_attachment(vault, &entry, &attachment, skipped)
+                        try_load_ssh_attachment(database, &entry, &attachment, skipped)
                     {
                         // The settings blob is also where the entry states what
                         // it wants done with the copy pushed into the user's own
                         // agent; carry that on the key itself so unlock/lock
-                        // don't have to re-read the vault.
+                        // don't have to re-read the database.
                         k.forward = forward;
                         out.push(k);
                     }
@@ -3194,7 +3214,7 @@ fn load_ssh_keys_reporting(
             // keep `ForwardPolicy::default()`: forwarded, removed at lock, no
             // per-entry constraints.
             for att_name in &entry.attachment_names {
-                if let Some(k) = try_load_ssh_attachment(vault, &entry, att_name, skipped) {
+                if let Some(k) = try_load_ssh_attachment(database, &entry, att_name, skipped) {
                     out.push(k);
                 }
             }
@@ -3210,15 +3230,15 @@ fn entry_matches_filter(entry: &EntrySummary, filter: Option<&str>) -> bool {
 /// Try to read and parse a single attachment as an SSH private key.
 /// Silent on non-key content; reports PEM-shaped blobs that fail to parse.
 fn try_load_ssh_attachment(
-    vault: &Vault,
+    database: &Database,
     entry: &EntrySummary,
     attachment_name: &str,
     skipped: &mut Vec<SkippedKeyDto>,
 ) -> Option<LoadedKey> {
     let mut skip = |reason: String| {
-        skipped.push(skipped_key("ssh", vault, entry, attachment_name, reason));
+        skipped.push(skipped_key("ssh", database, entry, attachment_name, reason));
     };
-    let bytes = match vault.read_binary(&entry.id, attachment_name) {
+    let bytes = match database.read_binary(&entry.id, attachment_name) {
         Ok(Some(b)) => b,
         Ok(None) => return None,
         Err(e) => {
@@ -3233,9 +3253,9 @@ fn try_load_ssh_attachment(
         format!("{display}:{attachment_name}")
     };
     // KeePassXC decrypts a passphrase-protected key with the entry's Password,
-    // so a vault that works there keeps working here. Only read it when needed.
+    // so a database that works there keeps working here. Only read it when needed.
     let parsed = match ssh_keys::parse_private_key(&bytes, &comment) {
-        Err(ssh_keys::ParseError::Encrypted) => match vault.get_field(&entry.id, "Password") {
+        Err(ssh_keys::ParseError::Encrypted) => match database.get_field(&entry.id, "Password") {
             Ok(Some(password)) if !password.is_empty() => {
                 ssh_keys::parse_private_key_with_passphrase(
                     &bytes,
@@ -3251,7 +3271,7 @@ fn try_load_ssh_attachment(
         Ok(mut loaded) => {
             // Which servers the entry says this key is for. Absent is the
             // normal case and means "anyone" — see `ssh_agent::hostkey`.
-            if let Ok(Some(field)) = vault.get_field(&entry.id, hostkey::FIELD_HOST_KEYS) {
+            if let Ok(Some(field)) = database.get_field(&entry.id, hostkey::FIELD_HOST_KEYS) {
                 loaded.host_keys = hostkey::parse_declarations(&field);
             }
             Some(loaded)
@@ -3293,17 +3313,17 @@ fn try_load_ssh_attachment(
     }
 }
 
-/// One skipped key, located by vault, entry path and attachment.
+/// One skipped key, located by database, entry path and attachment.
 fn skipped_key(
     agent: &str,
-    vault: &Vault,
+    database: &Database,
     entry: &EntrySummary,
     attachment: &str,
     reason: String,
 ) -> SkippedKeyDto {
     SkippedKeyDto {
         agent: agent.to_string(),
-        vault: vault.path().to_path_buf(),
+        database: database.path().to_path_buf(),
         entry: entry.display_path(),
         attachment: attachment.to_string(),
         reason,
@@ -3321,12 +3341,12 @@ fn log_skipped(skipped: &[SkippedKeyDto]) {
     }
 }
 
-/// Every key in `vault` (under `filter`) that the SSH and GPG agents could
+/// Every key in `database` (under `filter`) that the SSH and GPG agents could
 /// not load, and why.
-fn skipped_keys_in(vault: &Vault, filter: Option<&str>) -> Vec<SkippedKeyDto> {
+fn skipped_keys_in(database: &Database, filter: Option<&str>) -> Vec<SkippedKeyDto> {
     let mut skipped = Vec::new();
-    load_ssh_keys_reporting(vault, filter, &mut skipped);
-    load_gpg_keys_reporting(vault, filter, &mut skipped);
+    load_ssh_keys_reporting(database, filter, &mut skipped);
+    load_gpg_keys_reporting(database, filter, &mut skipped);
     skipped
 }
 
@@ -3366,7 +3386,7 @@ mod tests {
     #[test]
     fn an_entry_pointing_at_an_external_key_file_is_reported() {
         let dir = tempfile::TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("v.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("v.kdbx"), "pw").unwrap();
         let id = v.add_entry("Infra/elsewhere").unwrap();
         let settings = br#"<?xml version="1.0"?>
 <EntrySettings>

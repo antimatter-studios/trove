@@ -4,10 +4,11 @@ import { Icon } from './icons.jsx';
 import { buildTree, resolveEntryPath, isVisibleIn, recycleBinPath } from './tree.js';
 import * as api from './api.js';
 import { Sidebar, EntryList, Detail } from './views.jsx';
+import { DatabaseSync, EntryHistoryModal } from './DatabaseSync.jsx';
 import { useDragController, DragGhost, rowAt, overList } from './drag.jsx';
 import { dropZone, indexTree, resolveGroupDrop, resolveEntryDrop } from './dnd.js';
-import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, VaultSwitcher, OpenVaultModal, ClipboardToast, PlainToast, SettingsModal, NewVaultModal, EditFolderModal } from './overlays.jsx';
-// Trove — main app (multi-vault, backed by real .kdbx files via src/api.js)
+import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, DatabaseSwitcher, DatabaseMetadataModal, OpenDatabaseModal, ClipboardToast, PlainToast, SettingsModal, NewDatabaseModal, EditFolderModal } from './overlays.jsx';
+// Trove — main app (multi-database, backed by real .kdbx files via src/api.js)
 
 const { useState, useEffect, useRef, useCallback } = React;
 
@@ -28,7 +29,7 @@ function ResizeHandle({ onDelta, onReset, label }) {
   // Keep the latest onDelta in a ref so the drag effect depends only on `drag`
   // (onDelta is a fresh closure each render). The effect then runs once per drag
   // and its cleanup reliably restores the body styles on drag-end AND on
-  // unmount — if a shortcut locks/switches the vault mid-drag the handle
+  // unmount — if a shortcut locks/switches the database mid-drag the handle
   // unmounts with no mouseup, and must not leave the resize cursor + disabled
   // text selection stuck until reload.
   const onDeltaRef = useRef(onDelta);
@@ -58,8 +59,8 @@ function ResizeHandle({ onDelta, onReset, label }) {
   );
 }
 
-// Placeholder so the chrome renders before any vault is registered (fresh
-// install with no persisted recents). It reads as a locked, empty vault.
+// Placeholder so the chrome renders before any database is registered (fresh
+// install with no persisted recents). It reads as a locked, empty database.
 // Countdown text. Coarse while it is far away (nobody reads "1:04:59" as
 // anything but "about an hour") and precise under a minute, when it does start
 // to matter.
@@ -76,25 +77,27 @@ function fmtLeft(ms) {
   return `${s}s`;
 }
 
-const NO_VAULT = { id: null, name: "No vault", file: "—", path: "", locked: true, entries: [], groups: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
+const NO_DATABASE = { id: null, name: "No database", file: "—", path: "", locked: true, entries: [], groups: [], group: "__root", selId: null, query: "", sort: "title", loaded: false };
 
-// Give a fetched VaultDto the per-vault view state the UI layers on top.
+// Give a fetched DatabaseDto the per-database view state the UI layers on top.
 function withViewState(v) {
-  return { ...v, entries: [], groups: [], group: "__all", selId: null, query: "", sort: "title", loaded: false };
+  return { ...v, entries: [], groups: [], group: "__root", selId: null, query: "", sort: "title", loaded: false };
 }
 
 function App() {
-  // vaults: each is a VaultDto (id/name/file/path/locked) + per-vault view state.
-  const [vaults, setVaults] = useState([]);
+  // databases: each is a DatabaseDto (id/name/file/path/locked) + per-database view state.
+  const [databases, setDatabases] = useState([]);
   const [activeId, setActiveId] = useState(null);
-  const vault = vaults.find((v) => v.id === activeId) || vaults[0] || NO_VAULT;
-  const hasUnlockedVault = vaults.some((v) => !v.locked);
+  const databaseStateRef = useRef({ databases, activeId });
+  databaseStateRef.current = { databases, activeId };
+  const database = databases.find((v) => v.id === activeId) || databases[0] || NO_DATABASE;
+  const hasUnlockedDatabase = databases.some((v) => !v.locked);
   const patch = useCallback((p) => {
-    setVaults((vs) => vs.map((v) => v.id === activeId ? { ...v, ...(typeof p === "function" ? p(v) : p) } : v));
+    setDatabases((vs) => vs.map((v) => v.id === activeId ? { ...v, ...(typeof p === "function" ? p(v) : p) } : v));
   }, [activeId]);
 
-  const { locked, entries, group, selId, query, sort } = vault;
-  const setGroup = (g) => patch({ group: g });
+  const { locked, entries, group, selId, query, sort } = database;
+  const setGroup = (g) => { setSyncOpen(false); patch({ group: g }); };
   const setSelId = (id) => patch({ selId: id });
   const setQuery = (q) => patch({ query: q });
 
@@ -110,11 +113,14 @@ function App() {
   const [settings, setSettings] = useState(null);
   const [themeMenu, setThemeMenu] = useState(false);
   const [switcher, setSwitcher] = useState(false);
-  const [openVault, setOpenVault] = useState(false);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [historyEntry, setHistoryEntry] = useState(null);
+  const [openDatabase, setOpenDatabase] = useState(false);
   // Which build this is. A dev window and an installed one look identical
   // otherwise, which makes "is this even my change?" a guess.
   const [build, setBuild] = useState(null);
-  const [newVaultPath, setNewVaultPath] = useState(null);
+  const [newDatabasePath, setNewDatabasePath] = useState(null);
   const [revealed, setRevealed] = useState(false);
   // Secret detail for the selected entry, fetched on selection (get_entry_detail).
   const [detail, setDetail] = useState({ notes: "", fields: [], password: "" });
@@ -157,17 +163,17 @@ function App() {
   const appLockAt = useRef(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!hasUnlockedVault) return undefined;
+    if (!hasUnlockedDatabase) return undefined;
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [hasUnlockedVault]);
+  }, [hasUnlockedDatabase]);
 
-  const openCount = vaults.filter((v) => !v.locked).length;
-  const agentKeys = vaults.reduce((n, v) => n + (v.agentKeys || 0), 0);
+  const openCount = databases.filter((v) => !v.locked).length;
+  const agentKeys = databases.reduce((n, v) => n + (v.agentKeys || 0), 0);
   const idleMins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
   // Counts down to the window locking; resets on every interaction, so it also
   // shows that trove noticed you are still here.
-  const appLockLeft = idleMins > 0 && hasUnlockedVault && appLockAt.current
+  const appLockLeft = idleMins > 0 && hasUnlockedDatabase && appLockAt.current
     ? Math.max(0, appLockAt.current - now)
     : null;
   const idleLabel = idleMins > 0
@@ -177,7 +183,7 @@ function App() {
   // Counts down to the first forwarded key dropping out of the agent. Not a
   // "data lock" timer — a data lock is something you do, not something that
   // happens — this is the expiry those keys were given.
-  const expireAt = vaults.reduce(
+  const expireAt = databases.reduce(
     (soonest, v) => (v.keysExpireAt && (!soonest || v.keysExpireAt < soonest) ? v.keysExpireAt : soonest),
     null
   );
@@ -190,7 +196,7 @@ function App() {
       .then(setSettings)
       .catch((e) => console.error("settings load failed", e));
   }, [settings]);
-  // Per-key opt-in. The backend writes KeeAgent.settings into the vault and
+  // Per-key opt-in. The backend writes KeeAgent.settings into the database and
   // adds/removes the key in the running agent, then hands back a fresh list.
   const saveSettings = useCallback((next) => {
     setSettings(next);
@@ -200,20 +206,19 @@ function App() {
   useEffect(() => { document.documentElement.dataset.theme = theme; try { localStorage.setItem("trove.theme", theme); } catch (e) {} }, [theme]);
   useEffect(() => { document.documentElement.dataset.accent = accent; try { localStorage.setItem("trove.accent", accent); } catch (e) {} }, [accent]);
 
-  // ---- startup: load persisted registered vaults (all come back locked) ----
+  // ---- startup: load persisted registered databases (all come back locked) ----
   useEffect(() => {
-    api.listVaults().then((vs) => {
+    api.listDatabases().then((vs) => {
       const mapped = (vs || []).map(withViewState);
-      setVaults(mapped);
+      setDatabases(mapped);
       if (mapped.length) setActiveId(mapped[0].id);
-      else setOpenVault(true);
+      else setOpenDatabase(true);
     }).catch(() => {});
   }, []);
 
   // ---- tree, filtered + sorted list ----
-  const tree = React.useMemo(() => buildTree(entries, vault.groups), [entries, vault.groups]);
-  const favCount = entries.filter((e) => e.fav).length;
-  const binPath = recycleBinPath(vault.groups);
+  const tree = React.useMemo(() => buildTree(entries, database.groups), [entries, database.groups]);
+  const binPath = recycleBinPath(database.groups);
 
   const filtered = React.useMemo(() => {
     let out = entries;
@@ -244,7 +249,7 @@ function App() {
   }, [filtered, selId, patch]);
 
   const selected = entries.find((e) => e.id === selId) || null;
-  const anyOverlay = palette || form || del || help || openVault;
+  const anyOverlay = palette || form || del || help || openDatabase || metadataOpen || historyEntry;
 
   // ---- fetch secret detail (notes / custom fields / password) on selection ----
   // Re-runs on selection change AND when the selected entry's content changes:
@@ -253,57 +258,58 @@ function App() {
   // password/notes/fields shown and copyable.
   useEffect(() => {
     setRevealed(false);
-    if (!selected || vault.locked || vault.id == null) { setDetail({ notes: "", fields: [], password: "" }); return; }
+    if (!selected || database.locked || database.id == null) { setDetail({ notes: "", fields: [], password: "" }); return; }
     const eid = selected.id;
     let cancelled = false;
-    api.getEntryDetail(vault.id, eid)
+    api.getEntryDetail(database.id, eid)
       .then((d) => { if (!cancelled) setDetail(d || { notes: "", fields: [], password: "" }); })
       .catch(() => { if (!cancelled) setDetail({ notes: "", fields: [], password: "" }); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selId, activeId, vault.locked, vault.id, selected?.modified]);
+  }, [selId, activeId, database.locked, database.id, selected?.modified]);
 
-  // ---- lazily load entries for an unlocked-but-not-yet-loaded vault ----
+  // ---- lazily load entries for an unlocked-but-not-yet-loaded database ----
   useEffect(() => {
-    const v = vaults.find((x) => x.id === activeId);
+    const v = databases.find((x) => x.id === activeId);
     if (!v || v.locked || v.loaded) return;
     let cancelled = false;
     Promise.all([api.listEntries(v.id), api.listGroups(v.id)]).then(([list, groups]) => {
       if (cancelled) return;
-      setVaults((vs) => vs.map((x) => x.id === v.id
-        ? { ...x, entries: list, groups, loaded: true, selId: x.selId || (list[0] ? list[0].id : null) }
+      const firstEntry = list.find((entry) => entry.id === v.selId) || list[0];
+      setDatabases((vs) => vs.map((x) => x.id === v.id
+        ? { ...x, entries: list, groups, loaded: true, group: firstEntry?.groupPath || "__root", selId: firstEntry?.id || null }
         : x));
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [activeId, vaults]);
+  }, [activeId, databases]);
 
-  // ---- notice when something else writes the vault file ----
-  // A vault is one file with several writers: the CLI, KeePassXC, and the same
+  // ---- notice when something else writes the database file ----
+  // A database is one file with several writers: the CLI, KeePassXC, and the same
   // file synced onto another Mac. Without this the window shows a list that
   // stopped being true. Saving is safe either way (the core merges the other
   // writer's changes in), but the list should show them.
   //
   // Polled rather than watched. It is one `stat` per interval, it only runs
-  // while a vault is actually open and this window is visible, and there is no
-  // watcher to unregister when a vault closes or the app hides.
+  // while a database is actually open and this window is visible, and there is no
+  // watcher to unregister when a database closes or the app hides.
   useEffect(() => {
-    if (!vault || vault.locked || !vault.loaded) return;
-    const id = vault.id;
+    if (!database || database.locked || !database.loaded) return;
+    const id = database.id;
     let stopped = false;
 
     const check = async () => {
       if (stopped || document.hidden) return;
       try {
-        if (!(await api.vaultChangedOnDisk(id))) return;
-        const [list, groups] = await Promise.all([api.reloadVault(id), api.listGroups(id)]);
+        if (!(await api.databaseChangedOnDisk(id))) return;
+        const [list, groups] = await Promise.all([api.reloadDatabase(id), api.listGroups(id)]);
         if (stopped) return;
-        setVaults((vs) => vs.map((x) => x.id === id
+        setDatabases((vs) => vs.map((x) => x.id === id
           // Keep the selection if that entry still exists, so a reload does not
           // yank the reader somewhere else; fall back to the first entry.
           ? { ...x, entries: list, groups,
               selId: list.some((e) => e.id === x.selId) ? x.selId : (list[0] ? list[0].id : null) }
           : x));
-        flashPlain("Reloaded — the vault changed outside this window");
+        flashPlain("Reloaded — the database changed outside this window");
       } catch (e) { /* transient: a half-written file, a lock — try again next tick */ }
     };
 
@@ -312,7 +318,7 @@ function App() {
     // stale list is most likely and most annoying.
     window.addEventListener("focus", check);
     return () => { stopped = true; clearInterval(t); window.removeEventListener("focus", check); };
-  }, [vault]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [database]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- clipboard ----
   const clearCopiedSoon = () => {
@@ -335,9 +341,9 @@ function App() {
   // Copy a password: fetch it on demand (get_field), copy, run the 12s countdown
   // toast, and actually clear the OS clipboard at 0.
   const copyPassword = useCallback(async (entry) => {
-    if (!entry || vault.id == null) return;
+    if (!entry || database.id == null) return;
     let pw = "";
-    try { pw = (await api.getField(vault.id, entry.id, "Password")) || ""; } catch (e) { return; }
+    try { pw = (await api.getField(database.id, entry.id, "Password")) || ""; } catch (e) { return; }
     try { navigator.clipboard && navigator.clipboard.writeText(pw); } catch (e) {}
     setCopiedKey(entry.id + ":pass"); clearCopiedSoon();
     const total = 12;
@@ -354,7 +360,7 @@ function App() {
         return { ...c, left: c.left - 1 };
       });
     }, 1000);
-  }, [vault.id]);
+  }, [database.id]);
   // Non-secret copies carry their value already; password routes to copyPassword.
   const copy = useCallback((value, key, kind) => {
     if (kind === "password") { copyPassword(selected); return; }
@@ -364,37 +370,39 @@ function App() {
     flashPlain(nice + " copied");
   }, [selected, copyPassword]);
 
-  // ---- vault actions ----
+  // ---- database actions ----
   // `retractKeys` decides whether forwarded keys come back out of the OS agent.
   // An explicit lock says yes; the idle timer says no — see the auto-lock below.
-  // Lock ONE vault. `retractKeys` false is the app-lock case: hide it, leave
+  // Lock ONE database. `retractKeys` false is the app-lock case: hide it, leave
   // what it handed the machine alone.
   const lockOne = useCallback(async (id, retractKeys) => {
     if (id == null) return;
-    try { await api.lockVault(id, retractKeys); } catch (e) {}
-    setVaults((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], groups: [], loaded: false, selId: null } : v));
+    try { await api.lockDatabase(id, retractKeys); } catch (e) {}
+    setDatabases((vs) => vs.map((v) => v.id === id ? { ...v, locked: true, entries: [], groups: [], loaded: false, selId: null } : v));
   }, []);
 
   // Data lock: this database only. Its keys come out of the agent and its files
-  // go, and if another vault is still open you land on that one rather than at
-  // a login screen — you have not finished with the app, only with this vault.
+  // go, and if another database is still open you land on that one rather than at
+  // a login screen — you have not finished with the app, only with this database.
   const dataLock = useCallback(async () => {
     stopClip();
+    setSyncOpen(false); setHistoryEntry(null);
     setPalette(false); setForm(null); setDel(null);
     const id = activeId;
     await lockOne(id, true);
-    const next = vaults.find((v) => v.id !== id && !v.locked);
+    const next = databases.find((v) => v.id !== id && !v.locked);
     if (next) setActiveId(next.id);
-  }, [activeId, vaults, lockOne, stopClip]);
+  }, [activeId, databases, lockOne, stopClip]);
 
-  // App lock: the whole app steps away, so every open vault hides. Nothing is
+  // App lock: the whole app steps away, so every open database hides. Nothing is
   // taken back from the machine — that is what the data lock is for.
   const appLock = useCallback(async () => {
     stopClip();
+    setSyncOpen(false); setHistoryEntry(null);
     setPalette(false); setForm(null); setDel(null);
-    const open = vaults.filter((v) => !v.locked).map((v) => v.id);
+    const open = databases.filter((v) => !v.locked).map((v) => v.id);
     for (const id of open) await lockOne(id, false);
-  }, [vaults, lockOne, stopClip]);
+  }, [databases, lockOne, stopClip]);
 
   // Kept for callers that just mean "lock what I am looking at".
   const lock = useCallback((retractKeys = true) => (retractKeys ? dataLock() : appLock()), [dataLock, appLock]);
@@ -403,55 +411,96 @@ function App() {
   // Resolves with the entry list and deliberately does NOT flip the view:
   // <Unlock> shows a progress checklist while the backend works, and flipping
   // here would unmount it mid-list. It calls `unlockReady` when it's finished.
-  const unlock = async (pw) => await api.unlockVault(vault.id, pw);
+  const unlock = async (pw) => await api.unlockDatabase(database.id, pw);
   // Same contract as `unlock`, except it can resolve with null: a cancelled
   // fingerprint prompt is a decision, not a failure, and <Unlock> puts the
   // password field back rather than showing an error.
-  const touchIdUnlock = async () => await api.biometricUnlock(vault.id);
+  const touchIdUnlock = async () => await api.biometricUnlock(database.id);
   // Called after a successful password unlock, with the password that worked.
-  const touchIdRemember = async (pw) => await api.biometricEnroll(vault.id, pw);
+  const touchIdRemember = async (pw) => await api.biometricEnroll(database.id, pw);
   const unlockReady = async (list) => {
-    const groups = await api.listGroups(vault.id).catch(() => []);
-    patch({ locked: false, entries: list, groups, loaded: true, group: "__all", selId: list[0] ? list[0].id : null });
+    const [groups, metadata] = await Promise.all([
+      api.listGroups(database.id).catch(() => []),
+      api.getDatabaseMetadata(database.id).catch(() => null),
+    ]);
+    const firstEntry = list[0];
+    patch({ locked: false, troveUuid: metadata?.troveUuid || null, entries: list, groups, loaded: true, group: firstEntry?.groupPath || "__root", selId: firstEntry?.id || null });
   };
-  const switchVault = (id) => {
+  const switchDatabase = (id) => {
     setActiveId(id); setSwitcher(false);
+    setSyncOpen(false); setHistoryEntry(null);
     setPalette(false); setForm(null); setDel(null); setRevealed(false);
+  };
+  const revisionRefreshed = async (id = database.id) => {
+    const [entries, groups] = await Promise.all([api.listEntries(id), api.listGroups(id)]);
+    setDatabases((current) => current.map((item) => item.id === id ? { ...item, entries, groups } : item));
+  };
+  const revisionSaved = async (id = database.id) => {
+    await revisionRefreshed(id);
+    flashPlain("Entry version saved to " + (databases.find((item) => item.id === id)?.path || database.path));
+  };
+  const saveDatabase = async (id) => {
+    const target = databaseStateRef.current.databases.find((item) => item.id === id);
+    await api.saveDatabase(id);
+    flashPlain("Database saved: " + (target?.path || target?.file || id));
+    try {
+      const [entries, groups] = await Promise.all([api.listEntries(id), api.listGroups(id)]);
+      setDatabases((current) => current.map((item) => item.id === id ? { ...item, entries, groups } : item));
+    } catch (error) {
+      flashPlain("Database saved, but refresh failed: " + String(error));
+    }
+  };
+  const removeDatabase = async (id) => {
+    await api.removeDatabase(id);
+    const current = databaseStateRef.current;
+    const removed = current.databases.find((item) => item.id === id);
+    const remaining = current.databases.filter((item) => item.id !== id);
+    setDatabases((items) => items.filter((item) => item.id !== id));
+    if (current.activeId === id) {
+      stopClip();
+      setDetail({ notes: "", fields: [], password: "" });
+      setMetadataOpen(false); setGroupEditor(null);
+      switchDatabase((remaining.find((item) => !item.locked) || remaining[0])?.id || null);
+    }
+    if (!remaining.length) {
+      setSwitcher(false); setOpenDatabase(true);
+    }
+    flashPlain("Removed from Trove; file kept: " + (removed?.path || removed?.file || id));
   };
   // Native file dialog → register the picked .kdbx (locked) → switch to it.
   // Create: choose where the .kdbx goes, then set its master password. Split in
   // two because the native save dialog can't collect a password.
-  const newVault = async () => {
+  const newDatabase = async () => {
     let picked;
     try {
-      picked = await save({ defaultPath: "vault.kdbx", filters: [{ name: "KeePass vault", extensions: ["kdbx"] }] });
+      picked = await save({ defaultPath: "database.kdbx", filters: [{ name: "KeePass database", extensions: ["kdbx"] }] });
     } catch (e) { return; }
     if (!picked) return;
     // A typed filename may arrive without the extension depending on the platform.
-    setNewVaultPath(picked.endsWith(".kdbx") ? picked : picked + ".kdbx");
+    setNewDatabasePath(picked.endsWith(".kdbx") ? picked : picked + ".kdbx");
   };
 
-  const createVault = async (path, password) => {
-    const dto = await api.createVault(path, password);
-    setVaults((vs) => vs.some((v) => v.id === dto.id) ? vs : [...vs, withViewState(dto)]);
+  const createDatabase = async (path, password) => {
+    const dto = await api.createDatabase(path, password);
+    setDatabases((vs) => vs.some((v) => v.id === dto.id) ? vs : [...vs, withViewState(dto)]);
     setActiveId(dto.id);
-    setNewVaultPath(null);
-    setOpenVault(false);
+    setNewDatabasePath(null);
+    setOpenDatabase(false);
     flashPlain("Created " + dto.file);
   };
 
-  const browseVault = async () => {
+  const browseDatabase = async () => {
     let picked;
     try {
-      picked = await open({ multiple: false, directory: false, filters: [{ name: "KeePass vault", extensions: ["kdbx"] }] });
+      picked = await open({ multiple: false, directory: false, filters: [{ name: "KeePass database", extensions: ["kdbx"] }] });
     } catch (e) { return; }
     if (!picked) return;
     const path = Array.isArray(picked) ? picked[0] : picked;
     let dto;
-    try { dto = await api.registerVault(path); } catch (e) { flashPlain("Couldn't open vault"); return; }
-    setVaults((vs) => vs.some((v) => v.id === dto.id) ? vs : [...vs, withViewState(dto)]);
+    try { dto = await api.registerDatabase(path); } catch (e) { flashPlain("Couldn't open database"); return; }
+    setDatabases((vs) => vs.some((v) => v.id === dto.id) ? vs : [...vs, withViewState(dto)]);
     setActiveId(dto.id);
-    setOpenVault(false);
+    setOpenDatabase(false);
     flashPlain("Opened " + dto.file + (dto.locked ? " — locked" : ""));
   };
 
@@ -460,16 +509,16 @@ function App() {
   const toggleFav = async (id) => {
     const cur = entries.find((e) => e.id === id);
     try {
-      const list = await api.setFavorite(vault.id, id, !(cur && cur.fav));
+      const list = await api.setFavorite(database.id, id, !(cur && cur.fav));
       patch({ entries: list });
     } catch (e) {}
   };
 
-  // Per-key opt-in. The backend writes KeeAgent.settings into the vault and
+  // Per-key opt-in. The backend writes KeeAgent.settings into the database and
   // adds/removes the key in the running agent, then hands back a fresh list.
   const toggleAgentKey = async (entryId, enabled, policy) => {
     try {
-      const list = await api.setAgentKey(vault.id, entryId, enabled, policy);
+      const list = await api.setAgentKey(database.id, entryId, enabled, policy);
       patch({ entries: list });
     } catch (e) {
       console.error("agent key toggle failed", e);
@@ -480,7 +529,7 @@ function App() {
   // Existing entries have no secret on the list DTO — fetch it before editing.
   const openEdit = async (e) => {
     let d = { notes: "", fields: [], password: "" };
-    try { d = await api.getEntryDetail(vault.id, e.id); } catch (err) {}
+    try { d = await api.getEntryDetail(database.id, e.id); } catch (err) {}
     setForm({ entry: e, detail: d });
   };
   const saveEntry = async (f, orig) => {
@@ -494,10 +543,10 @@ function App() {
       tags: [...f.tags.filter((tag) => !isFavoriteTag(tag)), ...(orig?.fav ? ["Favorite"] : [])],
       // Blank-named rows are dropped here rather than sent: the form keeps an
       // empty row around while someone is typing into it, and a half-added
-      // attribute should not reach the vault.
+      // attribute should not reach the database.
       fields: (f.fields || []).filter((x) => x.k.trim() !== ""),
     };
-    const res = await api.saveEntry(vault.id, input);
+    const res = await api.saveEntry(database.id, input);
     // Stay put unless the entry would no longer be on screen.
     //
     // Saving must not move you for no reason: browsing `Infra` shows
@@ -511,15 +560,32 @@ function App() {
       entries: res.entries,
       groups: res.groups,
       selId: res.id,
-      group: isVisibleIn(saved, v.group, recycleBinPath(res.groups)) ? v.group : (saved && saved.groupPath) || "__all",
+      group: isVisibleIn(saved, v.group, recycleBinPath(res.groups)) ? v.group : (saved && saved.groupPath) || "__root",
     }));
     setForm(null);
     flashPlain(orig ? "Entry saved" : "Entry added");
   };
+  const createFolder = async (typedPath) => {
+    const path = typedPath;
+    const groups = await api.createGroup(database.id, path);
+    patch({ groups, group: path, selId: null });
+    setForm(null);
+    flashPlain("Folder created");
+  };
+  const saveCustomAttribute = async (entryId, oldName, name, value) => {
+    const detail = await api.setCustomAttribute(database.id, entryId, oldName, name, value);
+    if (selId === entryId) setDetail(detail);
+    patch({ entries: await api.listEntries(database.id) });
+  };
+  const deleteCustomAttribute = async (entryId, name) => {
+    const detail = await api.removeCustomAttribute(database.id, entryId, name);
+    if (selId === entryId) setDetail(detail);
+    patch({ entries: await api.listEntries(database.id) });
+  };
   const saveGroupTags = async (group, tags) => {
     const path = group.groupPath.join("/");
-    const groups = await api.setGroupTags(vault.id, path, tags);
-    const entries = await api.listEntries(vault.id);
+    const groups = await api.setGroupTags(database.id, path, tags);
+    const entries = await api.listEntries(database.id);
     patch({ groups, entries });
     setGroupEditor(null);
     flashPlain("Folder tags saved");
@@ -527,12 +593,12 @@ function App() {
   const deleteFolder = async (folder) => {
     const path = folder.groupPath.join("/");
     let res;
-    try { res = await api.deleteGroup(vault.id, path); } catch (err) { flashPlain("Delete failed"); throw err; }
+    try { res = await api.deleteGroup(database.id, path); } catch (err) { flashPlain("Delete failed"); throw err; }
     const gone = (g) => g === path || (typeof g === "string" && g.startsWith(path + "/"));
     patch((v) => ({
       entries: res.entries,
       groups: res.groups,
-      group: gone(v.group) ? "__all" : v.group,
+      group: gone(v.group) ? "__root" : v.group,
       selId: res.entries.some((x) => x.id === v.selId) ? v.selId : (res.entries[0] ? res.entries[0].id : null),
     }));
     setGroupEditor(null);
@@ -563,13 +629,13 @@ function App() {
   const dropped = async ({ item, copy, drop }) => {
     try {
       if (item.kind === "entry") {
-        const res = await api.dropEntry(vault.id, item.id, drop.parent, copy);
+        const res = await api.dropEntry(database.id, item.id, drop.parent, copy);
         patch({ entries: res.entries, groups: res.groups });
         flashPlain(`${copy ? "Copied" : "Moved"} ${item.label} to ${folderName(drop.parent)}`);
         return;
       }
       const source = item.path;
-      const res = await api.dropGroup(vault.id, source, drop.parent, copy, drop.order);
+      const res = await api.dropGroup(database.id, source, drop.parent, copy, drop.order);
       const moved = drop.parent ? drop.parent + "/" + item.label : item.label;
       // Browsing the folder that moved, or one inside it: follow it.
       patch((v) => ({
@@ -587,18 +653,18 @@ function App() {
 
   const doDelete = async (e) => {
     let list;
-    try { list = await api.deleteEntry(vault.id, e.id); } catch (err) { setDel(null); flashPlain("Delete failed"); return; }
+    try { list = await api.deleteEntry(database.id, e.id); } catch (err) { setDel(null); flashPlain("Delete failed"); return; }
     patch((v) => ({ entries: list, selId: list.some((x) => x.id === v.selId) ? v.selId : (list[0] ? list[0].id : null) }));
     setDel(null); setForm(null); flashPlain("Entry deleted");
   };
 
   // ---- app lock (idle) ----
-  // Locks the APP: closes the vault view and drops the decrypted database. It
+  // Locks the APP: closes the database view and drops the decrypted database. It
   // deliberately leaves keys in the OS agent. Those are machine-wide credentials with their own expiry;
   // yanking them because nobody clicked this window for five minutes would kill
   // a `git push` running in a terminal. An explicit Lock still retracts them.
   useEffect(() => {
-    if (!hasUnlockedVault) return;
+    if (!hasUnlockedDatabase) return;
     let t;
     const mins = settings && Number.isFinite(settings.idleLockMinutes) ? settings.idleLockMinutes : 5;
     if (mins <= 0) return undefined; // 0 = never lock on idle
@@ -611,42 +677,45 @@ function App() {
     evs.forEach((ev) => window.addEventListener(ev, reset, { passive: true }));
     reset();
     return () => { clearTimeout(t); evs.forEach((ev) => window.removeEventListener(ev, reset)); };
-  }, [hasUnlockedVault, appLock, settings]);
+  }, [hasUnlockedDatabase, appLock, settings]);
 
   const paletteActions = [
     { label: "New entry", icon: "plus", kbd: "⌘N", run: openNew },
     { label: "Copy password", icon: "key", kbd: "⌘C", run: () => copy(null, null, "password") },
     { label: "Data lock — remove keys + files", icon: "lock", kbd: "⌘L", run: dataLock },
-    ...vaults.filter((v) => v.id !== activeId).map((v) => ({
+    ...databases.filter((v) => v.id !== activeId).map((v) => ({
       label: "Switch to " + v.name + (v.locked ? " (locked)" : ""), icon: "shield",
-      kbd: "⌘" + (vaults.indexOf(v) + 1), run: () => switchVault(v.id),
+      kbd: "⌘" + (databases.indexOf(v) + 1), run: () => switchDatabase(v.id),
     })),
-    { label: "Open vault…", icon: "file", kbd: "⌘O", run: () => setOpenVault(true) },
+    { label: "Open database…", icon: "file", kbd: "⌘O", run: () => setOpenDatabase(true) },
     { label: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", icon: theme === "dark" ? "sun" : "moon", kbd: "⌘J", run: toggleTheme },
     { label: "Change color theme…", icon: "droplet", run: () => setThemeMenu(true) },
     { label: "Keyboard shortcuts", icon: "command", kbd: "?", run: () => setHelp(true) },
     { label: "Settings…", icon: "gear", run: openSettings },
-    { label: "New vault…", icon: "plus", run: () => newVault() },
+    { label: "New database…", icon: "plus", run: () => newDatabase() },
   ];
 
   // ---- keyboard ----
   useEffect(() => {
     const onKey = (e) => {
       const mod = e.metaKey || e.ctrlKey;
-      const typing = ["INPUT", "TEXTAREA"].includes(document.activeElement && document.activeElement.tagName);
+      const activeElement = document.activeElement;
+      const typing = ["INPUT", "TEXTAREA"].includes(activeElement && activeElement.tagName) || activeElement?.isContentEditable;
+      if (typing && mod && ["a", "c", "v", "x"].includes(e.key.toLowerCase())) return;
 
       if (mod && e.key >= "1" && e.key <= "9") {
-        const v = vaults[parseInt(e.key, 10) - 1];
-        if (v) { e.preventDefault(); switchVault(v.id); }
+        const v = databases[parseInt(e.key, 10) - 1];
+        if (v) { e.preventDefault(); switchDatabase(v.id); }
         return;
       }
-      if (mod && e.key.toLowerCase() === "o") { e.preventDefault(); setOpenVault(true); return; }
+      if (mod && e.key.toLowerCase() === "o") { e.preventDefault(); setOpenDatabase(true); return; }
       if (mod && e.key.toLowerCase() === "j") { e.preventDefault(); return toggleTheme(); }
       if (e.key === "Escape") {
+        if (historyEntry) return setHistoryEntry(null);
         if (palette) return setPalette(false);
         if (switcher) return setSwitcher(false);
         if (themeMenu) return setThemeMenu(false);
-        if (openVault) return setOpenVault(false);
+        if (openDatabase) return setOpenDatabase(false);
         if (form) return setForm(null);
         if (del) return setDel(null);
         if (help) return setHelp(false);
@@ -659,7 +728,7 @@ function App() {
 
       if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); return dataLock(); }
       if (mod && e.key.toLowerCase() === "n") { e.preventDefault(); return openNew(); }
-      if (anyOverlay || switcher || themeMenu) return;
+      if (anyOverlay || switcher || themeMenu || syncOpen) return;
       if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); if (selected) copy(null, null, "password"); return; }
       if (mod && e.key.toLowerCase() === "b") { e.preventDefault(); if (selected) copy(selected.username, selected.id + ":user", "username"); return; }
 
@@ -706,18 +775,21 @@ function App() {
         {/* The OS draws the window buttons and owns dragging. An overlay title
             bar was tried and reverted: it hands the drag region to the webview,
             and every variant either dragged once per focus or turned the press
-            into a text selection. This strip carries the build stamp and vault
-            name only. */}
+            into a text selection. This strip carries the build stamp and database
+            database identity only. */}
         <div className="titlebar">
           {/* Left: who this is. */}
           <div className="win-brand">
             <img src="/favicon.svg" alt="" width="15" height="15" />
             <span>Trove</span>
           </div>
-          {/* Centre: which vault you are looking at, of possibly several. */}
+          {/* Centre: which database you are looking at, of possibly several. */}
           <div className="win-title">
-            <span className={"dot" + (locked ? " locked" : "")} />
-            {vault.file}
+            <span className={"dot" + (database.readOnly ? " read-only" : locked ? " locked" : "")} />
+            <span className="win-database-name" title={database.path ? `${database.file} (${database.path})` : database.file}>
+              {database.file}{database.path ? ` (${database.path})` : ""}
+            </span>
+            {database.readOnly && <span className="win-read-only">READ ONLY</span>}
             {openCount > 1 && <span className="win-of"> · {openCount} open</span>}
           </div>
           {/* Right: what trove is currently doing to the machine, then which
@@ -742,19 +814,19 @@ function App() {
 
         {/* body */}
         {locked ? (
-          <Unlock vault={vault} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} onTouchId={touchIdUnlock} onRemember={touchIdRemember} />
+          <Unlock database={database} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} onTouchId={touchIdUnlock} onRemember={touchIdRemember} />
         ) : (
           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
-            <Sidebar tree={tree} total={entries.length} favCount={favCount} selectedGroup={group} onSelectGroup={setGroup} onEditGroupTags={setGroupEditor} drag={drag} onDragStart={startDrag} vault={vault} onSwitcher={() => setSwitcher(true)} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
+            <Sidebar tree={tree} selectedGroup={syncOpen ? null : group} onSelectGroup={setGroup} onEditGroupTags={setGroupEditor} drag={syncOpen ? null : drag} onDragStart={syncOpen ? undefined : startDrag} database={database} onSwitcher={() => setSwitcher(true)} onEditMetadata={() => setMetadataOpen(true)} onSync={() => setSyncOpen(true)} syncSelected={syncOpen} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
             <ResizeHandle
               label="Resize sidebar"
               onDelta={(inc) => setSidebarW((w) => clampW(w + inc, SIDEBAR_MIN, SIDEBAR_MAX))}
               onReset={() => setSidebarW(DEFAULT_SIDEBAR_W)}
             />
-            <EntryList
+            {syncOpen ? <DatabaseSync key={database.id} database={database} databases={databases} onSaved={revisionSaved} onRefreshed={revisionRefreshed} appActions={appActions} /> : <><EntryList
               entries={filtered} selectedId={selId} onSelect={setSelId}
               title={groupTitle} subtitle={groupSub} sort={sort} onCycleSort={cycleSort}
-              query={query} onQuery={setQuery} searchRef={searchRef} vaultName={vault.name}
+              query={query} onQuery={setQuery} searchRef={searchRef} databaseName={database.name}
               drag={drag} onDragStart={startDrag}
             />
             <ResizeHandle
@@ -763,28 +835,33 @@ function App() {
               onReset={() => setListW(DEFAULT_LIST_W)}
             />
             <Detail
-              vaultId={vault.id}
+              databaseId={database.id}
               appActions={appActions}
               entry={selected} notes={detail.notes} fields={detail.fields} password={detail.password}
               onCopy={copy} copiedKey={copiedKey}
               onEdit={openEdit} onDelete={(e) => setDel(e)} onToggleFav={toggleFav}
+              onSaveAttribute={saveCustomAttribute} onDeleteAttribute={deleteCustomAttribute}
               revealed={revealed} onToggleReveal={() => setRevealed((r) => !r)}
               onToggleAgentKey={toggleAgentKey}
+              onHistory={setHistoryEntry}
             />
+            </>}
           </div>
         )}
 
         {/* overlays */}
-        {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => patch({ selId: id, group: "__all" })} />}
-        {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onDelete={(e) => { setForm(null); setDel(e); }} />}
-        {groupEditor && <EditFolderModal group={groupEditor} entries={entries} vaultId={vault?.id} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} onDelete={deleteFolder} />}
+        {historyEntry && !database.locked && <EntryHistoryModal key={database.id + historyEntry.id} database={database} entry={historyEntry} onClose={() => setHistoryEntry(null)} onSaved={revisionSaved} />}
+        {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => { setSyncOpen(false); const entry = entries.find((item) => item.id === id); patch({ selId: id, group: entry?.groupPath || "__root" }); }} />}
+        {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onCreateFolder={createFolder} onDelete={(e) => { setForm(null); setDel(e); }} />}
+        {groupEditor && <EditFolderModal group={groupEditor} entries={entries} databaseId={database?.id} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} onDelete={deleteFolder} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}
         {help && <HelpModal onClose={() => setHelp(false)} />}
         {settingsOpen && settings && <SettingsModal settings={settings} onChange={saveSettings} onClose={() => setSettingsOpen(false)} />}
         {themeMenu && <ThemeMenu theme={theme} accent={accent} onTheme={setTheme} onAccent={setAccent} onClose={() => setThemeMenu(false)} />}
-        {switcher && <VaultSwitcher vaults={vaults} activeId={activeId} onSwitch={switchVault} onOpenNew={() => setOpenVault(true)} onNewVault={newVault} onClose={() => setSwitcher(false)} />}
-        {newVaultPath && <NewVaultModal path={newVaultPath} onCreate={createVault} onClose={() => setNewVaultPath(null)} />}
-        {openVault && <OpenVaultModal recents={vaults} activeId={activeId} onPick={(v) => { setOpenVault(false); switchVault(v.id); }} onBrowse={browseVault} onClose={() => setOpenVault(false)} />}
+        {switcher && <DatabaseSwitcher databases={databases} activeId={activeId} onSwitch={switchDatabase} onSave={saveDatabase} onRemove={removeDatabase} onOpenNew={() => setOpenDatabase(true)} onNewDatabase={newDatabase} onClose={() => setSwitcher(false)} />}
+        {metadataOpen && !database.locked && <DatabaseMetadataModal databaseId={database.id} databaseName={database.name} onClose={() => setMetadataOpen(false)} onSaved={(metadata) => { patch({ troveUuid: metadata?.troveUuid || null }); flashPlain("Database metadata saved"); }} />}
+        {newDatabasePath && <NewDatabaseModal path={newDatabasePath} onCreate={createDatabase} onClose={() => setNewDatabasePath(null)} />}
+        {openDatabase && <OpenDatabaseModal recents={databases} activeId={activeId} onPick={(v) => { setOpenDatabase(false); switchDatabase(v.id); }} onBrowse={browseDatabase} onClose={() => setOpenDatabase(false)} />}
 
         <DragGhost drag={drag} />
 

@@ -1,8 +1,8 @@
-# Remote agent access — using a vault key when you and the machine are in different countries
+# Remote agent access — using a database key when you and the machine are in different countries
 
 The ask: the laptop is in Berlin, you are not, and you want to tell an agent
 "ssh into that box and restart the deployment" and have it use an SSH key that
-lives in a trove vault — without the private bytes leaving the machine, and
+lives in a trove database — without the private bytes leaving the machine, and
 without typing the master password into anything that isn't that machine's own
 terminal.
 
@@ -39,8 +39,8 @@ So the shape is settled, and this document records it rather than relitigating:
 
 ## Five problems wearing one coat
 
-1. **Reach** — how does the request get to the machine holding the vault?
-2. **Unlock** — a locked vault needs a factor, and the password can't travel.
+1. **Reach** — how does the request get to the machine holding the database?
+2. **Unlock** — a locked database needs a factor, and the password can't travel.
 3. **Use** — authenticate (signing) vs extract (private bytes leave).
 4. **Approve** — who says yes, and can the requesting agent forge that yes?
 5. **Audit** — what did the agent actually do with the key.
@@ -64,7 +64,7 @@ building only if the tunnel recipe proves insufficient.
 ## Use: what works today
 
 With forwarding on, unlocking anywhere — CLI, daemon, or the desktop app — puts
-the vault's declared keys into the agent that `SSH_AUTH_SOCK` already names. A
+the database's declared keys into the agent that `SSH_AUTH_SOCK` already names. A
 remote-driven agent on that machine then uses them like any other program.
 
 The private bytes do leave troved for the OS agent; that is the deliberate
@@ -76,7 +76,7 @@ forwarded key still cannot export it.
 out real private bytes and require the session code plus a local-peer check:
 `SO_PEERCRED` on Unix, or the owner-only named-pipe ACL on Windows (see
 [provisioning-sessions.md](provisioning-sessions.md) and [windows.md](windows.md)).
-A standalone offline command instead opens the vault with its own credentials
+A standalone offline command instead opens the database with its own credentials
 and does not use the daemon session gate. A remote-originated daemon request
 must never obtain them:
 a forwarded signature is a bounded act, an extraction is a permanent loss. If
@@ -86,7 +86,7 @@ extraction on them.
 ## Gap: unlocking from afar without sending the password
 
 The tempting shortcut is to type the master password into the remote session.
-Don't. It is the root capability for the whole vault, forever, on every copy of
+Don't. It is the root capability for the whole database, forever, on every copy of
 the file, and it would land in a transcript, in scrollback, and plausibly in a
 log you don't own.
 
@@ -101,7 +101,7 @@ what kdbx expects; the second factor is a sidecar:
 
 - Share A sits on the machine, useless alone.
 - Share B is released by a device you carry, behind biometry.
-- Remote unlock: troved asks for B, the phone shows which vault and what
+- Remote unlock: troved asks for B, the phone shows which database and what
   triggered it, you approve, the daemon combines and zeroes B.
 
 Two ways to land the phone in kdbx4's composite key without inventing a format:
@@ -193,7 +193,7 @@ is cheap and currently not done.
 - A same-uid agent on an unlocked machine **is** you. The two gates decide which
   keys exist to be abused; they don't create a boundary.
 - The approving device becomes a capability holder. Losing it must not lose the
-  vault (the password still opens the file) and must be revocable.
+  database (the password still opens the file) and must be revocable.
 - The machine has to be awake with troved or the desktop app running. Nothing
   here wakes it.
 - None of this helps against an attacker who already has your uid and is willing

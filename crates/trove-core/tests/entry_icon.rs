@@ -4,9 +4,9 @@
 #![allow(missing_docs)]
 
 use tempfile::TempDir;
-use trove_core::{Error, Vault};
+use trove_core::{Database, Error};
 
-fn icon_of(v: &Vault, path: &str) -> Option<usize> {
+fn icon_of(v: &Database, path: &str) -> Option<usize> {
     v.list_entries()
         .into_iter()
         .find(|e| e.display_path() == path)
@@ -18,12 +18,12 @@ fn icon_of(v: &Vault, path: &str) -> Option<usize> {
 fn icon_sets_clears_and_survives_a_save() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("i.kdbx");
-    let mut v = Vault::create(&path, "pw").unwrap();
+    let mut v = Database::create(&path, "pw").unwrap();
     let id = v.add_entry("Web/site").unwrap();
 
     v.set_entry_icon(&id, Some(12)).unwrap();
     v.save().unwrap();
-    let mut v = Vault::open(&path, "pw").unwrap();
+    let mut v = Database::open(&path, "pw").unwrap();
     assert_eq!(icon_of(&v, "Web/site"), Some(12));
 
     v.set_entry_icon(&id, None).unwrap();

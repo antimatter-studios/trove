@@ -1,4 +1,4 @@
-// Interactions on an unlocked vault: entries load from the backend
+// Interactions on an unlocked database: entries load from the backend
 // (list_entries), selecting drives the detail pane (get_entry_detail),
 // revealing unmasks the fetched password, and the command palette opens.
 // All backend calls are mocked via src/api.js.
@@ -28,14 +28,15 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('../src/api.js', () => ({
   entryCapabilities: vi.fn(() => Promise.resolve([])),
   groupCapabilities: vi.fn(() => Promise.resolve([])),
-  listVaults: vi.fn(),
-  registerVault: vi.fn(),
-  createVault: vi.fn(),
-  unlockVault: vi.fn(),
-  lockVault: vi.fn(),
+  listDatabases: vi.fn(),
+  registerDatabase: vi.fn(),
+  createDatabase: vi.fn(),
+  unlockDatabase: vi.fn(),
+  lockDatabase: vi.fn(),
   listEntries: vi.fn(),
   listGroups: vi.fn(),
   setGroupTags: vi.fn(),
+  getDatabaseMetadata: vi.fn(() => Promise.resolve({ troveUuid: null })),
   getField: vi.fn(),
   getEntryDetail: vi.fn(),
   saveEntry: vi.fn(),
@@ -45,8 +46,8 @@ vi.mock('../src/api.js', () => ({
   buildInfo: vi.fn(),
   setAgentKey: vi.fn(),
   setSettings: vi.fn(),
-  vaultChangedOnDisk: vi.fn(),
-  reloadVault: vi.fn(),
+  databaseChangedOnDisk: vi.fn(),
+  reloadDatabase: vi.fn(),
   biometricStatus: vi.fn(),
   biometricUnlock: vi.fn(),
   biometricEnroll: vi.fn(),
@@ -61,8 +62,8 @@ const ENTRIES = [
   { id: 'e2', path: 'personal/email/fastmail', title: 'fastmail', group: ['personal', 'email'], groupPath: 'personal/email', username: 'you@fastmail.com', url: 'https://app.fastmail.com', type: 'login', entryType: 'login', strength: 95, pwLen: 30, fav: false, created: '2024-11-01T08:00:00Z', modified: '2026-06-29T20:10:00Z', attachmentNames: [] },
 ];
 const DETAIL = { notes: 'primary db', fields: [{ k: 'Host', v: 'db.prod' }], password: 'pg-Pr0d-8842!zQmx-vK' };
-// An already-unlocked vault so the app lazily loads its entries via list_entries.
-const OPEN_VAULT = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/vaults/personal.kdbx', locked: false };
+// An already-unlocked database so the app lazily loads its entries via list_entries.
+const OPEN_DATABASE = { id: 'v1', name: 'Personal', file: 'personal.kdbx', path: '/databases/personal.kdbx', locked: false };
 
 async function mountUnlocked() {
   const utils = render(<App />);
@@ -76,19 +77,19 @@ beforeEach(() => {
   api.getSettings.mockResolvedValue({ systemAgent: false, systemAgentLifetime: 900, systemAgentConfirm: false, materialize: false });
   api.setSettings.mockResolvedValue(undefined);
   // Nothing has touched the file unless a test says so.
-  api.vaultChangedOnDisk.mockResolvedValue(false);
+  api.databaseChangedOnDisk.mockResolvedValue(false);
   // Touch ID absent by default; the tests that care set it themselves.
   api.biometricStatus.mockResolvedValue({ available: false, enrolled: false });
   vi.clearAllMocks();
   try { localStorage.clear(); } catch { /* ignore */ }
-  api.listVaults.mockResolvedValue([OPEN_VAULT]);
+  api.listDatabases.mockResolvedValue([OPEN_DATABASE]);
   api.listEntries.mockResolvedValue(ENTRIES);
   api.listGroups.mockResolvedValue([]);
   api.getEntryDetail.mockResolvedValue(DETAIL);
   api.getField.mockResolvedValue(DETAIL.password);
 });
 
-describe('unlocked vault interactions', () => {
+describe('unlocked database interactions', () => {
   it('loads entries into the three-pane', async () => {
     const c = await mountUnlocked();
     expect(c.querySelector('.body .pane.sidebar')).toBeTruthy();
@@ -114,21 +115,21 @@ describe('unlocked vault interactions', () => {
     expect(favorites.querySelector('.tr-count').textContent).toBe('0');
   });
 
-  it('reloads when the vault file is changed by something else', async () => {
+  it('reloads when the database file is changed by something else', async () => {
     const c = await mountUnlocked();
     expect(c.querySelectorAll('.list .erow').length).toBe(ENTRIES.length);
 
     // The CLI (or KeePassXC, or another Mac via iCloud) writes the file.
     const AFTER = [...ENTRIES, { ...ENTRIES[0], id: 'e-new', title: 'added-elsewhere',
       path: 'Work/added-elsewhere', groupPath: 'Work' }];
-    api.vaultChangedOnDisk.mockResolvedValue(true);
-    api.reloadVault.mockResolvedValue(AFTER);
+    api.databaseChangedOnDisk.mockResolvedValue(true);
+    api.reloadDatabase.mockResolvedValue(AFTER);
 
     // Regaining focus is one of the two triggers (the other is a 3s poll,
     // which a test should not have to wait for).
     fireEvent.focus(window);
 
-    await waitFor(() => expect(api.reloadVault).toHaveBeenCalledWith('v1'));
+    await waitFor(() => expect(api.reloadDatabase).toHaveBeenCalledWith('v1'));
     await waitFor(() =>
       expect(c.querySelectorAll('.list .erow').length).toBe(AFTER.length));
     expect(c.textContent).toContain('added-elsewhere');
@@ -136,10 +137,10 @@ describe('unlocked vault interactions', () => {
 
   it('does not reload when nothing has touched the file', async () => {
     const c = await mountUnlocked();
-    api.vaultChangedOnDisk.mockResolvedValue(false);
+    api.databaseChangedOnDisk.mockResolvedValue(false);
     fireEvent.focus(window);
-    await waitFor(() => expect(api.vaultChangedOnDisk).toHaveBeenCalled());
-    expect(api.reloadVault).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.databaseChangedOnDisk).toHaveBeenCalled());
+    expect(api.reloadDatabase).not.toHaveBeenCalled();
     expect(c.querySelectorAll('.list .erow').length).toBe(ENTRIES.length);
   });
 

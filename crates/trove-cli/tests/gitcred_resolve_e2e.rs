@@ -44,12 +44,12 @@ fn ok(out: &Output, what: &str) -> String {
 }
 
 fn seed(trove: &std::path::Path, dir: &tempfile::TempDir) -> String {
-    let vault = dir.path().join("g.kdbx");
-    let vs = vault.to_str().unwrap().to_string();
+    let database = dir.path().join("g.kdbx");
+    let vs = database.to_str().unwrap().to_string();
     ok(
         &run_trove(
             trove,
-            &["--vault", &vs, "--password-stdin", "init"],
+            &["--database", &vs, "--password-stdin", "init"],
             &format!("{PW}\n"),
         ),
         "init",
@@ -58,7 +58,7 @@ fn seed(trove: &std::path::Path, dir: &tempfile::TempDir) -> String {
         &run_trove(
             trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "add",
@@ -86,12 +86,18 @@ fn git_credential_get_fills_from_matching_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let vs = seed(&trove, &dir);
 
-    // stdin: vault password (line 1), then git's request block.
+    // stdin: database password (line 1), then git's request block.
     let stdin = format!("{PW}\nprotocol=https\nhost=github.com\n\n");
     let out = ok(
         &run_trove(
             &trove,
-            &["--vault", &vs, "--password-stdin", "git-credential", "get"],
+            &[
+                "--database",
+                &vs,
+                "--password-stdin",
+                "git-credential",
+                "get",
+            ],
             &stdin,
         ),
         "git-credential get",
@@ -103,7 +109,13 @@ fn git_credential_get_fills_from_matching_entry() {
     let stdin = format!("{PW}\nprotocol=https\nhost=example.com\n\n");
     let out = run_trove(
         &trove,
-        &["--vault", &vs, "--password-stdin", "git-credential", "get"],
+        &[
+            "--database",
+            &vs,
+            "--password-stdin",
+            "git-credential",
+            "get",
+        ],
         &stdin,
     );
     assert!(out.status.success());
@@ -114,7 +126,7 @@ fn git_credential_get_fills_from_matching_entry() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             &vs,
             "--password-stdin",
             "git-credential",
@@ -141,7 +153,7 @@ fn resolve_prints_referenced_value() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "resolve",
@@ -158,7 +170,7 @@ fn resolve_prints_referenced_value() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 &vs,
                 "--password-stdin",
                 "resolve",
@@ -174,7 +186,7 @@ fn resolve_prints_referenced_value() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
+            "--database",
             &vs,
             "--password-stdin",
             "resolve",

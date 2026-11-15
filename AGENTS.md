@@ -27,5 +27,5 @@ it has everything Trove needs.
 ### Intentional old versions
 
 `crates/keepass-spec-tests` pins old `keepass` releases on purpose, to test
-compatibility with vaults those versions wrote. Do not update these pins. The
+compatibility with databases those versions wrote. Do not update these pins. The
 rest of that crate's dependencies follow the policy above.

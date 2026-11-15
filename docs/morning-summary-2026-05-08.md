@@ -6,7 +6,7 @@ Started 2026-05-07 evening; ended 2026-05-08 ~07:00. **All work local; no remote
 
 | ver | commit | what |
 |---|---|---|
-| 0.0.1 | 2e07a56 | kdbx vault + CLI + headless daemon; SSH key roundtrip works |
+| 0.0.1 | 2e07a56 | kdbx database + CLI + headless daemon; SSH key roundtrip works |
 | 0.0.2.0 | 5e583da | SSH agent — ed25519 keys via `$SSH_AUTH_SOCK`; real `ssh-add -l` matches fingerprint |
 | 0.0.3.0 | c5e6ff2 | GPG agent — `git commit -S` produces a Good signature against our Assuan socket |
 | 0.0.2.1 | cc95c92 | SSH agent + RSA-3072 / ECDSA P-256 / P-384 (sign-and-verify e2e for all four algos) |

@@ -1,5 +1,5 @@
 // Trove — pure view helpers over the entry list returned by the backend.
-// (All mock vault/entry data has been removed; entries now come from trove-core
+// (All mock database/entry data has been removed; entries now come from trove-core
 // via src/api.js.)
 //
 // Entries carry a `group` array (root→leaf group path); the last path segment is
@@ -101,7 +101,7 @@ export { buildTree, splitRecycleBin };
 
 /// The folder a typed path is interpreted against.
 ///
-/// `__all`, `__fav`, and `__root` resolve against the vault root.
+/// `__all`, `__fav`, and `__root` resolve against the database root.
 /// That makes relative and absolute identical in those views, which is
 /// precisely the behaviour they had before paths were relative at all.
 export function baseGroup(group) {
@@ -169,7 +169,7 @@ export function isVisibleIn(entry, group, binPath = null) {
   return entry.groupPath === group;
 }
 
-/// Path of the recycle bin among the vault's groups, or null if it has none.
+/// Path of the recycle bin among the database's groups, or null if it has none.
 export function recycleBinPath(groups = []) {
   const bin = groups.find((g) => g.recycleBin);
   return bin ? bin.path.join("/") : null;

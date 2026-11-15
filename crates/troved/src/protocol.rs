@@ -21,8 +21,8 @@ pub enum Request {
         /// prior `set-idle-timeout` left behind). Wire-optional for back-compat.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout: Option<u64>,
-        /// Optional keyfile bytes (base64) for a composite-key vault. The
-        /// daemon holds the decoded bytes in Vault memory so its own
+        /// Optional keyfile bytes (base64) for a composite-key database. The
+        /// daemon holds the decoded bytes in Database memory so its own
         /// re-saves derive the same composite key. Wire-optional for
         /// back-compat.
         // NOTE: sensitive — key material. Never Debug-print.
@@ -47,19 +47,19 @@ pub enum Request {
         session: Option<bool>,
     },
     List,
-    /// Lock one unlocked vault, or all of them.
+    /// Lock one unlocked database, or all of them.
     ///
-    /// `vault` names the file to lock; `None` locks every open vault, which is
-    /// what a bare `trove lock` sends and what the single-vault daemon always
+    /// `database` names the file to lock; `None` locks every open database, which is
+    /// what a bare `trove lock` sends and what the single-database daemon always
     /// did. Wire-optional, so an older CLI's `{"cmd":"lock"}` still means
     /// "lock everything".
     Lock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        vault: Option<String>,
+        database: Option<String>,
     },
     Shutdown,
     /// Inspect what the daemon has currently materialized. Read-only; works
-    /// even if the vault is locked (returns an empty list in that case).
+    /// even if the database is locked (returns an empty list in that case).
     /// Added in v0.0.5.0.
     MaterializeStatus,
     /// v0.0.6.0: configure the idle-lock timeout (in seconds). 0 disables.
@@ -70,9 +70,9 @@ pub enum Request {
     GetIdleTimeout,
     /// Return the daemon's build version so a connecting CLI can flag a
     /// CLI↔daemon drift (a stale sibling `troved` left behind by a CLI-only
-    /// rebuild). Read-only; works whether or not a vault is unlocked.
+    /// rebuild). Read-only; works whether or not a database is unlocked.
     GetVersion,
-    /// v0.0.9.0: snapshot of daemon state — vault path (if unlocked), idle
+    /// v0.0.9.0: snapshot of daemon state — database path (if unlocked), idle
     /// timer state, and counts of in-memory secret stores. Read-only.
     Status,
     /// List the SSH keys the agent is currently serving (analogous to
@@ -81,7 +81,7 @@ pub enum Request {
     /// List the GPG keys the agent is currently serving. Read-only; returns an
     /// empty list when locked.
     GpgAgentList,
-    /// The public half of every GPG key the unlocked vaults hold, as the bytes
+    /// The public half of every GPG key the unlocked databases hold, as the bytes
     /// `gpg --export` would give, one export per entry. Read-only; public keys
     /// only, so no session code. Empty when nothing is unlocked.
     GpgPublicKeys,
@@ -89,7 +89,7 @@ pub enum Request {
     /// path for the caller to export as `SSH_AUTH_SOCK`.
     ///
     /// An agent with nothing in it makes no offers, so it cannot trip `sshd`'s
-    /// `MaxAuthTries`. Needs no unlocked vault — the socket is the point, the
+    /// `MaxAuthTries`. Needs no unlocked database — the socket is the point, the
     /// keys arrive afterwards via [`Request::SshAgentAdd`]. The daemon owns the
     /// lifetime: scoped sockets go on `lock`.
     SshAgentEmpty,
@@ -147,7 +147,7 @@ pub enum Request {
     },
     /// Code-gated extraction over the unlocked daemon. Reads `attachment` (e.g.
     /// "id" for an SSH key) from the entry titled `title` and returns its bytes
-    /// base64-encoded. Requires a vault unlocked by the same uid as the caller
+    /// base64-encoded. Requires a database unlocked by the same uid as the caller
     /// (SO_PEERCRED) and the session `code` minted by `Unlock`. Refused when
     /// locked or when the code is absent/wrong. See docs/provisioning-sessions.md.
     Get {
@@ -157,9 +157,9 @@ pub enum Request {
         code: String,
     },
     /// Code-gated write: store an SSH private key on the unlocked daemon's
-    /// vault. `path` is the entry path (`group/.../title`, created mkdir-p if
+    /// database. `path` is the entry path (`group/.../title`, created mkdir-p if
     /// absent; an existing entry has its `id` attachment replaced). `key` is the
-    /// private-key bytes, base64-encoded. Same session gate as `Get` (vault
+    /// private-key bytes, base64-encoded. Same session gate as `Get` (database
     /// unlocked by the same uid + matching `code`). On success the daemon
     /// persists with `save()` and reloads the SSH agent key store so the new
     /// key is served immediately. See docs/provisioning-sessions.md.
@@ -177,9 +177,9 @@ pub enum Request {
         code: String,
     },
     /// Code-gated write: store a GPG secret-key export (binary OpenPGP packet
-    /// stream) on the unlocked daemon's vault under the `gpg-priv` attachment of
+    /// stream) on the unlocked daemon's database under the `gpg-priv` attachment of
     /// the entry titled `title` (created mkdir-p if absent). `key` is the export
-    /// bytes, base64-encoded. Same session gate as `AddSsh` (vault unlocked by
+    /// bytes, base64-encoded. Same session gate as `AddSsh` (database unlocked by
     /// the same uid + matching `code`). On success the daemon persists with
     /// `save()` and reloads the GPG key store so any ed25519 secret keys are
     /// served by the agent without a re-unlock.
@@ -214,7 +214,7 @@ pub enum Request {
     /// Read one entry's non-secret surface: standard unprotected fields plus
     /// the NAMES of custom fields and attachments. Never returns Password or
     /// other protected values (use `GetField` for those — it is code-gated).
-    /// Ungated beyond "a vault is unlocked", exactly like `List`.
+    /// Ungated beyond "a database is unlocked", exactly like `List`.
     ShowEntry {
         path: String,
     },
@@ -246,12 +246,12 @@ pub enum Request {
         code: String,
     },
     /// Search unprotected metadata; protected values never match or leave the
-    /// vault. Older clients send a string `term`; omitted filters default empty.
+    /// database. Older clients send a string `term`; omitted filters default empty.
     /// Read safe discovery metadata for an entry or every entry in a group.
     Describe {
         path: String,
     },
-    /// Ungated beyond "a vault is unlocked", exactly like `List`.
+    /// Ungated beyond "a database is unlocked", exactly like `List`.
     Search {
         term: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -269,7 +269,7 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
-    /// Code-gated Git credential lookup across every unlocked vault.
+    /// Code-gated Git credential lookup across every unlocked database.
     GitCredential {
         host: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -437,7 +437,9 @@ impl std::fmt::Debug for Request {
                 .field("keyfile", &"<redacted>")
                 .finish(),
             Request::List => f.write_str("List"),
-            Request::Lock { vault } => f.debug_struct("Lock").field("vault", vault).finish(),
+            Request::Lock { database } => {
+                f.debug_struct("Lock").field("database", database).finish()
+            }
             Request::Shutdown => f.write_str("Shutdown"),
             Request::MaterializeStatus => f.write_str("MaterializeStatus"),
             Request::SetIdleTimeout { seconds } => f
@@ -783,11 +785,11 @@ pub struct ResolvedDto {
 impl SettingsDto {
     /// An entry's `KeeAgent.settings`, as text, for `ssh-agent`.
     pub fn for_keeagent(
-        vault: &trove_core::Vault,
+        database: &trove_core::Database,
         id: &trove_core::EntryId,
         path: &str,
     ) -> trove_core::Result<Self> {
-        let document = vault
+        let document = database
             .read_binary(id, "KeeAgent.settings")?
             .and_then(|b| crate::ssh_agent::keeagent::decode(&b));
         Ok(SettingsDto {
@@ -800,21 +802,21 @@ impl SettingsDto {
         })
     }
 
-    /// An entry's document and effective items, read from `vault`.
+    /// An entry's document and effective items, read from `database`.
     pub fn for_entry(
-        vault: &trove_core::Vault,
+        database: &trove_core::Database,
         id: &trove_core::EntryId,
         path: &str,
         capability: trove_core::settings::Capability,
     ) -> trove_core::Result<Self> {
-        let stored = vault.settings_document(id, capability)?;
+        let stored = database.settings_document(id, capability)?;
         let legacy = stored.is_none();
         let document = match stored {
             Some(d) => Some(d),
-            None => vault.legacy_settings(id, capability)?,
+            None => database.legacy_settings(id, capability)?,
         };
         let effective = match &document {
-            Some(_) => vault
+            Some(_) => database
                 .effective_settings(id, capability)?
                 .map(|items| items.into_iter().map(EffectiveItemDto::from).collect()),
             None => None,
@@ -831,7 +833,7 @@ impl SettingsDto {
 
     /// A group's (or with `path` empty, the database's) defaults document.
     pub fn for_group(
-        vault: &trove_core::Vault,
+        database: &trove_core::Database,
         path: &str,
         capability: trove_core::settings::Capability,
     ) -> trove_core::Result<Self> {
@@ -840,7 +842,9 @@ impl SettingsDto {
             path: path.to_string(),
             group: true,
             legacy: false,
-            document: vault.group_settings(path, capability)?.map(|d| d.to_xml()),
+            document: database
+                .group_settings(path, capability)?
+                .map(|d| d.to_xml()),
             effective: None,
         })
     }
@@ -958,13 +962,13 @@ impl SshKeyDto {
     }
 }
 
-/// A key in an unlocked vault that the SSH or GPG agent could not load, for
+/// A key in an unlocked database that the SSH or GPG agent could not load, for
 /// `status` and the unlock reply.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkippedKeyDto {
     /// `ssh` or `gpg`.
     pub agent: String,
-    pub vault: PathBuf,
+    pub database: PathBuf,
     /// The entry's full path (`Work/SSH/github`).
     pub entry: String,
     pub attachment: String,
@@ -1026,7 +1030,7 @@ pub enum OkBody {
     },
     /// v0.0.6.0: response body for `GetIdleTimeout`.
     /// `seconds` is the configured timeout (0 == disabled).
-    /// `remaining` is the seconds-until-fire if a vault is unlocked, else null.
+    /// `remaining` is the seconds-until-fire if a database is unlocked, else null.
     IdleTimeout {
         seconds: u64,
         remaining: Option<u64>,
@@ -1036,24 +1040,24 @@ pub enum OkBody {
     Version {
         daemon_version: String,
     },
-    /// v0.0.9.0: response body for `Status`. `vault_path` is `Some` only when
-    /// a vault is unlocked. `idle_timeout_secs` is the configured timeout
+    /// v0.0.9.0: response body for `Status`. `database_path` is `Some` only when
+    /// a database is unlocked. `idle_timeout_secs` is the configured timeout
     /// (0 == disabled). `idle_remaining_secs` is `Some` only when the timer
     /// is running. `ssh_keys` / `gpg_keys` / `materialized` count the entries
     /// in the corresponding in-memory stores.
     Status {
-        vault_path: Option<PathBuf>,
-        /// Every unlocked vault, in unlock order. `vault_path` above stays as
-        /// the first of these so an older CLI keeps working; a multi-vault-aware
+        database_path: Option<PathBuf>,
+        /// Every unlocked database, in unlock order. `database_path` above stays as
+        /// the first of these so an older CLI keeps working; a multi-database-aware
         /// client reads this instead. Wire-optional for the same reason.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        vault_paths: Vec<PathBuf>,
+        database_paths: Vec<PathBuf>,
         idle_timeout_secs: u64,
         idle_remaining_secs: Option<u64>,
         ssh_keys: usize,
         gpg_keys: usize,
         materialized: usize,
-        /// Keys in the unlocked vaults that the agents could not load, and
+        /// Keys in the unlocked databases that the agents could not load, and
         /// why. Wire-optional: older daemons don't send it.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skipped_keys: Vec<SkippedKeyDto>,
@@ -1073,12 +1077,12 @@ pub enum OkBody {
         daemon_version: String,
         /// Per-entry materialization failures (one human-readable line each).
         /// Empty on a clean unlock. Materialization does not fail the unlock
-        /// (spec: a typo on one entry must not break the vault), but any file
+        /// (spec: a typo on one entry must not break the database), but any file
         /// that a configured entry failed to write MUST be reflected here so
         /// the CLI can warn loudly — never a silent `ok` with a file missing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         materialize_warnings: Vec<String>,
-        /// Keys in the vault just unlocked that the agents could not load.
+        /// Keys in the database just unlocked that the agents could not load.
         /// The unlock still succeeds; the CLI warns about each one, since an
         /// auto-spawned daemon's own stderr goes nowhere anyone reads.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1233,7 +1237,7 @@ impl Response {
         })
     }
     pub fn ok_status(
-        vault_paths: Vec<PathBuf>,
+        database_paths: Vec<PathBuf>,
         idle_timeout_secs: u64,
         idle_remaining_secs: Option<u64>,
         ssh_keys: usize,
@@ -1242,11 +1246,11 @@ impl Response {
         skipped_keys: Vec<SkippedKeyDto>,
     ) -> Self {
         Response::Ok(OkBody::Status {
-            // Older clients read `vault_path` and know nothing of a set; give
-            // them the first unlocked vault rather than null, so a
-            // single-vault daemon looks exactly as it always did.
-            vault_path: vault_paths.first().cloned(),
-            vault_paths,
+            // Older clients read `database_path` and know nothing of a set; give
+            // them the first unlocked database rather than null, so a
+            // single-database daemon looks exactly as it always did.
+            database_path: database_paths.first().cloned(),
+            database_paths,
             idle_timeout_secs,
             idle_remaining_secs,
             ssh_keys,

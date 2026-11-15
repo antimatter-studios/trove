@@ -1,0 +1,37 @@
+.database-sync { flex: 1; overflow: hidden; background: var(--bg-1); }
+.sync-header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.sync-header h2, .sync-header p { flex-basis: 100%; margin: 0; }
+.sync-header p, .revision-note { color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+.sync-header label { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+.sync-header select { max-width: 450px; }
+.sync-body { display: flex; flex: 1; min-height: 0; }
+.sync-entries { flex: 0 1 240px; min-width: 160px; overflow: auto; border-right: 1px solid var(--border); padding: 8px; }
+.sync-entries > p { color: var(--text-dim); font-size: 12px; padding: 8px; }
+.sync-entry { display: flex; flex-direction: column; gap: 5px; text-align: left; width: 100%; padding: 12px; border-radius: 6px; background: transparent; color: var(--text); }
+.sync-entry span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-dim); }
+.sync-entry:hover, .sync-entry.selected { background: var(--accent-dim); }
+.sync-entry.selected { box-shadow: inset 2px 0 var(--accent); }
+.sync-review { flex: 1; min-width: 0; overflow: auto; padding: 20px; }
+.sync-review h3 { margin: 0 0 16px; }
+.revision-comparison { min-width: 0; }
+.revision-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; font-size: 12px; color: var(--text-dim); }
+.revision-controls label { display: flex; align-items: center; gap: 6px; }
+.revision-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.revision-sides > div { min-width: 0; }
+.revision-sides select { width: 100%; margin: 8px 0; }
+.revision-path { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); margin: 6px 0; }
+.revision-field { border-bottom: 1px solid var(--border-soft); padding: 12px; }
+.revision-field.changed { background: var(--accent-dim); }
+.revision-label { display: flex; gap: 10px; font-size: 12px; font-weight: 600; }
+.revision-label span { color: var(--accent); font-weight: normal; }
+.revision-field pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; font-family: var(--font-mono); line-height: 1.5; min-width: 0; margin: 8px 0 0; user-select: text; }
+.revision-missing { color: var(--text-faint); font-style: italic; }
+.revision-empty { padding: 24px; color: var(--text-dim); }
+.revision-actions { display: flex; justify-content: space-between; gap: 16px; margin-top: 16px; }
+.revision-confirm { padding: 16px; border: 1px solid var(--accent-line); border-radius: 8px; background: var(--bg-2); margin-top: 12px; }
+.revision-confirm button { margin: 8px 8px 0 0; }
+.revision-error { padding: 12px; color: var(--red); overflow-wrap: anywhere; }
+.revision-modal { width: min(1000px, 94%); max-height: 90%; overflow: auto; }
+.revision-modal > .revision-comparison { padding: 20px; }
+.sb-sync { margin: 4px 0 12px; width: 100%; padding: 10px 12px; display: flex; align-items: center; gap: 8px; background: transparent; color: var(--text-dim); border-radius: 6px; text-align: left; }
+.sb-sync:hover, .sb-sync.selected { background: var(--accent-dim); color: var(--accent); }

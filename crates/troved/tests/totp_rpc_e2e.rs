@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -37,7 +37,7 @@ impl Harness {
     fn new() -> Self {
         let cb: LockCallback = Box::new(|| -> LockFuture { Box::pin(async {}) });
         Self {
-            state: Arc::new(Mutex::new(troved::vaults::VaultSet::new())),
+            state: Arc::new(Mutex::new(troved::databases::DatabaseSet::new())),
             key_store: Arc::new(RwLock::new(Vec::new())),
             gpg_store: Arc::new(RwLock::new(Vec::new())),
             scoped_agents: troved::ssh_agent::scoped::new_registry(),
@@ -87,7 +87,7 @@ impl Harness {
 async fn totp_rpcs_gate_compute_and_persist() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("t.kdbx");
-    Vault::create(&path, PASSWORD).expect("create");
+    Database::create(&path, PASSWORD).expect("create");
 
     let h = Harness::new();
     let code = h.unlock(&path).await;
@@ -193,7 +193,7 @@ async fn totp_rpcs_gate_compute_and_persist() {
     assert_eq!(resp["status"], "err", "{resp}");
 
     // The AddTotp write persisted to disk.
-    let v = Vault::open(&path, PASSWORD).expect("reopen");
+    let v = Database::open(&path, PASSWORD).expect("reopen");
     let id = v.find_by_title("2fa").expect("entry");
     assert_eq!(
         v.get_field(&id, "otp").unwrap().as_deref(),

@@ -1,4 +1,4 @@
-//! End-to-end tests for the vault-ops commands: merge (two-secret stdin
+//! End-to-end tests for the database-ops commands: merge (two-secret stdin
 //! order), export xml/csv, db-edit (rekey + KDF), db-info.
 
 #![allow(missing_docs)]
@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
-const PW: &str = "vault-ops-e2e-pw";
+const PW: &str = "database-ops-e2e-pw";
 
 fn find_trove() -> Option<PathBuf> {
     let p = PathBuf::from(option_env!("CARGO_BIN_EXE_trove")?);
@@ -42,12 +42,12 @@ fn ok(out: &Output, what: &str) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-/// Build a vault with one password entry via the CLI.
-fn seed(trove: &std::path::Path, vault: &str, entry: &str, secret: &str) {
+/// Build a database with one password entry via the CLI.
+fn seed(trove: &std::path::Path, database: &str, entry: &str, secret: &str) {
     ok(
         &run_trove(
             trove,
-            &["--vault", vault, "--password-stdin", "init"],
+            &["--database", database, "--password-stdin", "init"],
             &format!("{PW}\n"),
         ),
         "init",
@@ -56,8 +56,8 @@ fn seed(trove: &std::path::Path, vault: &str, entry: &str, secret: &str) {
         &run_trove(
             trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "password",
@@ -82,14 +82,14 @@ fn merge_flows_and_errors() {
     let b = dir.path().join("b.kdbx");
     let b = b.to_str().unwrap();
 
-    // Diverged copies of ONE vault — the case KDBX merge exists for.
+    // Diverged copies of ONE database — the case KDBX merge exists for.
     seed(&trove, a, "shared", "orig");
     std::fs::copy(a, b).unwrap();
     ok(
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 a,
                 "--password-stdin",
                 "add",
@@ -105,7 +105,7 @@ fn merge_flows_and_errors() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 b,
                 "--password-stdin",
                 "add",
@@ -122,7 +122,7 @@ fn merge_flows_and_errors() {
     let out = ok(
         &run_trove(
             &trove,
-            &["--vault", a, "--password-stdin", "merge", b],
+            &["--database", a, "--password-stdin", "merge", b],
             &format!("{PW}\n{PW}\n"),
         ),
         "merge",
@@ -131,7 +131,7 @@ fn merge_flows_and_errors() {
     let out = ok(
         &run_trove(
             &trove,
-            &["--vault", a, "--password-stdin", "list"],
+            &["--database", a, "--password-stdin", "list"],
             &format!("{PW}\n"),
         ),
         "list after merge",
@@ -141,27 +141,27 @@ fn merge_flows_and_errors() {
         "{out}"
     );
 
-    // Wrong source password → vault-error exit (2), target untouched.
+    // Wrong source password → database-error exit (2), target untouched.
     let out = run_trove(
         &trove,
-        &["--vault", a, "--password-stdin", "merge", b],
+        &["--database", a, "--password-stdin", "merge", b],
         &format!("{PW}\nwrong-source-pw\n"),
     );
     assert_eq!(out.status.code(), Some(2), "bad source creds");
 
-    // Unrelated vaults refuse cleanly (no panic): different root UUIDs.
+    // Unrelated databases refuse cleanly (no panic): different root UUIDs.
     let c = dir.path().join("c.kdbx");
     let c = c.to_str().unwrap();
     seed(&trove, c, "unrelated", "x");
     let out = run_trove(
         &trove,
-        &["--vault", a, "--password-stdin", "merge", c],
+        &["--database", a, "--password-stdin", "merge", c],
         &format!("{PW}\n{PW}\n"),
     );
-    assert!(!out.status.success(), "unrelated vaults must refuse");
+    assert!(!out.status.success(), "unrelated databases must refuse");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("different root UUID"),
-        "clean unrelated-vault error"
+        "clean unrelated-database error"
     );
 }
 
@@ -176,11 +176,11 @@ fn sync_flows_and_errors() {
     let a = a.to_str().unwrap();
     let b = dir.path().join("b.kdbx");
     let b = b.to_str().unwrap();
-    let list = |vault: &str| {
+    let list = |database: &str| {
         ok(
             &run_trove(
                 &trove,
-                &["--vault", vault, "--password-stdin", "list"],
+                &["--database", database, "--password-stdin", "list"],
                 &format!("{PW}\n"),
             ),
             "list",
@@ -192,7 +192,7 @@ fn sync_flows_and_errors() {
     let out = ok(
         &run_trove(
             &trove,
-            &["--vault", a, "--password-stdin", "sync", b],
+            &["--database", a, "--password-stdin", "sync", b],
             &format!("{PW}\n"),
         ),
         "sync creates",
@@ -201,13 +201,13 @@ fn sync_flows_and_errors() {
     assert!(list(b).contains("shared"));
 
     // Each side's change reaches the other.
-    for (vault, entry) in [(a, "in-a"), (b, "in-b")] {
+    for (database, entry) in [(a, "in-a"), (b, "in-b")] {
         ok(
             &run_trove(
                 &trove,
                 &[
-                    "--vault",
-                    vault,
+                    "--database",
+                    database,
                     "--password-stdin",
                     "add",
                     "password",
@@ -222,22 +222,22 @@ fn sync_flows_and_errors() {
     let out = ok(
         &run_trove(
             &trove,
-            &["--vault", a, "--password-stdin", "sync", b],
+            &["--database", a, "--password-stdin", "sync", b],
             &format!("{PW}\n{PW}\n"),
         ),
         "sync",
     );
     assert!(out.contains("pulled 1 created"), "{out}");
     assert!(out.contains("pushed 1 created"), "{out}");
-    for vault in [a, b] {
-        let out = list(vault);
+    for database in [a, b] {
+        let out = list(database);
         assert!(out.contains("in-a") && out.contains("in-b"), "{out}");
     }
 
-    // Wrong password for the other copy → vault-error exit (2).
+    // Wrong password for the other copy → database-error exit (2).
     let out = run_trove(
         &trove,
-        &["--vault", a, "--password-stdin", "sync", b],
+        &["--database", a, "--password-stdin", "sync", b],
         &format!("{PW}\nwrong\n"),
     );
     assert_eq!(out.status.code(), Some(2), "bad other creds");
@@ -249,7 +249,7 @@ fn sync_flows_and_errors() {
     let out = ok(
         &run_trove(
             &trove,
-            &["--vault", a, "--password-stdin", "sync", b],
+            &["--database", a, "--password-stdin", "sync", b],
             &format!("{PW}\n{PW}\n"),
         ),
         "sync again",
@@ -272,7 +272,7 @@ fn export_xml_and_csv_shapes() {
     let xml = ok(
         &run_trove(
             &trove,
-            &["--vault", v, "--password-stdin", "export"],
+            &["--database", v, "--password-stdin", "export"],
             &format!("{PW}\n"),
         ),
         "export xml",
@@ -284,7 +284,7 @@ fn export_xml_and_csv_shapes() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "export",
@@ -323,7 +323,7 @@ fn db_edit_rekey_kdf_and_db_info() {
     // Nothing-to-change is a clean error.
     let out = run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "db-edit"],
+        &["--database", v, "--password-stdin", "db-edit"],
         &format!("{PW}\n"),
     );
     assert!(!out.status.success());
@@ -333,7 +333,7 @@ fn db_edit_rekey_kdf_and_db_info() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "db-edit",
@@ -346,14 +346,14 @@ fn db_edit_rekey_kdf_and_db_info() {
     // Old password now fails (exit 2); new one lists the surviving entry.
     let out = run_trove(
         &trove,
-        &["--vault", v, "--password-stdin", "list"],
+        &["--database", v, "--password-stdin", "list"],
         &format!("{PW}\n"),
     );
     assert_eq!(out.status.code(), Some(2));
     let out = ok(
         &run_trove(
             &trove,
-            &["--vault", v, "--password-stdin", "list"],
+            &["--database", v, "--password-stdin", "list"],
             "new-master-pw\n",
         ),
         "list with new pw",
@@ -365,7 +365,7 @@ fn db_edit_rekey_kdf_and_db_info() {
         &run_trove(
             &trove,
             &[
-                "--vault",
+                "--database",
                 v,
                 "--password-stdin",
                 "db-edit",
@@ -381,7 +381,7 @@ fn db_edit_rekey_kdf_and_db_info() {
     let info = ok(
         &run_trove(
             &trove,
-            &["--vault", v, "--password-stdin", "db-info"],
+            &["--database", v, "--password-stdin", "db-info"],
             "new-master-pw\n",
         ),
         "db-info",
@@ -392,4 +392,120 @@ fn db_edit_rekey_kdf_and_db_info() {
     // --kdf-memory input unit (MiB) or the setter's API unit (KiB).
     assert!(info.contains("134217728"), "128 MiB in bytes: {info}");
     assert!(!info.contains("sekrit"), "db-info must not leak secrets");
+}
+
+#[test]
+fn database_metadata_can_be_shown_set_and_linked() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let database = dir.path().join("metadata.kdbx");
+    let database = database.to_str().unwrap();
+    seed(&trove, database, "metadata-test", "secret");
+
+    let shown = ok(
+        &run_trove(
+            &trove,
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "database",
+                "metadata",
+                "show",
+                "--json",
+            ],
+            &format!("{PW}\n"),
+        ),
+        "show database metadata",
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&shown).expect("metadata JSON");
+    assert!(metadata.get("name").is_some());
+    assert_eq!(metadata["trove_uuid"], serde_json::Value::Null);
+
+    let uuid = "3c7e4e44-5fca-4e2f-bb19-0912ebf2ab09";
+    ok(
+        &run_trove(
+            &trove,
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "database",
+                "metadata",
+                "set",
+                "--name",
+                "Shared copy",
+                "--description",
+                "linked test database",
+                "--default-username",
+                "chris",
+                "--trove-uuid",
+                uuid,
+            ],
+            &format!("{PW}\n"),
+        ),
+        "set database metadata",
+    );
+    let shown = ok(
+        &run_trove(
+            &trove,
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "database",
+                "metadata",
+                "show",
+                "--json",
+            ],
+            &format!("{PW}\n"),
+        ),
+        "show updated database metadata",
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&shown).expect("updated metadata JSON");
+    assert_eq!(metadata["name"], "Shared copy");
+    assert_eq!(metadata["description"], "linked test database");
+    assert_eq!(metadata["default_username"], "chris");
+    assert_eq!(metadata["trove_uuid"], uuid);
+
+    ok(
+        &run_trove(
+            &trove,
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "database",
+                "metadata",
+                "set",
+                "--generate-trove-uuid",
+            ],
+            &format!("{PW}\n"),
+        ),
+        "generate database UUID",
+    );
+    let shown = ok(
+        &run_trove(
+            &trove,
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "database",
+                "metadata",
+                "show",
+                "--json",
+            ],
+            &format!("{PW}\n"),
+        ),
+        "show generated database UUID",
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_str(&shown).expect("generated metadata JSON");
+    let generated_uuid = metadata["trove_uuid"].as_str().unwrap();
+    assert_eq!(generated_uuid.len(), 36);
+    assert_eq!(generated_uuid.matches('-').count(), 4);
 }

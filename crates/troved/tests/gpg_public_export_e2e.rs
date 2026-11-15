@@ -2,7 +2,7 @@
 //! `GNUPGHOME`, exported as a secret key, cut down to its public part, and
 //! imported into a second, empty `GNUPGHOME` must show up there as a public
 //! key only, with the same fingerprint and user ID. That is what lets gpg ask
-//! trove's agent to sign with a key that lives only in the vault.
+//! trove's agent to sign with a key that lives only in the database.
 //!
 //! Skips when `gpg` is not on PATH. Unix-only (gpg-agent sockets in a temp
 //! GNUPGHOME).

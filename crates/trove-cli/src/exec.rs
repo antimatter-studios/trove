@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use trove_core::settings::{Capability, EffectiveItem};
-use trove_core::{EntryId, Vault};
+use trove_core::{Database, EntryId};
 
 /// One resolved injection: an env var carrying either a secret value or the
 /// path of a materialized attachment.
@@ -55,7 +55,7 @@ impl Entry {
     }
 }
 
-/// Where `exec` reads entries from: a vault file opened here, or the vaults
+/// Where `exec` reads entries from: a database file opened here, or the databases
 /// unlocked in the daemon.
 pub trait Source {
     fn entries(&self) -> Result<Vec<Entry>>;
@@ -67,27 +67,27 @@ pub trait Source {
     /// `None` when exec is off for the entry.
     fn settings(&self, e: &Entry) -> Result<Option<Vec<EffectiveItem>>>;
     /// Whether this source asks for Touch ID itself before handing over a
-    /// value whose item says `confirm="true"`. The daemon does; a vault file
+    /// value whose item says `confirm="true"`. The daemon does; a database file
     /// opened here has no one between it and the caller, so exec asks.
     fn approves_itself(&self) -> bool {
         false
     }
 }
 
-/// A vault file opened by `exec` itself.
-pub struct VaultSource<'a> {
-    vault: &'a Vault,
+/// A database file opened by `exec` itself.
+pub struct DatabaseSource<'a> {
+    database: &'a Database,
     ids: std::collections::HashMap<String, EntryId>,
 }
 
-impl<'a> VaultSource<'a> {
-    pub fn new(vault: &'a Vault) -> Self {
-        let ids = vault
+impl<'a> DatabaseSource<'a> {
+    pub fn new(database: &'a Database) -> Self {
+        let ids = database
             .list_entries()
             .into_iter()
             .map(|e| (e.id.to_string(), e.id))
             .collect();
-        Self { vault, ids }
+        Self { database, ids }
     }
 
     fn id(&self, e: &Entry) -> Result<&EntryId> {
@@ -97,10 +97,10 @@ impl<'a> VaultSource<'a> {
     }
 }
 
-impl Source for VaultSource<'_> {
+impl Source for DatabaseSource<'_> {
     fn entries(&self) -> Result<Vec<Entry>> {
         Ok(self
-            .vault
+            .database
             .list_entries()
             .into_iter()
             .map(|e| Entry {
@@ -112,23 +112,23 @@ impl Source for VaultSource<'_> {
             .collect())
     }
     fn find(&self, path: &str) -> Result<Option<String>> {
-        Ok(self.vault.find_by_title(path).map(|id| id.to_string()))
+        Ok(self.database.find_by_title(path).map(|id| id.to_string()))
     }
     fn field(&self, e: &Entry, name: &str) -> Result<Option<String>> {
-        Ok(self.vault.get_field(self.id(e)?, name)?)
+        Ok(self.database.get_field(self.id(e)?, name)?)
     }
     fn attachment(&self, e: &Entry, name: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.vault.read_binary(self.id(e)?, name)?)
+        Ok(self.database.read_binary(self.id(e)?, name)?)
     }
     fn settings(&self, e: &Entry) -> Result<Option<Vec<EffectiveItem>>> {
         Ok(self
-            .vault
+            .database
             .effective_settings(self.id(e)?, Capability::EnvAgent)?)
     }
 }
 
-/// The vaults unlocked in the daemon, read through the session-gated RPCs
-/// (`TROVE_SESSION`), so `exec` needn't reopen the vault or ask for its
+/// The databases unlocked in the daemon, read through the session-gated RPCs
+/// (`TROVE_SESSION`), so `exec` needn't reopen the database or ask for its
 /// password.
 pub struct DaemonSource {
     code: String,
@@ -370,7 +370,7 @@ pub fn resolve(v: &dyn Source, scope: Scope, tmp: &Path) -> Result<Vec<Injection
     Ok(out)
 }
 
-/// The variables the open vaults ask to have exported into the shell at
+/// The variables the open databases ask to have exported into the shell at
 /// `trove unlock --export`: every `<Variable>` whose `export` resolves to
 /// `shell`. Read through the daemon like exec's, so a `confirm` item waits for
 /// Touch ID here too. Problems are warnings, not failures: an unlock that
@@ -662,8 +662,8 @@ mod tests {
         );
     }
 
-    fn vault_for_exec(dir: &TempDir) -> Vault {
-        let mut v = Vault::create(&dir.path().join("e.kdbx"), "pw").unwrap();
+    fn database_for_exec(dir: &TempDir) -> Database {
+        let mut v = Database::create(&dir.path().join("e.kdbx"), "pw").unwrap();
         // String secret with explicit env name.
         let id = v.add_entry("Infra/stripe").unwrap();
         v.set_field(&id, "Password", "sk_live_123").unwrap();
@@ -685,11 +685,11 @@ mod tests {
     #[test]
     fn group_scope_injects_env_and_files_and_wipes() {
         let dir = TempDir::new().unwrap();
-        let v = vault_for_exec(&dir);
+        let v = database_for_exec(&dir);
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
 
-        let mut inj = resolve(&VaultSource::new(&v), Scope::Auto("Infra".into()), &tmp).unwrap();
+        let mut inj = resolve(&DatabaseSource::new(&v), Scope::Auto("Infra".into()), &tmp).unwrap();
         inj.sort_by(|a, b| a.name.cmp(&b.name));
         let names: Vec<&str> = inj.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["KUBECONFIG", "STRIPE_KEY"]);
@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn exec_mappings_export_several_fields_and_attachments() {
         let dir = TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("m.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("m.kdbx"), "pw").unwrap();
         let id = v.add_entry("Db/main").unwrap();
         v.set_field(&id, "UserName", "app").unwrap();
         v.set_field(&id, "Password", "pg-secret").unwrap();
@@ -729,7 +729,12 @@ mod tests {
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
 
-        let inj = resolve(&VaultSource::new(&v), Scope::Auto("Db/main".into()), &tmp).unwrap();
+        let inj = resolve(
+            &DatabaseSource::new(&v),
+            Scope::Auto("Db/main".into()),
+            &tmp,
+        )
+        .unwrap();
         let got: Vec<(&str, &str)> = inj
             .iter()
             .map(|i| (i.name.as_str(), i.value.as_str()))
@@ -753,7 +758,12 @@ mod tests {
 
         // Exec.Env still works alongside the mappings.
         v.set_field(&id, "Exec.Env", "DATABASE_PASSWORD").unwrap();
-        let inj = resolve(&VaultSource::new(&v), Scope::Auto("Db/main".into()), &tmp).unwrap();
+        let inj = resolve(
+            &DatabaseSource::new(&v),
+            Scope::Auto("Db/main".into()),
+            &tmp,
+        )
+        .unwrap();
         assert!(inj.iter().any(|i| i.name == "DATABASE_PASSWORD"));
         wipe_dir(&tmp);
     }
@@ -769,19 +779,19 @@ mod tests {
             ("Exec.1BAD", "Password", "valid environment variable"),
             ("Exec.EMPTY", "", "empty"),
         ] {
-            let mut v = Vault::create(&dir.path().join(format!("{wanted}.kdbx")), "pw").unwrap();
+            let mut v = Database::create(&dir.path().join(format!("{wanted}.kdbx")), "pw").unwrap();
             let id = v.add_entry("e").unwrap();
             v.set_field(&id, "Password", "x").unwrap();
             v.set_field(&id, field, source).unwrap();
-            let err = resolve(&VaultSource::new(&v), Scope::Auto("e".into()), &tmp)
+            let err = resolve(&DatabaseSource::new(&v), Scope::Auto("e".into()), &tmp)
                 .err()
                 .expect(field);
             assert!(err.to_string().contains(wanted), "{field}: {err}");
         }
     }
 
-    fn doc_vault(dir: &TempDir, xml: &str) -> Vault {
-        let mut v = Vault::create(&dir.path().join("d.kdbx"), "pw").unwrap();
+    fn doc_database(dir: &TempDir, xml: &str) -> Database {
+        let mut v = Database::create(&dir.path().join("d.kdbx"), "pw").unwrap();
         let id = v.add_entry("antimatter-studios/gitea").unwrap();
         v.set_field(&id, "UserName", "chris").unwrap();
         v.set_field(&id, "gitea-token", "tok-123").unwrap();
@@ -794,7 +804,7 @@ mod tests {
     #[test]
     fn env_agent_settings_say_what_to_export() {
         let dir = TempDir::new().unwrap();
-        let v = doc_vault(
+        let v = doc_database(
             &dir,
             r#"<EnvAgentSettings version="1">
                  <Variable name="GITEA_TOKEN" field="gitea-token"/>
@@ -804,7 +814,7 @@ mod tests {
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
         let inj = resolve(
-            &VaultSource::new(&v),
+            &DatabaseSource::new(&v),
             Scope::Entry("antimatter-studios/gitea".into()),
             &tmp,
         )
@@ -827,12 +837,12 @@ mod tests {
     #[test]
     fn a_scope_with_nothing_configured_says_how_to_turn_exec_on() {
         let dir = TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("n.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("n.kdbx"), "pw").unwrap();
         let id = v.add_entry("Infra/db-main").unwrap();
         v.set_field(&id, "Password", "pg-pass").unwrap();
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
-        let err = resolve(&VaultSource::new(&v), Scope::Auto("Infra".into()), &tmp)
+        let err = resolve(&DatabaseSource::new(&v), Scope::Auto("Infra".into()), &tmp)
             .err()
             .expect("nothing to export");
         let msg = err.to_string();
@@ -849,7 +859,7 @@ mod tests {
         // the machine with no Touch ID, where the answer must be no.
         std::env::set_var("TROVE_TEST_APPROVER", "none");
         let dir = TempDir::new().unwrap();
-        let v = doc_vault(
+        let v = doc_database(
             &dir,
             r#"<EnvAgentSettings version="1">
                  <Variable name="GITEA_TOKEN" field="gitea-token" confirm="true"/>
@@ -858,7 +868,7 @@ mod tests {
         let tmp = dir.path().join("run");
         std::fs::create_dir(&tmp).unwrap();
         let err = resolve(
-            &VaultSource::new(&v),
+            &DatabaseSource::new(&v),
             Scope::Entry("antimatter-studios/gitea".into()),
             &tmp,
         )
@@ -881,11 +891,11 @@ mod tests {
             ),
         ] {
             let sub = TempDir::new().unwrap();
-            let v = doc_vault(&sub, xml);
+            let v = doc_database(&sub, xml);
             let tmp = dir.path().join(format!("run-{}", wanted.len()));
             std::fs::create_dir(&tmp).unwrap();
             let err = resolve(
-                &VaultSource::new(&v),
+                &DatabaseSource::new(&v),
                 Scope::Entry("antimatter-studios/gitea".into()),
                 &tmp,
             )
@@ -898,12 +908,12 @@ mod tests {
     #[test]
     fn single_entry_scope_and_misses() {
         let dir = TempDir::new().unwrap();
-        let v = vault_for_exec(&dir);
+        let v = database_for_exec(&dir);
         let tmp = dir.path().join("run2");
         std::fs::create_dir(&tmp).unwrap();
 
         let inj = resolve(
-            &VaultSource::new(&v),
+            &DatabaseSource::new(&v),
             Scope::Auto("Infra/stripe".into()),
             &tmp,
         )
@@ -912,7 +922,12 @@ mod tests {
         assert_eq!(inj[0].name, "STRIPE_KEY");
         assert_eq!(inj[0].value, "sk_live_123");
 
-        assert!(resolve(&VaultSource::new(&v), Scope::Auto("No/Such".into()), &tmp).is_err());
+        assert!(resolve(
+            &DatabaseSource::new(&v),
+            Scope::Auto("No/Such".into()),
+            &tmp
+        )
+        .is_err());
         wipe_dir(&tmp);
     }
 }

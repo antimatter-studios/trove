@@ -14,7 +14,7 @@
 # symlink stays a manual step you can undo.
 
 [Unit]
-Description=trove secrets daemon (SSH and GPG agents for KeePass vaults)
+Description=trove secrets daemon (SSH and GPG agents for KeePass databases)
 Documentation=https://github.com/antimatter-studios/trove
 
 [Service]

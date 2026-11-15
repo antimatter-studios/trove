@@ -1,10 +1,10 @@
 //! Integration tests for `trove-core`.
 //!
-//! Headline scenario: create a vault, store an SSH-style private key as a
+//! Headline scenario: create a database, store an SSH-style private key as a
 //! binary attachment, save, drop, reopen, and verify byte-for-byte equality.
 
 use tempfile::TempDir;
-use trove_core::{Error, Vault};
+use trove_core::{Database, Error};
 
 /// A realistic ~400-byte stand-in for an OpenSSH ed25519 private key. Not a
 /// real key — just shaped like one so the binary path is exercised on data
@@ -30,45 +30,45 @@ qQfUbWTy7y1CralfiweAAAAEXNkcG0tdGVzdC1lZDI1NTE5AQID\n";
 #[test]
 fn create_open_roundtrip_with_binary_attachment() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     let password = "correct horse battery staple";
     let key_bytes = synthetic_ed25519_key();
 
     // Create.
     let id = {
-        let mut vault = Vault::create(&path, password).expect("create");
-        let id = vault.add_entry("github-deploy").expect("add_entry");
-        vault
+        let mut database = Database::create(&path, password).expect("create");
+        let id = database.add_entry("github-deploy").expect("add_entry");
+        database
             .set_field(&id, "UserName", "git")
             .expect("set username");
-        vault
+        database
             .set_field(&id, "URL", "git@github.com")
             .expect("set url");
-        vault
+        database
             .set_field(&id, "Password", "passphrase-for-the-key")
             .expect("set password");
-        vault
+        database
             .set_tags(&id, &["gitlab".to_string(), "work".to_string()])
             .expect("set tags");
-        vault
+        database
             .attach_binary(&id, "id_ed25519", &key_bytes)
             .expect("attach");
-        vault.save().expect("save");
+        database.save().expect("save");
         id
     };
 
     // Drop the original handle, reopen with the same password.
-    let vault = Vault::open(&path, password).expect("reopen");
+    let database = Database::open(&path, password).expect("reopen");
 
     // The entry survived and the attachment is round-tripped exactly.
-    let summary = vault.get_entry(&id).expect("entry survives reopen");
+    let summary = database.get_entry(&id).expect("entry survives reopen");
     assert_eq!(summary.title, "github-deploy");
     assert_eq!(summary.username.as_deref(), Some("git"));
     assert_eq!(summary.url.as_deref(), Some("git@github.com"));
     assert_eq!(summary.attachment_names, vec!["id_ed25519".to_string()]);
     assert_eq!(summary.tags, vec!["gitlab", "work"]);
 
-    let read = vault
+    let read = database
         .read_binary(&id, "id_ed25519")
         .expect("read_binary ok")
         .expect("attachment present");
@@ -79,14 +79,14 @@ fn create_open_roundtrip_with_binary_attachment() {
 fn native_entry_tags_round_trip_as_kdbx_tags() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("tags.kdbx");
-    let mut vault = Vault::create(&path, "pw").unwrap();
-    let id = vault.add_entry("tagged").unwrap();
-    vault
+    let mut database = Database::create(&path, "pw").unwrap();
+    let id = database.add_entry("tagged").unwrap();
+    database
         .set_entry_tags(&id, vec!["gitlab".into(), "Favorite".into()])
         .unwrap();
-    vault.save().unwrap();
+    database.save().unwrap();
 
-    let reopened = Vault::open(&path, "pw").unwrap();
+    let reopened = Database::open(&path, "pw").unwrap();
     assert_eq!(
         reopened.get_entry_tags(&id).unwrap(),
         ["gitlab", "Favorite"]
@@ -108,11 +108,11 @@ fn native_entry_tags_round_trip_as_kdbx_tags() {
 #[test]
 fn open_with_wrong_password_returns_bad_password() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     {
-        let _ = Vault::create(&path, "correct").expect("create");
+        let _ = Database::create(&path, "correct").expect("create");
     }
-    match Vault::open(&path, "wrong") {
+    match Database::open(&path, "wrong") {
         Err(Error::BadPassword) => {}
         Err(other) => panic!("expected BadPassword, got Err({other:?})"),
         Ok(_) => panic!("expected BadPassword, got Ok"),
@@ -122,12 +122,12 @@ fn open_with_wrong_password_returns_bad_password() {
 #[test]
 fn read_binary_on_missing_entry_errors_with_entry_not_found() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let vault = Vault::create(&path, "pw").expect("create");
+    let path = dir.path().join("database.kdbx");
+    let database = Database::create(&path, "pw").expect("create");
     let bogus: trove_core::EntryId = "00000000-0000-0000-0000-000000000000"
         .parse()
         .expect("parse uuid");
-    match vault.read_binary(&bogus, "x") {
+    match database.read_binary(&bogus, "x") {
         Err(Error::EntryNotFound(_)) => {}
         other => panic!("expected EntryNotFound, got {other:?}"),
     }
@@ -136,22 +136,26 @@ fn read_binary_on_missing_entry_errors_with_entry_not_found() {
 #[test]
 fn read_binary_on_missing_attachment_returns_ok_none() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
-    let id = vault.add_entry("entry").expect("add");
-    let res = vault.read_binary(&id, "no-such-attachment").expect("ok");
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
+    let id = database.add_entry("entry").expect("add");
+    let res = database.read_binary(&id, "no-such-attachment").expect("ok");
     assert!(res.is_none());
 }
 
 #[test]
 fn list_entries_finds_added_entries() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
-    let _ = vault.add_entry("alpha").expect("add alpha");
-    let _ = vault.add_entry("beta").expect("add beta");
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
+    let _ = database.add_entry("alpha").expect("add alpha");
+    let _ = database.add_entry("beta").expect("add beta");
 
-    let titles: Vec<String> = vault.list_entries().into_iter().map(|e| e.title).collect();
+    let titles: Vec<String> = database
+        .list_entries()
+        .into_iter()
+        .map(|e| e.title)
+        .collect();
     assert!(titles.contains(&"alpha".to_string()));
     assert!(titles.contains(&"beta".to_string()));
     assert_eq!(titles.len(), 2);
@@ -160,24 +164,24 @@ fn list_entries_finds_added_entries() {
 #[test]
 fn find_by_title_round_trips() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
-    let id = vault.add_entry("unique-title").expect("add");
-    let found = vault
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
+    let id = database.add_entry("unique-title").expect("add");
+    let found = database
         .find_by_title("unique-title")
         .expect("title lookup hits");
     assert_eq!(found, id);
-    assert!(vault.find_by_title("does-not-exist").is_none());
+    assert!(database.find_by_title("does-not-exist").is_none());
 }
 
 #[test]
 fn create_refuses_to_overwrite_existing_file() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     {
-        let _ = Vault::create(&path, "pw").expect("first create");
+        let _ = Database::create(&path, "pw").expect("first create");
     }
-    match Vault::create(&path, "pw") {
+    match Database::create(&path, "pw") {
         Err(Error::AlreadyExists(p)) => assert_eq!(p, path),
         Err(other) => panic!("expected AlreadyExists, got Err({other:?})"),
         Ok(_) => panic!("expected AlreadyExists, got Ok"),
@@ -187,21 +191,21 @@ fn create_refuses_to_overwrite_existing_file() {
 #[test]
 fn remove_binary_is_no_op_when_missing_and_drops_when_present() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
-    let id = vault.add_entry("e").expect("add");
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
+    let id = database.add_entry("e").expect("add");
     // No-op on missing.
-    vault.remove_binary(&id, "ghost").expect("noop ok");
+    database.remove_binary(&id, "ghost").expect("noop ok");
     // Now attach and remove.
-    vault
+    database
         .attach_binary(&id, "blob", &[1, 2, 3, 4])
         .expect("attach");
     assert_eq!(
-        vault.get_entry(&id).expect("entry").attachment_names,
+        database.get_entry(&id).expect("entry").attachment_names,
         vec!["blob".to_string()]
     );
-    vault.remove_binary(&id, "blob").expect("remove");
-    assert!(vault
+    database.remove_binary(&id, "blob").expect("remove");
+    assert!(database
         .get_entry(&id)
         .expect("entry")
         .attachment_names
@@ -214,18 +218,18 @@ fn remove_binary_is_no_op_when_missing_and_drops_when_present() {
 #[test]
 fn add_entry_with_path_creates_groups_and_round_trips() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     let id = {
-        let mut vault = Vault::create(&path, "pw").expect("create");
-        let id = vault
+        let mut database = Database::create(&path, "pw").expect("create");
+        let id = database
             .add_entry("Work/SSH/github")
             .expect("add nested entry");
-        vault.save().expect("save");
+        database.save().expect("save");
         id
     };
 
-    let vault = Vault::open(&path, "pw").expect("reopen");
-    let summary = vault.get_entry(&id).expect("entry survives reopen");
+    let database = Database::open(&path, "pw").expect("reopen");
+    let summary = database.get_entry(&id).expect("entry survives reopen");
     assert_eq!(summary.title, "github", "leaf becomes the entry title");
     assert_eq!(
         summary.group_path,
@@ -236,12 +240,12 @@ fn add_entry_with_path_creates_groups_and_round_trips() {
 
     // mkdir -p semantics: a second entry under the same prefix must reuse
     // the existing groups rather than create duplicates.
-    let mut vault = vault;
-    let _ = vault
+    let mut database = database;
+    let _ = database
         .add_entry("Work/SSH/gitlab")
         .expect("add second nested entry");
 
-    let display_paths: Vec<String> = vault
+    let display_paths: Vec<String> = database
         .list_entries()
         .into_iter()
         .map(|e| e.display_path())
@@ -256,34 +260,34 @@ fn add_entry_with_path_creates_groups_and_round_trips() {
 #[test]
 fn find_by_title_supports_paths_and_leaf_fallback() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
-    let nested = vault
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
+    let nested = database
         .add_entry("Work/SSH/github")
         .expect("add nested entry");
-    let _root = vault.add_entry("root-only").expect("add root entry");
+    let _root = database.add_entry("root-only").expect("add root entry");
 
     assert_eq!(
-        vault.find_by_title("Work/SSH/github"),
+        database.find_by_title("Work/SSH/github"),
         Some(nested.clone()),
         "exact path lookup hits the nested entry"
     );
     // Leaf-only lookup walks all groups; "github" still resolves to the
     // nested entry because nothing at root shares the leaf.
-    assert_eq!(vault.find_by_title("github"), Some(nested));
+    assert_eq!(database.find_by_title("github"), Some(nested));
     // Wrong path → None even though the leaf exists somewhere.
-    assert!(vault.find_by_title("Personal/github").is_none());
-    assert!(vault.find_by_title("missing").is_none());
+    assert!(database.find_by_title("Personal/github").is_none());
+    assert!(database.find_by_title("missing").is_none());
 }
 
 /// Path validation: empty segments and the empty title are rejected.
 #[test]
 fn add_entry_rejects_malformed_paths() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
     for bad in ["", "/leading", "trailing/", "double//slash", "/"] {
-        match vault.add_entry(bad) {
+        match database.add_entry(bad) {
             Err(Error::InvalidPath(_)) => {}
             other => panic!("expected InvalidPath for {bad:?}, got {other:?}"),
         }
@@ -293,12 +297,12 @@ fn add_entry_rejects_malformed_paths() {
 #[test]
 fn delete_entry_removes_from_listing() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
-    let id = vault.add_entry("doomed").expect("add");
-    vault.delete_entry(&id).expect("delete");
-    assert!(vault.list_entries().is_empty());
-    match vault.delete_entry(&id) {
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
+    let id = database.add_entry("doomed").expect("add");
+    database.delete_entry(&id).expect("delete");
+    assert!(database.list_entries().is_empty());
+    match database.delete_entry(&id) {
         Err(Error::EntryNotFound(_)) => {}
         other => panic!("expected EntryNotFound on second delete, got {other:?}"),
     }
@@ -311,12 +315,12 @@ fn delete_entry_removes_from_listing() {
 #[test]
 fn save_names_root_group_without_polluting_paths() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
+    let path = dir.path().join("database.kdbx");
     {
-        let mut vault = Vault::create(&path, "pw").expect("create");
-        vault.add_entry("top-level").expect("add root entry");
-        vault.add_entry("Work/SSH/github").expect("add nested");
-        vault.save().expect("save");
+        let mut database = Database::create(&path, "pw").expect("create");
+        database.add_entry("top-level").expect("add root entry");
+        database.add_entry("Work/SSH/github").expect("add nested");
+        database.save().expect("save");
     }
 
     // Inspect the persisted database the way KeePassXC would: the single
@@ -327,9 +331,9 @@ fn save_names_root_group_without_polluting_paths() {
     assert_eq!(db.root().name, "Root", "root group is named on disk");
 
     // The named root stays out of trove's entry paths.
-    let vault = Vault::open(&path, "pw").expect("reopen");
+    let database = Database::open(&path, "pw").expect("reopen");
     let by_title = |t: &str| {
-        vault
+        database
             .list_entries()
             .into_iter()
             .find(|e| e.title == t)
@@ -353,11 +357,13 @@ fn save_names_root_group_without_polluting_paths() {
 #[test]
 fn root_prefix_aliases_the_root_group_without_nesting() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault.kdbx");
-    let mut vault = Vault::create(&path, "pw").expect("create");
+    let path = dir.path().join("database.kdbx");
+    let mut database = Database::create(&path, "pw").expect("create");
 
-    let id = vault.add_entry("Root/alpha").expect("add via Root/ prefix");
-    let summary = vault.get_entry(&id).expect("entry exists");
+    let id = database
+        .add_entry("Root/alpha")
+        .expect("add via Root/ prefix");
+    let summary = database.get_entry(&id).expect("entry exists");
     assert!(
         summary.group_path.is_empty(),
         "leading Root must address the root group, not create a child: {:?}",
@@ -366,12 +372,12 @@ fn root_prefix_aliases_the_root_group_without_nesting() {
     assert_eq!(summary.display_path(), "alpha");
 
     // Every spelling resolves to the same entry.
-    assert_eq!(vault.find_by_title("Root/alpha").as_ref(), Some(&id));
-    assert_eq!(vault.find_by_title("root/alpha").as_ref(), Some(&id));
-    assert_eq!(vault.find_by_title("alpha").as_ref(), Some(&id));
+    assert_eq!(database.find_by_title("Root/alpha").as_ref(), Some(&id));
+    assert_eq!(database.find_by_title("root/alpha").as_ref(), Some(&id));
+    assert_eq!(database.find_by_title("alpha").as_ref(), Some(&id));
 
     // No child group named "Root" was created under the (named) root.
-    vault.save().expect("save");
+    database.save().expect("save");
     let mut f = std::fs::File::open(&path).expect("open file");
     let key = keepass::DatabaseKey::new().with_password("pw");
     let db = keepass::Database::open(&mut f, key).expect("decrypt");

@@ -14,13 +14,13 @@ binary is launched, so CI passes again on macOS. (#413)
 
 ## v0.27.0 — 2026-10-26
 
-**Select vault passwords by path suffix.** The `databases:` map in
+**Select database passwords by path suffix.** The `databases:` map in
 `.env.trove.yaml` accepts keys such as `homelab/docs/work.kdbx` alongside
 existing filename-only keys. The longest matching suffix wins, using whole
 path components, so copies with different passwords can share one credentials
 file. Relative paths include the caller's working directory, and symlink
 aliases are preserved for matching. Existing filename entries and the
-exported `TROVE_VAULT_PASSWORD` override keep working.
+exported `TROVE_DATABASE_PASSWORD` override keep working.
 
 **Update SSH cryptography dependencies.** The SSH backend moves to the upstream
 `ssh-key` 0.7.0-rc.11 release candidate to use patched `crypto-bigint` arithmetic,
@@ -51,14 +51,14 @@ are gone. A group or the database can hold the same documents in `CustomData`,
 with defaults only, so a folder never grants; an entry's items inherit from
 its folders, the nearest value winning, and constraints only tighten. During
 the transition `Exec.*` and `Materialize.*` fields and a `gpg-priv` attachment
-still count as a document; `trove settings migrate` converts a vault, and
+still count as a document; `trove settings migrate` converts a database, and
 `trove add file` writes the document. A KeePassXC open-and-save keeps every
 document, measured by an oracle test. (#397, #399, #400)
 
 **Commands for them.** `trove env-agent add|remove|disable|defaults`,
 `trove materialize add|remove|disable|defaults`, `trove gpg-agent
 enable|disable|defaults` and `trove ssh-agent enable|disable` edit the
-documents on the vault file or through the daemon; `trove settings show
+documents on the database file or through the daemon; `trove settings show
 [--effective] [--json]`, `edit`, `validate` and `migrate` inspect and edit any
 of them. `trove env-agent add antimatter-studios/gitea GITEA_TOKEN --field
 gitea-token` is all it takes to hand an agent a token through `trove exec`.
@@ -77,9 +77,9 @@ strength of the unlock. One approval covers the item for its `lifetime`.
 exported by `trove unlock --export` and set in the session subshell. (#404)
 
 **`.env.trove.yaml` replaces `.env.trove`.** `--env` reads one YAML file:
-vault passwords under `databases:`, keyed by vault filename, and other
+database passwords under `databases:`, keyed by database filename, and other
 variables under `environment:`. The dotenv `.env.trove`, its
-`TROVE_VAULT_<NAME>_FILE` profiles and the bare filename-to-password map are
+`TROVE_DATABASE_<NAME>_FILE` profiles and the bare filename-to-password map are
 retired outright and refused with directions to convert, and `trove doctor`
 reports a leftover `.env.trove` as a failure. This deliberately breaks the
 config-file promise in `docs/stability.md`, which now says so. Convert by
@@ -89,14 +89,14 @@ moving each password under `databases:` and every other variable under
 **`trove exec` grows up.** Before settings documents, an entry could already
 map several variables, each to any field or, with `@<attachment>`, to an
 attachment's path (`Exec.PGUSER=UserName`, `Exec.PGPASSWORD=Password`); those
-fields now count as an `EnvAgent.settings` during the transition (#374). Without `--vault`, exec reads the vaults
+fields now count as an `EnvAgent.settings` during the transition (#374). Without `--database`, exec reads the databases
 unlocked in troved with `TROVE_SESSION` and no password (#382). On Linux its
 files go to a memory-backed directory rather than disk-backed `/tmp` (#363).
 
 **SSH keys load in more forms.** Passphrase-protected OpenSSH keys are
 decrypted with the entry's Password, as KeePassXC's agent does (#365); PuTTY
 `.ppk` keys are read (#373) and imported (#384); ECDSA P-521 keys load, and DSA
-says why it is skipped (#357). `trove import-ssh` bootstraps a vault from
+says why it is skipped (#357). `trove import-ssh` bootstraps a database from
 `~/.ssh` (#371), and `trove ssh-agent add` takes a glob or `--tag` to fill a
 private agent in one go (#369). A KeeAgent lifetime now applies on trove's own
 agent, not only the forwarded copy (#361). Entries pointing at an external key
@@ -104,7 +104,7 @@ file are reported rather than silently ignored (#366), and every skipped key is
 listed with its reason in `unlock` and `status` (#358).
 
 **GPG.** Passphrase-protected `gpg --export-secret-keys` exports are accepted
-(#381). `trove gpg-agent import` puts a vault key's public half into gpg's
+(#381). `trove gpg-agent import` puts a database key's public half into gpg's
 keyring, without which gpg never asks the agent to sign (#372). `gpgconf
 --kill` and `--reload` get answers instead of `Unknown_IPC_Command` (#345).
 
@@ -112,7 +112,7 @@ keyring, without which gpg never asks the agent to sign (#372). `gpgconf
 what to fix (#370), including gpg's keyring and where materialized files live
 (#386). `trove analyze` gains `--reuse`, `--weak`, `--age` (#378) and
 `--expired`, and `trove health` runs them all as one report (#387). `trove
-status --verbose` lists what each vault serves (#385), and `materialize-status`
+status --verbose` lists what each database serves (#385), and `materialize-status`
 says whether each file is in memory or on disk (#376).
 
 **Entries.** Expiry dates (#379) and built-in icons (#388) can be set and
@@ -129,7 +129,7 @@ when it is free (#367). The server moves into `troved::server::serve` (#380).
 is non-dumpable on Linux (#349), and `trove clip` no longer puts the
 clipboard's hash on argv, where `ps` showed it (#354).
 
-**Compatibility.** Every attachment in a KeePassXC-written KDBX 3.1 vault is
+**Compatibility.** Every attachment in a KeePassXC-written KDBX 3.1 database is
 read, fixing two keepass-rs reader bugs (#360), and trove's save path is
 tested through every cipher, KDF and compression (#359). `trove-core` owns its
 challenge-response key type instead of re-exporting keepass-rs's, a breaking
@@ -142,13 +142,13 @@ lockfile fixes: #347, #362, #383.
 
 ## v0.25.0 — 2026-09-30
 
-**`trove sync`, a two-way sync with another copy of the vault.** `trove sync
-<OTHER>` merges another copy of `--vault` (in a synced folder, on a USB stick,
+**`trove sync`, a two-way sync with another copy of the database.** `trove sync
+<OTHER>` merges another copy of `--database` (in a synced folder, on a USB stick,
 on a network share) into it, saves, and atomically replaces the other copy with
-the result, so both end equal. A missing copy is created with `--vault`'s own
+the result, so both end equal. A missing copy is created with `--database`'s own
 credentials, and a copy that brings nothing new is left untouched. (#336)
 
-**Saves merge other writers' changes instead of refusing.** Saving a vault that
+**Saves merge other writers' changes instead of refusing.** Saving a database that
 changed on disk since it was opened used to fail with `StaleWrite`. Now `save()`
 merges the other file in (the newer change to an entry wins, the other goes into
 its history) and writes, checking again before and after the rename. Permanent
@@ -191,14 +191,14 @@ Linux) copies. The carried card says move or copy and turns green or red for
 whether the folder under it takes the drop. Resting on a closed folder for a
 second opens it. Folder order is stored per group in `CustomData` under
 `Trove.Position`, since keepass-rs keeps no order of its own; trove-core gains
-`Vault::set_group_order` and `GroupSummary::position`. The window also stops
+`Database::set_group_order` and `GroupSummary::position`. The window also stops
 behaving like a web page: text is selectable only where it is worth copying,
 and right click no longer opens the webview's page menu. (#325)
 
 **Entry history kept on trove's own edits.** Like KeePassXC, saving now files
 an entry's previous state as a history version for every entry trove changed,
-trimmed to the vault's `HistoryMaxItems` / `HistoryMaxSize`. Before this, an
-edit in trove silently dropped the value it replaced from a vault shared with
+trimmed to the database's `HistoryMaxItems` / `HistoryMaxSize`. Before this, an
+edit in trove silently dropped the value it replaced from a database shared with
 KeePassXC. Removing a field now updates the entry's modification time, so merges
 see it. (#326)
 
@@ -208,7 +208,7 @@ see it. (#326)
 down a socket that `trove ssh-agent empty` handed out, and leaves the others and
 the main agent alone. It closes `$SSH_AUTH_SOCK` when no socket is named. Before
 this, `trove lock` was the only way to release a private socket, so a script that
-ran repeatedly against an unlocked vault reached the 32-socket limit.
+ran repeatedly against an unlocked database reached the 32-socket limit.
 `trove ssh-agent sockets [--json]` lists the open private sockets and the keys on
 each. The limit error now names both commands. (#221)
 
@@ -223,8 +223,8 @@ contents and all, or is destroyed if it is already there.
 **The recycle bin stands apart.** It is pinned at the bottom of the sidebar,
 above Data lock, instead of sitting among the folders, and selecting it lists
 everything in it, including entries inside deleted folders. It is found by the
-vault's recycle-bin setting, so a folder that happens to be named "Recycle Bin"
-stays an ordinary folder. `trove-core` gains `Vault::recycle_bin_path`.
+database's recycle-bin setting, so a folder that happens to be named "Recycle Bin"
+stays an ordinary folder. `trove-core` gains `Database::recycle_bin_path`.
 
 **Folder badges count the whole tree.** A folder's badge counts every entry
 under it once, so a folder holding only subfolders no longer shows 0, and Root
@@ -260,11 +260,11 @@ names describe.
 
 ## v0.20.0 — 2026-09-25
 
-**Unlock can select a password for each vault from `.env.trove`.** Use a YAML
-map keyed by exact vault filename, or dotenv profiles that pair
-`TROVE_VAULT_<NAME>_FILE` with `TROVE_VAULT_<NAME>_PASSWORD`. This makes
+**Unlock can select a password for each database from `.env.trove`.** Use a YAML
+map keyed by exact database filename, or dotenv profiles that pair
+`TROVE_DATABASE_<NAME>_FILE` with `TROVE_DATABASE_<NAME>_PASSWORD`. This makes
 unlocking several databases in one directory work with `trove unlock --env`;
-the existing `TROVE_VAULT_PASSWORD` remains available and takes precedence.
+the existing `TROVE_DATABASE_PASSWORD` remains available and takes precedence.
 
 ## v0.19.0 — 2026-09-23
 
@@ -281,7 +281,7 @@ star to add the native tag to an entry.
 
 ## v0.18.0 — 2026-09-23
 
-**`unlock --detach` unlocks the vault and gives you your prompt back.** The two
+**`unlock --detach` unlocks the database and gives you your prompt back.** The two
 existing modes both answer the same question — where does the session code go —
 because a process cannot set a variable in the shell that launched it. So
 `unlock` either launches a subshell with `TROVE_SESSION` set, or prints
@@ -289,7 +289,7 @@ because a process cannot set a variable in the shell that launched it. So
 unlocking so that `ssh`, `git` and `gpg` work, in the shell you are already in,
 with the history and jobs you already have.
 
-`--detach` is that case. The vault unlocks exactly as it always does — both
+`--detach` is that case. The database unlocks exactly as it always does — both
 agents serve its keys, `Materialize.*` entries are written to disk — and no
 session code is minted at all. Not minted and withheld: **not minted**. A code
 nobody holds is not a tidy loose end, it is a live extraction capability sitting
@@ -297,12 +297,12 @@ in daemon memory for the life of the unlock, and the point of the flag is that
 the gate is never opened rather than opened and abandoned. `get` and
 `materialize` are therefore refused in that shell, which is the accurate
 description of what you asked for; `ssh`, `git` and `gpg` keep working, because
-they go through the agents and never needed a code. Use `--vault <PATH>` to read
+they go through the agents and never needed a code. Use `--database <PATH>` to read
 offline, or unlock again without the flag if you wanted a session after all.
 
-Detaching one vault leaves an existing session alone. `unlock` is additive
-across vaults, so revoking the session of a shell still using it would be a
-surprising way to open a second vault.
+Detaching one database leaves an existing session alone. `unlock` is additive
+across databases, so revoking the session of a shell still using it would be a
+surprising way to open a second database.
 
 ### Removed
 
@@ -398,7 +398,7 @@ matched case-insensitively, and an empty value counts as absent rather than as
 **`--env` needs its path attached, and stops eating the subcommand.** `--env`
 takes an optional value, and an option whose value is optional consumes
 whatever follows it — which is usually the subcommand. So
-`trove --vault v --env git-credential get` read `git-credential` as the path
+`trove --database v --env git-credential get` read `git-credential` as the path
 and then ran `trove get`. That is the git credential helper's exact
 invocation, since `credential.helper` holds everything up to the subcommand
 and git appends the operation, so the one command `--env` exists to serve was
@@ -421,7 +421,7 @@ created for, and then the name lies — a key called `antimatter-studios/gitea`
 is also what grants shell access to a Raspberry Pi. Giving it a second, accurate
 name previously meant `trove get`ting the private key to disk and
 `trove add ssh`ing it back, writing a key that had never existed outside the
-vault onto a filesystem:
+database onto a filesystem:
 
 ```sh
 trove cp "antimatter-studios/gitea" "homelab/ssh"
@@ -460,7 +460,7 @@ on announcing a path that no longer exists.
 `MaxAuthTries` defaults to 6, counted per connection, and every key an agent
 lists is offered and counted against it — the publickey query phase carries no
 signature, but it still costs an attempt. trove's agent serves every key in
-every unlocked vault, so a key sitting past the sixth is never reached and the
+every unlocked database, so a key sitting past the sixth is never reached and the
 connection dies with `Received disconnect: Too many authentication failures`,
 which reads as the server rejecting you. The agent's order is not stable across
 unlocks, so an unchanged setup works at 15:00 and fails at 17:00, and `sshd`
@@ -482,7 +482,7 @@ so a failure passes even under `set -e` and leaves `SSH_AUTH_SOCK` empty, which
 keys, so callers running in parallel cannot disturb each other's offers. Key
 material never leaves the daemon — a private socket is served by the same agent
 code as the main one — and the daemon owns the lifetime, so the sockets go on
-`lock`, on idle-lock and at shutdown, and a key that leaves the vault leaves
+`lock`, on idle-lock and at shutdown, and a key that leaves the database leaves
 them at the same moment.
 
 **Or let the agent choose, from the server's host key.** An entry can name the
@@ -507,7 +507,7 @@ callers who would rather find out immediately.
 ## v0.15.0 — 2026-09-10
 
 **Desktop attachments reach the file.** Adding, replacing, renaming or deleting
-an attachment in the app changed the vault in memory and stopped there, so the
+an attachment in the app changed the database in memory and stopped there, so the
 work survived exactly as long as the window stayed open. Every mutating command
 now goes through one path that mutates and then saves — entry save, delete and
 favourite included.
@@ -515,7 +515,7 @@ favourite included.
 **A save says how long it is going to take.** KDBX rotates the master seed on
 every write, so every write re-derives the key with Argon2; at KeePassXC's own
 defaults that is seconds, and it cannot be cached without encrypting two
-versions of a vault under one key. The app now measures its own unlock, re-times
+versions of a database under one key. The app now measures its own unlock, re-times
 each save, and draws the progress bar against that measurement rather than an
 invented duration. A picked file appears in the list immediately, marked
 *saving*, instead of the list sitting empty and looking broken.
@@ -540,15 +540,15 @@ silently ignored, which is what made a debug save take ten seconds.
 
 ## v0.14.0 — 2026-09-09
 
-**Saving no longer overwrites another writer's changes.** `Vault::save()` wrote
+**Saving no longer overwrites another writer's changes.** `Database::save()` wrote
 memory over disk unconditionally — no comparison of any kind — so with the
 desktop app open and the CLI editing the same file, whichever saved last threw
 the other's work away silently. That is one file with several writers: the CLI,
-the app, KeePassXC, and the same vault synced onto a second Mac.
+the app, KeePassXC, and the same database synced onto a second Mac.
 
 `save()` now records what the file looked like when it was read and refuses to
 write over a file that changed since. The desktop app checks every three
-seconds while a vault is open and the window visible, and again on regaining
+seconds while a database is open and the window visible, and again on regaining
 focus, then reloads and says so — a list that stopped being true is worse than
 one that jumps, and the selection survives when its entry still exists.
 
@@ -576,8 +576,8 @@ rewritten to point at the new file while keeping the lifetime, confirm and
 remove-at-close it already said.
 
 **Touch ID unlocks the desktop app.** The unlock screen offers a fingerprint
-when the vault has a password stored for it, and "Remember with Touch ID"
-enrols after a password the vault has just accepted — never from what someone
+when the database has a password stored for it, and "Remember with Touch ID"
+enrols after a password the database has just accepted — never from what someone
 typed into a box. Cancelling returns to the password field rather than showing
 an error, because cancelling is a decision.
 
@@ -590,19 +590,19 @@ layer when it lands.
 
 **The app's bundle identifier is `com.antimatterstudios.trove`**, matching the
 other applications in this account. macOS keys an app's config directory by
-that identifier, so the registered-vault list and settings are copied across on
+that identifier, so the registered-database list and settings are copied across on
 first run rather than being orphaned.
 
 ## v0.13.0 — 2026-09-09
 
-**Breaking: `TROVE_DB_PASSWORD` is now `TROVE_VAULT_PASSWORD`.** Rename it in
+**Breaking: `TROVE_DB_PASSWORD` is now `TROVE_DATABASE_PASSWORD`.** Rename it in
 your `.env.trove`. There is no fallback and no deprecation period — a secret
 that answers to two names is exactly the thing that rots quietly. Nothing else
-in trove says "DB": the vault is a vault everywhere else, `TROVE_VAULT` is its
-path, and this is that vault's password.
+in trove says "DB": the database is a database everywhere else, `TROVE_DATABASE` is its
+path, and this is that database's password.
 
 **`--keychain` takes the password from the macOS login keychain**, managed with
-`trove keychain save|forget|status`. `save` proves the password opens the vault
+`trove keychain save|forget|status`. `save` proves the password opens the database
 before storing it, because an entry that does not work is worse than no entry —
 it fails later and somewhere else.
 
@@ -627,7 +627,7 @@ helper inside that bundle rather than by this binary.
 
 **docs/cli-reference.md documents the `.env.trove` file properly** — where bare
 `--env` looks and why, the syntax, why there is deliberately no `~/.config`
-location (dotfile repositories get committed, and this file holds a vault
+location (dotfile repositories get committed, and this file holds a database
 password), the permission warning and `TROVE_ENV_STRICT`, and the
 password-source order with the reason each source sits where it does.
 
@@ -640,12 +640,12 @@ straight into `trove show` — and it left `list` and `search` printing the same
 data two different ways. Both now print one entry per line as
 `group/sub/title`, sorted by full path, with the same column saying what each
 entry carries. `list` keeps a trailing count; `search` does not, since a hit
-count belongs to a query rather than to a vault.
+count belongs to a query rather than to a database.
 
-**An env file anyone can read now says so.** `--env` loads a vault password from
+**An env file anyone can read now says so.** `--env` loads a database password from
 a file, and a real one was sitting at mode 0644 with nothing said about it. ssh
 refuses a private key at 0644 outright and this file is worse — it opens the
-whole vault, not one key.
+whole database, not one key.
 
 trove warns rather than refuses, because the two files do not live in the same
 world. `~/.ssh` is local, owned, on a real filesystem. An env file may sit in a
@@ -703,15 +703,15 @@ RPC carries names only and each value is a separate code-gated round trip, so
 populating them would mean `--json` quietly pulling every secret in an entry
 across the wire. `--attr` remains the way to read one deliberately.
 
-**Bare `--env` looks beside the vault.** It meant one hardcoded relative path,
-so `trove unlock ~/vaults/work.kdbx --env` failed with `No such file or
-directory` while `.env.trove` sat next to the vault that command named — and the
+**Bare `--env` looks beside the database.** It meant one hardcoded relative path,
+so `trove unlock ~/databases/work.kdbx --env` failed with `No such file or
+directory` while `.env.trove` sat next to the database that command named — and the
 error quoted a path the user never typed. It now looks in the working directory
-first, so a checkout can override, then in the directory holding the vault,
-which is where the file belongs when a vault and its settings are kept together.
+first, so a checkout can override, then in the directory holding the database,
+which is where the file belongs when a database and its settings are kept together.
 With neither present the error lists every place tried. Deliberately not a
 user-wide config directory: `~/.config` gets committed to dotfile repositories,
-and this file holds a vault password.
+and this file holds a database password.
 
 ## v0.9.1 — 2026-09-06
 
@@ -733,25 +733,25 @@ The macOS release asset is now `Trove_<version>_universal.dmg`.
 
 **Unlocking in the desktop app no longer freezes the window.** Every
 `#[tauri::command]` was synchronous, so it ran on the main thread and blocked
-the event loop for the whole Argon2 derivation — on a vault tuned to 50 rounds
+the event loop for the whole Argon2 derivation — on a database tuned to 50 rounds
 and 64 MB that is seconds of a dead window and a spinning cursor. Fifteen
 commands now run off the main thread, and the unlock reports each step as it
-happens rather than going dark and finishing all at once. Vault creation
+happens rather than going dark and finishing all at once. Database creation
 remains synchronous during its Argon2 derivation and can still block the
 window.
 
 **Locking is two ideas now, because one button was doing both.** *App lock*
 hides the window and takes nothing back from the machine; it is what the idle
-timer fires. *Data lock* removes that vault's keys from the system agent and
+timer fires. *Data lock* removes that database's keys from the system agent and
 dematerializes its files. Data lock applies to one database, so with several
-open you land on the next open vault rather than at a login screen — you have
-finished with that vault, not with the app. The old single "lock" left people
+open you land on the next open database rather than at a login screen — you have
+finished with that database, not with the app. The old single "lock" left people
 guessing which of those it meant.
 
 **Every SSH entry carries its own agent policy.** Whether to load it at all, how
 long it lives, whether the agent confirms each signature, and whether a data
 lock takes it back — written to `KeeAgent.settings` in the encoding KeePassXC
-reads, so the two applications agree about the same vault.
+reads, so the two applications agree about the same database.
 
 **`SSH_AUTH_SOCK` is a snapshot, and trove now copes when it goes stale.** macOS
 restarts its launchd ssh-agent on a fresh socket directory, and from that moment
@@ -776,26 +776,26 @@ keys go elsewhere; `TROVE_SSH_AGENT_SOCK` names one outright.
 **`--no-shell`** is an alias for `--export`: automation wants to say what it is
 avoiding, and a subshell is the thing a harness has no way to exit.
 
-The window title bar carries the vault name, the forwarded-key count and their
+The window title bar carries the database name, the forwarded-key count and their
 expiry, and the build stamp. The toolbar row is gone — search sits above the
-list it filters, lock state on the vault chip it describes, the app controls at
+list it filters, lock state on the database chip it describes, the app controls at
 the top of the detail column, and Data lock above New entry in the sidebar.
 
 ## v0.8.0 — 2026-09-05
 
 **Unlocking in the desktop app now does what unlocking in the daemon does.** The
-app held its own vault and talked to nothing, so opening one gave you an entry
+app held its own database and talked to nothing, so opening one gave you an entry
 list and no more: no agent keys, no materialized files, nothing another
-application or a terminal could see. It now forwards the vault's SSH keys into
+application or a terminal could see. It now forwards the database's SSH keys into
 the system agent and writes `Materialize.*` entries to their targets, and
-locking undoes both — files first, then keys. Per-vault bookkeeping means
-locking one vault never retracts another's keys. Both are settings-gated, with a
+locking undoes both — files first, then keys. Per-database bookkeeping means
+locking one database never retracts another's keys. Both are settings-gated, with a
 settings panel and a per-entry "add this key to the system agent" toggle that
 writes the same `KeeAgent.settings` KeePassXC reads. A GUI has no shell, so this
 is the only route from a desktop unlock to the rest of the machine.
 
 **KeePassXC's `KeeAgent.settings` are finally read correctly.** On a real
-KeePassXC vault trove served 2 SSH keys where KeePassXC served 5, and the two
+KeePassXC database trove served 2 SSH keys where KeePassXC served 5, and the two
 that worked got in through the content-scan fallback — every key the user had
 explicitly marked was skipped, silently. Three causes: the file is UTF-16 and
 `str::from_utf8` *accepts* those bytes (NUL is valid UTF-8), so every tag lookup
@@ -807,36 +807,36 @@ encodings we write both — `settings_xml_encoded` takes an `Encoding`, and the
 declared `encoding=` always matches the bytes. Proven against the real
 `keepassxc-cli` in both directions.
 
-**`--env` opens a vault without a prompt.** `trove unlock <vault> --env` reads
+**`--env` opens a database without a prompt.** `trove unlock <database> --env` reads
 `./.env.trove`; `--env <dir>` reads that directory's; `--env <file>` reads that
 file. It is a general loader, not a password mechanism: every `KEY=VALUE` lands
-in the environment, so `TROVE_VAULT`, `TROVE_IDLE_TIMEOUT` and the socket paths
+in the environment, so `TROVE_DATABASE`, `TROVE_IDLE_TIMEOUT` and the socket paths
 can live in one file, and `TROVE_DB_PASSWORD` is simply the one the unlock path
 also consults. A variable already set wins, so the file supplies defaults; and
 the password is used only when `--env` was passed, so an exported
-`TROVE_DB_PASSWORD` can never silently unlock a vault for a command that didn't
+`TROVE_DB_PASSWORD` can never silently unlock a database for a command that didn't
 ask for one.
 
 **macOS binaries are signed with the hardened runtime.** Not for Gatekeeper —
 Homebrew tarballs aren't quarantined — but because `troved` holds the decrypted
-vault and your SSH keys in memory, and an ad-hoc signed binary can be attached
+database and your SSH keys in memory, and an ad-hoc signed binary can be attached
 to by any process running as the same user. Apple's own `ssh-agent` is
 SIP-protected and refuses; a Developer ID signature with the hardened runtime
 and no `get-task-allow` puts `troved` in that class. Release builds sign when
 the `APPLE_*` secrets are present; `scripts/sign-macos.sh` does it locally.
 
-**Several vaults unlocked at once.** `unlock` is now additive rather than
-replacing whatever was open: a personal vault and a work vault can serve keys
+**Several databases unlocked at once.** `unlock` is now additive rather than
+replacing whatever was open: a personal database and a work database can serve keys
 simultaneously, and the SSH and GPG agents serve the union. Agents identify a key
-by public blob or keygrip, so different keys simply coexist. `trove lock --vault
-<PATH>` drops one vault and leaves the rest serving; a bare `trove lock` still
+by public blob or keygrip, so different keys simply coexist. `trove lock --database
+<PATH>` drops one database and leaves the rest serving; a bare `trove lock` still
 drops everything. `list`, `search` and `status` span the whole open set, and
-`status` reports every unlocked vault.
+`status` reports every unlocked database.
 
-A title held by two open vaults is refused with both vault paths named rather
-than resolved by guessing — returning the wrong vault's secret would be worse
-than an error. Materialized files are first-wins across vaults: a target another
-open vault already owns is skipped with a warning instead of being overwritten,
+A title held by two open databases is refused with both database paths named rather
+than resolved by guessing — returning the wrong database's secret would be worse
+than an error. Materialized files are first-wins across databases: a target another
+open database already owns is skipped with a warning instead of being overwritten,
 since overwriting would replace data a live process is using.
 
 **RSA OpenPGP keys work.** trove previously parsed only ed25519 and cv25519 and
@@ -864,7 +864,7 @@ it's configurable from KeePassXC itself: `RemoveAtDatabaseClose`,
 `UseLifetimeConstraintWhenSigning` + `LifetimeConstraintDuration`, and
 `UseConfirmConstraintWhenSigning` are all honoured. Keys with no stated lifetime
 inherit trove's own auto-lock window, so a forwarded copy expires roughly when the
-vault would have locked anyway.
+database would have locked anyway.
 
 Forwarding never fails an unlock: per-key failures come back as
 `ssh_forward_warnings` and `trove unlock` prints them on stderr. `TROVE_SSH_FORWARD=0`
@@ -879,11 +879,11 @@ every level (natural, case-insensitive) instead of in entry-insertion order.
 
 ## v0.7.0 — 2026-07-29
 
-**Desktop app, now backed by real vaults:** the Trove desktop app graduates from a
+**Desktop app, now backed by real databases:** the Trove desktop app graduates from a
 design prototype to a working KeePass manager. It opens, creates, unlocks, and locks
 real `.kdbx` files; browses the group/entry tree; adds, edits, moves, and deletes
 entries; and reveals and copies secrets on demand behind an auto-clearing clipboard,
-locking itself after five minutes idle. Recently-opened vaults are remembered, and
+locking itself after five minutes idle. Recently-opened databases are remembered, and
 opening one uses the native file picker. Passwords never sit in the entry list —
 strength is scored server-side and each secret is fetched only when its entry is
 selected.
@@ -895,7 +895,7 @@ tray icon, with a Show Trove / Quit Trove menu, plus a web favicon.
 and detail pane to resize them; double-click a divider to reset it; the widths
 persist across restarts.
 
-**Unlock-screen polish:** the locked-vault chip no longer wraps its path or lets it
+**Unlock-screen polish:** the locked-database chip no longer wraps its path or lets it
 collide with the Change control on a long path — the directory truncates with an
 ellipsis while the filename stays visible (full path on hover), and Change is now a
 proper button.
@@ -960,7 +960,7 @@ CI).
 
 **Clipboard (parity G5):** `clip` with a hash-guarded detached auto-clear.
 
-**Vault ops (parity G6):** `merge` (proven equivalent to keepassxc-cli's
+**Database ops (parity G6):** `merge` (proven equivalent to keepassxc-cli's
 merge), `export xml|csv` (re-importable), `db-edit` (rekey + Argon2 retune),
 `db-info`. Fixed a latent bug: entry mutations now stamp
 `LastModificationTime`/`LocationChanged`, so trove edits no longer silently
@@ -974,7 +974,7 @@ wiped on exit — the `op run` of kdbx); `--json` on `list`/`search`/`db-info`;
 `docs/security-review-2026-07-04.md`; unpredictable `exec` temp-dir names.
 
 **Desktop app (new):** a Tauri 2 GUI (`trove-desktop/`) that links `trove-core`
-directly — a three-pane vault browser that opens a `.kdbx` and reveals fields on
+directly — a three-pane database browser that opens a `.kdbx` and reveals fields on
 demand (secrets stay in the backend, never in the entry list). Brought into this
 monorepo and shipped in the same release as macOS (universal), Linux
 (`.deb`/AppImage) and Windows (NSIS) bundles.
@@ -982,7 +982,7 @@ monorepo and shipped in the same release as macOS (universal), Linux
 ### Detailed entries
 
 - `trove git-credential <get|store|erase>` (beyond parity): a git credential
-  helper backed by the vault. `git config credential.helper "trove --vault
+  helper backed by the database. `git config credential.helper "trove --database
   ~/v.kdbx git-credential"` — `git push` authenticates against an entry
   matched by URL host (and username when git sends one), with no plaintext
   `~/.git-credentials`. store/erase are accepted and ignored.
@@ -1002,15 +1002,15 @@ monorepo and shipped in the same release as macOS (universal), Linux
 - YubiKey challenge-response unlock (keepassxc-cli parity G7), behind
   `--features yubikey`: global `--yubikey <SLOT>[:SERIAL]` composites an
   HMAC-SHA1 challenge-response with the password (and optional keyfile) —
-  KeePassXC's scheme, same vault unlocks there with the same device. The
+  KeePassXC's scheme, same database unlocks there with the same device. The
   device answers a fresh challenge on every save. Validated in CI (Linux)
   through the keepass crate's software `LocalChallenge` provider — the
   identical derivation minus USB; the hardware test ships `#[ignore]`d for
   manual runs. Linux-only for now: upstream keepass pins the nusb USB
   backend, which doesn't compile on macOS.
-- Vault ops (keepassxc-cli parity G6), all offline-only: `trove merge`
+- Database ops (keepassxc-cli parity G6), all offline-only: `trove merge`
   (KDBX-standard reconciliation of diverged copies — proven equivalent to
-  keepassxc-cli's merge on the same pair; unrelated vaults refuse cleanly),
+  keepassxc-cli's merge on the same pair; unrelated databases refuse cleanly),
   `trove export --format xml|csv` (decrypted KeePass XML that keepassxc
   imports back, CSV with KeePassXC's exact header), `trove db-edit`
   (rekey password/keyfile, Argon2 retuning), `trove db-info`. XML *import*
@@ -1041,8 +1041,8 @@ monorepo and shipped in the same release as macOS (universal), Linux
   Interop proven against keepassxc-cli: identical codes both directions.
   (Steam's non-standard 5-char variant is out of scope.)
 - Keyfile unlock (keepassxc-cli parity G2): global `--key-file <PATH>`
-  composites the keyfile with the password wherever a vault is opened —
-  offline commands, `init` (new vault locked with the pair), and `unlock`
+  composites the keyfile with the password wherever a database is opened —
+  offline commands, `init` (new database locked with the pair), and `unlock`
   (the daemon holds the bytes so its re-saves keep the composite key; the
   wire `Unlock` RPC grew an optional base64 `keyfile` field). Every format
   KeePassXC accepts. Interop proven both directions against keepassxc-cli.
@@ -1050,34 +1050,34 @@ monorepo and shipped in the same release as macOS (universal), Linux
   (docs/parity-plan.md): `add password` (prompt / `--secret-stdin` /
   `--generate`), `get password`, `show` (`--attr`, `--show-protected`),
   `edit` (`--set`/`--unset`/`--password-prompt`), `search`, `mkdir`, `mv`,
-  `rm`, `rmdir`. All work offline (`--vault`) and daemon-routed (new
+  `rm`, `rmdir`. All work offline (`--database`) and daemon-routed (new
   `ShowEntry`/`Search`/`GetField`/`AddPassword`/`EditEntry`/`RemoveEntry`/
   `MoveEntry`/`Mkdir`/`Rmdir` RPCs, session-gated like `add ssh`).
 - `rm`/`rmdir` follow KeePassXC recycle-bin semantics: entries and groups move
   to a shared "Recycle Bin" (created on demand, `Meta/RecycleBinUUID`
   convention); a repeat remove — or `--permanent` — destroys.
 - CRUD interop is proven against real `keepassxc-cli` in the conformance
-  suite: trove-authored vaults read back field-for-field, keepassxc-authored
-  vaults round-trip through every trove command, and trove-recycled entries
+  suite: trove-authored databases read back field-for-field, keepassxc-authored
+  databases round-trip through every trove command, and trove-recycled entries
   appear in keepassxc's own Recycle Bin view.
 
 ## v0.4.0 — 2026-07-01
 
-- `add file` / `add gpg` now target the vault unlocked in the running daemon by
+- `add file` / `add gpg` now target the database unlocked in the running daemon by
   default (gated by `TROVE_SESSION`), consistent with `add ssh`. Pass
-  `--vault <PATH>` to operate on a kdbx file directly (offline).
+  `--database <PATH>` to operate on a kdbx file directly (offline).
 - `troved` takes a singleton `flock`, making orphaned/stale SSH- and GPG-agent
   sockets impossible.
 
 ## v0.3.0 — 2026-06-24
 
-- `--vault <PATH>` is now a global offline selector (works before or after the
-  subcommand); positional vault arguments dropped.
+- `--database <PATH>` is now a global offline selector (works before or after the
+  subcommand); positional database arguments dropped.
 - `add ssh` requires a `<comment>` argument, recorded in `id.pub`.
-- The vault's top-level group is named `Root` and treated as the default group.
+- The database's top-level group is named `Root` and treated as the default group.
 - KDBX 4.0 → 4.1 heal on save, daemon lifecycle management, and `ssh`/`gpg` CLI
   wrappers.
-- Upgraded to `keepass 0.13.10` (KeePassXC-readable vaults) with a cross-tool
+- Upgraded to `keepass 0.13.10` (KeePassXC-readable databases) with a cross-tool
   conformance suite and session-code provisioning.
 - Windows support (named-pipe IPC) and the cross-platform release pipeline.
 - Installed the github-guard git hooks.
@@ -1090,7 +1090,7 @@ monorepo and shipped in the same release as macOS (universal), Linux
 
 ## v0.1.0 — 2026-05-08
 
-Initial tagged release: kdbx-compatible vault (`trove-core`), the `trove` CLI
+Initial tagged release: kdbx-compatible database (`trove-core`), the `trove` CLI
 and `troved` headless daemon with a line-JSON control socket, in-memory SSH and
 GPG agents, real KDBX `<Binary>` attachments, file materialization (the founding
 feature), idle-lock, and the daemon-aware CLI. The granular history is below.
@@ -1099,12 +1099,12 @@ feature), idle-lock, and the daemon-aware CLI. The granular history is below.
 
 Fine-grained feature log from before the tagged-release cadence (oldest first):
 
-- **v0.0.1** — kdbx vault read/write ([crates/trove-core/src/lib.rs](crates/trove-core/src/lib.rs)), `trove` CLI scaffold (`init`, `list`, `add ssh`, `get ssh`), `troved` headless daemon with the line-JSON control socket, end-to-end SSH-key roundtrip.
+- **v0.0.1** — kdbx database read/write ([crates/trove-core/src/lib.rs](crates/trove-core/src/lib.rs)), `trove` CLI scaffold (`init`, `list`, `add ssh`, `get ssh`), `troved` headless daemon with the line-JSON control socket, end-to-end SSH-key roundtrip.
 - **v0.0.2** — SSH agent listener serving ed25519 keys over `SSH_AUTH_SOCK`. Keys live only in daemon memory; cleared on lock.
 - **v0.0.3** — SSH agent algorithm coverage extended: RSA (>= 2048 bits, signs with rsa-sha2-256 / rsa-sha2-512 per RFC 8332), ECDSA P-256, ECDSA P-384.
 - **v0.0.4** — GPG agent listener speaking the Assuan protocol; ed25519 OpenPGP signing works against `git commit -S`. Hand-rolled OpenPGP packet parser ([crates/troved/src/gpg_agent/keys.rs](crates/troved/src/gpg_agent/keys.rs)) avoids pulling in `rpgp`.
 - **v0.0.5** — GPG `PKDECRYPT` for ECDH-on-Curve25519: AES-128/192/256 KW unwrap of the wrapped session key against gpg 2.5.x. RSA / NIST-curve / Ed448 still out of scope.
-- **v0.0.6** — Real KDBX `<Binary>` attachments via a vendored fork of `keepass` 0.7.33 (since retired in v0.0.14); legacy `_SDPM_BIN_*` string-field fallback kept for read-compat with v0.0.1–v0.0.5 vaults (also retired in v0.0.14).
+- **v0.0.6** — Real KDBX `<Binary>` attachments via a vendored fork of `keepass` 0.7.33 (since retired in v0.0.14); legacy `_SDPM_BIN_*` string-field fallback kept for read-compat with v0.0.1–v0.0.5 databases (also retired in v0.0.14).
 - **v0.0.7** — File materialization (the founding feature): `trove add file`, `Materialize.{Source,Target,Mode,TTL,AllowDiskBacked}` custom-field schema, in-process `trove materialize`, daemon-driven materialize-on-unlock + wipe-on-lock with optional TTL. Linux: refuses non-tmpfs targets unless `AllowDiskBacked=true`. macOS: soft allowlist (`/tmp`, `/private/tmp`, `$XDG_RUNTIME_DIR`) — APFS provides no real tmpfs, so this is a hint, not a guarantee.
 - **v0.0.8** — Idle-lock. `IdleTracker` with a tokio driver task ([crates/troved/src/idle.rs](crates/troved/src/idle.rs)); auto-locks after configurable inactivity (default 900s). Activity = any control RPC except `ping`, any SSH agent message, any GPG Assuan command. New `set-idle-timeout` / `get-idle-timeout` RPCs and `TROVE_IDLE_TIMEOUT` env var.
 - **v0.0.9** — GitHub Actions CI (`.github/workflows/ci.yml`): test matrix on Linux + macOS, clippy with `-D warnings`, fmt check, cargo-audit, MSRV check at Rust 1.75. Repo run through `cargo fmt --all`.
@@ -1112,4 +1112,4 @@ Fine-grained feature log from before the tagged-release cadence (oldest first):
 - **v0.0.11** — Fuzz harnesses for the SSH agent wire decoder and Assuan line parser ([crates/troved/fuzz/](crates/troved/fuzz/), nightly-only) plus proptest property tests on stable. ~4.3M libfuzzer iterations on this machine, 0 crashes.
 - **v0.0.12** — Clean-room kdbx spec test suite: round-trip matrix, malformed-input rejection, keyfile formats, binary pool, cross-tool (`keepassxc-cli`) interop. Programmatically generated fixtures from a seeded RNG; no GPL imports. Originally lived under `vendor/keepass/tests/`; relocated to [crates/keepass-spec-tests](crates/keepass-spec-tests/) in v0.0.14.
 - **v0.0.13** — Daemon-aware CLI: `trove unlock`, `trove lock`, `trove status`, `trove idle set/get`, `trove materialize-status`. Replaces the `printf '{...}' | nc -U` incantations from v0.0.8 with proper subcommands.
-- **v0.0.14** — Migrated off the vendored `keepass` 0.7.33 fork to the published `keepass = "0.12.5"`. Upstream's PR #294 already restructured attachments as first-class Database-owned objects with `EntryMut::add_attachment(name, Value::Unprotected(bytes))`, which is what our 3 patches were trying to enable. Local fork retired; legacy `_SDPM_BIN_*` migration code retired (no production v0.0.1–v0.0.5 vaults exist).
+- **v0.0.14** — Migrated off the vendored `keepass` 0.7.33 fork to the published `keepass = "0.12.5"`. Upstream's PR #294 already restructured attachments as first-class Database-owned objects with `EntryMut::add_attachment(name, Value::Unprotected(bytes))`, which is what our 3 patches were trying to enable. Local fork retired; legacy `_SDPM_BIN_*` migration code retired (no production v0.0.1–v0.0.5 databases exist).

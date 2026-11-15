@@ -8,7 +8,7 @@ behind it.
 
 ## The question that started it
 
-> "When I unlock my vault in a terminal, my Claude Code sessions still can't use
+> "When I unlock my database in a terminal, my Claude Code sessions still can't use
 > my github SSH key. Should there be a `--global` flag?"
 
 **Answer: the scope boundary wasn't where it looked.** Two surfaces, only one
@@ -28,11 +28,11 @@ So the Claude Code sessions weren't blocked by scoping — they never had
 
 | Question | Answer |
 |---|---|
-| Does unlocking in Trove Desktop expose keys system-wide? | No — desktop talks to **no daemon at all**. It embeds trove-core and holds vaults in-process. |
+| Does unlocking in Trove Desktop expose keys system-wide? | No — desktop talks to **no daemon at all**. It embeds trove-core and holds databases in-process. |
 | How does KeePassXC make keys visible to VS Code? | It doesn't run an agent. It pushes keys into your *existing* agent via `SSH_AGENTC_ADD_IDENTITY`. macOS launchd injects `SSH_AUTH_SOCK` into every login-session process, so everything sees it. |
 | Is there a standard socket path ssh looks for? | On Unix, **no** — env var only. `IdentityAgent` in `~/.ssh/config` is the file-based equivalent and is immune to what a process inherited. |
 | Does Apple run a gpg-agent? | No. macOS ships nothing for GPG. gpg brings its own, auto-started by `gpgconf --launch`. |
-| Is troved a bad idea if we forward to the platform agent? | No. It's the **lifecycle owner**: gpg can't be delegated at all, materialization has no OS counterpart, idle-lock spans every sink, and the daemon holds the decrypted vault so writes don't re-prompt. Agents are sinks, not the point. |
+| Is troved a bad idea if we forward to the platform agent? | No. It's the **lifecycle owner**: gpg can't be delegated at all, materialization has no OS counterpart, idle-lock spans every sink, and the daemon holds the decrypted database so writes don't re-prompt. Agents are sinks, not the point. |
 | Is ssh-agent the only platform integration? | On macOS yes. Windows has a well-known *pipe*; Linux additionally has Secret Service (a different kind of integration). |
 | Would a launchd service help gpg? | It would add **lifecycle**, not reach — gpg is already global via its fixed path. And it would make the displacement problem permanent and invisible. |
 | Could other agents integrate *into* trove? | Yes, and routing-in is strictly safer than forwarding-out: no key material moves. |
@@ -46,10 +46,10 @@ So the Claude Code sessions weren't blocked by scoping — they never had
 
 ## Decisions
 
-1. **Multi-vault, not single-vault.** `unlock` is additive; agents serve the union.
+1. **Multi-database, not single-database.** `unlock` is additive; agents serve the union.
 2. **Keys union with last-wins; deconfliction deferred** until a real conflict appears.
 3. **Materialized files are first-wins** — the opposite of keys. Overwriting would
-   destroy data a live process is using, and locking either vault would wipe a
+   destroy data a live process is using, and locking either database would wipe a
    file the other expects.
 4. **KeePassXC is the compatibility target** for agent behaviour, extending the
    discipline `parity-plan.md` already applied to the CLI.
@@ -64,7 +64,7 @@ So the Claude Code sessions weren't blocked by scoping — they never had
 9. **scdaemon is the only viable GPG route.** Owning or fronting `S.gpg-agent`
    both fail; see below.
 10. **Agent-wide `REMOVE_ALL` / `LOCK` against a foreign agent stay manual** — they
-    hit keys trove never added, so they can't fire from a vault lock.
+    hit keys trove never added, so they can't fire from a database lock.
 
 ---
 
@@ -72,10 +72,10 @@ So the Claude Code sessions weren't blocked by scoping — they never had
 
 316 → **326 tests**, zero regressions, clippy + fmt clean.
 
-- **Multi-vault daemon** — `VaultSet`, additive unlock, union keyrings,
-  `lock --vault`, per-vault materialize with cross-vault target refusal.
+- **Multi-database daemon** — `DatabaseSet`, additive unlock, union keyrings,
+  `lock --database`, per-database materialize with cross-database target refusal.
   Also fixed: the idle timer wasn't re-armed after a partial lock, which would
-  have left remaining vaults unlocked forever.
+  have left remaining databases unlocked forever.
 - **RSA for OpenPGP** — parse (algo 1/2/3), keygrip, PKCS#1 v1.5 signing, sexp
   encoders. Unblocks most existing PGP keys, which are RSA.
 - **Agent management messages** — `REMOVE_IDENTITY`, `REMOVE_ALL_IDENTITIES`,
@@ -84,7 +84,7 @@ So the Claude Code sessions weren't blocked by scoping — they never had
   for keys held unprotected, and ignored `--data`. Now byte-matches real gpg-agent.
 - **SSH forwarding mechanism** — built and verified against a real `ssh-agent`,
   but **not yet wired** into unlock/lock.
-- **Docs** — [multi-vault](multi-vault.md), [agent-routing](agent-routing.md),
+- **Docs** — [multi-database](multi-database.md), [agent-routing](agent-routing.md),
   [macos](macos.md), [windows](windows.md), [todo](todo.md).
 
 ### Two findings that only a real client could have caught

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Headless daemon for trove: holds unlocked vault state and serves clients over IPC"
+description = "Headless daemon for trove: holds unlocked database state and serves clients over IPC"
 
 [lib]
 name = "troved"
@@ -86,15 +86,13 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
 objc2 = "0.6"
 block2 = "0.6"
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = {
-    version = "0.61",
-    features = [
-        "Win32_Foundation",
-        "Win32_Security",
-        "Win32_Security_Authorization",
-    ],
-}
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+]
 
 [build-dependencies]
 # Formats the dev-build timestamp (0.2.0-dev-YYYYMMDDHHMMSS) in build.rs.

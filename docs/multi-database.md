@@ -1,47 +1,47 @@
-# Multi-vault unlock — design notes
+# Multi-database unlock — design notes
 
-Status: **phase 1 implemented.** The daemon holds a set of unlocked vaults
-(`troved::vaults::VaultSet`); `unlock` is additive, the SSH/GPG agents serve the
-union, `list`/`search`/`status` span the whole set, and `lock [--vault <path>]`
-drops one vault or all of them. Phases 2 and 3 below — dropping the vestigial
-`<VAULT>` positional and adding `--vault` disambiguation to the read/write
-commands — are **not** implemented: a title held by two open vaults is refused
+Status: **phase 1 implemented.** The daemon holds a set of unlocked databases
+(`troved::databases::DatabaseSet`); `unlock` is additive, the SSH/GPG agents serve the
+union, `list`/`search`/`status` span the whole set, and `lock [--database <path>]`
+drops one database or all of them. Phases 2 and 3 below — dropping the vestigial
+`<DATABASE>` positional and adding `--database` disambiguation to the read/write
+commands — are **not** implemented: a title held by two open databases is refused
 with a message naming both, which is safe but not yet resolvable without locking
 one of them.
 
 ## Goal
 
-Unlock several vaults at once (e.g. a personal vault and a company vault) and
-have their keys serve from one place, while keeping the common single-vault case
-ergonomic. Multiple unlocked vaults is the uncommon case — so the design favours
-the single-vault path and only asks the user to disambiguate when there's
+Unlock several databases at once (e.g. a personal database and a company database) and
+have their keys serve from one place, while keeping the common single-database case
+ergonomic. Multiple unlocked databases is the uncommon case — so the design favours
+the single-database path and only asks the user to disambiguate when there's
 genuine ambiguity.
 
 ## The core realization: collisions only matter for title-addressed ops
 
 SSH and GPG agents identify a key by its **public-key blob / keygrip**, never by
-title or which vault it came from. So unlocking N vaults just loads the **union**
+title or which database it came from. So unlocking N databases just loads the **union**
 of their keys into one keyring:
 
 - Different keys → the keyring grows; `ssh`/`git` pick whichever key a host
   accepts. No conflict.
-- The *same* keypair in two vaults → a genuine collision, resolved **last-unlock
-  wins**: the keyring is keyed by public blob, so the later vault's entry
+- The *same* keypair in two databases → a genuine collision, resolved **last-unlock
+  wins**: the keyring is keyed by public blob, so the later database's entry
   overwrites the earlier. The only observable difference is the **comment/label**
   shown in `ssh-add -l` — the signature is identical (it's the same key). The
   user manages this; it costs nothing.
 
-So "dump every unlocked vault's keys into the agents" needs **no collision
+So "dump every unlocked database's keys into the agents" needs **no collision
 handling at all** at the agent layer. Collisions only bite the commands that
 address an entry **by title**: `get`, `add`, `remove`.
 
-The same public-blob/keygrip addressing generalises one level up — "which vault
+The same public-blob/keygrip addressing generalises one level up — "which database
 owns this key" becomes "which *backend* owns this key". See
 [agent-routing.md](agent-routing.md).
 
 ### Motivating example
 
-Unlock a personal vault and a company vault. Different SSH keys coexist in the
+Unlock a personal database and a company database. Different SSH keys coexist in the
 agent — `ssh-add -L` lists both; nothing shadows. The only place "personal vs
 company" needs attention is two keys **for the same host** (two `github.com`
 accounts), and that's a pure-SSH concern solved with `~/.ssh/config` host
@@ -49,7 +49,7 @@ aliases (`IdentitiesOnly yes` + a `work-github` alias), not something trove does
 That pattern is documented today under
 [**Two accounts on one host**](cli-reference.md#two-accounts-on-one-host).
 
-The shared agent prefixes each SSH key comment with the source vault's filename
+The shared agent prefixes each SSH key comment with the source database's filename
 without its extension. For example, keys from `personal.kdbx` and `work.kdbx`
 appear as `personal:github.com` and `work:github.com` in `ssh-add -l` and
 `trove ssh-agent list`. This is display-only labelling; it does not change which
@@ -60,47 +60,47 @@ in your SSH host aliases, as described in [**Two accounts on one host**](cli-ref
 
 Keys are last-unlock-wins because a collision is harmless — same keypair, same
 signature, only the label differs. **Materialized files are not keys.** Two
-vaults with an entry targeting the same path (`/tmp/kubeconfig`) is a real
+databases with an entry targeting the same path (`/tmp/kubeconfig`) is a real
 conflict: overwriting replaces data a running process may be using, and locking
-either vault would then wipe a file the other still expects to exist.
+either database would then wipe a file the other still expects to exist.
 
-So files are **first-wins**: the daemon tracks which vault materialized each
-path, and an unlock that would write over a path another open vault already owns
+So files are **first-wins**: the daemon tracks which database materialized each
+path, and an unlock that would write over a path another open database already owns
 skips that entry and reports it in the unlock response's `materialize_warnings`
 (never a silent `ok` with the wrong bytes on disk). Two guards cover this:
 
 - plan validation already refuses a target that **exists** on disk, whatever put
   it there — this is what fires in the ordinary case;
-- the cross-vault claim check catches the narrower case where the file has been
+- the cross-database claim check catches the narrower case where the file has been
   deleted behind trove's back but the path is still owned and still due a wipe.
 
-`lock --vault <path>` wipes only that vault's files, which is why
-`MaterializedFile` carries its source vault.
+`lock --database <path>` wipes only that database's files, which is why
+`MaterializedFile` carries its source database.
 
-## `--vault` is the disambiguator, never a required positional
+## `--database` is the disambiguator, never a required positional
 
-The `<VAULT>` positional goes away. A command operates on the unlocked set, and
-`--vault <path>` selects/disambiguates only when needed:
+The `<DATABASE>` positional goes away. A command operates on the unlocked set, and
+`--database <path>` selects/disambiguates only when needed:
 
-| Command | No `--vault`, 0 unlocked | No `--vault`, 1 unlocked | No `--vault`, N unlocked | `--vault <path>` |
+| Command | No `--database`, 0 unlocked | No `--database`, 1 unlocked | No `--database`, N unlocked | `--database <path>` |
 |---|---|---|---|---|
-| `get <title>` | error: nothing unlocked | search the one vault | search all; **error on a title collision** | restrict to that vault |
-| `add` / `remove` | error: nothing unlocked | target the one vault | **refuse — require `--vault`** | target that vault (must be unlocked) |
-| `list` | error: nothing unlocked | list the one vault | list the union, annotated by vault | list that vault |
-| `lock` | no-op | lock it | lock **all** | `lock --vault <path>` locks one |
+| `get <title>` | error: nothing unlocked | search the one database | search all; **error on a title collision** | restrict to that database |
+| `add` / `remove` | error: nothing unlocked | target the one database | **refuse — require `--database`** | target that database (must be unlocked) |
+| `list` | error: nothing unlocked | list the one database | list the union, annotated by database | list that database |
+| `lock` | no-op | lock it | lock **all** | `lock --database <path>` locks one |
 
 `unlock <path>` and `init <path>` keep their positional — you're naming a file.
-`unlock` becomes **additive**: each call loads that vault's keys into the keyring
-rather than replacing the previous vault.
+`unlock` becomes **additive**: each call loads that database's keys into the keyring
+rather than replacing the previous database.
 
-Rule of thumb: *agent/title ops need no vault; write/ambiguous ops take an
-optional `--vault`.*
+Rule of thumb: *agent/title ops need no database; write/ambiguous ops take an
+optional `--database`.*
 
 ## The daemon owns the write
 
-When `add`/`remove` mutate a vault, **the daemon performs the write**, not the
+When `add`/`remove` mutate a database, **the daemon performs the write**, not the
 CLI. Rationale: re-saving a `.kdbx` re-encrypts it, which needs the master key.
-The daemon already holds the decrypted vault **and** its key from `unlock`, so it
+The daemon already holds the decrypted database **and** its key from `unlock`, so it
 can mutate-in-memory and `save()` straight back to the file it already knows —
 no prompt. If the CLI wrote the file itself it would have to re-derive the key
 (re-ask for the master password on every `add`), and shipping the password back
@@ -108,15 +108,15 @@ over the socket would be a security regression.
 
 Flow for `trove add ssh personal/github.com <keyfile>`:
 
-1. CLI sends an `AddSsh` RPC (key bytes + entry path + optional `--vault`).
+1. CLI sends an `AddSsh` RPC (key bytes + entry path + optional `--database`).
 2. Daemon resolves the target from its open set (1 open → use it; N open + no
-   `--vault` → refuse; `--vault` → that one, must be open).
+   `--database` → refuse; `--database` → that one, must be open).
 3. Daemon adds the entry, loads the new key into the SSH agent, and `save()`s the
-   vault back to that file's path.
+   database back to that file's path.
 4. Gated like `get`: `SO_PEERCRED` (Unix) + the session code.
 
-The daemon is the source of truth for *which vaults are open and where they
-live* (`Status` already reports the vault path; multi-vault reports the list).
+The daemon is the source of truth for *which databases are open and where they
+live* (`Status` already reports the database path; multi-database reports the list).
 
 ## Entry names are paths, to segregate accounts
 
@@ -124,7 +124,7 @@ Entry names use a directory-like structure (`personal/github.com`,
 `work/clientA/github.com`, `work/clientB/github.com`) so a user with multiple
 identities for the same host can keep them in separate groups. trove already
 supports nested groups, so this is just the entry path (group hierarchy +
-title), addressed without the vault prefix.
+title), addressed without the database prefix.
 
 ## `add ssh` — private key as a **file**, validated
 
@@ -167,26 +167,26 @@ ungated straight from the daemon (it already knows every loaded key's public
 blob for the agent); the simple first version rides the gated private extraction
 + local derivation.
 
-## The one open decision: session code with multiple vaults
+## The one open decision: session code with multiple databases
 
 Extraction (`get`) is gated by the one-time session code minted at `unlock`
-(exported as `TROVE_SESSION`). With several vaults, the choice is:
+(exported as `TROVE_SESSION`). With several databases, the choice is:
 
-- **One daemon-session code covering all unlocked vaults** (recommended):
-  simplest — `get` checks the code, then searches/targets by title/`--vault`. One
+- **One daemon-session code covering all unlocked databases** (recommended):
+  simplest — `get` checks the code, then searches/targets by title/`--database`. One
   env var, one capability for "this shell may extract during this session".
-- A code **per vault**: one `TROVE_SESSION` can't hold several, so this gets
+- A code **per database**: one `TROVE_SESSION` can't hold several, so this gets
   awkward fast.
 
-Recommendation: one daemon-session code + `SO_PEERCRED`; `--vault` disambiguates
+Recommendation: one daemon-session code + `SO_PEERCRED`; `--database` disambiguates
 *which secret*, not *which credential*.
 
 ## Suggested phasing
 
 1. ✅ **Done.** Additive unlock → union into the SSH/GPG agents; `list`/`status`
-   across all; `lock [--vault]`. (Biggest UX win, no write path, lowest risk.)
-2. Drop the vestigial `<VAULT>` from `get`; add `--vault` disambiguation + the
+   across all; `lock [--database]`. (Biggest UX win, no write path, lowest risk.)
+2. Drop the vestigial `<DATABASE>` from `get`; add `--database` disambiguation + the
    collision error; add `get --public` / `--out`.
 3. Daemon-side `add`/`remove` (mutate in memory + `save()` to the known path),
-   code-gated, with `--vault` targeting per the refuse-on-ambiguity rule; switch
+   code-gated, with `--database` targeting per the refuse-on-ambiguity rule; switch
    `add ssh` to the positional-file + validate-on-add behaviour.

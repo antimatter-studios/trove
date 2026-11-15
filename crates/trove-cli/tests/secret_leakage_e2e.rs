@@ -1,6 +1,6 @@
 //! Secrets must not leak into places nobody meant them to go: error messages,
 //! other processes' command lines, or the daemon's log. Each test seeds a
-//! vault with recognisable canary values, drives a surface, and checks every
+//! database with recognisable canary values, drives a surface, and checks every
 //! output channel for them.
 //!
 //! The daemon half runs the real `troved` with every socket isolated in a
@@ -29,7 +29,7 @@ fn run(trove: &Path, env: &[(&str, &str)], args: &[&str], stdin: &str) -> Output
     let mut cmd = Command::new(trove);
     cmd.args(args)
         .env_remove("TROVE_SESSION")
-        .env_remove("TROVE_VAULT")
+        .env_remove("TROVE_DATABASE")
         .env_remove("SSH_AUTH_SOCK")
         .env("TROVE_NO_AUTOSPAWN", "1")
         .stdin(Stdio::piped())
@@ -78,14 +78,14 @@ fn assert_output_clean(what: &str, out: &Output, canaries: &[&str]) {
     );
 }
 
-/// A vault holding the canaries: a password entry exec can inject, and a file
+/// A database holding the canaries: a password entry exec can inject, and a file
 /// attachment.
 fn seed(trove: &Path, dir: &Path) -> String {
-    let vault = dir.join("leak.kdbx");
-    let vs = vault.to_str().unwrap().to_string();
+    let database = dir.join("leak.kdbx");
+    let vs = database.to_str().unwrap().to_string();
     let pw = format!("{MASTER}\n");
     let offline = |args: &[&str], stdin: &str, what: &str| {
-        let mut full = vec!["--vault", vs.as_str(), "--password-stdin"];
+        let mut full = vec!["--database", vs.as_str(), "--password-stdin"];
         full.extend_from_slice(args);
         ok(&run(trove, &[], &full, stdin), what);
     };
@@ -129,7 +129,7 @@ fn offline_errors_and_reads_do_not_leak() {
     let vs = seed(&trove, tmp.path());
     let all = [MASTER, WRONG_MASTER, SECRET, FILE_BYTES];
     let offline = |args: &[&str], stdin: &str| {
-        let mut full = vec!["--vault", vs.as_str(), "--password-stdin"];
+        let mut full = vec!["--database", vs.as_str(), "--password-stdin"];
         full.extend_from_slice(args);
         run(&trove, &[], &full, stdin)
     };
@@ -186,7 +186,7 @@ fn exec_keeps_secrets_off_every_command_line() {
         &trove,
         &[],
         &[
-            "--vault",
+            "--database",
             &vs,
             "--password-stdin",
             "exec",

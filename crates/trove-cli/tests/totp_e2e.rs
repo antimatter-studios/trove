@@ -51,12 +51,16 @@ fn totp_offline_lifecycle() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("t.kdbx");
-    let vault = vault.to_str().unwrap();
+    let database = dir.path().join("t.kdbx");
+    let database = database.to_str().unwrap();
     let pw = format!("{PASSWORD}\n");
 
     ok(
-        &run_trove(&trove, &["--vault", vault, "--password-stdin", "init"], &pw),
+        &run_trove(
+            &trove,
+            &["--database", database, "--password-stdin", "init"],
+            &pw,
+        ),
         "init",
     );
 
@@ -67,8 +71,8 @@ fn totp_offline_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "totp",
@@ -86,8 +90,8 @@ fn totp_offline_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "show",
                 "Web/github",
@@ -105,8 +109,8 @@ fn totp_offline_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "show",
             "Web/github",
@@ -124,8 +128,8 @@ fn totp_offline_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "show",
                 "Web/github",
@@ -148,8 +152,8 @@ fn totp_offline_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "totp",
@@ -165,8 +169,8 @@ fn totp_offline_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "show",
                 "Web/github",
@@ -182,8 +186,8 @@ fn totp_offline_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "add",
             "totp",
@@ -201,8 +205,8 @@ fn totp_offline_lifecycle() {
         &run_trove(
             &trove,
             &[
-                "--vault",
-                vault,
+                "--database",
+                database,
                 "--password-stdin",
                 "add",
                 "password",
@@ -216,8 +220,8 @@ fn totp_offline_lifecycle() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "show",
             "plain",

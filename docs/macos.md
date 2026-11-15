@@ -45,7 +45,7 @@ Host *
 
 Read from `~/.ssh/config`, not the environment, so it works regardless of what a
 process inherited — including GUI-launched apps. Keys stay in troved, so
-idle-lock, `lock --vault`, and wipe all keep working. Get the path from
+idle-lock, `lock --database`, and wipe all keep working. Get the path from
 `trove ssh-agent socket`.
 
 **2. Forwarding into Apple's agent (the KeePassXC model).**
@@ -66,7 +66,7 @@ all KeePassXC-compatible and all read from `KeeAgent.settings`:
 | `UseLifetimeConstraintWhenSigning` + `LifetimeConstraintDuration` | agent expires the key by itself — survives troved being killed | **written but ignored** |
 | `UseConfirmConstraintWhenSigning` | prompt on every *use* — strongest control over a key we no longer hold, but on a stock Mac it has no prompt to show and simply refuses (see below) | **written but ignored** |
 
-Note the granularity: these are **per entry**, live in the vault, and round-trip
+Note the granularity: these are **per entry**, live in the database, and round-trip
 through KeePassXC — so a user can configure trove's agent behaviour from
 KeePassXC's own UI. No new trove-specific config is needed.
 
@@ -134,7 +134,7 @@ stored. Use `ssh-add --apple-load-keychain` (or `ssh-add -v`, which prints
 | `LOCK` (22) / `UNLOCK` (23) | passphrase-gate the whole agent (`ssh-add -x` / `-X`) | same collateral damage, **and** trove would have to choose and store the passphrase — generate-and-discard bricks the agent |
 
 If these ever land, they belong behind explicit commands (`trove agent purge`,
-`trove agent lock`), never fired by a vault lock. Per-key `REMOVE_IDENTITY` is
+`trove agent lock`), never fired by a database lock. Per-key `REMOVE_IDENTITY` is
 the correct automatic behaviour.
 
 ### `CONSTRAIN_CONFIRM` on Apple's agent — verified, with a catch
@@ -340,7 +340,7 @@ protocol family we already handle. No APDUs, no USB, no card emulation.
   loses it.** Proxying unknown cards through to the real scdaemon is therefore
   *required*, not optional, and "working" for the spike means `git commit -S`
   reaches trove **and** hardware still works.
-- The card protocol is a different dialect, and a vault of N keys has to be
+- The card protocol is a different dialect, and a database of N keys has to be
   modelled as **one** virtual card (presenting two serials desynchronised
   gpg-agent — see the spike).
 

@@ -3,9 +3,8 @@
 //! Two jobs:
 //!
 //! 1. **Resolve** the target string from the entry's custom field into an
-//!    absolute path. We expand `~`, `$HOME`, and `$XDG_RUNTIME_DIR` using the
-//!    daemon's environment — never the entry's. (An entry could otherwise
-//!    smuggle env-var references that the user didn't intend.)
+//!    absolute path. We expand `~` and `$NAME` / `${NAME}` references using
+//!    the daemon's environment — never the entry's.
 //! 2. **Validate** that the resolved path is safe to write to. We refuse:
 //!    - paths whose textual form contains a `..` segment (before expansion);
 //!    - paths under known system directories (`/etc/`, `/usr/`, `/bin/`,
@@ -55,6 +54,12 @@ pub enum PathError {
 
     #[error("XDG_RUNTIME_DIR is not set; cannot expand '$XDG_RUNTIME_DIR' in target")]
     XdgRuntimeNotSet,
+
+    #[error("environment variable '{0}' is not set; cannot expand it in target")]
+    EnvironmentVariableNotSet(String),
+
+    #[error("malformed environment-variable reference in target: {0}")]
+    MalformedEnvironmentVariable(String),
 }
 
 /// System-directory prefixes we refuse to materialize into. Order matters
@@ -73,16 +78,15 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
     // we leave them off to stay faithful to the spec.
 ];
 
-/// Expand `~`, `$HOME`, and `$XDG_RUNTIME_DIR` against the daemon's environment
-/// without invoking a shell. Returns the un-validated absolute path.
+/// Expand `~` and environment-variable references against the daemon's
+/// environment without invoking a shell. Returns the un-validated path.
 ///
 /// We expand `~` only at the very start of the string (a leading `~/` or the
 /// bare string `~`). A `~` later in the string is treated as a literal —
 /// matching what most shells do.
 ///
-/// `$HOME` and `$XDG_RUNTIME_DIR` are recognized in two forms: `$HOME`
-/// (followed by `/` or end-of-string) and `${HOME}`. No other env vars are
-/// expanded; we don't want to surprise users with `$PATH` etc.
+/// Variables use shell-style identifier syntax and either `$NAME` or
+/// `${NAME}`. Values are inserted literally and are never recursively parsed.
 pub fn expand_env(raw: &str) -> Result<PathBuf, PathError> {
     if raw.is_empty() {
         return Err(PathError::Empty);
@@ -98,8 +102,7 @@ pub fn expand_env(raw: &str) -> Result<PathBuf, PathError> {
         raw.to_string()
     };
 
-    // env-var expansion. Cheap state machine; we don't use a generic shell
-    // expander because we deliberately allow only HOME and XDG_RUNTIME_DIR.
+    // Expand variables directly; this is deliberately not shell evaluation.
     let mut out = String::with_capacity(after_tilde.len());
     let mut chars = after_tilde.chars().peekable();
     while let Some(c) = chars.next() {
@@ -121,11 +124,14 @@ pub fn expand_env(raw: &str) -> Result<PathBuf, PathError> {
                 name.push(nc);
             }
             if !closed {
-                // Malformed `${VAR` — preserve literally to avoid silent loss.
-                out.push('$');
-                out.push('{');
-                out.push_str(&name);
-                continue;
+                return Err(PathError::MalformedEnvironmentVariable(format!(
+                    "${{{name}"
+                )));
+            }
+            if !valid_env_name(&name) {
+                return Err(PathError::MalformedEnvironmentVariable(format!(
+                    "${{{name}}}"
+                )));
             }
             push_env_value(&mut out, &name)?;
         } else {
@@ -155,32 +161,20 @@ pub fn expand_env(raw: &str) -> Result<PathBuf, PathError> {
     Ok(PathBuf::from(out))
 }
 
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn push_env_value(out: &mut String, name: &str) -> Result<(), PathError> {
-    match name {
-        "HOME" => match env::var("HOME") {
-            Ok(v) => {
-                out.push_str(&v);
-                Ok(())
-            }
-            Err(_) => Err(PathError::HomeNotSet),
-        },
-        "XDG_RUNTIME_DIR" => match env::var("XDG_RUNTIME_DIR") {
-            Ok(v) if !v.is_empty() => {
-                out.push_str(&v);
-                Ok(())
-            }
-            _ => Err(PathError::XdgRuntimeNotSet),
-        },
-        // Anything else: not in our allowlist. Don't expand it; emit literally.
-        // (Refusing would block legitimate static paths that happen to contain
-        // a `$`; emitting literally lets the rest of validation catch it if
-        // the path is bogus.)
-        other => {
-            out.push('$');
-            out.push_str(other);
-            Ok(())
-        }
-    }
+    let value = env::var(name).map_err(|_| match name {
+        "HOME" => PathError::HomeNotSet,
+        "XDG_RUNTIME_DIR" => PathError::XdgRuntimeNotSet,
+        _ => PathError::EnvironmentVariableNotSet(name.to_string()),
+    })?;
+    out.push_str(&value);
+    Ok(())
 }
 
 /// Reject if the *raw* (un-expanded) path string contains a `..` segment.
@@ -529,9 +523,41 @@ mod tests {
     }
 
     #[test]
-    fn unknown_env_var_is_left_literal() {
-        let p = expand_env("/static/$NOT_A_REAL_VAR/x").expect("expand");
-        assert_eq!(p, PathBuf::from("/static/$NOT_A_REAL_VAR/x"));
+    fn expands_arbitrary_environment_variables() {
+        with_env(
+            "TROVE_TEST_MATERIALIZE_DIR",
+            Some("/tmp/trove-test"),
+            || {
+                assert_eq!(
+                    expand_env("$TROVE_TEST_MATERIALIZE_DIR/file").unwrap(),
+                    PathBuf::from("/tmp/trove-test/file")
+                );
+                assert_eq!(
+                    expand_env("${TROVE_TEST_MATERIALIZE_DIR}/file").unwrap(),
+                    PathBuf::from("/tmp/trove-test/file")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn unset_environment_variable_is_an_error() {
+        with_env("TROVE_TEST_MISSING_MATERIALIZE_DIR", None, || {
+            assert!(matches!(
+                expand_env("$TROVE_TEST_MISSING_MATERIALIZE_DIR/file"),
+                Err(PathError::EnvironmentVariableNotSet(name)) if name == "TROVE_TEST_MISSING_MATERIALIZE_DIR"
+            ));
+        });
+    }
+
+    #[test]
+    fn expansion_does_not_bypass_path_validation() {
+        with_env("TROVE_TEST_MATERIALIZE_DIR", Some("/tmp/../etc"), || {
+            assert!(matches!(
+                resolve_and_validate_target("$TROVE_TEST_MATERIALIZE_DIR/file"),
+                Err(PathError::TraversalSegment)
+            ));
+        });
     }
 
     #[test]

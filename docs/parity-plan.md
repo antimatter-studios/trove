@@ -14,14 +14,14 @@ everything we write must be readable by KeePassXC and vice versa.
 | G3 | TOTP | `show --totp`, `clip --totp` | none |
 | G4 | Generation + audit | `generate`, `diceware`, `estimate`, `analyze` | `generate ssh` only |
 | G5 | Clipboard | `clip` with auto-clear timeout | none |
-| G6 | Vault ops | `merge`, `import`, `export`, `db-edit`, `db-info` | none |
+| G6 | Database ops | `merge`, `import`, `export`, `db-edit`, `db-info` | none |
 | G7 | Hardware key | `--yubikey` challenge-response | none |
 
 ## Feature groups
 
 ### G1 — generic entry CRUD (foundation; everything else builds on it)
 
-New CLI surface (offline `--vault` mode and daemon-session mode, same as the
+New CLI surface (offline `--database` mode and daemon-session mode, same as the
 existing ssh/gpg/file commands):
 
 - `trove add password <ENTRY_PATH> [--username U] [--url URL] [--notes N]
@@ -47,13 +47,13 @@ group with the KeePassXC UUID convention), `search_entries`.
 
 ### G2 — keyfile unlock
 
-- Global `--key-file <PATH>` flag beside `--vault`; also honored by `unlock`
+- Global `--key-file <PATH>` flag beside `--database`; also honored by `unlock`
   (daemon stores the composite key material only in memory).
 - Formats: KeePass XML v2 keyfile, legacy XML v1, raw 32-byte, hex-64, and
   arbitrary-file SHA-256 fallback — i.e. exactly the `keepass` crate's
   `DatabaseKey::with_keyfile` behavior, which matches KeePassXC.
 - `trove init --key-file` can generate a fresh XML v2 keyfile.
-- trove-core: `Vault::create/open` grow `_with_key` variants taking a
+- trove-core: `Database::create/open` grow `_with_key` variants taking a
   `KeySource { password, keyfile }`.
 
 ### G3 — TOTP
@@ -73,7 +73,7 @@ group with the KeePassXC UUID convention), `search_entries`.
   [--special] [--exclude CHARS] [--every-group]` — CSPRNG (`rand::rngs::OsRng`).
 - `trove generate diceware [--words N]` — EFF long wordlist, embedded.
 - `trove estimate [PASSWORD]` — zxcvbn entropy estimate (crate `zxcvbn`).
-- `trove analyze --hibp <FILE>` — offline HIBP: SHA-1 the vault's passwords,
+- `trove analyze --hibp <FILE>` — offline HIBP: SHA-1 the database's passwords,
   binary-search the sorted `pwned-passwords` file. Never sends anything on
   the wire. (Online k-anonymity check is a beyond-parity opt-in, G9.)
 
@@ -85,7 +85,7 @@ group with the KeePassXC UUID convention), `search_entries`.
 - Backends: `arboard` crate (macOS/Windows/X11); Wayland via `wl-copy` exec
   fallback; inside tmux/SSH fall back to OSC 52 escape.
 
-### G6 — vault ops
+### G6 — database ops
 
 - `trove merge <SOURCE> [--into TARGET]` — keepass crate `Database::merge`
   (KDBX-standard last-write-wins with history preservation); prints a
@@ -102,7 +102,7 @@ group with the KeePassXC UUID convention), `search_entries`.
 - Feature-flagged (`--features yubikey`), `ykoath`/`challenge-response` via
   the `yubico_manager` protocol KeePassXC uses (HMAC-SHA1 over slot 2).
 - The key-derivation composition follows KeePassXC's documented scheme so a
-  vault created by KeePassXC with YubiKey CR unlocks in trove and vice versa.
+  database created by KeePassXC with YubiKey CR unlocks in trove and vice versa.
 - CI/tests: protocol layer mocked (recorded challenge/response vectors);
   hardware path marked `#[ignore]` and runnable manually. We do NOT claim
   hardware-validated until a human runs it with a real key.

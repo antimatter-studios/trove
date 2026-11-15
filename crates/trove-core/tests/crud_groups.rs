@@ -1,8 +1,8 @@
-//! Integration tests for the generic-CRUD vault APIs: group creation and
+//! Integration tests for the generic-CRUD database APIs: group creation and
 //! removal, entry moves, recycle-bin semantics (KeePassXC-compatible
 //! `Meta/RecycleBinUUID` convention), field removal, and search.
 //!
-//! Every mutating scenario saves, drops, and reopens the vault before
+//! Every mutating scenario saves, drops, and reopens the database before
 //! asserting, so what we verify is what actually landed in the kdbx file.
 
 #![allow(missing_docs)]
@@ -10,19 +10,19 @@
 use std::path::Path;
 
 use tempfile::TempDir;
-use trove_core::{Error, Vault, RECYCLE_BIN_GROUP};
+use trove_core::{Database, Error, RECYCLE_BIN_GROUP};
 
 const PW: &str = "test password";
 
-fn new_vault(dir: &TempDir) -> Vault {
-    Vault::create(&dir.path().join("t.kdbx"), PW).expect("create vault")
+fn new_database(dir: &TempDir) -> Database {
+    Database::create(&dir.path().join("t.kdbx"), PW).expect("create database")
 }
 
-fn reopen(path: &Path) -> Vault {
-    Vault::open(path, PW).expect("reopen vault")
+fn reopen(path: &Path) -> Database {
+    Database::open(path, PW).expect("reopen database")
 }
 
-fn paths(v: &Vault) -> Vec<String> {
+fn paths(v: &Database) -> Vec<String> {
     let mut p: Vec<String> = v.list_entries().iter().map(|e| e.display_path()).collect();
     p.sort();
     p
@@ -31,7 +31,7 @@ fn paths(v: &Vault) -> Vec<String> {
 #[test]
 fn mkdir_creates_hierarchy_and_rejects_duplicate() {
     let dir = TempDir::new().unwrap();
-    let mut v = new_vault(&dir);
+    let mut v = new_database(&dir);
     v.add_group("Work/SSH").expect("mkdir -p Work/SSH");
     // Intermediate now exists; creating the same leaf again is an error…
     assert!(matches!(
@@ -51,8 +51,8 @@ fn mkdir_creates_hierarchy_and_rejects_duplicate() {
 #[test]
 fn move_entry_between_groups_persists() {
     let dir = TempDir::new().unwrap();
-    let vault_path = dir.path().join("t.kdbx");
-    let mut v = Vault::create(&vault_path, PW).unwrap();
+    let database_path = dir.path().join("t.kdbx");
+    let mut v = Database::create(&database_path, PW).unwrap();
     let id = v.add_entry("inbox-item").unwrap();
     v.add_group("Archive/2026").unwrap();
     v.move_entry(&id, "Archive/2026").expect("mv");
@@ -64,14 +64,14 @@ fn move_entry_between_groups_persists() {
     v.save().unwrap();
     drop(v);
 
-    let v = reopen(&vault_path);
+    let v = reopen(&database_path);
     assert_eq!(paths(&v), vec!["Archive/2026/inbox-item".to_string()]);
 }
 
 #[test]
 fn recursive_group_copy_preflights_preserves_metadata_and_drops_materialization() {
     let dir = TempDir::new().unwrap();
-    let mut v = new_vault(&dir);
+    let mut v = new_database(&dir);
     v.add_group("Apple/Empty").unwrap();
     v.set_group_tags("Apple", &["signing".into()]).unwrap();
     let id = v.add_entry("Apple/Keys/developer").unwrap();
@@ -142,15 +142,15 @@ fn recursive_group_copy_preflights_preserves_metadata_and_drops_materialization(
 #[test]
 fn rm_moves_to_recycle_bin_and_sets_meta_uuid() {
     let dir = TempDir::new().unwrap();
-    let vault_path = dir.path().join("t.kdbx");
-    let mut v = Vault::create(&vault_path, PW).unwrap();
+    let database_path = dir.path().join("t.kdbx");
+    let mut v = Database::create(&database_path, PW).unwrap();
     let id = v.add_entry("doomed").unwrap();
     let recycled = v.recycle_entry(&id, false).expect("rm");
     assert!(recycled, "first rm should recycle, not destroy");
     v.save().unwrap();
     drop(v);
 
-    let v = reopen(&vault_path);
+    let v = reopen(&database_path);
     // The entry survives, relocated under the bin group.
     let expected = format!("{RECYCLE_BIN_GROUP}/doomed");
     assert_eq!(paths(&v), vec![expected]);
@@ -159,8 +159,8 @@ fn rm_moves_to_recycle_bin_and_sets_meta_uuid() {
 #[test]
 fn rm_inside_bin_destroys_and_permanent_skips_bin() {
     let dir = TempDir::new().unwrap();
-    let vault_path = dir.path().join("t.kdbx");
-    let mut v = Vault::create(&vault_path, PW).unwrap();
+    let database_path = dir.path().join("t.kdbx");
+    let mut v = Database::create(&database_path, PW).unwrap();
 
     // --permanent never touches the bin.
     let id = v.add_entry("gone-for-good").unwrap();
@@ -174,22 +174,22 @@ fn rm_inside_bin_destroys_and_permanent_skips_bin() {
     v.save().unwrap();
     drop(v);
 
-    let v = reopen(&vault_path);
+    let v = reopen(&database_path);
     assert!(v.list_entries().is_empty(), "entry must be fully gone");
 }
 
 #[test]
 fn rmdir_recycles_group_with_contents() {
     let dir = TempDir::new().unwrap();
-    let vault_path = dir.path().join("t.kdbx");
-    let mut v = Vault::create(&vault_path, PW).unwrap();
+    let database_path = dir.path().join("t.kdbx");
+    let mut v = Database::create(&database_path, PW).unwrap();
     v.add_entry("Old/Project/token").unwrap();
     let recycled = v.remove_group("Old", false, false).expect("rmdir Old");
     assert!(recycled);
     v.save().unwrap();
     drop(v);
 
-    let v = reopen(&vault_path);
+    let v = reopen(&database_path);
     let expected = format!("{RECYCLE_BIN_GROUP}/Old/Project/token");
     assert_eq!(paths(&v), vec![expected]);
 }
@@ -197,7 +197,7 @@ fn rmdir_recycles_group_with_contents() {
 #[test]
 fn recycle_bin_path_appears_once_bin_is_used() {
     let dir = TempDir::new().unwrap();
-    let mut v = new_vault(&dir);
+    let mut v = new_database(&dir);
     assert_eq!(v.recycle_bin_path(), None);
     v.add_entry("Old/token").unwrap();
     v.remove_group("Old", false, false).expect("rmdir Old");
@@ -210,7 +210,7 @@ fn recycle_bin_path_appears_once_bin_is_used() {
 #[test]
 fn rmdir_permanent_requires_recursive_for_non_empty() {
     let dir = TempDir::new().unwrap();
-    let mut v = new_vault(&dir);
+    let mut v = new_database(&dir);
     v.add_entry("Stuff/keep").unwrap();
     assert!(matches!(
         v.remove_group("Stuff", true, false),
@@ -232,7 +232,7 @@ fn rmdir_permanent_requires_recursive_for_non_empty() {
 #[test]
 fn remove_field_and_custom_field_names() {
     let dir = TempDir::new().unwrap();
-    let mut v = new_vault(&dir);
+    let mut v = new_database(&dir);
     let id = v.add_entry("svc").unwrap();
     v.set_field(&id, "UserName", "alice").unwrap();
     v.set_field(&id, "API-Token", "sekrit").unwrap();
@@ -254,7 +254,7 @@ fn remove_field_and_custom_field_names() {
 #[test]
 fn search_matches_all_unprotected_surfaces_only() {
     let dir = TempDir::new().unwrap();
-    let mut v = new_vault(&dir);
+    let mut v = new_database(&dir);
     let a = v.add_entry("Work/GitHub").unwrap();
     v.set_field(&a, "UserName", "octocat").unwrap();
     v.set_field(&a, "URL", "https://github.com").unwrap();
@@ -279,12 +279,12 @@ fn search_matches_all_unprotected_surfaces_only() {
 #[test]
 fn group_order_persists_and_rejects_strangers() {
     let dir = TempDir::new().unwrap();
-    let vault_path = dir.path().join("t.kdbx");
-    let mut v = Vault::create(&vault_path, PW).unwrap();
+    let database_path = dir.path().join("t.kdbx");
+    let mut v = Database::create(&database_path, PW).unwrap();
     for g in ["Work/A", "Work/B", "Work/C", "Home"] {
         v.add_group(g).unwrap();
     }
-    let order = |v: &Vault, parent: &[&str]| -> Vec<(String, Option<u32>)> {
+    let order = |v: &Database, parent: &[&str]| -> Vec<(String, Option<u32>)> {
         let mut kids: Vec<_> = v
             .list_groups()
             .into_iter()
@@ -306,7 +306,7 @@ fn group_order_persists_and_rejects_strangers() {
     v.save().unwrap();
     drop(v);
 
-    let mut v = reopen(&vault_path);
+    let mut v = reopen(&database_path);
     assert_eq!(
         order(&v, &["Work"]),
         vec![

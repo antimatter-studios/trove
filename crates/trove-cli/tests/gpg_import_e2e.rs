@@ -1,4 +1,4 @@
-//! `trove gpg-agent import`, offline: a vault holding a real GPG secret-key
+//! `trove gpg-agent import`, offline: a database holding a real GPG secret-key
 //! export, and an empty `GNUPGHOME`. After the import that keyring must hold
 //! the key's public half (same fingerprints) and no secret key; `--print`
 //! writes the same public keys to stdout.
@@ -11,7 +11,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use trove_core::Vault;
+use trove_core::Database;
 
 const PASSWORD: &str = "gpg-import-test-pw";
 
@@ -57,7 +57,7 @@ fn trove(bin: &Path, home: &Path, args: &[&str]) -> Output {
     let mut child = Command::new(bin)
         .env("GNUPGHOME", home)
         .env_remove("TROVE_SESSION")
-        .env_remove("TROVE_VAULT")
+        .env_remove("TROVE_DATABASE")
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -131,17 +131,23 @@ fn gpg_agent_import_puts_only_public_keys_in_the_keyring() {
     let expected = fingerprints(source.path());
 
     let tmp = tempfile::tempdir().unwrap();
-    let vault = tmp.path().join("v.kdbx");
-    let mut v = Vault::create(&vault, PASSWORD).unwrap();
+    let database = tmp.path().join("v.kdbx");
+    let mut v = Database::create(&database, PASSWORD).unwrap();
     let id = v.add_entry("Signing/work").unwrap();
     v.attach_binary(&id, "gpg-priv", &secret).unwrap();
     v.save().unwrap();
-    let vault = vault.to_str().unwrap();
+    let database = database.to_str().unwrap();
 
     let out = trove(
         &bin,
         target.path(),
-        &["--vault", vault, "--password-stdin", "gpg-agent", "import"],
+        &[
+            "--database",
+            database,
+            "--password-stdin",
+            "gpg-agent",
+            "import",
+        ],
     );
     assert!(
         out.status.success(),
@@ -157,7 +163,13 @@ fn gpg_agent_import_puts_only_public_keys_in_the_keyring() {
     let out = trove(
         &bin,
         target.path(),
-        &["--vault", vault, "--password-stdin", "gpg-agent", "import"],
+        &[
+            "--database",
+            database,
+            "--password-stdin",
+            "gpg-agent",
+            "import",
+        ],
     );
     assert!(out.status.success());
     assert_eq!(fingerprints(target.path()), expected);
@@ -166,8 +178,8 @@ fn gpg_agent_import_puts_only_public_keys_in_the_keyring() {
         &bin,
         target.path(),
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "gpg-agent",
             "import",

@@ -1,15 +1,15 @@
 # trove-desktop
 
-A desktop vault manager — the GUI front-end for [`trove-core`](https://github.com/antimatter-studios/trove).
+A desktop database manager — the GUI front-end for [`trove-core`](https://github.com/antimatter-studios/trove).
 
 Built with Tauri 2 (Rust backend) and React + Vite (frontend). The Rust side links
-`trove-core` directly and exposes a small command surface; the unlocked vault lives
+`trove-core` directly and exposes a small command surface; the unlocked database lives
 in backend memory and the UI only ever sees non-secret entry summaries until it asks
 for a specific field.
 
 ## Status
 
-Early scaffold. Working vertical slice: open a `.kdbx` vault with a master password
+Early scaffold. Working vertical slice: open a `.kdbx` database with a master password
 and browse its entries. Creating entries, editing fields, and copy-to-clipboard are
 not built yet.
 
@@ -47,6 +47,21 @@ without regard to case). Other KeePass clients see it as a normal tag; the
 desktop presents it through the star rather than a separate tag label. Legacy
 `_TroveFav` fields are ignored; toggle the star to set the native tag. Other
 entry tags are preserved.
+
+## Database menu
+
+Each database in the dropdown has two icon buttons:
+
+- **Save** (disk icon) explicitly writes the unlocked database to disk. Entry
+  edits still save automatically. Save is disabled for locked or read-only
+  databases, and failures remain visible in the dropdown.
+- **Remove** (close icon) closes the database and forgets its registration so
+  it does not return on restart. Its `.kdbx` file is never deleted or rewritten.
+  The database's session effects are cleaned up as with an explicit database
+  lock. Use **Open database** to register the same file again later.
+
+Removing the active database selects another unlocked database when available;
+removing the last database shows the open dialog.
 
 ## License
 

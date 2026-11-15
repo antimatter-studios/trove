@@ -13,7 +13,7 @@ Windows different and what is left to do.
 On Unix, `ssh` finds its agent **only** through `$SSH_AUTH_SOCK`. There is no
 path it probes, which is why reaching trove's agent needs either an env var, an
 `IdentityAgent` line in `~/.ssh/config`, or pushing keys into whatever agent the
-platform already runs (see [multi-vault.md](multi-vault.md) for the vault side
+platform already runs (see [multi-database.md](multi-database.md) for the database side
 and `crates/troved/src/ssh_agent/forward.rs` for the forwarding mechanism).
 
 Windows is the opposite, and closer to how gpg works: Win32-OpenSSH falls back
@@ -92,7 +92,7 @@ The threat model's [three barriers](threat-model.md) are not all present here.
 - **No `SO_PEERCRED`.** Named pipes carry no peer credentials, so
   `crates/troved/src/server.rs` uses a `u32::MAX` sentinel for `peer_uid`. An
   explicit owner-only DACL blocks other users, but troved cannot check that a
-  connected client has the same user identity that unlocked the vault. A
+  connected client has the same user identity that unlocked the database. A
   process running as the pipe owner can connect; the session code still gates
   extraction.
 - **Owner-only pipe DACL.** `ipc.rs` supplies an explicit protected DACL for

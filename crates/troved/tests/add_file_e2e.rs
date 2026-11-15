@@ -1,7 +1,7 @@
 //! Integration tests for code-gated `add file` — the `AddFile` RPC that lets
 //! the CLI store an arbitrary file (as a real KDBX `<Binary>` attachment) plus
-//! its `Materialize.*` plan on the daemon's already-unlocked vault without a
-//! vault path (docs/provisioning-sessions.md, docs/multi-vault.md).
+//! its `Materialize.*` plan on the daemon's already-unlocked database without a
+//! database path (docs/provisioning-sessions.md, docs/multi-database.md).
 //!
 //! Like add_ssh_e2e, these drive `handle()` directly with an explicit peer uid
 //! so we can exercise the SO_PEERCRED branch. They prove:
@@ -22,7 +22,7 @@ use base64::Engine;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::GpgKeyStore;
 use troved::handler::{handle, SessionStore, SharedState};
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
@@ -55,7 +55,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let state: SharedState = Arc::new(Mutex::new(troved::vaults::VaultSet::new()));
+        let state: SharedState = Arc::new(Mutex::new(troved::databases::DatabaseSet::new()));
         let key_store: KeyStore = Arc::new(RwLock::new(Vec::new()));
         let gpg_store: GpgKeyStore = Arc::new(RwLock::new(Vec::new()));
         let scoped_agents = troved::ssh_agent::scoped::new_registry();
@@ -119,9 +119,9 @@ fn add_file(code: &str, title: &str, src: &[u8]) -> Request {
 #[tokio::test]
 async fn add_file_writes_attachment_and_materialize_fields_then_round_trips() {
     let tmp = TempDir::new().expect("tempdir");
-    let vault = tmp.path().join("v.kdbx");
-    // Start from an empty vault — the daemon must create the entry mkdir-p.
-    Vault::create(&vault, PASSWORD).expect("create vault");
+    let database = tmp.path().join("v.kdbx");
+    // Start from an empty database — the daemon must create the entry mkdir-p.
+    Database::create(&database, PASSWORD).expect("create database");
     let h = Harness::new();
 
     // Locked: refused even with a fabricated code.
@@ -129,7 +129,7 @@ async fn add_file_writes_attachment_and_materialize_fields_then_round_trips() {
     assert_eq!(b["status"], "err", "add must be refused while locked: {b}");
 
     // Unlock as OWNER → session code.
-    let b = h.handle_as(unlock(&vault), OWNER).await;
+    let b = h.handle_as(unlock(&database), OWNER).await;
     let code = b["code"].as_str().expect("unlock returns code").to_string();
 
     // Wrong code → refused; right code from a different uid → refused.
@@ -145,7 +145,7 @@ async fn add_file_writes_attachment_and_materialize_fields_then_round_trips() {
     assert_eq!(b["status"], "ok", "valid add should succeed: {b}");
 
     // Persisted to disk: re-open the file independently and check the entry.
-    let reopened = Vault::open(&vault, PASSWORD).expect("re-open saved vault");
+    let reopened = Database::open(&database, PASSWORD).expect("re-open saved database");
     let id = reopened
         .find_by_title(ENTRY)
         .expect("entry should exist on disk after add");

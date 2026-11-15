@@ -20,7 +20,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use matrix::{fixtures, keepassxc_party, trove_party, Config, EntrySpec, KeyMaterial, VaultSpec};
+use matrix::{fixtures, keepassxc_party, trove_party, Config, EntrySpec, KeyMaterial, DatabaseSpec};
 
 const PASSWORD: &str = "interop-crud-pw";
 const SECRET: &str = "s3cret-hunter2";
@@ -89,7 +89,7 @@ fn kpxc_attr(oracle: &Path, db: &Path, entry: &str, attr: &str, protected: bool)
         .to_string()
 }
 
-/// Direction 1: a vault authored entirely by trove's CRUD commands reads back
+/// Direction 1: a database authored entirely by trove's CRUD commands reads back
 /// field-for-field in keepassxc, including the effects of `edit` and `mv`.
 #[test]
 fn trove_crud_reads_back_in_keepassxc() {
@@ -100,11 +100,11 @@ fn trove_crud_reads_back_in_keepassxc() {
     let pw = format!("{PASSWORD}\n");
     let pw2 = format!("{PASSWORD}\n{SECRET}\n");
 
-    run_ok(&trove, &["--vault", dbs, "--password-stdin", "init"], &pw);
+    run_ok(&trove, &["--database", dbs, "--password-stdin", "init"], &pw);
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             dbs,
             "--password-stdin",
             "add",
@@ -122,13 +122,13 @@ fn trove_crud_reads_back_in_keepassxc() {
     );
     run_ok(
         &trove,
-        &["--vault", dbs, "--password-stdin", "mkdir", "Work"],
+        &["--database", dbs, "--password-stdin", "mkdir", "Work"],
         &pw,
     );
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             dbs,
             "--password-stdin",
             "mv",
@@ -140,7 +140,7 @@ fn trove_crud_reads_back_in_keepassxc() {
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             dbs,
             "--password-stdin",
             "edit",
@@ -171,15 +171,15 @@ fn trove_crud_reads_back_in_keepassxc() {
     }
 }
 
-/// Direction 2: a vault authored by keepassxc round-trips through every trove
+/// Direction 2: a database authored by keepassxc round-trips through every trove
 /// read/write command.
 #[test]
-fn keepassxc_vault_full_crud_via_trove() {
+fn keepassxc_database_full_crud_via_trove() {
     let trove = trove_bin();
     let pw = format!("{PASSWORD}\n");
 
     for oracle in oracles() {
-        let spec = VaultSpec {
+        let spec = DatabaseSpec {
             name: "interop-crud".to_string(),
             password: PASSWORD,
             key: KeyMaterial::Password,
@@ -213,14 +213,14 @@ fn keepassxc_vault_full_crud_via_trove() {
             .unwrap_or_else(|e| panic!("keepassxc produce: {e}"));
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("kpxc.kdbx");
-        std::fs::write(&db, &bytes).expect("write vault");
+        std::fs::write(&db, &bytes).expect("write database");
         let dbs = db.to_str().expect("utf8");
 
         // get password recovers keepassxc's protected value exactly.
         let out = run_ok(
             &trove,
             &[
-                "--vault",
+                "--database",
                 dbs,
                 "--password-stdin",
                 "get",
@@ -235,7 +235,7 @@ fn keepassxc_vault_full_crud_via_trove() {
         let out = run_ok(
             &trove,
             &[
-                "--vault",
+                "--database",
                 dbs,
                 "--password-stdin",
                 "show",
@@ -249,7 +249,7 @@ fn keepassxc_vault_full_crud_via_trove() {
         // search finds by notes, case-insensitively.
         let out = run_ok(
             &trove,
-            &["--vault", dbs, "--password-stdin", "search", "GUEST"],
+            &["--database", dbs, "--password-stdin", "search", "GUEST"],
             &pw,
         );
         assert!(out.contains("wifi"), "{out}");
@@ -258,7 +258,7 @@ fn keepassxc_vault_full_crud_via_trove() {
         run_ok(
             &trove,
             &[
-                "--vault",
+                "--database",
                 dbs,
                 "--password-stdin",
                 "edit",
@@ -289,11 +289,11 @@ fn trove_rm_lands_in_keepassxc_recycle_bin() {
     let pw = format!("{PASSWORD}\n");
     let pw2 = format!("{PASSWORD}\n{SECRET}\n");
 
-    run_ok(&trove, &["--vault", dbs, "--password-stdin", "init"], &pw);
+    run_ok(&trove, &["--database", dbs, "--password-stdin", "init"], &pw);
     run_ok(
         &trove,
         &[
-            "--vault",
+            "--database",
             dbs,
             "--password-stdin",
             "add",
@@ -305,7 +305,7 @@ fn trove_rm_lands_in_keepassxc_recycle_bin() {
     );
     run_ok(
         &trove,
-        &["--vault", dbs, "--password-stdin", "rm", "doomed"],
+        &["--database", dbs, "--password-stdin", "rm", "doomed"],
         &pw,
     );
 

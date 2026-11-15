@@ -3,10 +3,10 @@
 #![allow(missing_docs)]
 
 use tempfile::TempDir;
-use trove_core::{Error, Vault};
+use trove_core::{Database, Error};
 
-fn vault(dir: &TempDir) -> Vault {
-    let mut v = Vault::create(&dir.path().join("r.kdbx"), "pw").unwrap();
+fn database(dir: &TempDir) -> Database {
+    let mut v = Database::create(&dir.path().join("r.kdbx"), "pw").unwrap();
     let id = v.add_entry("Infra/prod/postgres").unwrap();
     v.set_field(&id, "Password", "pg-secret").unwrap();
     v.set_field(&id, "UserName", "trove_app").unwrap();
@@ -21,7 +21,7 @@ fn vault(dir: &TempDir) -> Vault {
 #[test]
 fn resolves_default_password_and_named_fields() {
     let dir = TempDir::new().unwrap();
-    let v = vault(&dir);
+    let v = database(&dir);
 
     // Whole path → Password.
     assert_eq!(
@@ -45,7 +45,7 @@ fn resolves_default_password_and_named_fields() {
 #[test]
 fn reference_errors_are_precise() {
     let dir = TempDir::new().unwrap();
-    let v = vault(&dir);
+    let v = database(&dir);
 
     // Not a trove:// ref.
     assert!(matches!(

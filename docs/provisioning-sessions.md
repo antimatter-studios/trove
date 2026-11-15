@@ -1,7 +1,7 @@
 # Provisioning sessions — extracting secrets under a session code
 
 How a consumer tool (e.g. a device provisioner like `inpace-config`) uses trove
-to pull secrets repeatedly during a work session **without** turning "the vault
+to pull secrets repeatedly during a work session **without** turning "the database
 is unlocked" into "any process on the box can extract every secret."
 
 Companion to [threat-model.md](threat-model.md) — this is the concrete answer to
@@ -22,7 +22,7 @@ the duration of an unlock," for the *extraction* surface specifically.
 A consumer needs trove secrets for two fundamentally different reasons, and they
 have different security properties:
 
-| Access | Example | Do the private bytes leave the vault? |
+| Access | Example | Do the private bytes leave the database? |
 |---|---|---|
 | **Authenticate** | SSH to a device using a build/bench key | **No** — signing happens in `troved`; the agent only proves possession |
 | **Extract** | install a customer SSH key onto a device; sign a device cert from a CA | **Yes** — the tool needs the actual private bytes |
@@ -40,7 +40,7 @@ bytes to the caller. That's what the **session code** gates.
    unlock, invalidated on `lock` / idle-lock. The operator enters the master
    password interactively; the code is the *capability* to extract during this
    unlock.
-2. **`get` / `materialize` require `unlock` + the code.** Refused when the vault
+2. **`get` / `materialize` require `unlock` + the code.** Refused when the database
    is locked; refused when the code is absent or wrong.
 3. **The code is handed off invisibly**, never shown or typed. On an interactive
    terminal `unlock` launches the operator's own `$SHELL` with `TROVE_SESSION`
@@ -52,14 +52,14 @@ bytes to the caller. That's what the **session code** gates.
    — not on screen, not in `ps`, not on disk.
 4. **`--detach` declines the code entirely.** Both handoffs above need somewhere
    to put the code: a subshell to launch, or an `eval` to consume the line. An
-   operator who wants neither — unlock the vault, keep the shell they are in —
+   operator who wants neither — unlock the database, keep the shell they are in —
    has nowhere for it to go, and a code with nowhere to go is not harmless. It
    is a live extraction capability sitting in daemon memory for the whole
    unlock, reachable by anything that can read the operator's environment or
    guess badly enough. So `--detach` has the daemon mint nothing: the gate is
    never opened rather than opened and abandoned.
 
-   The vault is still fully unlocked — the SSH and GPG agents serve its keys and
+   The database is still fully unlocked — the SSH and GPG agents serve its keys and
    `Materialize.*` entries are written to disk, because those are the *authenticate*
    half of the table above and need no code. What is refused is *extraction*:
    `get` and `materialize` in that shell. This is the honest shape of "I unlocked
@@ -79,10 +79,10 @@ On Windows the named pipe's owner-only DACL replaces the `SO_PEERCRED` check:
 other users cannot connect, but troved cannot distinguish two processes running
 as the same owner. The session code continues to gate extraction.
 
-The daemon holds the session mutex through each code-gated vault operation.
-Unlock, lock, and shutdown take that mutex before vault state as well, so a
-request cannot validate against one session and then access vault state after a
-concurrent transition. The shared lock order is session, then vault state.
+The daemon holds the session mutex through each code-gated database operation.
+Unlock, lock, and shutdown take that mutex before database state as well, so a
+request cannot validate against one session and then access database state after a
+concurrent transition. The shared lock order is session, then database state.
 
 None is a hard wall on its own (the master password remains the root capability —
 a password holder can `unlock` and read the code). Together they make extraction
@@ -94,14 +94,14 @@ the gap a bare ssh-agent leaves open.
 
 ```console
 # ── start a provisioning session (interactive: drops you into a session shell) ──
-$ trove unlock ~/vault/semdatex.kdbx
-Enter vault password: ********
+$ trove unlock ~/database/semdatex.kdbx
+Enter database password: ********
 trove: unlocked · session active in this shell — run add/get here, `exit` to end
 #  → you are now in your own $SHELL with TROVE_SESSION set. Not on screen, not in
 #    `ps`, never on disk. `exit` leaves the session.
 #
 #  Non-interactive / scripted use instead captures the export:
-#     eval "$(trove unlock ~/vault/semdatex.kdbx)"
+#     eval "$(trove unlock ~/database/semdatex.kdbx)"
 
 # ── the consumer tool runs normally; it uses the agent + the code for you ──
 $ inpace config hub network 192.168.0.182 inPACE1 ~/clinics/00001.henrik-clinic.json
@@ -110,8 +110,8 @@ $ inpace config hub network 192.168.0.182 inPACE1 ~/clinics/00001.henrik-clinic.
   ✓ clinic-ca.crt + device leaf  # leaf minted from the materialized CA, installed, CA wiped
 #  the private bytes touched disk only for the seconds the tool used them
 
-# ── a rogue process tries to cash in on the unlocked vault ──────────
-$ trove get ssh ~/vault/semdatex.kdbx "henrik/customer"     # no code
+# ── a rogue process tries to cash in on the unlocked database ──────────
+$ trove get ssh ~/database/semdatex.kdbx "henrik/customer"     # no code
 trove: refused — session code required
 $ sudo -u mallory trove get ssh …                           # different user
 trove: refused — not the unlocking uid
@@ -143,22 +143,22 @@ A tool integrates along the two access lines:
 What ships today (cross-check [status.md](status.md)):
 
 **Works today**
-- `unlock` → daemon holds the vault; **ssh-agent** + **gpg-agent** serve keys.
+- `unlock` → daemon holds the database; **ssh-agent** + **gpg-agent** serve keys.
 - `unlock` **mints a one-time session code**, rotated every unlock, and prints
   `export TROVE_SESSION=…` on **stdout** (human notice on **stderr**).
 - **`get ssh` / `get gpg` / `get file`** route extraction through the *unlocked
   daemon*, gated on the session code **and** `SO_PEERCRED` (served only to the
-  unlocking uid). Refused when the vault is locked or the code is absent/wrong.
+  unlocking uid). Refused when the database is locked or the code is absent/wrong.
 - **materialize** (plan-driven, on unlock; TTL; wiped on `lock`/SIGINT).
 - **idle-lock**, **`lock`** (wipes materialized files, drops agent keys, and
   invalidates the session code).
 
-**Behaviour change:** `get` no longer opens the vault one-shot with a fresh
-password — it requires a running daemon with the vault unlocked. The `<vault>`
+**Behaviour change:** `get` no longer opens the database one-shot with a fresh
+password — it requires a running daemon with the database unlocked. The `<database>`
 positional is retained for CLI compatibility but is vestigial; extraction always
-serves the daemon's currently-unlocked vault. `get file` without `--name`
+serves the daemon's currently-unlocked database. `get file` without `--name`
 defaults to the `blob` attachment (it can't read `Materialize.Source` without a
-vault open, which would defeat the gate).
+database open, which would defeat the gate).
 
 **Not yet implemented**
 - Binding the code to the unlocking *process* (today it's uid-bound, not

@@ -23,11 +23,11 @@ and are released together.
   it replaced is the exception: it is refused, with directions to convert it.
 - **The `trove-core` API.** Its public Rust API, as published on crates.io.
   Structs and enums that may grow are marked `#[non_exhaustive]`.
-- **Vault safety.** trove never damages a KeePassXC-compatible vault: what it
+- **Database safety.** trove never damages a KeePassXC-compatible database: what it
   writes stays readable by KeePassXC, and it keeps the data other clients put
-  there, even when it doesn't use that data itself. Saving keeps the vault's
+  there, even when it doesn't use that data itself. Saving keeps the database's
   KDF, outer cipher and compression; only the KDBX 4 minor version moves to
-  4.1. New vaults use Argon2d, and trove doesn't retune an AES-KDF vault
+  4.1. New databases use Argon2d, and trove doesn't retune an AES-KDF database
   (KeePassXC does that).
 
 ## Not covered

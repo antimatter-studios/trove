@@ -5,11 +5,11 @@
 #![allow(missing_docs)]
 
 use tempfile::TempDir;
-use trove_core::{Error, Vault};
+use trove_core::{Database, Error};
 
 const PW: &str = "expiry-test-pw";
 
-fn expires_of(v: &Vault, path: &str) -> Option<String> {
+fn expires_of(v: &Database, path: &str) -> Option<String> {
     v.list_entries()
         .into_iter()
         .find(|e| e.display_path() == path)
@@ -21,7 +21,7 @@ fn expires_of(v: &Vault, path: &str) -> Option<String> {
 fn expiry_sets_clears_and_survives_a_save() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("e.kdbx");
-    let mut v = Vault::create(&path, PW).unwrap();
+    let mut v = Database::create(&path, PW).unwrap();
     let id = v.add_entry("Web/site").unwrap();
     assert_eq!(expires_of(&v, "Web/site"), None, "no expiry by default");
 
@@ -34,7 +34,7 @@ fn expiry_sets_clears_and_survives_a_save() {
         .unwrap();
     v.save().unwrap();
 
-    let mut v = Vault::open(&path, PW).unwrap();
+    let mut v = Database::open(&path, PW).unwrap();
     assert_eq!(
         expires_of(&v, "Web/site").as_deref(),
         Some("2030-06-15T08:30:00+00:00")
@@ -47,7 +47,7 @@ fn expiry_sets_clears_and_survives_a_save() {
 #[test]
 fn a_bad_expiry_is_refused() {
     let dir = TempDir::new().unwrap();
-    let mut v = Vault::create(&dir.path().join("e.kdbx"), PW).unwrap();
+    let mut v = Database::create(&dir.path().join("e.kdbx"), PW).unwrap();
     let id = v.add_entry("x").unwrap();
     for bad in ["tomorrow", "2030-13-01", "2030-06-15T25:00:00Z", ""] {
         assert!(

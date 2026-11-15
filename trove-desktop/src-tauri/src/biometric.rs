@@ -1,4 +1,4 @@
-//! Touch ID for the desktop app: a fingerprint gate in front of a vault
+//! Touch ID for the desktop app: a fingerprint gate in front of a database
 //! password kept in the macOS login keychain.
 //!
 //! **What this is and is not.** The fingerprint is checked by
@@ -18,7 +18,7 @@
 //! from an unsigned binary with no bundle at all.
 //!
 //! The keychain entry is deliberately the same one the CLI writes — same
-//! service, same account — so enrolling a vault in either place serves both.
+//! service, same account — so enrolling a database in either place serves both.
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -30,21 +30,21 @@ mod imp {
     use std::path::Path;
     use std::time::Duration;
 
-    /// Must match `trove-cli`'s `keychain::SERVICE`, so a vault enrolled from
+    /// Must match `trove-cli`'s `keychain::SERVICE`, so a database enrolled from
     /// the CLI unlocks with Touch ID here and vice versa.
-    const SERVICE: &str = "trove vault password";
+    const SERVICE: &str = "trove database password";
 
     /// `errSecItemNotFound` — nothing stored, which is a state rather than a
     /// failure.
     const NOT_FOUND: i32 = -25300;
 
-    /// A vault is addressed by its canonical path, matching the CLI.
-    fn account(vault: &Path) -> Result<String, String> {
-        let canonical = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
+    /// A database is addressed by its canonical path, matching the CLI.
+    fn account(database: &Path) -> Result<String, String> {
+        let canonical = database.canonicalize().unwrap_or_else(|_| database.to_path_buf());
         canonical
             .to_str()
             .map(str::to_string)
-            .ok_or_else(|| format!("vault path is not valid UTF-8: {}", vault.display()))
+            .ok_or_else(|| format!("database path is not valid UTF-8: {}", database.display()))
     }
 
     /// Is there a fingerprint reader with an enrolled finger, right now?
@@ -85,8 +85,8 @@ mod imp {
             .map_err(|_| "Touch ID prompt timed out".to_string())
     }
 
-    pub fn is_enrolled(vault: &Path) -> Result<bool, String> {
-        let account = account(vault)?;
+    pub fn is_enrolled(database: &Path) -> Result<bool, String> {
+        let account = account(database)?;
         match get_generic_password(SERVICE, &account) {
             Ok(_) => Ok(true),
             Err(e) if e.code() == NOT_FOUND => Ok(false),
@@ -94,14 +94,14 @@ mod imp {
         }
     }
 
-    pub fn enroll(vault: &Path, password: &str) -> Result<(), String> {
-        let account = account(vault)?;
+    pub fn enroll(database: &Path, password: &str) -> Result<(), String> {
+        let account = account(database)?;
         set_generic_password(SERVICE, &account, password.as_bytes())
             .map_err(|e| format!("storing the password in the keychain: {e}"))
     }
 
-    pub fn forget(vault: &Path) -> Result<bool, String> {
-        let account = account(vault)?;
+    pub fn forget(database: &Path) -> Result<bool, String> {
+        let account = account(database)?;
         match delete_generic_password(SERVICE, &account) {
             Ok(()) => Ok(true),
             Err(e) if e.code() == NOT_FOUND => Ok(false),
@@ -110,11 +110,11 @@ mod imp {
     }
 
     /// The stored password, released only after a successful fingerprint.
-    pub fn unlock(vault: &Path, reason: &str) -> Result<Option<String>, String> {
-        let account = account(vault)?;
+    pub fn unlock(database: &Path, reason: &str) -> Result<Option<String>, String> {
+        let account = account(database)?;
         // Look before prompting: asking for a fingerprint and then admitting
         // there is nothing stored wastes the gesture and reads as a bug.
-        if !is_enrolled(vault)? {
+        if !is_enrolled(database)? {
             return Ok(None);
         }
         if !authenticate(reason)? {
@@ -139,16 +139,16 @@ mod imp {
     pub fn available() -> bool {
         false
     }
-    pub fn is_enrolled(_vault: &Path) -> Result<bool, String> {
+    pub fn is_enrolled(_database: &Path) -> Result<bool, String> {
         Ok(false)
     }
-    pub fn enroll(_vault: &Path, _password: &str) -> Result<(), String> {
+    pub fn enroll(_database: &Path, _password: &str) -> Result<(), String> {
         Err(unsupported())
     }
-    pub fn forget(_vault: &Path) -> Result<bool, String> {
+    pub fn forget(_database: &Path) -> Result<bool, String> {
         Ok(false)
     }
-    pub fn unlock(_vault: &Path, _reason: &str) -> Result<Option<String>, String> {
+    pub fn unlock(_database: &Path, _reason: &str) -> Result<Option<String>, String> {
         Ok(None)
     }
 }

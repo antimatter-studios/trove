@@ -15,8 +15,8 @@
 //!      produces a sign-only primary and no subkey at all, which would leave
 //!      nothing to decrypt with.
 //!   3. Export the secret key bundle as a binary blob.
-//!   4. Stash it in a real .kdbx vault under attachment `gpg-priv`.
-//!   5. Open the vault, populate the in-memory GPG key store. Both keygrips
+//!   4. Stash it in a real .kdbx database under attachment `gpg-priv`.
+//!   5. Open the database, populate the in-memory GPG key store. Both keygrips
 //!      (signing primary + encryption subkey) should appear as RSA keys.
 //!   6. Encrypt a message with `gpg --encrypt` (encryption needs no secret).
 //!   7. Spawn our GPG agent listener on a temp socket; symlink it as
@@ -30,9 +30,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::RwLock;
-use trove_core::Vault;
+use trove_core::Database;
 use troved::gpg_agent::{self, GpgKeyStore};
-use troved::handler::load_gpg_keys_from_vault;
+use troved::handler::load_gpg_keys_from_database;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 
 fn noop_idle() -> Arc<IdleTracker> {
@@ -66,7 +66,7 @@ async fn gpg_rsa_decrypt_against_our_agent_recovers_plaintext() {
     }
     let params_path = tmp.path().join("keyparams");
     let secret_path = tmp.path().join("secret.gpg");
-    let vault_path = tmp.path().join("vault.kdbx");
+    let database_path = tmp.path().join("database.kdbx");
     let sock_path = tmp.path().join("gpg.sock");
     let plaintext_path = tmp.path().join("plain.txt");
     let cipher_path = tmp.path().join("plain.gpg");
@@ -158,24 +158,26 @@ async fn gpg_rsa_decrypt_against_our_agent_recovers_plaintext() {
     let secret_bytes = std::fs::read(&secret_path).expect("read exported key");
     assert!(!secret_bytes.is_empty());
 
-    // 4. Stash in a vault.
+    // 4. Stash in a database.
     let password = "rsa-decrypt-itest-pw";
     {
-        let mut vault = Vault::create(&vault_path, password).expect("create vault");
-        let id = vault.add_entry("gpg-rsa-decrypt-itest").expect("add entry");
-        vault
+        let mut database = Database::create(&database_path, password).expect("create database");
+        let id = database
+            .add_entry("gpg-rsa-decrypt-itest")
+            .expect("add entry");
+        database
             .attach_binary(&id, "gpg-priv", &secret_bytes)
             .expect("attach gpg-priv");
-        vault.save().expect("save vault");
+        database.save().expect("save database");
     }
 
-    // 5. Populate the GPG key store from the vault.
-    let vault = Vault::open(&vault_path, password).expect("reopen");
-    let keys = load_gpg_keys_from_vault(&vault);
+    // 5. Populate the GPG key store from the database.
+    let database = Database::open(&database_path, password).expect("reopen");
+    let keys = load_gpg_keys_from_database(&database);
     assert_eq!(
         keys.len(),
         2,
-        "vault should yield the RSA primary and the RSA encryption subkey, got {}",
+        "database should yield the RSA primary and the RSA encryption subkey, got {}",
         keys.len()
     );
     for k in &keys {

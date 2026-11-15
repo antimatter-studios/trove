@@ -45,8 +45,8 @@ fn keyfile_offline_round_trip_and_failure_modes() {
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    let vault = dir.path().join("kf.kdbx");
-    let vault = vault.to_str().unwrap();
+    let database = dir.path().join("kf.kdbx");
+    let database = database.to_str().unwrap();
     let kf = dir.path().join("key.bin");
     std::fs::write(&kf, [7u8; 32]).unwrap();
     let kfs = kf.to_str().unwrap();
@@ -57,8 +57,8 @@ fn keyfile_offline_round_trip_and_failure_modes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--key-file",
             kfs,
             "--password-stdin",
@@ -76,8 +76,8 @@ fn keyfile_offline_round_trip_and_failure_modes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--password-stdin",
             "add",
             "password",
@@ -92,8 +92,8 @@ fn keyfile_offline_round_trip_and_failure_modes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--key-file",
             kfs,
             "--password-stdin",
@@ -106,8 +106,12 @@ fn keyfile_offline_round_trip_and_failure_modes() {
     assert!(out.status.success(), "get: {out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), SECRET);
 
-    // Same password, no keyfile → refused with the vault-error exit (2).
-    let out = run_trove(&trove, &["--vault", vault, "--password-stdin", "list"], &pw);
+    // Same password, no keyfile → refused with the database-error exit (2).
+    let out = run_trove(
+        &trove,
+        &["--database", database, "--password-stdin", "list"],
+        &pw,
+    );
     assert!(!out.status.success(), "open without keyfile must fail");
     assert_eq!(out.status.code(), Some(2), "bad-key exit code");
 
@@ -117,8 +121,8 @@ fn keyfile_offline_round_trip_and_failure_modes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--key-file",
             wrong.to_str().unwrap(),
             "--password-stdin",
@@ -132,8 +136,8 @@ fn keyfile_offline_round_trip_and_failure_modes() {
     let out = run_trove(
         &trove,
         &[
-            "--vault",
-            vault,
+            "--database",
+            database,
             "--key-file",
             "/no/such/keyfile",
             "--password-stdin",
@@ -144,6 +148,6 @@ fn keyfile_offline_round_trip_and_failure_modes() {
     assert!(!out.status.success(), "missing keyfile path must fail");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("reading key file"),
-        "should fail on the keyfile read, not the vault open"
+        "should fail on the keyfile read, not the database open"
     );
 }

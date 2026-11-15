@@ -3,10 +3,10 @@ name = "trove-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "kdbx-compatible vault library: I/O, crypto, sidecars"
+description = "kdbx-compatible database library: I/O, crypto, sidecars"
 repository.workspace = true
 readme = "README.md"
-keywords = ["keepass", "kdbx", "password", "vault", "crypto"]
+keywords = ["keepass", "kdbx", "password", "database", "crypto"]
 categories = ["cryptography", "parser-implementations"]
 
 [features]
@@ -25,10 +25,13 @@ zeroize.workspace = true
 # keepass, which parses KDBX's XML with it.
 quick-xml = "0.42"
 thiserror.workspace = true
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
 # Steam Guard codes (`encoder=steam`), which keepass's TOTP renders as decimal
 # digits. All three are already in the tree through keepass's `totp` feature.
 hmac = "0.12"
 sha1 = "0.10"
+sha2 = "0.11.1"
 base32 = "0.5"
 
 [dev-dependencies]

@@ -5,8 +5,8 @@
 //! we:
 //!   1. Generate a fresh keypair via `ssh-keygen -t … -N ''`.
 //!   2. Compute the expected SHA256 fingerprint via `ssh-keygen -lf <pub>`.
-//!   3. Stash the private key in a real .kdbx vault under attachment "id".
-//!   4. Open the vault, populate the in-memory key store, and start the
+//!   3. Stash the private key in a real .kdbx database under attachment "id".
+//!   4. Open the database, populate the in-memory key store, and start the
 //!      SSH agent listener on a temp socket.
 //!   5. Run `SSH_AUTH_SOCK=<socket> ssh-add -l` and assert the fingerprint
 //!      and comment line up.
@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::RwLock;
-use trove_core::Vault;
-use troved::handler::load_ssh_keys_from_vault;
+use trove_core::Database;
+use troved::handler::load_ssh_keys_from_database;
 use troved::idle::{IdleTracker, LockCallback, LockFuture};
 use troved::ssh_agent::{self, KeyStore};
 
@@ -42,7 +42,7 @@ fn have_tool(name: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ssh_add_lists_and_dumps_vault_ed25519_key() {
+async fn ssh_add_lists_and_dumps_database_ed25519_key() {
     if !have_tool("ssh-keygen") || !have_tool("ssh-add") {
         eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
         return;
@@ -57,7 +57,7 @@ async fn ssh_add_lists_and_dumps_vault_ed25519_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ssh_add_lists_and_dumps_vault_rsa_3072_key() {
+async fn ssh_add_lists_and_dumps_database_rsa_3072_key() {
     if !have_tool("ssh-keygen") || !have_tool("ssh-add") {
         eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
         return;
@@ -72,7 +72,7 @@ async fn ssh_add_lists_and_dumps_vault_rsa_3072_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ssh_add_lists_and_dumps_vault_ecdsa_p256_key() {
+async fn ssh_add_lists_and_dumps_database_ecdsa_p256_key() {
     if !have_tool("ssh-keygen") || !have_tool("ssh-add") {
         eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
         return;
@@ -87,7 +87,7 @@ async fn ssh_add_lists_and_dumps_vault_ecdsa_p256_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ssh_add_lists_and_dumps_vault_ecdsa_p384_key() {
+async fn ssh_add_lists_and_dumps_database_ecdsa_p384_key() {
     if !have_tool("ssh-keygen") || !have_tool("ssh-add") {
         eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
         return;
@@ -102,7 +102,7 @@ async fn ssh_add_lists_and_dumps_vault_ecdsa_p384_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ssh_add_lists_and_dumps_vault_ecdsa_p521_key() {
+async fn ssh_add_lists_and_dumps_database_ecdsa_p521_key() {
     if !have_tool("ssh-keygen") || !have_tool("ssh-add") {
         eprintln!("SKIP: ssh-keygen/ssh-add not on $PATH");
         return;
@@ -116,7 +116,7 @@ async fn ssh_add_lists_and_dumps_vault_ecdsa_p521_key() {
     .await;
 }
 
-/// Drive the full vault → agent → ssh-add round-trip for a single key type.
+/// Drive the full database → agent → ssh-add round-trip for a single key type.
 ///
 /// `keygen_args` is the prefix passed to `ssh-keygen` (e.g. `["-t","rsa","-b","3072"]`);
 /// `expected_pubkey_prefix` is the algorithm token we expect at the start of
@@ -133,7 +133,7 @@ async fn run_e2e_for(
     let tmp = TempDir::new().expect("tempdir");
     let key_path = tmp.path().join("k");
     let pub_path = tmp.path().join("k.pub");
-    let vault_path = tmp.path().join("vault.kdbx");
+    let database_path = tmp.path().join("database.kdbx");
     let sock_path = tmp.path().join("agent.sock");
 
     // 1. Generate a real keypair on disk.
@@ -167,21 +167,21 @@ async fn run_e2e_for(
 
     let pubkey_text = std::fs::read_to_string(&pub_path).expect("read pub");
 
-    // 3. Stash the private key into a real vault under attachment "id".
+    // 3. Stash the private key into a real database under attachment "id".
     let key_bytes = std::fs::read(&key_path).expect("read priv");
     let password = "test-password";
     {
-        let mut vault = Vault::create(&vault_path, password).expect("create vault");
-        let id = vault.add_entry(comment).expect("add entry");
-        vault
+        let mut database = Database::create(&database_path, password).expect("create database");
+        let id = database.add_entry(comment).expect("add entry");
+        database
             .attach_binary(&id, "id", &key_bytes)
             .expect("attach id");
-        vault.save().expect("save vault");
+        database.save().expect("save database");
     }
 
-    // 4a. Reopen vault, pull keys out, populate the key store.
-    let vault = Vault::open(&vault_path, password).expect("reopen vault");
-    let keys = load_ssh_keys_from_vault(&vault);
+    // 4a. Reopen database, pull keys out, populate the key store.
+    let database = Database::open(&database_path, password).expect("reopen database");
+    let keys = load_ssh_keys_from_database(&database);
     assert_eq!(keys.len(), 1, "exactly one key should load for {comment}");
     let store: KeyStore = Arc::new(RwLock::new(keys));
 

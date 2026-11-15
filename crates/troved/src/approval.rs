@@ -13,7 +13,7 @@
 //! * **An approval lasts the item's `lifetime`.** With `lifetime="600"`, one
 //!   fingerprint covers that item for ten minutes; without one, every use asks.
 //! * **Prompts happen outside the daemon's locks.** A prompt can wait for a
-//!   minute, and holding the vault lock through it would stall every other
+//!   minute, and holding the database lock through it would stall every other
 //!   request. A prompt waits up to a minute for a finger.
 
 use std::collections::HashMap;
@@ -22,12 +22,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use trove_core::settings::{Capability, EffectiveItem};
-use trove_core::{EntryId, Vault};
+use trove_core::{Database, EntryId};
 
 /// One settings item that needs approval before its secret is used.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Gate {
-    pub vault: PathBuf,
+    pub database: PathBuf,
     pub entry: String,
     pub capability: Capability,
     pub item: String,
@@ -38,7 +38,7 @@ pub struct Gate {
 impl Gate {
     fn key(&self) -> (PathBuf, String, Capability, String) {
         (
-            self.vault.clone(),
+            self.database.clone(),
             self.entry.clone(),
             self.capability,
             self.item.clone(),
@@ -70,7 +70,7 @@ fn gpg_gates() -> &'static Mutex<HashMap<String, Gate>> {
     GATES.get_or_init(Default::default)
 }
 
-/// Forget every approval: on lock, a vault's grants go with it.
+/// Forget every approval: on lock, a database's grants go with it.
 pub fn clear() {
     grants().lock().expect("grants lock").clear();
 }
@@ -99,20 +99,20 @@ pub enum Reads<'a> {
 /// The confirm-flagged items of an entry that name what is being read.
 /// A field or attachment named by no such item needs no approval.
 pub fn gates_for(
-    vault: &Vault,
-    vault_key: &std::path::Path,
+    database: &Database,
+    database_key: &std::path::Path,
     id: &EntryId,
     entry_path: &str,
     reads: Reads<'_>,
 ) -> Vec<Gate> {
     let mut out = Vec::new();
     for capability in [Capability::EnvAgent, Capability::GpgAgent] {
-        let Ok(Some(items)) = vault.effective_settings(id, capability) else {
+        let Ok(Some(items)) = database.effective_settings(id, capability) else {
             continue;
         };
         for item in items.iter().filter(|i| i.flag("confirm")) {
             if names(item, reads) {
-                out.push(gate(vault_key, entry_path, capability, item));
+                out.push(gate(database_key, entry_path, capability, item));
             }
         }
     }
@@ -128,13 +128,13 @@ fn names(item: &EffectiveItem, reads: Reads<'_>) -> bool {
 
 /// The gate for one item.
 pub fn gate(
-    vault_key: &std::path::Path,
+    database_key: &std::path::Path,
     entry_path: &str,
     capability: Capability,
     item: &EffectiveItem,
 ) -> Gate {
     Gate {
-        vault: vault_key.to_path_buf(),
+        database: database_key.to_path_buf(),
         entry: entry_path.to_string(),
         capability,
         item: item.key.clone(),
@@ -239,7 +239,7 @@ mod tests {
 
     fn g(item: &str, lifetime: Option<u64>) -> Gate {
         Gate {
-            vault: PathBuf::from("/v.kdbx"),
+            database: PathBuf::from("/v.kdbx"),
             entry: "e".into(),
             capability: Capability::EnvAgent,
             item: item.into(),

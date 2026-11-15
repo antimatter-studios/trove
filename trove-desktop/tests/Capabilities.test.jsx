@@ -50,7 +50,7 @@ describe('CapabilitySections', () => {
   it('offers to add a capability only while it is off', async () => {
     api.entryCapabilities.mockResolvedValue(caps());
     api.setCapabilityOn.mockResolvedValue(caps({ envOn: true }));
-    const { findByText, queryByText } = render(<CapabilitySections vaultId="v1" entry={ENTRY} />);
+    const { findByText, queryByText } = render(<CapabilitySections databaseId="v1" entry={ENTRY} />);
     fireEvent.click(await findByText(/Export variables to trove exec/));
     await waitFor(() => expect(api.setCapabilityOn).toHaveBeenCalledWith('v1', 'e1', 'env-agent', true));
     await findByText(/Environment · 0/);
@@ -61,7 +61,7 @@ describe('CapabilitySections', () => {
   it('adds a variable from a field and shows an inherited constraint as inherited', async () => {
     api.entryCapabilities.mockResolvedValue(caps({ envOn: true }));
     api.setCapabilityItem.mockResolvedValue(caps({ envOn: true, envItems: [TOKEN] }));
-    const { container, findByText } = render(<CapabilitySections vaultId="v1" entry={ENTRY} />);
+    const { container, findByText } = render(<CapabilitySections databaseId="v1" entry={ENTRY} />);
     await findByText(/Environment · 0/);
     const name = container.querySelector('.cap-add input');
     fireEvent.change(name, { target: { value: 'gitea_token' } });
@@ -82,7 +82,7 @@ describe('CapabilitySections', () => {
     api.entryCapabilities.mockResolvedValue(caps({ envOn: true, envItems: [TOKEN] }));
     api.removeCapabilityItem.mockResolvedValue(caps({ envOn: true }));
     api.setCapabilityOn.mockResolvedValue(caps());
-    const { container, findByText } = render(<CapabilitySections vaultId="v1" entry={ENTRY} />);
+    const { container, findByText } = render(<CapabilitySections databaseId="v1" entry={ENTRY} />);
     await findByText('GITEA_TOKEN');
     fireEvent.click(container.querySelector('.cap-row .icon-btn'));
     await waitFor(() => expect(api.removeCapabilityItem).toHaveBeenCalledWith('v1', 'e1', 'env-agent', 'GITEA_TOKEN'));
@@ -92,7 +92,7 @@ describe('CapabilitySections', () => {
 
   it('shows a backend refusal instead of crashing', async () => {
     api.entryCapabilities.mockRejectedValue('EnvAgent.settings is not well-formed XML');
-    const { findByText } = render(<CapabilitySections vaultId="v1" entry={ENTRY} />);
+    const { findByText } = render(<CapabilitySections databaseId="v1" entry={ENTRY} />);
     expect(await findByText(/not well-formed/)).toBeTruthy();
   });
 });
@@ -105,7 +105,7 @@ describe('FolderDefaults', () => {
       { capability: 'gpg-agent', defaults: {}, allowed: ['uses', 'confirm', 'lifetime'] },
     ]);
     api.setGroupDefault.mockResolvedValue([]);
-    const { container, findByDisplayValue } = render(<FolderDefaults vaultId="v1" path="Apple/Apps/rest-mail" />);
+    const { container, findByDisplayValue } = render(<FolderDefaults databaseId="v1" path="Apple/Apps/rest-mail" />);
     await findByDisplayValue('0600');
     const dir = container.querySelector('input[placeholder="~/projects/app/secrets"]');
     fireEvent.change(dir, { target: { value: '~/rest-mail/secrets' } });
@@ -115,9 +115,9 @@ describe('FolderDefaults', () => {
     );
   });
 
-  it('says it applies to the whole vault at the root', async () => {
+  it('says it applies to the whole database at the root', async () => {
     api.groupCapabilities.mockResolvedValue([]);
-    const { findByText } = render(<FolderDefaults vaultId="v1" path="" />);
-    expect(await findByText(/whole vault/)).toBeTruthy();
+    const { findByText } = render(<FolderDefaults databaseId="v1" path="" />);
+    expect(await findByText(/whole database/)).toBeTruthy();
   });
 });

@@ -10,21 +10,21 @@ trove [OPTIONS] <COMMAND>
 
 | Flag | Description |
 | --- | --- |
-| `--vault <PATH>` | Operate **offline** on this kdbx file, bypassing the daemon. Global — works before or after the subcommand. Defaults to `TROVE_VAULT` when set; an explicit flag wins. See "Operating modes" below. |
-| `--password-stdin` | Read the vault password from stdin (one line) instead of prompting. For `init`, the single line becomes the password without a confirm step. Global — works on every subcommand. |
-| `--key-file <PATH>` | Composite key: this keyfile PLUS the password, wherever a vault is opened — offline `--vault` commands, `init` (locks the new vault with the pair), and `unlock` (the daemon holds the bytes in memory so its re-saves keep the composite key). Any format KeePassXC accepts: XML v1/v2, raw 32-byte, hex-64, or an arbitrary file (SHA-256). A wrong/missing keyfile fails like a wrong password (exit 2). |
-| `--yubikey <SLOT>[:SERIAL]` | *(builds with `--features yubikey`; Linux-only for now — upstream keepass pins a USB backend that doesn't compile on macOS.)* HMAC-SHA1 challenge-response composited with the password/keyfile, KeePassXC's scheme. Applies to offline `--vault` commands and `init`; daemon-backed commands, including `unlock`, reject it as unsupported. The device must stay connected while writing: every save answers a fresh challenge. |
+| `--database <PATH>` | Operate **offline** on this kdbx file, bypassing the daemon. Global — works before or after the subcommand. Defaults to `TROVE_DATABASE` when set; an explicit flag wins. See "Operating modes" below. |
+| `--password-stdin` | Read the database password from stdin (one line) instead of prompting. For `init`, the single line becomes the password without a confirm step. Global — works on every subcommand. |
+| `--key-file <PATH>` | Composite key: this keyfile PLUS the password, wherever a database is opened — offline `--database` commands, `init` (locks the new database with the pair), and `unlock` (the daemon holds the bytes in memory so its re-saves keep the composite key). Any format KeePassXC accepts: XML v1/v2, raw 32-byte, hex-64, or an arbitrary file (SHA-256). A wrong/missing keyfile fails like a wrong password (exit 2). |
+| `--yubikey <SLOT>[:SERIAL]` | *(builds with `--features yubikey`; Linux-only for now — upstream keepass pins a USB backend that doesn't compile on macOS.)* HMAC-SHA1 challenge-response composited with the password/keyfile, KeePassXC's scheme. Applies to offline `--database` commands and `init`; daemon-backed commands, including `unlock`, reject it as unsupported. The device must stay connected while writing: every save answers a fresh challenge. |
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
 
 ### Operating modes
 
-`trove` has two modes, selected by the global `--vault` flag or its `TROVE_VAULT` default (both flag placements are equivalent: `trove --vault V list` == `trove list --vault V`; the flag overrides the environment variable):
+`trove` has two modes, selected by the global `--database` flag or its `TROVE_DATABASE` default (both flag placements are equivalent: `trove --database V list` == `trove list --database V`; the flag overrides the environment variable):
 
-- **Offline (`--vault <PATH>`)** — the command opens the kdbx file directly. The password comes from `--password-stdin` or a prompt (never the command line). No daemon, no `TROVE_SESSION`. This is the stateless path automation should use. `init` and `materialize` always operate this way; with `--vault`, so do `add ssh/gpg/file`, `generate ssh`, `get`, and `list`.
-- **Daemon (no vault path selected)** — `add ssh/gpg/file`, `generate ssh`, `get`, and `list` act on the vault unlocked in the running `troved`, gated by the `TROVE_SESSION` code `trove unlock` minted. `init` and `materialize` have no daemon mode and error without a path from `--vault` or `TROVE_VAULT`.
+- **Offline (`--database <PATH>`)** — the command opens the kdbx file directly. The password comes from `--password-stdin` or a prompt (never the command line). No daemon, no `TROVE_SESSION`. This is the stateless path automation should use. `init` and `materialize` always operate this way; with `--database`, so do `add ssh/gpg/file`, `generate ssh`, `get`, and `list`.
+- **Daemon (no database path selected)** — `add ssh/gpg/file`, `generate ssh`, `get`, and `list` act on the database unlocked in the running `troved`, gated by the `TROVE_SESSION` code `trove unlock` minted. `init` and `materialize` have no daemon mode and error without a path from `--database` or `TROVE_DATABASE`.
 
-`unlock` is the exception: it is inherently daemon-directed, so it keeps its own positional `<VAULT>` and ignores `--vault`.
+`unlock` is the exception: it is inherently daemon-directed, so it keeps its own positional `<DATABASE>` and ignores `--database`.
 
 ## Exit codes
 
@@ -35,12 +35,12 @@ error chain:
 | --- | --- |
 | 0 | Success |
 | 1 | User-recoverable error: bad path, missing entry or group, entry/group/attachment already exists, non-empty group, missing or invalid TOTP, I/O error, no daemon or nothing unlocked, and anything not listed under 2 |
-| 2 | Vault-level error: bad password or keyfile, corrupt or unreadable kdbx, or the file changed on disk in a way a save could not merge. From the daemon, only `unlock` reports 2, for an error mentioning a password, kdbx or decryption |
+| 2 | Database-level error: bad password or keyfile, corrupt or unreadable kdbx, or the file changed on disk in a way a save could not merge. From the daemon, only `unlock` reports 2, for an error mentioning a password, kdbx or decryption |
 
 Outside `classify_exit`:
 
 - A command-line usage error (unknown flag, missing argument) exits **2**,
-  clap's code, the same as a vault error. `--help` and `--version` exit 0.
+  clap's code, the same as a database error. `--help` and `--version` exit 0.
   `--env <PATH>` written without `=` exits 1 with a hint.
 - `trove exec` exits with the child's exit code, or 1 when the child was
   killed by a signal.
@@ -54,12 +54,12 @@ Outside `classify_exit`:
 ## trove unlock
 
 ```
-trove unlock [--filter <TAG>] [--detach] <VAULT>
+trove unlock [--filter <TAG>] [--detach] <DATABASE>
 ```
 
-Unlocks a vault additively. `--filter` selects entries tagged `<TAG>` directly
+Unlocks a database additively. `--filter` selects entries tagged `<TAG>` directly
 or through a containing group (case-insensitive) for SSH/GPG agent exposure
-and unlock-time materialization. The decrypted vault remains available to the
+and unlock-time materialization. The decrypted database remains available to the
 normal session-gated commands. `trove edit` manages entry tags; `trove group`
 lists and edits group tags. Without `--filter`, every entry is exposed.
 `--detach` unlocks without creating a session code or opening a subshell; the
@@ -70,29 +70,43 @@ Entry-addressing commands accept a `group/sub/title` **entry path**; intermediat
 ## trove init
 
 ```
-trove --vault <PATH> init
+trove --database <PATH> init
 ```
 
-Create a new empty kdbx vault at `--vault <PATH>` (required). Prompts twice for the master password (or once with `--password-stdin`). Errors if the file already exists.
+Create a new empty kdbx database at `--database <PATH>` (required). Prompts twice for the master password (or once with `--password-stdin`). Errors if the file already exists.
 
-Backed by [`Vault::create`](../crates/trove-core/src/lib.rs). The default kdbx config is KDBX 4 + AES-256 + GZip + ChaCha20 (inner stream) + Argon2d.
+Backed by [`Database::create`](../crates/trove-core/src/lib.rs). The default kdbx config is KDBX 4 + AES-256 + GZip + ChaCha20 (inner stream) + Argon2d.
+
+## trove database metadata
+
+```
+trove --database <PATH> database metadata show [--json]
+trove --database <PATH> database metadata set [--name NAME] [--description TEXT]
+    [--default-username NAME] [--trove-uuid UUID | --generate-trove-uuid]
+```
+
+Show or update the selected KDBX database's name, description, default
+username, and Trove database UUID. Updates are saved to the database file.
+Empty values clear their fields. Set the same UUID on physical copies that
+Trove should recognize as linked; `--generate-trove-uuid` creates a new one.
+`show --json` prints these fields as JSON.
 
 ## trove list
 
 ```
-trove [--vault <PATH>] list [--json] [--show-id]
+trove [--database <PATH>] list [--json] [--show-id]
 ```
 
 Print one line per entry: its path and a summary of its attachments, with the
 entry's UUID first when `--show-id` is given. Recursively walks all groups.
-With `--vault` it reads the file directly (offline); without it, it lists the
-daemon's currently unlocked vault. `--json` prints
+With `--database` it reads the file directly (offline); without it, it lists the
+daemon's currently unlocked database. `--json` prints
 [entry summaries](#trove-list---json-trove-search---json).
 
 ## trove show
 
 ```
-trove [--vault <PATH>] show [OPTIONS] <ENTRY_PATH>
+trove [--database <PATH>] show [OPTIONS] <ENTRY_PATH>
 ```
 
 Print an entry's details: path, title, username, URL, notes, custom-field
@@ -115,7 +129,7 @@ through the code-gated `GetField` RPC (`TROVE_SESSION`).
 ## trove describe
 
 ```
-trove [--vault <PATH>] describe [--json] <ENTRY_OR_GROUP_PATH>
+trove [--database <PATH>] describe [--json] <ENTRY_OR_GROUP_PATH>
 ```
 
 Print safe discovery metadata for an entry or every entry in a group. This
@@ -127,13 +141,13 @@ Trove does not validate field names or interpret their meanings. Use
 [`--json`](#trove-describe---json) for structured output suitable for agents.
 
 The daemon view is read-only and does not require `TROVE_SESSION`; with multiple
-vaults unlocked, Trove asks you to leave only one open to disambiguate group
+databases unlocked, Trove asks you to leave only one open to disambiguate group
 paths.
 
 ## trove search
 
 ```
-trove [--vault <PATH>] search [TERM] [--field NAME[=VALUE]] [--tag TAG] [--attachment GLOB] [--json]
+trove [--database <PATH>] search [TERM] [--field NAME[=VALUE]] [--tag TAG] [--attachment GLOB] [--json]
 ```
 
 Case-insensitive substring search across title, username, URL, notes, group
@@ -159,7 +173,7 @@ searches.
 ## trove edit
 
 ```
-trove [--vault <PATH>] edit [OPTIONS] <ENTRY_PATH>
+trove [--database <PATH>] edit [OPTIONS] <ENTRY_PATH>
 ```
 
 Field-level edits on an existing entry. At least one change flag is required.
@@ -185,19 +199,19 @@ stops it being used.
 ## trove group
 
 ```
-trove [--vault <PATH>] group list [--json]
-trove [--vault <PATH>] group edit <GROUP_PATH> [--tag TAG]... [--untag TAG]... [--clear-tags]
+trove [--database <PATH>] group list [--json]
+trove [--database <PATH>] group edit <GROUP_PATH> [--tag TAG]... [--untag TAG]... [--clear-tags]
 ```
 
 List groups (including empty groups and `Root`) with direct and inherited
 KeePass tags, or edit tags directly on a group. Group edits are offline; pass
-`--vault` and unlock the file through the CLI. Tags inherited from ancestors
+`--database` and unlock the file through the CLI. Tags inherited from ancestors
 are shown but not changed by editing a child group.
 
 ## trove rm
 
 ```
-trove [--vault <PATH>] rm [--permanent] <ENTRY_PATH>
+trove [--database <PATH>] rm [--permanent] <ENTRY_PATH>
 ```
 
 Remove an entry the KeePassXC way: move it to the recycle bin (created on
@@ -208,7 +222,7 @@ destroyed outright. Reports which of the two happened.
 ## trove mv
 
 ```
-trove [--vault <PATH>] mv <ENTRY_PATH> <DEST>     # alias: move
+trove [--database <PATH>] mv <ENTRY_PATH> <DEST>     # alias: move
 ```
 
 Move an entry, renaming it when `<DEST>` names a new title — Unix `mv`
@@ -236,7 +250,7 @@ The destination follows the same existing-group or new-group-path rules.
 ## trove cp
 
 ```
-trove [--vault <PATH>] cp <ENTRY_PATH> <DEST>     # alias: copy
+trove [--database <PATH>] cp <ENTRY_PATH> <DEST>     # alias: copy
 ```
 
 Duplicate an entry, whole, at a new path — **key material and all**.
@@ -262,7 +276,7 @@ by anything wanting the public half.
 
 Without this the only route was `trove get` the private key to disk and
 `trove add ssh` it back, which writes a key that had never existed outside the
-vault onto a filesystem. `cp` keeps it inside the daemon, for the same reason
+database onto a filesystem. `cp` keeps it inside the daemon, for the same reason
 `trove generate ssh` exists so nobody has to run `ssh-keygen` themselves.
 
 Same destination rules as `mv`, and an existing entry is **refused** rather
@@ -280,13 +294,13 @@ destination conflicts before writing. It drops `Materialize.*` fields from
 copies by default so originals and backups do not claim the same output paths.
 `--keep-materialize` retains those fields and prints a warning about possible
 target collisions. `--dry-run` prints the preflighted entry paths without
-changing the vault; `-v` prints each source-to-destination path. `mv -r` moves
+changing the database; `-v` prints each source-to-destination path. `mv -r` moves
 the corresponding group tree.
 
 ## trove mkdir
 
 ```
-trove [--vault <PATH>] mkdir <GROUP_PATH>
+trove [--database <PATH>] mkdir <GROUP_PATH>
 ```
 
 Create a group hierarchy (`mkdir -p` semantics for intermediate segments).
@@ -295,7 +309,7 @@ Errors if the leaf group already exists.
 ## trove rmdir
 
 ```
-trove [--vault <PATH>] rmdir [--permanent [--recursive]] <GROUP_PATH>
+trove [--database <PATH>] rmdir [--permanent [--recursive]] <GROUP_PATH>
 ```
 
 Remove a group and everything in it — to the recycle bin by default.
@@ -313,7 +327,7 @@ Subcommands: `password`, `ssh`, `gpg`, `file`, `help`.
 ### trove add password
 
 ```
-trove [--vault <PATH>] add password [OPTIONS] <ENTRY_PATH>
+trove [--database <PATH>] add password [OPTIONS] <ENTRY_PATH>
 ```
 
 | Argument / flag | Description |
@@ -322,8 +336,8 @@ trove [--vault <PATH>] add password [OPTIONS] <ENTRY_PATH>
 | `--username <U>` / `--url <U>` / `--notes <N>` | Optional standard fields. |
 | `--generate` | Mint the password (OS CSPRNG, letters+digits) and print it once to stdout — the only echo, so it pipes. |
 | `--length <N>` | Length for `--generate` (default 20). |
-| `--secret-stdin` | Read the password from stdin. Offline only; with global `--password-stdin`, the vault password is line 1 and this secret line 2. |
-| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--secret-stdin` | Read the password from stdin. Offline only; with global `--password-stdin`, the database password is line 1 and this secret line 2. |
+| `--database <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 
 Without `--generate`/`--secret-stdin` the secret is prompted for (hidden,
 confirmed). Adding to an existing entry path is refused — use `trove edit`.
@@ -331,7 +345,7 @@ confirmed). Adding to an existing entry path is refused — use `trove edit`.
 ### trove add totp
 
 ```
-trove [--vault <PATH>] add totp <ENTRY_PATH> (--uri <URI> | --secret <BASE32> [--digits N] [--period N] [--algorithm A] | --secret <BASE32> --steam)
+trove [--database <PATH>] add totp <ENTRY_PATH> (--uri <URI> | --secret <BASE32> [--digits N] [--period N] [--algorithm A] | --secret <BASE32> --steam)
 ```
 
 Attach a TOTP (2FA) generator: stored as the `otp` string field carrying an
@@ -341,7 +355,7 @@ both tools. The field is Protected (never searchable, `--attr otp` needs
 replaced. `--secret` takes the base32 "manual entry" code sites display
 (whitespace tolerated), with `--digits` (default 6), `--period` (default 30s)
 and `--algorithm` (SHA1 default, SHA256, SHA512). The URI is validated before
-anything lands in the vault. `--steam` stores a Steam Guard generator the way
+anything lands in the database. `--steam` stores a Steam Guard generator the way
 KeePassXC does (`encoder=steam`: five characters from Steam's alphabet, 30s),
 and a Steam URI from KeePassXC reads the same. HOTP (`otpauth://hotp`,
 counter-based) is refused rather than misread as TOTP. Read codes with
@@ -350,7 +364,7 @@ counter-based) is refused rather than misread as TOTP. Read codes with
 ### trove add ssh
 
 ```
-trove [--vault <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE> <COMMENT>
+trove [--database <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE> <COMMENT>
 ```
 
 | Argument / flag | Description |
@@ -359,7 +373,7 @@ trove [--vault <PATH>] add ssh [OPTIONS] <ENTRY_PATH> <KEY_FILE> <COMMENT>
 | `<KEY_FILE>` | Path to the SSH private key file (e.g. `~/.ssh/id_ed25519`), OpenSSH or PEM, or a PuTTY `.ppk` (v2 or v3, without a passphrase), which is stored converted to OpenSSH. Validated before storing. A passphrase-protected OpenSSH key prompts for its passphrase on the terminal and is stored decrypted, so no plaintext copy has to be written to disk. |
 | `<COMMENT>` | Public-key comment, typically an email like `you@host`. Recorded in `id.pub` (and so in a server's authorized_keys). Required. |
 | `--user <USER>` | Optional `UserName` field. |
-| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--database <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
 Stores the private key in the `id` attachment, the derived public key in `id.pub`, and `KeeAgent.settings`. An existing entry has its attachments replaced in place. See also `trove generate ssh` (mints a keypair in-tool).
@@ -367,7 +381,7 @@ Stores the private key in the `id` attachment, the derived public key in `id.pub
 ### trove import-ssh
 
 ```
-trove [--vault <PATH>] import-ssh [DIR] [--group <GROUP>] [--yes] [--dry-run]
+trove [--database <PATH>] import-ssh [DIR] [--group <GROUP>] [--yes] [--dry-run]
 ```
 
 | Argument / flag | Description |
@@ -377,7 +391,7 @@ trove [--vault <PATH>] import-ssh [DIR] [--group <GROUP>] [--yes] [--dry-run]
 | `--yes`, `-y` | Import every usable key without asking. |
 | `--dry-run` | List what would be imported and what would be skipped; change nothing. |
 
-Bootstraps a vault from existing keys without a `trove add ssh` per key. Every
+Bootstraps a database from existing keys without a `trove add ssh` per key. Every
 regular file holding a PEM private key or a PuTTY key is offered, whatever its
 name; `known_hosts`, `config`, `authorized_keys` and `*.pub` never are. Each
 key becomes `<GROUP>/<file name>`, stored as `add ssh` stores it, with the
@@ -391,32 +405,32 @@ passphrase. So is a key whose entry already exists; importing never overwrites. 
 about each key on the terminal, and refuses to run when there is none to ask on
 (including with `--password-stdin`). The key files are never changed or removed.
 
-Offline, the vault is opened once and saved once. Through the daemon, each key
+Offline, the database is opened once and saved once. Through the daemon, each key
 is served by the agent as soon as it is stored.
 
 ### trove add gpg
 
 ```
-trove [--vault <PATH>] add gpg [OPTIONS] --key <KEY> <TITLE>
+trove [--database <PATH>] add gpg [OPTIONS] --key <KEY> <TITLE>
 ```
 
 | Argument / flag | Description |
 | --- | --- |
 | `<TITLE>` | Entry path or title (e.g. `"git-signing"`). |
 | `--key <KEY>` | Path to the binary GPG secret-key export. Required. **Binary, not armored.** |
-| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--database <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
-The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produces (without `--armor`). Stored under the `gpg-priv` attachment. On vault unlock, troved parses each `gpg-priv` attachment and registers every ed25519 and RSA secret key it finds.
+The export file is what `gpg --export-secret-keys --output <file> <KEYID>` produces (without `--armor`). Stored under the `gpg-priv` attachment. On database unlock, troved parses each `gpg-priv` attachment and registers every ed25519 and RSA secret key it finds.
 
-A passphrase-protected export (gpg's default) is decrypted on the terminal: `add gpg` asks for the passphrase, three tries, and stores the key unprotected inside the vault, so no unprotected export has to touch the disk. With no terminal to ask on it refuses. Supported protection is what GnuPG writes by default: v4 keys, iterated and salted S2K over SHA-1 or SHA-2, AES-128/192/256. AEAD (OCB) protection and GnuPG stub keys are refused by name.
+A passphrase-protected export (gpg's default) is decrypted on the terminal: `add gpg` asks for the passphrase, three tries, and stores the key unprotected inside the database, so no unprotected export has to touch the disk. With no terminal to ask on it refuses. Supported protection is what GnuPG writes by default: v4 keys, iterated and salted S2K over SHA-1 or SHA-2, AES-128/192/256. AEAD (OCB) protection and GnuPG stub keys are refused by name.
 
-A protected export already in a vault (added by another tool) is decrypted at unlock with the entry's Password, as KeePassXC does for protected SSH keys. Without a Password it is skipped with a warning.
+A protected export already in a database (added by another tool) is decrypted at unlock with the entry's Password, as KeePassXC does for protected SSH keys. Without a Password it is skipped with a warning.
 
 ### trove add file
 
 ```
-trove [--vault <PATH>] add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
+trove [--database <PATH>] add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
 ```
 
 | Argument / flag | Description |
@@ -426,9 +440,9 @@ trove [--vault <PATH>] add file [OPTIONS] --src <SRC> --target <TARGET> <TITLE>
 | `--target <TARGET>` | Path to materialize the file to on unlock. Required. |
 | `--name <NAME>` | Override attachment name. Default: basename of `--src`. |
 | `--mode <MODE>` | File mode (octal, 3 or 4 digits). Default `0600`. |
-| `--ttl <TTL>` | Materialization lifetime in seconds. Default: lifetime of the vault unlock. |
+| `--ttl <TTL>` | Materialization lifetime in seconds. Default: lifetime of the database unlock. |
 | `--allow-disk-backed` | Allow non-tmpfs target. Off by default. Sets `allowDiskBacked="true"` on its `<File>`. |
-| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--database <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
 Stores the file bytes as a real KDBX `<Binary>` attachment and names it in the
@@ -440,7 +454,7 @@ in front; see [Capability settings documents](#capability-settings-documents).
 ## trove rename-attachment
 
 ```
-trove rename-attachment <ENTRY_PATH> <OLD_NAME> <NEW_NAME> --vault <PATH>
+trove rename-attachment <ENTRY_PATH> <OLD_NAME> <NEW_NAME> --database <PATH>
 ```
 
 Renames an attachment and everything that names it:
@@ -450,11 +464,11 @@ Renames an attachment and everything that names it:
 - `KeeAgent.settings` — rewritten to name the new file, keeping the rest of the
   policy (lifetime, confirm, remove-at-close) and its original encoding
 
-Offline only (`--vault`): it rewrites the file, while the daemon serves a vault
+Offline only (`--database`): it rewrites the file, while the daemon serves a database
 that is already open.
 
 ```
-$ trove rename-attachment "Work/server" id_rsa id_ed25519 --vault v.kdbx --env
+$ trove rename-attachment "Work/server" id_rsa id_ed25519 --database v.kdbx --env
 renamed attachment id_rsa → id_ed25519
   moved Materialize.id_ed25519.AllowDiskBacked
   moved Materialize.id_ed25519.Mode
@@ -475,12 +489,12 @@ file lands is a separate question from what the attachment is called.
 trove get <COMMAND>
 ```
 
-Subcommands: `password`, `ssh`, `gpg`, `file`, `help`. Each resolves the entry by path/title and writes to `--out` (or stdout). With `--vault` they read the file directly (offline); without it, they ask the daemon, gated by `TROVE_SESSION`. On Unix, private `--out` files are created `0600` via `O_CREAT|O_EXCL`.
+Subcommands: `password`, `ssh`, `gpg`, `file`, `help`. Each resolves the entry by path/title and writes to `--out` (or stdout). With `--database` they read the file directly (offline); without it, they ask the daemon, gated by `TROVE_SESSION`. On Unix, private `--out` files are created `0600` via `O_CREAT|O_EXCL`.
 
 ### trove get password
 
 ```
-trove [--vault <PATH>] get password <ENTRY_PATH> [--base64]
+trove [--database <PATH>] get password <ENTRY_PATH> [--base64]
 ```
 
 Print the entry's password to stdout — the script primitive
@@ -492,7 +506,7 @@ routes through the code-gated `GetField` RPC.
 ### trove get ssh
 
 ```
-trove [--vault <PATH>] get ssh [OPTIONS] <ENTRY_PATH>
+trove [--database <PATH>] get ssh [OPTIONS] <ENTRY_PATH>
 ```
 
 | Argument / flag | Description |
@@ -500,7 +514,7 @@ trove [--vault <PATH>] get ssh [OPTIONS] <ENTRY_PATH>
 | `<ENTRY_PATH>` | Entry path to look up, e.g. `"github.com"` or `"Work/SSH/github"`. |
 | `--public` | Emit the public key (authorized_keys line) instead of the private key. |
 | `--out <OUT>` | Write to this path (private → 0600, plus `<OUT>.pub` → 0644). Stdout if omitted. |
-| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--database <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
 Reads the `id` (and `id.pub`) attachments; the public key falls back to being derived from the private key for legacy entries.
@@ -508,15 +522,15 @@ Reads the `id` (and `id.pub`) attachments; the public key falls back to being de
 ### trove get gpg
 
 ```
-trove [--vault <PATH>] get gpg [OPTIONS] <TITLE>
+trove [--database <PATH>] get gpg [OPTIONS] <TITLE>
 ```
 
-Reads the `gpg-priv` attachment. `--vault` → offline; otherwise daemon (`TROVE_SESSION`). `--out` writes to a path (0600), else stdout.
+Reads the `gpg-priv` attachment. `--database` → offline; otherwise daemon (`TROVE_SESSION`). `--out` writes to a path (0600), else stdout.
 
 ### trove get file
 
 ```
-trove [--vault <PATH>] get file [OPTIONS] <TITLE>
+trove [--database <PATH>] get file [OPTIONS] <TITLE>
 ```
 
 | Argument / flag | Description |
@@ -525,7 +539,7 @@ trove [--vault <PATH>] get file [OPTIONS] <TITLE>
 | `--name <NAME>` | Attachment name to read (e.g. `id.pub`). Default: `"blob"`. Pass it for any entry that does not use the conventional `blob` slot. |
 | `--out <OUT>` | Write to this path. Stdout if omitted. |
 | `--base64` | Write the standard base64 encoding instead of raw attachment bytes. No wrapping; a final newline is added only when writing to a terminal. Encoded files still use mode `0600`. |
-| `--vault <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
+| `--database <PATH>` | Global. Present → offline; absent → the unlocked daemon (`TROVE_SESSION`). |
 | `--password-stdin` | Global — see top (offline mode only). |
 
 Reads any attachment by name. **Ignores** the `Materialize.*` fields — `--out` controls where the bytes land. One-shot equivalent of full materialization.
@@ -541,10 +555,10 @@ A git credential helper. git appends the operation and speaks its
 (scheme/port/path ignored; also filtered by username when git provides one)
 and replies with that entry's `username`/`password`; no match yields an empty
 reply so git falls back to its next helper or prompt. `store`/`erase` are
-accepted and ignored — trove is a deliberate vault, not an autofilled cache.
-Without `--vault`, `get` uses the unlocked daemon and requires `TROVE_SESSION`;
-this avoids re-opening the database for every HTTPS operation. Add `--vault`
-to use offline mode instead. With `--vault --password-stdin`, the vault
+accepted and ignored — trove is a deliberate database, not an autofilled cache.
+Without `--database`, `get` uses the unlocked daemon and requires `TROVE_SESSION`;
+this avoids re-opening the database for every HTTPS operation. Add `--database`
+to use offline mode instead. With `--database --password-stdin`, the database
 password is stdin line 1 and git's request block follows.
 
 ### Which secret is sent: `git.token`, else `Password`
@@ -579,7 +593,7 @@ which secret is being sent before assuming the credential is stale.
 ## trove resolve
 
 ```
-trove --vault <PATH> resolve [--base64] trove://<entry-path>[/<field>]
+trove --database <PATH> resolve [--base64] trove://<entry-path>[/<field>]
 ```
 
 Print one referenced secret to stdout. `--base64` prints its standard base64
@@ -587,13 +601,13 @@ encoding without wrapping; a terminal gets a final newline, a pipe does not.
 The field defaults to `Password`;
 `trove://Infra/prod/postgres/UserName` names it explicitly (last `/`-segment
 when the whole path isn't itself an entry). The scripting primitive for
-config templating: `export PGPASSWORD=$(trove --vault v resolve
+config templating: `export PGPASSWORD=$(trove --database v resolve
 trove://Infra/prod/postgres)`. Offline-only.
 
 ## trove exec
 
 ```
-trove [--vault <PATH>] exec <SCOPE> -- <cmd> [args…]
+trove [--database <PATH>] exec <SCOPE> -- <cmd> [args…]
 ```
 
 Run `<cmd>` with secrets injected for exactly its lifetime (the `op run` of
@@ -612,7 +626,7 @@ are deleted.
 
 If a name matches both an entry and a group, `exec` reports the ambiguity.
 Select the intended scope with `--entry PATH` or `--group PATH`, for example
-`trove --vault v.kdbx exec --group Infra -- env`.
+`trove --database v.kdbx exec --group Infra -- env`.
 
 What an entry exports is its `EnvAgent.settings` document: one environment
 variable per `<Variable>`, naming the field or attachment it comes from. A field
@@ -631,11 +645,11 @@ its path exported.
 entry, create its document with `trove env-agent add`. A scope in which no
 entry has one is an error that says so, rather than a command run with nothing
 injected. A variable whose item sets `confirm="true"` is handed over only after
-Touch ID approves it — asked by the daemon, or by `exec` itself with `--vault` —
+Touch ID approves it — asked by the daemon, or by `exec` itself with `--database` —
 and refused where no approval can be asked.
 
 During the transition, the fields the document replaces still count as one, so
-existing vaults keep working:
+existing databases keep working:
 
 | field | value | exports |
 | --- | --- | --- |
@@ -648,57 +662,57 @@ used to get are gone. A variable that names a field or attachment the entry
 doesn't have, or a name that isn't a valid variable, stops `exec` before the
 command runs.
 
-With `--vault` it opens that file, asking for its password. Without it, it reads
-the vaults unlocked in the daemon through the session-gated reads, so it needs
+With `--database` it opens that file, asking for its password. Without it, it reads
+the databases unlocked in the daemon through the session-gated reads, so it needs
 the `TROVE_SESSION` code from `trove unlock` and no password.
 
 ## trove merge
 
 ```
-trove --vault <TARGET> merge <SOURCE> [--source-key-file <PATH>]
+trove --database <TARGET> merge <SOURCE> [--source-key-file <PATH>]
 ```
 
-KDBX-standard merge of diverged copies of one vault (last-write-wins by
+KDBX-standard merge of diverged copies of one database (last-write-wins by
 modification time, histories preserved — the same algorithm KeePassXC runs,
 proven equivalent in the interop suite). The source is unchanged. Two secrets
 arrive in order: target password (line 1 with `--password-stdin`), then source
 password (line 2). The global `--key-file` applies to the target;
-`--source-key-file` to the source. Unrelated vaults (different root UUID) are
+`--source-key-file` to the source. Unrelated databases (different root UUID) are
 refused with a clean error — merge reconciles copies, it doesn't import.
 Offline-only.
 
 ## trove sync
 
 ```
-trove --vault <VAULT> sync <OTHER> [--other-key-file <PATH>]
+trove --database <DATABASE> sync <OTHER> [--other-key-file <PATH>]
 ```
 
-Two-way sync with another copy of the same vault, such as one in a synced
+Two-way sync with another copy of the same database, such as one in a synced
 folder, on a USB stick or on a network share. The other copy is merged into
-`--vault` (the same merge as `trove merge`), then the result replaces the
+`--database` (the same merge as `trove merge`), then the result replaces the
 other copy atomically, so both end equal. A missing copy is created from
-`--vault` with the same password and key file; a copy that already has
-everything is left untouched. `--vault` is authoritative for vault settings
+`--database` with the same password and key file; a copy that already has
+everything is left untouched. `--database` is authoritative for database settings
 such as the KDF, but what only the other copy has (custom data such as
 KeePassXC-Browser keys, its recycle bin, deletions) is kept. For an existing
-copy two secrets arrive in order: `--vault`'s password (line 1 with
-`--password-stdin`), then the other copy's (line 2). The global `--key-file` applies to `--vault`;
+copy two secrets arrive in order: `--database`'s password (line 1 with
+`--password-stdin`), then the other copy's (line 2). The global `--key-file` applies to `--database`;
 `--other-key-file` to the other copy. Prints what was pulled and what was
 pushed. Offline-only.
 
 A sync service that could not merge two edits leaves a second file next to
-the vault, such as Dropbox's `vault (… conflicted copy …).kdbx` or Syncthing's
-`vault.sync-conflict-….kdbx`. Sync it into the vault with
-`trove --vault vault.kdbx sync '<conflicted copy>'`, then delete the copy.
+the database, such as Dropbox's `database (… conflicted copy …).kdbx` or Syncthing's
+`database.sync-conflict-….kdbx`. Sync it into the database with
+`trove --database database.kdbx sync '<conflicted copy>'`, then delete the copy.
 
 Writes to either file that land during the sync are merged in, not
-overwritten. Every trove save does this: when the vault file changed since it
+overwritten. Every trove save does this: when the database file changed since it
 was opened, the other writer's changes are merged in before writing.
 
 ## trove export
 
 ```
-trove --vault <PATH> export [--format xml|csv]
+trove --database <PATH> export [--format xml|csv]
 ```
 
 **The output contains every secret in plaintext** on stdout. `xml` is
@@ -708,7 +722,7 @@ interop suite); `csv` uses KeePassXC's exact column header. Offline-only.
 ## trove db-edit
 
 ```
-trove --vault <PATH> db-edit [--set-password] [--set-key-file <PATH> | --unset-key-file] [--kdf-memory MIB] [--kdf-iterations N] [--kdf-parallelism N]
+trove --database <PATH> db-edit [--set-password] [--set-key-file <PATH> | --unset-key-file] [--kdf-memory MIB] [--kdf-iterations N] [--kdf-parallelism N]
 ```
 
 Rekey (new password prompted, or stdin line 2 after the current password) and
@@ -717,7 +731,7 @@ retune the Argon2 KDF. At least one change required. Offline-only.
 ## trove db-info
 
 ```
-trove --vault <PATH> db-info [--json]
+trove --database <PATH> db-info [--json]
 ```
 
 Non-secret facts: format version, cipher, compression, KDF parameters,
@@ -727,7 +741,7 @@ entry/group counts, recycle-bin presence. Offline-only.
 ## trove clip
 
 ```
-trove [--vault <PATH>] clip <ENTRY_PATH> [--attr NAME | --totp] [--timeout SECS]
+trove [--database <PATH>] clip <ENTRY_PATH> [--attr NAME | --totp] [--timeout SECS]
 ```
 
 Copy the entry's password (default), another attribute, or its current TOTP
@@ -735,7 +749,7 @@ code to the system clipboard, then auto-clear after `--timeout` seconds
 (default 10; `0` disables). The clear is guarded: a detached child re-reads
 the clipboard and wipes it only if it still holds what trove put there —
 something you copied in the meantime is left alone. The child receives a
-SHA-256 of the value on argv, never the value. Offline with `--vault`;
+SHA-256 of the value on argv, never the value. Offline with `--database`;
 daemon-routed (code-gated `GetField`/`GetTotp`) without. Requires a
 clipboard: headless sessions get a clean error.
 
@@ -746,7 +760,7 @@ trove generate password [--length N] [--special] [--no-lower] [--no-upper] [--no
 trove generate diceware [--words N] [--count N]
 ```
 
-Purely local (no vault, no daemon), OS CSPRNG, uniform selection. `password`
+Purely local (no database, no daemon), OS CSPRNG, uniform selection. `password`
 defaults to 20 chars over lower+upper+digits; `--special` adds printable
 punctuation, `--exclude` drops ambiguous characters. `diceware` draws from the
 vendored EFF large wordlist (7776 words ≈ 12.9 bits/word; default 7 words
@@ -767,11 +781,11 @@ password itself is never included.
 ## trove analyze
 
 ```
-trove --vault <PATH> analyze [--hibp <FILE>] [--reuse] [--weak [--min-score N]] [--age DAYS] [--expired] [--json]
-trove --vault <PATH> health [--hibp <FILE>] [--json]
+trove --database <PATH> analyze [--hibp <FILE>] [--reuse] [--weak [--min-score N]] [--age DAYS] [--expired] [--json]
+trove --database <PATH> health [--hibp <FILE>] [--json]
 ```
 
-Audit the vault's passwords; at least one check is required, and any finding
+Audit the database's passwords; at least one check is required, and any finding
 exits 1. Only entry paths are printed, never a password.
 
 | Check | Reports |
@@ -783,13 +797,13 @@ exits 1. Only entry paths are printed, never a password.
 | `--expired` | entries whose expiry date (`edit --expires`) has passed, with or without a password |
 
 `trove health` is `analyze --reuse --weak --age 365 --expired`, plus `--hibp`
-when given a dump: one report for the whole vault.
+when given a dump: one report for the whole database.
 
-Offline Have-I-Been-Pwned audit: every vault password is SHA-1-hashed and
+Offline Have-I-Been-Pwned audit: every database password is SHA-1-hashed and
 binary-searched in the sorted `pwned-passwords` dump at `<FILE>` (the multi-GB
 file is seeked, never loaded; nothing is ever sent anywhere). Breached entries
  print as `<path>  seen N times in breaches`. Exits 1 when anything is
- breached — scriptable as a CI gate. Offline-only: requires `--vault`.
+ breached — scriptable as a CI gate. Offline-only: requires `--database`.
 Empty or missing passwords print as `<path>  empty password` in human mode,
 fail the audit the same way, and are counted separately from passwords
 checked against the dump. [`--json`](#trove-analyze---json) writes the counts
@@ -824,14 +838,14 @@ parsing display text.
 
 ### `trove list --json`, `trove search --json`
 
-An array of entry summaries, in vault order:
+An array of entry summaries, in database order:
 
 ```
 [
   {
     "id": string,               // entry UUID
     "title": string,
-    "path"?: string,            // "Web/forge"; offline (--vault) only, see below
+    "path"?: string,            // "Web/forge"; offline (--database) only, see below
     "username": string | null,
     "url": string | null,
     "attachments": [string],    // attachment names
@@ -967,7 +981,7 @@ An array with one object per group, `Root` and empty groups included:
 
 ```
 {
-  "path": string,        // the --vault path as given
+  "path": string,        // the --database path as given
   "version": string,     // "KDBX4.1"
   "cipher": string,      // "AES256"
   "compression": string, // "GZip"
@@ -985,7 +999,7 @@ An array with one object per group, `Root` and empty groups included:
   "entries": 1,
   "groups": 1,
   "kdf": "Argon2 { iterations: 50, memory: 1048576, parallelism: 4, version: Version13 }",
-  "path": "/home/me/vaults/work.kdbx",
+  "path": "/home/me/databases/work.kdbx",
   "recycle_bin": false,
   "version": "KDBX4.1"
 }
@@ -1062,7 +1076,7 @@ present only when its check ran, and each non-empty list also exits 1:
 ```
 {
   "daemon_running": bool,
-  "vault_paths": [string],                  // every unlocked vault
+  "database_paths": [string],                  // every unlocked database
   "idle_timeout_seconds": integer | null,   // 0 when auto-lock is off
   "idle_remaining_seconds": integer | null, // null when no countdown is running
   "ssh_key_count": integer,
@@ -1071,7 +1085,7 @@ present only when its check ran, and each non-empty list also exits 1:
   "skipped_keys": [                          // keys the agents couldn't load
     {
       "agent": string,                       // "ssh" or "gpg"
-      "vault": string,
+      "database": string,
       "entry": string,                       // full path, e.g. "Work/SSH/github"
       "attachment": string,
       "reason": string
@@ -1081,10 +1095,10 @@ present only when its check ran, and each non-empty list also exits 1:
 ```
 
 With no daemon running it still succeeds: `daemon_running` is `false`,
-`vault_paths` and `skipped_keys` are empty, the counts are 0 and both timers
+`database_paths` and `skipped_keys` are empty, the counts are 0 and both timers
 are `null`.
 
-`skipped_keys` lists every key in the unlocked vaults that troved found but
+`skipped_keys` lists every key in the unlocked databases that troved found but
 couldn't load: a passphrase-protected key its entry's Password doesn't
 decrypt, an RSA key under 2048 bits, an unsupported algorithm, a KeeAgent entry
 that points at an external key file instead of holding the key, an OpenPGP
@@ -1092,18 +1106,18 @@ export with no signing key. `unlock` warns
 about the same keys on stderr. The human `trove status` output lists them under
 "Skipped keys" when there are any.
 
-`--verbose` (`-v`) adds what each unlocked vault is serving. With `--json` that
+`--verbose` (`-v`) adds what each unlocked database is serving. With `--json` that
 is two more keys:
 
 ```
 {
-  "vaults": [{
+  "databases": [{
     "path": string,
     "ssh_keys": [string],                              // entry paths
     "materialized": [{"title": string, "target_path": string}],
     "skipped_keys": [string]                           // one line per key, with the reason
   }],
-  "gpg_keys": [string]                                 // all vaults: the agent doesn't track which
+  "gpg_keys": [string]                                 // all databases: the agent doesn't track which
 }
 ```
 
@@ -1116,7 +1130,7 @@ is two more keys:
   "materialized_file_count": 1,
   "skipped_keys": [],
   "ssh_key_count": 1,
-  "vault_paths": ["/home/me/vaults/work.kdbx"]
+  "database_paths": ["/home/me/databases/work.kdbx"]
 }
 ```
 
@@ -1126,7 +1140,7 @@ is two more keys:
 {
   "ok": bool,          // false when any check failed
   "checks": [{
-    "name": string,    // daemon, version, keys, gpg-keyring, materialize, daemons, ssh-agent, gpg-agent, vault, env-file
+    "name": string,    // daemon, version, keys, gpg-keyring, materialize, daemons, ssh-agent, gpg-agent, database, env-file
     "status": string,  // ok, info, warn or fail
     "detail": string,
     "hint": string | null
@@ -1160,7 +1174,7 @@ when files are materialized, `daemons` only on Unix, `env-file` once per `.env.t
     {
       "title": string,                          // entry title
       "target_path": string,
-      "vault"?: string,                         // the unlocked vault it came from
+      "database"?: string,                         // the unlocked database it came from
       "ttl_remaining_seconds": integer | null,  // null without a TTL
       "exists": bool,                           // whether the file is there now
       "memory_backed": bool                     // true only on a Linux tmpfs
@@ -1182,7 +1196,7 @@ disk and the wipe on lock is best effort.
       "target_path": "/run/user/1000/kubeconfig",
       "title": "kube",
       "ttl_remaining_seconds": 3597,
-      "vault": "/home/me/vaults/work.kdbx"
+      "database": "/home/me/databases/work.kdbx"
     }
   ]
 }
@@ -1206,7 +1220,7 @@ The keys the main agent serves; `[]` when no daemon is running.
 An entry whose `KeeAgent.settings` sets a lifetime (KeePassXC's "Remove key
 from agent after") is served for that long after unlock, or after
 `ssh-agent add` for a private socket. After that the key is no longer listed
-and signing with it is refused, though the vault stays unlocked. Unlocking
+and signing with it is refused, though the database stays unlocked. Unlocking
 again restarts the lifetime.
 
 ```json
@@ -1289,12 +1303,12 @@ macOS only. Never includes the stored password.
 ```
 {
   "stored": bool,
-  "vault": string   // the keychain account: the vault's absolute path
+  "database": string   // the keychain account: the database's absolute path
 }
 ```
 
 ```json
-{"stored": true, "vault": "/Users/me/vaults/work.kdbx"}
+{"stored": true, "database": "/Users/me/databases/work.kdbx"}
 ```
 
 ## trove ssh-agent
@@ -1333,7 +1347,7 @@ Print the path to a **new, private** agent socket that serves no keys.
 `sshd`'s `MaxAuthTries` defaults to **6**, counted per connection, and every key
 an agent lists is offered and counted against that — the publickey query phase
 carries no signature, but it still costs an attempt. The socket above serves
-every key in every unlocked vault, which is what you want at a terminal and not
+every key in every unlocked database, which is what you want at a terminal and not
 what a deployment tool wants: hold more than six keys and a server refuses the
 connection before reaching one that sits past the sixth, with
 `Received disconnect: Too many authentication failures`. Worse, `sshd` logs a
@@ -1362,8 +1376,8 @@ Every call returns a **separate** socket with its own keys, so callers that run
 in parallel can't disturb each other's offers. The daemon owns the lifetime: the
 sockets go on `trove lock`, on idle-lock and at shutdown. A caller that is
 finished with its socket before then — anything that runs repeatedly while the
-vault stays unlocked — should hand it back with
-[`trove ssh-agent close`](#trove-ssh-agent-close). A key that leaves the vault — because its entry was edited, removed
+database stays unlocked — should hand it back with
+[`trove ssh-agent close`](#trove-ssh-agent-close). A key that leaves the database — because its entry was edited, removed
 or moved — is dropped from these sockets at the same moment it is dropped from
 the main one. Key material never leaves troved: a scoped socket is served by the
 same agent code as the main one.
@@ -1374,7 +1388,7 @@ the daemon stopped accepting anything; past the limit `empty` is refused with a
 message naming `trove ssh-agent close` and `trove lock`.
 
 Requires a daemon that is already running — it does not autospawn one. A daemon
-with no vault unlocked holds no keys, so a socket it handed out could never be
+with no database unlocked holds no keys, so a socket it handed out could never be
 filled.
 
 `--add <PATTERN>` and `--tag <TAG>` create the socket and fill it in one step,
@@ -1430,7 +1444,7 @@ it, drop its keys and remove the socket file. The other private sockets, and the
 main agent, are left alone. Without `SOCKET` it closes the one named by
 `$SSH_AUTH_SOCK`.
 
-A script that runs often while the vault stays unlocked should release what it
+A script that runs often while the database stays unlocked should release what it
 made, or every run holds a socket until the next lock and the 32-socket limit is
 eventually reached:
 
@@ -1461,7 +1475,7 @@ when no daemon is running.
 `sshd`'s `MaxAuthTries` defaults to **6**, counted per connection, and every key
 an agent lists is offered and counted against it — the publickey query phase
 carries no signature, but it still costs an attempt. The agent serves every key
-in every unlocked vault, so past six keys a server refuses the connection before
+in every unlocked database, so past six keys a server refuses the connection before
 reaching one that sits later in the order, with `Received disconnect: Too many
 authentication failures`. It reads as the server rejecting you. And `sshd` logs
 a failure once the count reaches half the limit, so from the fourth offer onward
@@ -1590,8 +1604,8 @@ git clone git@github.com:me/dotfiles.git         # offers id_personal
 ### trove ssh-agent enable / disable
 
 ```
-trove [--vault <PATH>] ssh-agent enable <ENTRY> [--key ATT] [--confirm | --no-confirm] [--lifetime S]
-trove [--vault <PATH>] ssh-agent disable <ENTRY>
+trove [--database <PATH>] ssh-agent enable <ENTRY> [--key ATT] [--confirm | --no-confirm] [--lifetime S]
+trove [--database <PATH>] ssh-agent disable <ENTRY>
 ```
 
 Writes the entry's `KeeAgent.settings`, the file KeePassXC's SSH Agent tab
@@ -1628,12 +1642,12 @@ ln -sf "$(trove gpg-agent socket)" "$(gpgconf --list-dirs agent-socket)"
 ### trove gpg-agent import
 
 ```
-trove [--vault <PATH>] gpg-agent import [--print]
+trove [--database <PATH>] gpg-agent import [--print]
 ```
 
-Import the public half of every vault GPG key into gpg's keyring. gpg only asks
+Import the public half of every database GPG key into gpg's keyring. gpg only asks
 an agent to sign with a key it already knows, so a key that lives only in the
-vault is invisible to `gpg` and `git commit -S` until its public key is in the
+database is invisible to `gpg` and `git commit -S` until its public key is in the
 keyring.
 
 Each entry's `gpg-priv` secret-key export is cut down to its public packets
@@ -1649,14 +1663,14 @@ it is a deliberate step.
 | Flag | Description |
 | --- | --- |
 | `--print` | Write the public keys (binary OpenPGP) to stdout instead of importing them. Refuses a terminal. |
-| `--vault <PATH>` | Global. Present → read that vault file; absent → the vaults unlocked in the daemon. |
+| `--database <PATH>` | Global. Present → read that database file; absent → the databases unlocked in the daemon. |
 
 ### trove gpg-agent enable / disable / defaults
 
 ```
-trove [--vault <PATH>] gpg-agent enable <ENTRY> [--key ATT] [--keygrip G]... [--uses sign|decrypt|both] [--confirm | --no-confirm] [--lifetime S]
-trove [--vault <PATH>] gpg-agent disable <ENTRY> [--key ATT]
-trove [--vault <PATH>] gpg-agent defaults (<GROUP> | --database) [--uses U] [--confirm | --no-confirm] [--lifetime S] [--clear ATTR]...
+trove [--database <PATH>] gpg-agent enable <ENTRY> [--key ATT] [--keygrip G]... [--uses sign|decrypt|both] [--confirm | --no-confirm] [--lifetime S]
+trove [--database <PATH>] gpg-agent disable <ENTRY> [--key ATT]
+trove [--database <PATH>] gpg-agent defaults (<GROUP> | --at-database) [--uses U] [--confirm | --no-confirm] [--lifetime S] [--clear ATTR]...
 ```
 
 The agent serves only keys an entry's `GpgAgent.settings` names. `enable` adds
@@ -1668,18 +1682,18 @@ whose `gpg-priv` would otherwise still count is given an empty document.
 ## trove materialize
 
 ```
-trove --vault <PATH> materialize
-trove [--vault <PATH>] materialize add <ENTRY> <ATTACHMENT> [--target PATH | --dir DIR] [--mode M] [--ttl S] [--allow-disk-backed]
-trove [--vault <PATH>] materialize remove <ENTRY> <ATTACHMENT>
-trove [--vault <PATH>] materialize disable <ENTRY>
-trove [--vault <PATH>] materialize defaults (<GROUP> | --database) [--dir DIR] [--mode M] [--ttl S] [--allow-disk-backed | --no-allow-disk-backed] [--clear ATTR]...
+trove --database <PATH> materialize
+trove [--database <PATH>] materialize add <ENTRY> <ATTACHMENT> [--target PATH | --dir DIR] [--mode M] [--ttl S] [--allow-disk-backed]
+trove [--database <PATH>] materialize remove <ENTRY> <ATTACHMENT>
+trove [--database <PATH>] materialize disable <ENTRY>
+trove [--database <PATH>] materialize defaults (<GROUP> | --at-database) [--dir DIR] [--mode M] [--ttl S] [--allow-disk-backed | --no-allow-disk-backed] [--clear ATTR]...
 ```
 
-Without a subcommand: open the vault, run every entry's materialize plan **in-process** (not via the daemon), hold open until SIGINT / SIGTERM, then wipe everything and exit. Useful for testing and disconnected workflows. Does **not** touch the daemon's `MaterializedStore`; if `troved` is also running, drive it via the `unlock` RPC instead so SSH and GPG agents come up at the same time. Per-entry materialize errors are logged but don't abort the others.
+Without a subcommand: open the database, run every entry's materialize plan **in-process** (not via the daemon), hold open until SIGINT / SIGTERM, then wipe everything and exit. Useful for testing and disconnected workflows. Does **not** touch the daemon's `MaterializedStore`; if `troved` is also running, drive it via the `unlock` RPC instead so SSH and GPG agents come up at the same time. Per-entry materialize errors are logged but don't abort the others.
 
 With one, it edits the entry's `Materialize.settings` (`add`, `remove`,
-`disable`) or a group's defaults (`defaults`), through the vault file with
-`--vault` or through the daemon with `TROVE_SESSION`. A `<File>` without a
+`disable`) or a group's defaults (`defaults`), through the database file with
+`--database` or through the daemon with `TROVE_SESSION`. A `<File>` without a
 `--target` is written into the inherited `dir` under its attachment's name, so
 a group can say where its entries' files go:
 
@@ -1691,10 +1705,10 @@ trove materialize add Apple/Apps/rest-mail/apns AuthKey_XXXXXXXXXX.p8
 ## trove env-agent
 
 ```
-trove [--vault <PATH>] env-agent add <ENTRY> <NAME> (--field F | --attachment A) [--export none|shell] [--confirm | --no-confirm] [--lifetime S]
-trove [--vault <PATH>] env-agent remove <ENTRY> <NAME>
-trove [--vault <PATH>] env-agent disable <ENTRY>
-trove [--vault <PATH>] env-agent defaults (<GROUP> | --database) [--export none|shell] [--confirm | --no-confirm] [--lifetime S] [--clear ATTR]...
+trove [--database <PATH>] env-agent add <ENTRY> <NAME> (--field F | --attachment A) [--export none|shell] [--confirm | --no-confirm] [--lifetime S]
+trove [--database <PATH>] env-agent remove <ENTRY> <NAME>
+trove [--database <PATH>] env-agent disable <ENTRY>
+trove [--database <PATH>] env-agent defaults (<GROUP> | --at-database) [--export none|shell] [--confirm | --no-confirm] [--lifetime S] [--clear ATTR]...
 ```
 
 Edits the entry's `EnvAgent.settings`, which says what `trove exec` exports
@@ -1718,10 +1732,10 @@ warning, when refused. An attachment cannot be exported to a shell.
 ## trove settings
 
 ```
-trove [--vault <PATH>] settings show [<PATH>] [<CAPABILITY>] [--group | --database] [--effective] [--json]
-trove [--vault <PATH>] settings edit <CAPABILITY> [<PATH>] [--group | --database]
-trove [--vault <PATH>] settings validate [<SCOPE>]
-trove [--vault <PATH>] settings migrate [<SCOPE>] [--dry-run]
+trove [--database <PATH>] settings show [<PATH>] [<CAPABILITY>] [--group | --database] [--effective] [--json]
+trove [--database <PATH>] settings edit <CAPABILITY> [<PATH>] [--group | --database]
+trove [--database <PATH>] settings validate [<SCOPE>]
+trove [--database <PATH>] settings migrate [<SCOPE>] [--dry-run]
 ```
 
 `<CAPABILITY>` is `env-agent`, `materialize`, `gpg-agent` or, for `show` on an
@@ -1792,12 +1806,12 @@ daemon understands them, with a warning that the versions differ
 (`TROVE_NO_VERSION_WARN=1` silences it). A command the old daemon can't decode
 fails with an error that names both versions and says to restart it: stop it
 with `trove daemons kill --all` (on Windows, end `troved.exe`), then re-run.
-The next command starts the current daemon, and vaults need unlocking again.
+The next command starts the current daemon, and databases need unlocking again.
 
 ## trove doctor
 
 ```
-trove [--vault <PATH>] doctor [--json]
+trove [--database <PATH>] doctor [--json]
 ```
 
 Check the setup around trove and say what to fix. Read-only, and it never starts
@@ -1807,13 +1821,13 @@ a daemon.
 | --- | --- |
 | `daemon` | whether troved is running on the control socket this CLI uses |
 | `version` | the running daemon is the same build as the CLI |
-| `keys` | keys in the unlocked vaults the agents couldn't load, and why |
+| `keys` | keys in the unlocked databases the agents couldn't load, and why |
 | `gpg-keyring` | gpg's keyring has the public key of every GPG key the agent serves (`trove gpg-agent import` adds them) |
 | `materialize` | materialized files on a disk-backed filesystem, where the wipe on lock is best effort |
 | `daemons` | live daemons on other sockets, and files left by dead ones (Unix) |
 | `ssh-agent` | `SSH_AUTH_SOCK`: unset, trove's agent, a private one from `ssh-agent empty`, another live agent, or nothing listening |
 | `gpg-agent` | whether gpg's agent socket (`gpgconf --list-dirs agent-socket`) is a symlink to trove's |
-| `vault` | the vault from `--vault` or `TROVE_VAULT` opens and is KDBX 4 (KDBX 3.1 is a warning) |
+| `database` | the database from `--database` or `TROVE_DATABASE` opens and is KDBX 4 (KDBX 3.1 is a warning) |
 | `env-file` | each `.env.trove.yaml` a bare `--env` would find is readable only by its owner; a retired `.env.trove` where one belongs fails |
 
 Each line is `ok`, `info`, `warn` or `FAIL`, with a suggested fix under it where
@@ -1859,31 +1873,31 @@ troved [--resident]
 
 Long-running. Listens on three Unix sockets; serves clients until `shutdown` RPC, SIGINT, or SIGTERM. Removes its own socket files on exit.
 
-Without `--resident`, it also exits once the last vault is locked (by `trove lock` or the idle timer) and nothing materialized is left to clean up; the next `trove` command starts a fresh one. `--resident` keeps it running after that, with its agent sockets up and empty, for a service manager to own. The launchd agent and systemd user unit in [`packaging/`](../packaging/) and `brew services start trove` all run `troved --resident` and restart it if it dies, but not after a clean exit.
+Without `--resident`, it also exits once the last database is locked (by `trove lock` or the idle timer) and nothing materialized is left to clean up; the next `trove` command starts a fresh one. `--resident` keeps it running after that, with its agent sockets up and empty, for a service manager to own. The launchd agent and systemd user unit in [`packaging/`](../packaging/) and `brew services start trove` all run `troved --resident` and restart it if it dies, but not after a clean exit.
 
 Permission model: every socket is bound by the daemon, then `chmod 0600` so only the same UID can connect.
 
 ## The `.env.trove.yaml` file
 
-A YAML file of vault passwords and trove settings, loaded only when `--env` is
+A YAML file of database passwords and trove settings, loaded only when `--env` is
 passed. Nothing is read without that flag: an exported password must never
-silently open a vault for a command that didn't ask for one.
+silently open a database for a command that didn't ask for one.
 
 The name keeps the `.env.` prefix on purpose. Gitignore templates, secret
 scanners and coding agents already treat `.env.*` files as secret, and this one
-holds vault passwords. Keep it out of version control all the same.
+holds database passwords. Keep it out of version control all the same.
 
 ### Where it is found
 
 | form | reads |
 | --- | --- |
-| `--env` | `./.env.trove.yaml`, then `<vault dir>/.env.trove.yaml` |
+| `--env` | `./.env.trove.yaml`, then `<database dir>/.env.trove.yaml` |
 | `--env=<dir>` | `<dir>/.env.trove.yaml` |
 | `--env=<file>` | exactly that file |
 
 **A path must be attached with `=`.** `--env=<PATH>`, never `--env <PATH>`. An
 option whose value is optional otherwise takes whatever follows it, and what
-follows it is usually the subcommand — `trove --vault v --env git-credential
+follows it is usually the subcommand — `trove --database v --env git-credential
 get` read `git-credential` as the path and then ran `trove get`. That is the
 credential-helper invocation exactly, since git appends the operation to
 whatever `credential.helper` holds, so the one command `--env` exists to serve
@@ -1894,38 +1908,38 @@ Flags were never affected: `--env --keychain status` has always parsed, because
 a `-`-prefixed token is not taken as an optional value.
 
 Bare `--env` tries the working directory first, so a project checkout can override,
-then the directory holding the vault being opened — which is where the file belongs
-when a vault and its settings are kept together (`~/vaults/work.kdbx` beside
-`~/vaults/.env.trove.yaml`). When neither exists, the error names both places it looked.
+then the directory holding the database being opened — which is where the file belongs
+when a database and its settings are kept together (`~/databases/work.kdbx` beside
+`~/databases/.env.trove.yaml`). When neither exists, the error names both places it looked.
 
 `--env=<file>` naming a file that does not exist is a **hard error**, never a silent
 fallback: you named that path, so a typo must not be papered over by prompting or by
 reading something else.
 
 There is deliberately no user-wide config location. `~/.config` ends up committed to
-dotfile repositories, and this file holds a vault password.
+dotfile repositories, and this file holds a database password.
 
 ### Syntax
 
 ```yaml
-# vault passwords, keyed by filename or path suffix
+# database passwords, keyed by filename or path suffix
 databases:
-  work.kdbx: "work vault password"
-  personal.kdbx: "personal vault password"
+  work.kdbx: "work database password"
+  personal.kdbx: "personal database password"
   homelab/docs/work.kdbx: "homelab work password"
 
 # any other variables to set
 environment:
-  TROVE_VAULT: /Users/me/vaults/work.kdbx
+  TROVE_DATABASE: /Users/me/databases/work.kdbx
   TROVE_IDLE_TIMEOUT: 900
 ```
 
 Either section may be left out, but a file needs at least one.
 
-- **`databases:`** maps a vault's filename or path suffix, including `.kdbx`, to its password.
+- **`databases:`** maps a database's filename or path suffix, including `.kdbx`, to its password.
   `trove unlock work.kdbx --env` uses the work password, wherever `work.kdbx` is.
   Existing filename-only entries remain compatible. Add as many parent directories
-  as needed to distinguish same-named vaults: `work.kdbx`, `docs/work.kdbx`, or
+  as needed to distinguish same-named databases: `work.kdbx`, `docs/work.kdbx`, or
   `homelab/docs/work.kdbx`. The matching suffix with the most path components wins.
   Matches use whole components: `lab/docs/work.kdbx` does not match
   `homelab/docs/work.kdbx`. Equivalent suffix spellings use the alphabetically
@@ -1933,15 +1947,15 @@ Either section may be left out, but a file needs at least one.
   A password must be a string, so quote it:
   YAML reads an unquoted `1e3`, `0x10` or `true` as a number or boolean, and
   trove refuses that rather than guess what text was meant.
-- **`environment:`** sets variables before trove runs: `TROVE_VAULT`,
+- **`environment:`** sets variables before trove runs: `TROVE_DATABASE`,
   `TROVE_IDLE_TIMEOUT`, the socket paths. Numbers and booleans are taken as their
-  text. Passwords are refused here — `TROVE_VAULT_PASSWORD` and the old
-  `TROVE_VAULT_<NAME>_FILE`/`_PASSWORD` profiles — so there is one place a
-  password can be. `TROVE_VAULT` selects the default offline vault for commands
-  that accept `--vault`; `--vault <PATH>` overrides it.
+  text. Passwords are refused here — `TROVE_DATABASE_PASSWORD` and the old
+  `TROVE_DATABASE_<NAME>_FILE`/`_PASSWORD` profiles — so there is one place a
+  password can be. `TROVE_DATABASE` selects the default offline database for commands
+  that accept `--database`; `--database <PATH>` overrides it.
 
 A variable **already set in the environment wins**, so the file supplies defaults
-rather than overriding its caller. In the same way an exported `TROVE_VAULT_PASSWORD`
+rather than overriding its caller. In the same way an exported `TROVE_DATABASE_PASSWORD`
 wins over `databases:`.
 
 Relative database paths include the caller's working directory when matching.
@@ -1954,7 +1968,7 @@ section.
 
 ### The retired `.env.trove`
 
-The dotenv `.env.trove` (`KEY=VALUE` lines, `TROVE_VAULT_<NAME>_FILE` profiles)
+The dotenv `.env.trove` (`KEY=VALUE` lines, `TROVE_DATABASE_<NAME>_FILE` profiles)
 and the bare `work.kdbx: password` map are no longer read. trove refuses them, and
 says how to convert, whenever it meets one:
 
@@ -1962,17 +1976,17 @@ says how to convert, whenever it meets one:
   stops there rather than carrying on to another file or a prompt;
 - dotenv lines or a bare map in whichever file `--env` reads.
 
-Converting is mechanical: passwords move under `databases:`, keyed by vault filename,
+Converting is mechanical: passwords move under `databases:`, keyed by database filename,
 and every other variable moves under `environment:`. Then delete the old file.
 
 ### Permissions
 
-The file holds a vault password, so trove warns when it is readable by more than its
+The file holds a database password, so trove warns when it is readable by more than its
 owner:
 
 ```
 trove: warning: .env.trove.yaml is mode 0644 — readable by more than its owner,
-and it holds a vault password. Fix with: chmod 600 .env.trove.yaml
+and it holds a database password. Fix with: chmod 600 .env.trove.yaml
 ```
 
 `TROVE_ENV_STRICT=1` turns that warning into a refusal, which is what `ssh` does with a
@@ -1987,7 +2001,7 @@ inherited by every child process.
 
 ### Where the password comes from
 
-More than one source can supply a vault password. They are tried in this order:
+More than one source can supply a database password. They are tried in this order:
 
 | order | source | can it block? |
 | --- | --- | --- |
@@ -2014,7 +2028,7 @@ All env vars are read at process start.
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `TROVE_VAULT` | (unset) | Default path for offline commands that accept `--vault`. An explicit `--vault <PATH>` takes precedence. `unlock` uses its positional vault argument. |
+| `TROVE_DATABASE` | (unset) | Default path for offline commands that accept `--database`. An explicit `--database <PATH>` takes precedence. `unlock` uses its positional database argument. |
 | `TROVE_SOCK` | `$XDG_RUNTIME_DIR/trove.sock` or `${TMPDIR:-/tmp}/trove-$UID.sock` | Path of the control socket. |
 | `TROVE_SSH_SOCK` | `$XDG_RUNTIME_DIR/trove-ssh.sock` or `${TMPDIR:-/tmp}/trove-ssh-$UID.sock` | Path of the SSH agent socket. |
 | `TROVE_GPG_SOCK` | `$XDG_RUNTIME_DIR/trove-gpg.sock` or `${TMPDIR:-/tmp}/trove-gpg-$UID.sock` | Path of the GPG agent socket. |
@@ -2022,7 +2036,7 @@ All env vars are read at process start.
 | `TROVE_SSH_FORWARD` | (on) | Set to `0` / `false` / `no` / `off` to stop pushing unlocked SSH keys into the agent named by `$SSH_AUTH_SOCK`. Read on every unlock, not just at start. Forwarding is already inert when `$SSH_AUTH_SOCK` is unset or points at trove's own socket. |
 | `TROVE_SSH_OPENSSH_PIPE` | (on) | Windows only. Set to `0` to stop troved also serving `\\.\pipe\openssh-ssh-agent`, the pipe Windows OpenSSH uses when `SSH_AUTH_SOCK` is unset. It is only taken when free. |
 | `TROVE_SSH_STRICT_HOSTKEYS` | (off) | Set to `1` / `true` / `yes` to answer a server that no key's `SshAgent.HostKeys` declares with an empty identity list, instead of falling back to offering everything. Read once when the agent socket is bound. Turns a stale declaration from a missed optimisation into a refused connection — which is the point, and why it is off by default. |
-| `TROVE_VAULT_PASSWORD` | (unset) | Vault password, used **only** with `--env` (see above), and winning over the file's `databases:`. Prefer the `databases:` section of a `0600` `.env.trove.yaml` — an exported variable is inherited by every child process. It cannot be set from the file's `environment:`. |
+| `TROVE_DATABASE_PASSWORD` | (unset) | Database password, used **only** with `--env` (see above), and winning over the file's `databases:`. Prefer the `databases:` section of a `0600` `.env.trove.yaml` — an exported variable is inherited by every child process. It cannot be set from the file's `environment:`. |
 | `TROVE_ENV_STRICT` | (off) | Set to `1` / `true` / `yes` / `on` to make `--env` **refuse** a file readable by more than its owner, instead of warning. macOS/Unix only. |
 | `TROVE_SPAWN_TIMEOUT_SECS` | `5` | How long a client waits for an auto-spawned daemon's socket to become reachable before erroring. Raise on slow/loaded machines. |
 | `XDG_RUNTIME_DIR` | (system) | Used in default socket-path resolution. |
@@ -2041,13 +2055,13 @@ Request envelope: `{"cmd": "<name>", ...}`. Response envelope: `{"status": "ok"|
 | `cmd` | Request fields | Response on success | Notes |
 | --- | --- | --- | --- |
 | `ping` | none | `{"status":"ok","pong":true}` | Heartbeat. Does **not** reset the idle timer. |
-| `unlock` | `path: string`, `password: string`, `filter?: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…],"ssh_forward_warnings":[…]}` | **Additive** — adds this vault to the unlocked set rather than replacing it, and the SSH/GPG stores are rebuilt from the union of every open vault (see [multi-vault.md](multi-vault.md)). Re-unlocking a vault already open replaces just that one. When `filter` is present, only entries carrying that KeePass-native tag are exposed through the agents and materialization. Otherwise runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every selected materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the vault) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. A target another unlocked vault already materialized is skipped and warned about, never overwritten. Also forwards the selected SSH keys into the agent named by `$SSH_AUTH_SOCK`, under the same contract: never fails the unlock, per-key failures land in `ssh_forward_warnings` (omitted when empty). |
-| `list` | none | `{"status":"ok","entries":[{"id","title","username","url","attachments"}, ...]}` | The union across every unlocked vault, in unlock order. Errors if none is unlocked. |
-| `lock` | `vault: string` *(optional)* | `{"status":"ok"}` | Without `vault`: wipes all materialized files, drops every vault, clears the SSH+GPG stores, cancels the idle timer. With `vault`: drops only that vault, wipes only **its** materialized files, rebuilds the key stores from what is still open, and keeps the idle timer armed; errors if no vault is unlocked at that path. Either way, keys that dropped out of the store are also removed from the agent named by `$SSH_AUTH_SOCK` (unless the entry set `RemoveAtDatabaseClose=false`); keys another still-unlocked vault provides stay. Idempotent. |
+| `unlock` | `path: string`, `password: string`, `filter?: string` | `{"status":"ok","code","daemon_version","materialize_warnings":[…],"ssh_forward_warnings":[…]}` | **Additive** — adds this database to the unlocked set rather than replacing it, and the SSH/GPG stores are rebuilt from the union of every open database (see [multi-database.md](multi-database.md)). Re-unlocking a database already open replaces just that one. When `filter` is present, only entries carrying that KeePass-native tag are exposed through the agents and materialization. Otherwise runs materialization (creating any missing parent dirs of a target, mode 0700). Synchronous: `ok` only after every selected materialized file is on disk. A per-entry materialization failure does **not** fail the unlock (spec: one bad entry must not break the database) but is reported in `materialize_warnings` (omitted when empty) so the CLI warns loudly — never a silent `ok` with a configured file missing. A target another unlocked database already materialized is skipped and warned about, never overwritten. Also forwards the selected SSH keys into the agent named by `$SSH_AUTH_SOCK`, under the same contract: never fails the unlock, per-key failures land in `ssh_forward_warnings` (omitted when empty). |
+| `list` | none | `{"status":"ok","entries":[{"id","title","username","url","attachments"}, ...]}` | The union across every unlocked database, in unlock order. Errors if none is unlocked. |
+| `lock` | `database: string` *(optional)* | `{"status":"ok"}` | Without `database`: wipes all materialized files, drops every database, clears the SSH+GPG stores, cancels the idle timer. With `database`: drops only that database, wipes only **its** materialized files, rebuilds the key stores from what is still open, and keeps the idle timer armed; errors if no database is unlocked at that path. Either way, keys that dropped out of the store are also removed from the agent named by `$SSH_AUTH_SOCK` (unless the entry set `RemoveAtDatabaseClose=false`); keys another still-unlocked database provides stay. Idempotent. |
 | `shutdown` | none | `{"status":"ok"}` | Same as `lock`, then signals the daemon main loop to exit. |
-| `materialize-status` | none | `{"status":"ok","materialized":[{"title","target_path","vault","ttl_remaining_seconds","exists"}, ...]}` | Read-only; works even with every vault locked (returns empty array). `vault` names the unlocked vault the file came from. |
+| `materialize-status` | none | `{"status":"ok","materialized":[{"title","target_path","database","ttl_remaining_seconds","exists"}, ...]}` | Read-only; works even with every database locked (returns empty array). `database` names the unlocked database the file came from. |
 | `set-idle-timeout` | `seconds: u64` | `{"status":"ok"}` | `0` disables auto-lock. Takes effect immediately; if the new timeout has already elapsed, the timer fires on the next driver wake. |
-| `get-idle-timeout` | none | `{"status":"ok","seconds": u64, "remaining": u64\|null}` | `seconds` is the configured timeout. `remaining` is seconds-until-fire if a vault is unlocked, else `null`. |
+| `get-idle-timeout` | none | `{"status":"ok","seconds": u64, "remaining": u64\|null}` | `seconds` is the configured timeout. `remaining` is seconds-until-fire if a database is unlocked, else `null`. |
 
 Error responses: `{"status":"err","error":"<message>"}`. Errors do not close the connection — you can pipeline more commands.
 
@@ -2143,22 +2157,22 @@ The rules:
   dialog. Where no approval can be asked — another platform, no reader, no one
   at the Mac — the secret is refused, never handed over on the strength of the
   unlock. One approval covers the item for its `lifetime`; locking forgets
-  every approval. A caller holding the vault password can open the file
+  every approval. A caller holding the database password can open the file
   directly and is not stopped by this: it gates the daemon, not the file.
 - **Renaming an attachment** rewrites every item that names it.
 - **KeePassXC** keeps the documents through an open and save, but has no editor
   for trove's three; use `trove settings edit` or the commands above.
 
 During the transition, the fields these documents replace still count as one,
-so existing vaults keep working: `Materialize.<attachment>.Target` / `.Mode` /
+so existing databases keep working: `Materialize.<attachment>.Target` / `.Mode` /
 `.TTL` / `.AllowDiskBacked` as a `<File>`, `Exec.<VAR>` and `Exec.Env` as
 `<Variable>`s (see [trove exec](#trove-exec)), and a `gpg-priv` attachment as a
 `<Key>`. A document, once written, replaces them, and the commands remove the
-fields when they write it; `trove settings migrate` converts a whole vault. The
+fields when they write it; `trove settings migrate` converts a whole database. The
 entry-level `Materialize.Source` / `Materialize.Target` form was removed
 earlier and is still reported as an error.
 
-Changes made through the daemon while the vault is unlocked take effect at
+Changes made through the daemon while the database is unlocked take effect at
 once: a new or changed file is written, and the file behind a removed or
 changed one is wiped. Changes KeePassXC makes to the file on disk aren't seen
 until the next unlock.

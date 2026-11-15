@@ -8,7 +8,7 @@
 use anyhow::{bail, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use trove_core::Vault;
+use trove_core::Database;
 
 /// Fields whose XML `<Value>` carries the ProtectInMemory marker, matching
 /// KeePassXC's plaintext export of protected fields.
@@ -72,8 +72,8 @@ impl Node {
     }
 }
 
-/// Serialize the vault as importable KeePass XML.
-pub fn export_xml(v: &Vault) -> Result<String> {
+/// Serialize the database as importable KeePass XML.
+pub fn export_xml(v: &Database) -> Result<String> {
     // Attachment pool: stable ids in first-seen order, referenced per entry.
     let mut pool: Vec<Vec<u8>> = Vec::new();
     let mut root = Node::default();
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn exports_fields_protected_markers_groups_and_attachments() {
         let dir = TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("x.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("x.kdbx"), "pw").unwrap();
         let id = v.add_entry("Web/login").unwrap();
         v.set_field(&id, "UserName", "alice&bob").unwrap();
         v.set_field(&id, "Password", "s<e>cret").unwrap();
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn rejects_xml_10_control_characters_with_entry_and_field_context() {
         let dir = TempDir::new().unwrap();
-        let mut v = Vault::create(&dir.path().join("control.kdbx"), "pw").unwrap();
+        let mut v = Database::create(&dir.path().join("control.kdbx"), "pw").unwrap();
         let id = v.add_entry("Web/login").unwrap();
         v.set_field(&id, "Notes", "before\u{1}after").unwrap();
 
