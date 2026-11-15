@@ -27,6 +27,8 @@ base64 = "0.22"
 # Server-side password-strength scoring for the entry list (the DTO carries a
 # 0..=100 score, never the password itself).
 zxcvbn = "3"
+# Wipes each password read for the Health report once the checks are done.
+zeroize = "1"
 
 # In the monorepo the GUI links trove-core directly from the workspace source,
 # so a core change is picked up without a crates.io publish + version bump. The
@@ -64,6 +66,12 @@ opt-level = 3
 
 [profile.dev.package.troved]
 opt-level = 3
+
+[dev-dependencies]
+# The Health test backdates an entry's modification time, which trove-core
+# never writes on purpose (every edit stamps "now").
+keepass = { version = "0.15", features = ["save_kdbx4"] }
+chrono = { version = "0.4", default-features = false }
 
 # macOS only: Touch ID (LocalAuthentication) plus the login keychain that holds
 # the password it gates. `LAContext` needs no entitlement — verified from an

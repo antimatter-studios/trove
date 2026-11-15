@@ -4,6 +4,18 @@ All notable changes, per released version. trove is pre-1.0, so minor versions
 may carry behavior changes. The most recent releases are also summarized in the
 README; the full history and the pre-1.0 development milestones live here.
 
+## Unreleased
+
+**Password Health view in the desktop app.** A "Password Health" button in the
+sidebar opens a report on the open database: reused, weak (zxcvbn score below
+3), old (unchanged for over a year) and expired entries, with a count for each.
+Clicking an entry selects it in its folder, and the report refreshes after a
+save, a reload from disk or a database switch. It runs the same checks as
+`trove health`, which now live in the daemon library (`troved::health`) so the
+CLI and the desktop share one copy; `trove analyze` and `trove health` print
+exactly what they did before. Only entry paths reach the window, never a
+password or hash. (#446)
+
 ## v0.27.1 — 2026-11-01
 
 **Maintenance release; trove's behaviour is unchanged from v0.27.0.** Scheduled

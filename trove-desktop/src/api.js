@@ -112,6 +112,11 @@ export function getEntryDetail(id, entryId) {
   return invoke('get_entry_detail', { id, entryId });
 }
 
+// database_health(id) -> { reused: [{ entries: [{id, path}] }], weak: [{id, path, score}],
+//   stale: [{id, path, ageDays}], expired: [{id, path, expiredAt}] }
+// Entry ids and paths only; no password or hash ever crosses the bridge.
+export const databaseHealth = (id) => invoke('database_health', { id });
+
 export const getEntryRevisions = (id, entryId) => invoke('get_entry_revisions', { id, entryId });
 export const listRevisionEntries = (id) => invoke('list_revision_entries', { id });
 export const applyEntryRevision = (id, sourceId, entryId, index, sourceToken, targetToken) =>

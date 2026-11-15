@@ -304,8 +304,8 @@ bigger ideas, grouped:
   (#310), HOTP, Steam and Yandex codes (#311), FIDO2 as a primary unlock factor
   (#312).
 - **Extensibility:** a sandboxed plugin host (#288), custom entry types (#292).
-- **Audit and health:** scheduled breach checks and a health report (#284),
-  cross-entry analytics (#285).
+- **Audit and health:** scheduled breach checks and breach notifications
+  (#284).
 - **Mobile:** materialization metadata that KeePassDX and Strongbox can adopt
   (#290). There will be no first-party mobile app ([docs/scope.md](docs/scope.md)).
 - **Quality of life:** history UI with global undo (#287), large attachments

@@ -5,6 +5,7 @@ import { buildTree, resolveEntryPath, isVisibleIn, recycleBinPath } from './tree
 import * as api from './api.js';
 import { Sidebar, EntryList, Detail } from './views.jsx';
 import { DatabaseSync, EntryHistoryModal } from './DatabaseSync.jsx';
+import { HealthView } from './HealthView.jsx';
 import { useDragController, DragGhost, rowAt, overList } from './drag.jsx';
 import { dropZone, indexTree, resolveGroupDrop, resolveEntryDrop } from './dnd.js';
 import { Unlock, CommandPalette, EntryForm, ConfirmDelete, HelpModal, ThemeMenu, DatabaseSwitcher, DatabaseMetadataModal, OpenDatabaseModal, ClipboardToast, PlainToast, SettingsModal, NewDatabaseModal, EditFolderModal } from './overlays.jsx';
@@ -97,7 +98,7 @@ function App() {
   }, [activeId]);
 
   const { locked, entries, group, selId, query, sort } = database;
-  const setGroup = (g) => { setSyncOpen(false); patch({ group: g }); };
+  const setGroup = (g) => { setSyncOpen(false); setHealthOpen(false); patch({ group: g }); };
   const setSelId = (id) => patch({ selId: id });
   const setQuery = (q) => patch({ query: q });
 
@@ -115,6 +116,7 @@ function App() {
   const [switcher, setSwitcher] = useState(false);
   const [metadataOpen, setMetadataOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
+  const [healthOpen, setHealthOpen] = useState(false);
   const [historyEntry, setHistoryEntry] = useState(null);
   const [openDatabase, setOpenDatabase] = useState(false);
   // Which build this is. A dev window and an installed one look identical
@@ -386,7 +388,7 @@ function App() {
   // a login screen — you have not finished with the app, only with this database.
   const dataLock = useCallback(async () => {
     stopClip();
-    setSyncOpen(false); setHistoryEntry(null);
+    setSyncOpen(false); setHealthOpen(false); setHistoryEntry(null);
     setPalette(false); setForm(null); setDel(null);
     const id = activeId;
     await lockOne(id, true);
@@ -398,7 +400,7 @@ function App() {
   // taken back from the machine — that is what the data lock is for.
   const appLock = useCallback(async () => {
     stopClip();
-    setSyncOpen(false); setHistoryEntry(null);
+    setSyncOpen(false); setHealthOpen(false); setHistoryEntry(null);
     setPalette(false); setForm(null); setDel(null);
     const open = databases.filter((v) => !v.locked).map((v) => v.id);
     for (const id of open) await lockOne(id, false);
@@ -425,6 +427,12 @@ function App() {
     ]);
     const firstEntry = list[0];
     patch({ locked: false, troveUuid: metadata?.troveUuid || null, entries: list, groups, loaded: true, group: firstEntry?.groupPath || "__root", selId: firstEntry?.id || null });
+  };
+  // Leave Sync or Health and show an entry in its folder.
+  const openEntry = (id) => {
+    setSyncOpen(false); setHealthOpen(false);
+    const entry = entries.find((item) => item.id === id);
+    patch({ selId: id, group: entry?.groupPath || "__root" });
   };
   const switchDatabase = (id) => {
     setActiveId(id); setSwitcher(false);
@@ -728,7 +736,7 @@ function App() {
 
       if (mod && e.key.toLowerCase() === "l") { e.preventDefault(); return dataLock(); }
       if (mod && e.key.toLowerCase() === "n") { e.preventDefault(); return openNew(); }
-      if (anyOverlay || switcher || themeMenu || syncOpen) return;
+      if (anyOverlay || switcher || themeMenu || syncOpen || healthOpen) return;
       if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); if (selected) copy(null, null, "password"); return; }
       if (mod && e.key.toLowerCase() === "b") { e.preventDefault(); if (selected) copy(selected.username, selected.id + ":user", "username"); return; }
 
@@ -817,13 +825,13 @@ function App() {
           <Unlock database={database} onUnlock={unlock} onReady={unlockReady} onChange={() => setSwitcher(true)} onTouchId={touchIdUnlock} onRemember={touchIdRemember} />
         ) : (
           <div className="body" style={{ "--sidebar-w": sidebarW + "px", "--list-w": listW + "px" }}>
-            <Sidebar tree={tree} selectedGroup={syncOpen ? null : group} onSelectGroup={setGroup} onEditGroupTags={setGroupEditor} drag={syncOpen ? null : drag} onDragStart={syncOpen ? undefined : startDrag} database={database} onSwitcher={() => setSwitcher(true)} onEditMetadata={() => setMetadataOpen(true)} onSync={() => setSyncOpen(true)} syncSelected={syncOpen} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
+            <Sidebar tree={tree} selectedGroup={syncOpen || healthOpen ? null : group} onSelectGroup={setGroup} onEditGroupTags={setGroupEditor} drag={syncOpen || healthOpen ? null : drag} onDragStart={syncOpen || healthOpen ? undefined : startDrag} database={database} onSwitcher={() => setSwitcher(true)} onEditMetadata={() => setMetadataOpen(true)} onSync={() => { setHealthOpen(false); setSyncOpen(true); }} syncSelected={syncOpen} onHealth={() => { setSyncOpen(false); setHealthOpen(true); }} healthSelected={healthOpen} onNew={openNew} onDataLock={dataLock} idleLabel={idleLabel} />
             <ResizeHandle
               label="Resize sidebar"
               onDelta={(inc) => setSidebarW((w) => clampW(w + inc, SIDEBAR_MIN, SIDEBAR_MAX))}
               onReset={() => setSidebarW(DEFAULT_SIDEBAR_W)}
             />
-            {syncOpen ? <DatabaseSync key={database.id} database={database} databases={databases} onSaved={revisionSaved} onRefreshed={revisionRefreshed} appActions={appActions} /> : <><EntryList
+            {syncOpen ? <DatabaseSync key={database.id} database={database} databases={databases} onSaved={revisionSaved} onRefreshed={revisionRefreshed} appActions={appActions} /> : healthOpen ? <HealthView database={database} appActions={appActions} onSelectEntry={openEntry} /> : <><EntryList
               entries={filtered} selectedId={selId} onSelect={setSelId}
               title={groupTitle} subtitle={groupSub} sort={sort} onCycleSort={cycleSort}
               query={query} onQuery={setQuery} searchRef={searchRef} databaseName={database.name}
@@ -851,7 +859,7 @@ function App() {
 
         {/* overlays */}
         {historyEntry && !database.locked && <EntryHistoryModal key={database.id + historyEntry.id} database={database} entry={historyEntry} onClose={() => setHistoryEntry(null)} onSaved={revisionSaved} />}
-        {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={(id) => { setSyncOpen(false); const entry = entries.find((item) => item.id === id); patch({ selId: id, group: entry?.groupPath || "__root" }); }} />}
+        {palette && <CommandPalette entries={entries} actions={paletteActions} onClose={() => setPalette(false)} onOpenEntry={openEntry} />}
         {form && <EntryForm key={form.entry ? form.entry.id : "new"} entry={form.entry} detail={form.detail} group={group} onClose={() => setForm(null)} onSave={saveEntry} onCreateFolder={createFolder} onDelete={(e) => { setForm(null); setDel(e); }} />}
         {groupEditor && <EditFolderModal group={groupEditor} entries={entries} databaseId={database?.id} onClose={() => setGroupEditor(null)} onSave={saveGroupTags} onDelete={deleteFolder} />}
         {del && <ConfirmDelete entry={del} onCancel={() => setDel(null)} onConfirm={doDelete} />}

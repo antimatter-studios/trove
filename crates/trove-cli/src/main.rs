@@ -5,7 +5,6 @@
 
 #![forbid(unsafe_code)]
 
-mod analyze;
 mod clip;
 mod daemon;
 mod doctor;
@@ -32,6 +31,7 @@ use trove_core::{
     Database, DatabaseMetadata, Error as CoreError, GroupTransferPlan, SearchFieldFilter,
     SearchQuery,
 };
+use troved::health;
 
 /// Exit code for user-recoverable errors (bad path, missing entry, etc.).
 const EXIT_USER_ERROR: u8 = 1;
@@ -5520,42 +5520,9 @@ fn print_show_summary(
         println!("Icon: {n}");
     }
     if let Some(when) = expires {
-        let expired = is_expired(when);
+        let expired = troved::health::is_expired(when);
         println!("Expires: {when}{}", if expired { " (expired)" } else { "" });
     }
-}
-
-/// Whether an RFC 3339 UTC expiry time is in the past. RFC 3339 UTC strings
-/// of the same shape sort as times, so a string compare is enough.
-fn is_expired(when: &str) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = (now / 86_400) as i64;
-    let secs = now % 86_400;
-    let (y, m, d) = civil_from_days(days);
-    let now = format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00",
-        secs / 3600,
-        secs / 60 % 60,
-        secs % 60
-    );
-    when < now.as_str()
-}
-
-/// Howard Hinnant's civil_from_days: days since the Unix epoch to a date.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
 }
 
 /// One entry as the JSON shape `show --json` prints.
@@ -7292,9 +7259,10 @@ fn cmd_analyze(
             None => empty_paths.push(entry.display_path()),
         }
     }
-    let items: Vec<analyze::Item> = passwords
+    let items: Vec<health::Item> = passwords
         .iter()
-        .map(|(entry, pw)| analyze::Item {
+        .map(|(entry, pw)| health::Item {
+            id: entry.id.as_str().to_string(),
             path: entry.display_path(),
             password: pw.as_str(),
             modified: entry.modified.as_deref(),
@@ -7336,7 +7304,10 @@ fn cmd_analyze(
     }
 
     if checks.reuse {
-        let groups = analyze::reused(&items);
+        let groups: Vec<Vec<String>> = health::reused(&items)
+            .into_iter()
+            .map(|g| g.into_iter().map(|e| e.path).collect())
+            .collect();
         if !json {
             for g in &groups {
                 println!("reused by {}: {}", g.len(), g.join(", "));
@@ -7353,9 +7324,9 @@ fn cmd_analyze(
     }
 
     if let Some(min_score) = checks.weak {
-        let weak = analyze::weak(&items, min_score);
+        let weak = health::weak(&items, min_score);
         if !json {
-            for (path, score) in &weak {
+            for (health::EntryRef { path, .. }, score) in &weak {
                 println!("{path}  weak (score {score} of 4)");
             }
         }
@@ -7364,15 +7335,15 @@ fn cmd_analyze(
         }
         let weak: Vec<Value> = weak
             .into_iter()
-            .map(|(path, score)| serde_json::json!({"entry_path": path, "score": score}))
+            .map(|(entry, score)| serde_json::json!({"entry_path": entry.path, "score": score}))
             .collect();
         out.insert("weak".into(), weak.into());
     }
 
     if let Some(max_days) = checks.age {
-        let stale = analyze::stale(&items, analyze::today(), max_days);
+        let stale = health::stale(&items, health::today(), max_days);
         if !json {
-            for (path, days) in &stale {
+            for (health::EntryRef { path, .. }, days) in &stale {
                 println!("{path}  unchanged for {days} days");
             }
         }
@@ -7384,22 +7355,16 @@ fn cmd_analyze(
         }
         let stale: Vec<Value> = stale
             .into_iter()
-            .map(|(path, days)| serde_json::json!({"entry_path": path, "age_days": days}))
+            .map(|(entry, days)| serde_json::json!({"entry_path": entry.path, "age_days": days}))
             .collect();
         out.insert("stale".into(), stale.into());
     }
 
     if checks.expired {
-        // Every entry, not only those with a password: a certificate or key
-        // entry expires too.
-        let mut expired: Vec<(String, String)> = entries
-            .iter()
-            .filter_map(|e| {
-                let when = e.expires.as_deref()?;
-                is_expired(when).then(|| (e.display_path(), when.to_string()))
-            })
+        let expired: Vec<(String, String)> = health::expired(&entries, &health::now_rfc3339())
+            .into_iter()
+            .map(|(entry, when)| (entry.path, when))
             .collect();
-        expired.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         if !json {
             for (path, when) in &expired {
                 println!("{path}  expired {when}");

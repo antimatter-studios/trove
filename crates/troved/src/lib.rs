@@ -23,6 +23,9 @@ pub mod gpg_agent;
 pub mod handler;
 /// Process-level hardening (non-dumpable on Linux).
 pub mod hardening;
+/// Password health checks (reuse, weakness, age, expiry) shared by `trove
+/// analyze`, `trove health` and the desktop Health view.
+pub mod health;
 pub mod idle;
 pub mod ipc;
 pub mod materialize;

@@ -89,7 +89,7 @@ function TreeNode({ node, depth, open, setOpen, selected, onSelect, onEditTags, 
 /// How long a carried item has to rest on a closed folder before it opens.
 const HOVER_OPEN_MS = 1000;
 
-function Sidebar({ tree, selectedGroup, onSelectGroup, onEditGroupTags, database, onSwitcher, onEditMetadata, onSync, syncSelected, onNew, onDataLock, idleLabel, drag, onDragStart }) {
+function Sidebar({ tree, selectedGroup, onSelectGroup, onEditGroupTags, database, onSwitcher, onEditMetadata, onSync, syncSelected, onHealth, healthSelected, onNew, onDataLock, idleLabel, drag, onDragStart }) {
   const [open, setOpenState] = React.useState({ __root: true, inpace: true, personal: true, infra: false });
   const setOpen = (p) => setOpenState((o) => ({ ...o, [p]: !o[p] }));
   // The bin is not a folder you file things in; it is pinned apart below.
@@ -157,6 +157,7 @@ function Sidebar({ tree, selectedGroup, onSelectGroup, onEditGroupTags, database
         </button>
 
         {onSync && <button className={'sb-sync' + (syncSelected ? ' selected' : '')} onClick={onSync} aria-pressed={!!syncSelected}><Icon name="link" size={16} />Database Sync</button>}
+        {onHealth && !database.locked && <button className={'sb-sync sb-health' + (healthSelected ? ' selected' : '')} onClick={onHealth} aria-pressed={!!healthSelected}><Icon name="shield" size={16} />Password Health</button>}
         <div className="sb-label">Groups</div>
         {folders.map((n) => (
           <TreeNode key={n.path} node={n} depth={0} open={open} setOpen={setOpen} selected={selectedGroup} onSelect={onSelectGroup} onEditTags={onEditGroupTags} dnd={dnd} onDragStart={onDragStart} />
