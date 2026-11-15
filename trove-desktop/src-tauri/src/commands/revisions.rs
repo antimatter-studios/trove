@@ -60,7 +60,7 @@ pub async fn get_entry_revisions(
     id: String,
     entry_id: String,
 ) -> Result<Vec<RevisionDto>, String> {
-    let entry_id = EntryId::from_str(&entry_id).map_err(|error| error.to_string())?;
+    let Ok(entry_id) = EntryId::from_str(&entry_id);
     on_database(app, id, move |database| {
         database
             .entry_revisions(&entry_id)
@@ -108,7 +108,7 @@ pub async fn apply_entry_revision(
     source_token: String,
     target_token: Option<String>,
 ) -> Result<(), String> {
-    let entry_id = EntryId::from_str(&entry_id).map_err(|error| error.to_string())?;
+    let Ok(entry_id) = EntryId::from_str(&entry_id);
     let source_entry = entry_id.clone();
     let same_database = id == source_id;
     let (version, uuid) = on_database(app.clone(), source_id, move |database| {

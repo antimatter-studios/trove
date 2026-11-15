@@ -120,8 +120,10 @@ describe('app chrome + theme', () => {
   it('shows the database path beside its filename in the centered title', async () => {
     api.listDatabases.mockResolvedValue([LOCKED_DATABASE]);
     const { container: c } = render(<App />);
-    const title = await waitFor(() => c.querySelector('.win-database-name'));
-    expect(title.textContent).toBe('personal.kdbx (/databases/personal.kdbx)');
+    // The title renders "—" until the database list arrives, so wait for the
+    // text itself, not merely for the element.
+    const title = c.querySelector('.win-database-name');
+    await waitFor(() => expect(title.textContent).toBe('personal.kdbx (/databases/personal.kdbx)'));
     expect(title).toHaveAttribute('title', 'personal.kdbx (/databases/personal.kdbx)');
   });
 
@@ -135,7 +137,8 @@ describe('app chrome + theme', () => {
     const { container: c } = render(<App />);
     await waitFor(() => expect(c.querySelector('.vc-change')).toBeTruthy());
     fireEvent.click(c.querySelector('.vc-change'));
-    const paths = await waitFor(() => c.querySelectorAll('.vsw .database-option .vrf'));
+    await waitFor(() => expect(c.querySelectorAll('.vsw .database-option .vrf')).toHaveLength(3));
+    const paths = c.querySelectorAll('.vsw .database-option .vrf');
     expect([...paths].map((path) => path.textContent)).toEqual([
       '/Users/chris/Library/Databases/christhomas.kdbx',
       '/Volumes/homelab/backups/christhomas.kdbx',
