@@ -303,6 +303,7 @@ async fn writes_are_gated_and_persist() {
             title: None,
             sets: [("Env".to_string(), "prod".to_string())].into(),
             unsets: vec![],
+            protected: vec![],
             add_tags: vec![],
             remove_tags: vec![],
             clear_tags: false,
@@ -486,4 +487,85 @@ async fn remove_and_rmdir_report_recycle_state_and_persist() {
 
     let v = Database::open(&path, PASSWORD).expect("reopen");
     assert!(v.list_entries().is_empty(), "all entries destroyed");
+}
+
+#[tokio::test]
+async fn edit_entry_stores_named_fields_protected_and_old_requests_still_work() {
+    let dir = TempDir::new().unwrap();
+    let path = seed_database(&dir);
+    let h = Harness::new();
+    let code = h.unlock(&path).await;
+
+    let resp = h
+        .handle_as(
+            Request::EditEntry {
+                path: "Web/github".into(),
+                title: None,
+                sets: [
+                    ("API_TOKEN".to_string(), "tok-secret".to_string()),
+                    ("Region".to_string(), "eu".to_string()),
+                ]
+                .into(),
+                unsets: vec![],
+                protected: vec!["API_TOKEN".into()],
+                add_tags: vec![],
+                remove_tags: vec![],
+                clear_tags: false,
+                code: code.clone(),
+            },
+            OWNER,
+        )
+        .await;
+    assert_eq!(resp["status"], "ok", "{resp}");
+
+    // A request from a client that predates `protected` has no such key.
+    let old: Request = serde_json::from_value(serde_json::json!({
+        "cmd": "edit-entry",
+        "path": "Web/github",
+        "sets": { "Env": "prod" },
+        "code": code,
+    }))
+    .expect("an old-shape EditEntry still parses");
+    let resp = h.handle_as(old, OWNER).await;
+    assert_eq!(resp["status"], "ok", "{resp}");
+
+    // Naming a protected field that is not being set is refused.
+    let resp = h
+        .handle_as(
+            Request::EditEntry {
+                path: "Web/github".into(),
+                title: None,
+                sets: Default::default(),
+                unsets: vec![],
+                protected: vec!["Nope".into()],
+                add_tags: vec![],
+                remove_tags: vec![],
+                clear_tags: false,
+                code: code.clone(),
+            },
+            OWNER,
+        )
+        .await;
+    assert!(is_err(&resp), "{resp}");
+
+    let resp = h
+        .handle_as(
+            Request::ShowEntry {
+                path: "Web/github".into(),
+            },
+            OWNER,
+        )
+        .await;
+    assert_eq!(resp["status"], "ok", "{resp}");
+    assert_eq!(
+        resp["entry"]["protected_fields"],
+        serde_json::json!(["API_TOKEN"])
+    );
+    assert!(!resp.to_string().contains("tok-secret"), "{resp}");
+
+    let v = Database::open(&path, PASSWORD).expect("reopen");
+    let id = v.find_by_title("Web/github").expect("entry");
+    assert_eq!(v.field_is_protected(&id, "API_TOKEN").unwrap(), Some(true));
+    assert_eq!(v.field_is_protected(&id, "Region").unwrap(), Some(false));
+    assert_eq!(v.get_field(&id, "Env").unwrap().as_deref(), Some("prod"));
 }

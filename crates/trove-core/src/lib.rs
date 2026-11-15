@@ -1929,6 +1929,29 @@ impl Database {
     /// matching KeePassXC, which memory-protects both by default.
     pub fn set_field(&mut self, id: &EntryId, field: &str, value: &str) -> Result<()> {
         const PROTECTED_FIELDS: [&str; 2] = ["Password", "otp"];
+        self.store_field(id, field, value, PROTECTED_FIELDS.contains(&field))
+    }
+
+    /// Set or replace a string field with the kdbx Protected flag, whatever
+    /// its name. A protected custom field is left out of `search_entries`,
+    /// `describe` and the CLI's `show` like `Password` is.
+    pub fn set_protected_field(&mut self, id: &EntryId, field: &str, value: &str) -> Result<()> {
+        self.store_field(id, field, value, true)
+    }
+
+    /// Whether a string field is stored with the kdbx Protected flag.
+    /// `Ok(None)` when the entry has no such field.
+    pub fn field_is_protected(&self, id: &EntryId, field: &str) -> Result<Option<bool>> {
+        let entry_id = self.lookup_entry_id(id)?;
+        let entry = self
+            .inner
+            .db
+            .entry(entry_id)
+            .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
+        Ok(entry.fields.get(field).map(|value| value.is_protected()))
+    }
+
+    fn store_field(&mut self, id: &EntryId, field: &str, value: &str, protect: bool) -> Result<()> {
         let entry_id = self.lookup_entry_id(id)?;
         self.remember_before_edit(entry_id);
         let mut entry = self
@@ -1936,7 +1959,7 @@ impl Database {
             .db
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        if PROTECTED_FIELDS.contains(&field) {
+        if protect {
             entry.set_protected(field, value);
         } else {
             entry.set_unprotected(field, value);

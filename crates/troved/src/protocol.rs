@@ -303,6 +303,10 @@ pub enum Request {
         sets: std::collections::BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unsets: Vec<String>,
+        /// Names in `sets` to store with the kdbx Protected flag, whatever
+        /// their name (`Password` and `otp` always are).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        protected: Vec<String>,
         /// KeePass-native tags to add to the entry.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         add_tags: Vec<String>,
@@ -599,6 +603,7 @@ impl std::fmt::Debug for Request {
                 title,
                 sets,
                 unsets,
+                protected,
                 add_tags,
                 remove_tags,
                 clear_tags,
@@ -610,6 +615,7 @@ impl std::fmt::Debug for Request {
                 // Field NAMES are safe to log; values may be secrets.
                 .field("sets", &sets.keys().collect::<Vec<_>>())
                 .field("unsets", unsets)
+                .field("protected", protected)
                 .field("add_tags", add_tags)
                 .field("remove_tags", remove_tags)
                 .field("clear_tags", clear_tags)
@@ -922,6 +928,9 @@ pub struct ShowDto {
     pub notes: Option<String>,
     /// Names (not values) of custom string fields beyond the standard five.
     pub custom_fields: Vec<String>,
+    /// The names in `custom_fields` stored with the kdbx Protected flag.
+    #[serde(default)]
+    pub protected_fields: Vec<String>,
     pub attachments: Vec<String>,
     pub group_path: Vec<String>,
     /// KeePass-native tags attached to this entry.

@@ -107,6 +107,12 @@ pub enum EnvAgentOp {
         /// The attachment it carries, exported as a temp-file path.
         #[arg(long)]
         attachment: Option<String>,
+        /// Create `--field` as a new protected custom field, prompting for its
+        /// value (hidden, twice; read from stdin when stdin is not a
+        /// terminal). With `--database` and `--password-stdin` the database
+        /// password is stdin line 1 and the value line 2.
+        #[arg(long, requires = "field", conflicts_with = "attachment")]
+        value_prompt: bool,
         /// `shell` also exports it into the shell at `trove unlock --export`.
         #[arg(long, value_parser = ["none", "shell"])]
         export: Option<String>,
@@ -466,6 +472,119 @@ fn apply_defaults(doc: &mut Document, attrs: &Attributes, clear: &[String]) -> R
     Ok(())
 }
 
+/// The standard KeePass fields, which `--value-prompt` never creates.
+const STANDARD_FIELDS: [&str; 5] = ["Title", "UserName", "Password", "URL", "Notes"];
+
+/// Read a new field's value: hidden and confirmed on a terminal, otherwise
+/// one line of stdin.
+fn read_field_value(field: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    let value = if std::io::stdin().is_terminal() {
+        let first = rpassword::prompt_password(format!("Value for {field}: "))?;
+        let second = rpassword::prompt_password(format!("Confirm {field}: "))?;
+        if first != second {
+            return Err(anyhow!("values do not match"));
+        }
+        first
+    } else {
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
+            .context("reading the field value from stdin")?;
+        line.trim_end_matches(['\r', '\n']).to_string()
+    };
+    if value.is_empty() {
+        return Err(anyhow!("the value for {field} must not be empty"));
+    }
+    Ok(value)
+}
+
+fn field_exists_error(entry: &str, field: &str) -> anyhow::Error {
+    anyhow!("field '{field}' already exists on {entry}; drop --value-prompt to use it")
+}
+
+/// `trove env-agent add --value-prompt`: create `field` as a protected custom
+/// field and add the variable that exports it. Offline this is one save;
+/// through the daemon it is an `EditEntry` then a `SetSettings`, and the
+/// field is removed again if the second fails.
+fn add_with_new_field(store: &mut Store, entry: &str, field: &str, item: Attributes) -> Result<()> {
+    let cap = Capability::EnvAgent;
+    if STANDARD_FIELDS
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(field))
+    {
+        return Err(anyhow!(
+            "--value-prompt creates a custom field; '{field}' is a standard field"
+        ));
+    }
+    let target = Target::Entry(entry.to_string());
+    // Check everything that can fail before asking for the value.
+    let current = store.read(&target, cap)?;
+    let mut doc = current.doc.unwrap_or_else(|| Document::new(cap));
+    doc.upsert_item(item)?;
+    match store {
+        Store::Offline(v) => {
+            let id = Store::entry_id(v, entry)?;
+            if v.get_field(&id, field)?.is_some() {
+                return Err(field_exists_error(entry, field));
+            }
+            let value = read_field_value(field)?;
+            v.set_protected_field(&id, field, &value)?;
+            v.store_settings(&id, cap, Some(&doc))?;
+            v.save().context("saving database")
+        }
+        Store::Daemon { code } => {
+            let resp = crate::daemon_call(&Request::ShowEntry {
+                path: entry.to_string(),
+            })?;
+            let exists = resp
+                .get("entry")
+                .and_then(|e| e.get("custom_fields"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|name| name.as_str() == Some(field));
+            if exists {
+                return Err(field_exists_error(entry, field));
+            }
+            let value = read_field_value(field)?;
+            crate::daemon_call(&Request::EditEntry {
+                path: entry.to_string(),
+                title: None,
+                sets: [(field.to_string(), value)].into(),
+                unsets: Vec::new(),
+                protected: vec![field.to_string()],
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                clear_tags: false,
+                code: code.clone(),
+            })?;
+            let saved = crate::daemon_call(&Request::SetSettings {
+                path: entry.to_string(),
+                capability: cap.cli_name().to_string(),
+                group: false,
+                document: Some(doc.to_xml()),
+                utf16: false,
+                code: code.clone(),
+            });
+            if let Err(e) = saved {
+                let _ = crate::daemon_call(&Request::EditEntry {
+                    path: entry.to_string(),
+                    title: None,
+                    sets: Default::default(),
+                    unsets: vec![field.to_string()],
+                    protected: Vec::new(),
+                    add_tags: Vec::new(),
+                    remove_tags: Vec::new(),
+                    clear_tags: false,
+                    code: code.clone(),
+                });
+                return Err(e);
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn cmd_env_agent(op: EnvAgentOp, database: Option<&Path>, pw_stdin: bool) -> Result<()> {
     let mut store = Store::open(database, pw_stdin)?;
     let cap = Capability::EnvAgent;
@@ -475,12 +594,13 @@ pub fn cmd_env_agent(op: EnvAgentOp, database: Option<&Path>, pw_stdin: bool) ->
             name,
             field,
             attachment,
+            value_prompt,
             export,
             constraints,
         } => {
             let mut attrs: Attributes = vec![("name".to_string(), name.clone())];
-            match (field, attachment) {
-                (Some(f), _) => set(&mut attrs, "field", &f),
+            match (&field, attachment) {
+                (Some(f), _) => set(&mut attrs, "field", f),
                 (None, Some(a)) => set(&mut attrs, "attachment", &a),
                 (None, None) => unreachable!("clap requires one"),
             }
@@ -488,8 +608,14 @@ pub fn cmd_env_agent(op: EnvAgentOp, database: Option<&Path>, pw_stdin: bool) ->
                 set(&mut attrs, "export", &e);
             }
             constraints.apply(&mut attrs);
-            update_entry(&mut store, &entry, cap, |doc| Ok(doc.upsert_item(attrs)?))?;
-            println!("{entry}: exports {name}");
+            if value_prompt {
+                let field = field.expect("clap requires --field with --value-prompt");
+                add_with_new_field(&mut store, &entry, &field, attrs)?;
+                println!("{entry}: exports {name} from new protected field {field}");
+            } else {
+                update_entry(&mut store, &entry, cap, |doc| Ok(doc.upsert_item(attrs)?))?;
+                println!("{entry}: exports {name}");
+            }
         }
         EnvAgentOp::Remove { entry, name } => {
             update_entry(&mut store, &entry, cap, |doc| {
