@@ -1926,7 +1926,10 @@ impl Database {
     /// `"Title"`, `"UserName"`, `"Password"`, `"URL"`, `"Notes"`. Custom fields permitted.
     ///
     /// `Password` and `otp` are stored with the kdbx Protected flag —
-    /// matching KeePassXC, which memory-protects both by default.
+    /// matching KeePassXC, which memory-protects both by default. Any other
+    /// field keeps the flag it already has, so overwriting a field another
+    /// client protected (a passkey's private key, say) leaves it protected;
+    /// a new field is unprotected.
     pub fn set_field(&mut self, id: &EntryId, field: &str, value: &str) -> Result<()> {
         const PROTECTED_FIELDS: [&str; 2] = ["Password", "otp"];
         let entry_id = self.lookup_entry_id(id)?;
@@ -1936,7 +1939,11 @@ impl Database {
             .db
             .entry_mut(entry_id)
             .ok_or_else(|| Error::EntryNotFound(id.0.clone()))?;
-        if PROTECTED_FIELDS.contains(&field) {
+        let already_protected = entry
+            .fields
+            .get(field)
+            .is_some_and(|existing| existing.is_protected());
+        if already_protected || PROTECTED_FIELDS.contains(&field) {
             entry.set_protected(field, value);
         } else {
             entry.set_unprotected(field, value);
