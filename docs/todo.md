@@ -51,7 +51,7 @@ sites** outside tests. Blocked on nothing except the parser below.
 |---|---|
 | `RemoveAtDatabaseClose` | **deliberately not honoured** for our own agent — lock always drops the store, and honouring `false` would mean retaining a key past lock. Needed for the forwarding path only. |
 | `UseLifetimeConstraintWhenSigning` + `LifetimeConstraintDuration` | **done** — trove's own agent and private sockets stop serving the key when the lifetime runs out, counted from unlock (or `ssh-agent add`). |
-| `UseConfirmConstraintWhenSigning` | **blocked** on having a UI to prompt with (see item 6). Implementable for forwarding today, since the external agent prompts. |
+| `UseConfirmConstraintWhenSigning` | **done** — trove's own agent, the Windows OpenSSH pipe and private sockets ask for Touch ID before every signature, and refuse where none can be asked. Forwarded copies carry `SSH_AGENT_CONSTRAIN_CONFIRM`. A desktop-app dialog waits on item 6. |
 
 ### 5. RSA `PKDECRYPT`
 Signing works for RSA now; decryption doesn't. Blocks `pass`, `sops`,

@@ -171,8 +171,10 @@ pub struct ForwardPolicy {
     /// `None` when the entry expresses no preference and the daemon's own
     /// default applies.
     pub lifetime_secs: Option<u32>,
-    /// `UseConfirmConstraintWhenAdding` — make the receiving agent prompt the
-    /// user before every use of the key (`SSH_AGENT_CONSTRAIN_CONFIRM`).
+    /// `UseConfirmConstraintWhenAdding` or `...WhenSigning` — make the
+    /// receiving agent prompt the user before every use of the key
+    /// (`SSH_AGENT_CONSTRAIN_CONFIRM`). trove's own sockets ask the approver
+    /// before every signature too.
     pub confirm: bool,
 }
 
