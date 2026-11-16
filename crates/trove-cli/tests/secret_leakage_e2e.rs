@@ -19,6 +19,7 @@ const WRONG_MASTER: &str = "leak-canary-wrong-3b9e";
 const SECRET: &str = "leak-canary-secret-8c2f";
 const FILE_BYTES: &str = "leak-canary-file-5a7d";
 const WRONG_CODE: &str = "leak-canary-code-6f0a";
+const COPY_SECRET: &str = "leak-canary-copy-9d3c";
 
 fn find_trove() -> Option<PathBuf> {
     let p = PathBuf::from(option_env!("CARGO_BIN_EXE_trove")?);
@@ -161,6 +162,72 @@ fn offline_errors_and_reads_do_not_leak() {
     ] {
         let out = offline(args, &pw);
         assert!(!out.status.success(), "{} should fail", args.join(" "));
+        assert_output_clean(&args.join(" "), &out, &all);
+    }
+}
+
+/// A merge or sync report names entries, never their values, in human or
+/// `--json` form.
+#[test]
+fn merge_and_sync_reports_do_not_leak() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let vs = seed(&trove, tmp.path());
+    let copy = tmp.path().join("copy.kdbx");
+    let cs = copy.to_str().unwrap();
+    let all = [MASTER, SECRET, FILE_BYTES, COPY_SECRET];
+    let pw = format!("{MASTER}\n");
+    let two = format!("{MASTER}\n{MASTER}\n");
+    let on = |database: &str, args: &[&str], stdin: &str| {
+        let mut full = vec!["--database", database, "--password-stdin"];
+        full.extend_from_slice(args);
+        run(&trove, &[], &full, stdin)
+    };
+
+    for (round, args) in [
+        &["merge", cs][..],
+        &["merge", cs, "--json"],
+        &["sync", cs],
+        &["sync", cs, "--json"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let new = format!("Infra/new-{round}");
+        std::fs::copy(&vs, &copy).unwrap();
+        // A later second, so the copy's edits win the merge.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        ok(
+            &on(
+                cs,
+                &[
+                    "edit",
+                    "Infra/svc",
+                    "--set",
+                    &format!("Token={COPY_SECRET}"),
+                ],
+                &pw,
+            ),
+            "edit copy",
+        );
+        ok(
+            &on(
+                cs,
+                &["add", "password", &new, "--secret-stdin"],
+                &format!("{MASTER}\n{COPY_SECRET}\n"),
+            ),
+            "add to copy",
+        );
+        let out = on(&vs, args, &two);
+        ok(&out, &args.join(" "));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(&new),
+            "{} reports the new entry",
+            args.join(" ")
+        );
         assert_output_clean(&args.join(" "), &out, &all);
     }
 }
