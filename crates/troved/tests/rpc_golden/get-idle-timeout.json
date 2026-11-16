@@ -1,0 +1,10 @@
+{
+  "request": {
+    "cmd": "get-idle-timeout"
+  },
+  "response": {
+    "status": "string",
+    "seconds": "integer",
+    "remaining": "integer|null"
+  }
+}

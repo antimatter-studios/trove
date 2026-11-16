@@ -1,0 +1,9 @@
+{
+  "request": {
+    "cmd": "ping"
+  },
+  "response": {
+    "status": "string",
+    "pong": "bool"
+  }
+}

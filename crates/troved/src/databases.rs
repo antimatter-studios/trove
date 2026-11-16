@@ -73,7 +73,7 @@ pub enum ResolveError {
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ResolveError::NoDatabase => write!(f, "no database unlocked"),
+            ResolveError::NoDatabase => f.write_str(crate::protocol::NO_DATABASE_UNLOCKED),
             ResolveError::NotFound(title) => write!(f, "entry not found: {title}"),
             ResolveError::AmbiguousEntry { title, databases } => write!(
                 f,

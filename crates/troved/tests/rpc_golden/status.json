@@ -1,0 +1,26 @@
+{
+  "request": {
+    "cmd": "status"
+  },
+  "response": {
+    "status": "string",
+    "database_path": "string|null",
+    "database_paths?": [
+      "string"
+    ],
+    "idle_timeout_secs": "integer",
+    "idle_remaining_secs": "integer|null",
+    "ssh_keys": "integer",
+    "gpg_keys": "integer",
+    "materialized": "integer",
+    "skipped_keys?": [
+      {
+        "agent": "string",
+        "database": "string",
+        "entry": "string",
+        "attachment": "string",
+        "reason": "string"
+      }
+    ]
+  }
+}

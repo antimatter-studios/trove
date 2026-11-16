@@ -1,0 +1,9 @@
+{
+  "request": {
+    "cmd": "set-idle-timeout",
+    "seconds": 0
+  },
+  "response": {
+    "status": "string"
+  }
+}

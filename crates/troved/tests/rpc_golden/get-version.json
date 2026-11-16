@@ -1,0 +1,10 @@
+{
+  "request": {
+    "cmd": "get-version"
+  },
+  "response": {
+    "status": "string",
+    "daemon_version": "string",
+    "protocol_version": "integer"
+  }
+}

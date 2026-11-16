@@ -1,0 +1,19 @@
+{
+  "request": {
+    "cmd": "ssh-agent-list"
+  },
+  "response": {
+    "status": "string",
+    "ssh_keys": [
+      {
+        "algo": "string",
+        "blob_b64": "string",
+        "comment": "string",
+        "expires_in_secs?": "integer"
+      }
+    ]
+  },
+  "nonempty": [
+    "ssh_keys"
+  ]
+}
