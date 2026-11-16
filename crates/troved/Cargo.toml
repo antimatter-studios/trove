@@ -100,6 +100,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The fuzz harness bodies (fuzz/harness/), replayed on stable by
+# tests/fuzz_corpus_replay.rs, drive keepass-rs directly.
+keepass.workspace = true
 # `test-util` enables `tokio::test(start_paused = true)` for the IdleTracker
 # unit tests so simulated time advances without real wall-clock waits.
 tokio = { workspace = true, features = ["test-util"] }

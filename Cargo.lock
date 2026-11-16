@@ -2928,6 +2928,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek 2.2.0",
  "hmac 0.12.1",
+ "keepass",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",

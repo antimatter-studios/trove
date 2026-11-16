@@ -1,0 +1,1 @@
+{"cmd": "ssh-agent-add-matching", "socket": "/nonexistent/agent.sock", "pattern": "Infra/*", "tag": "ssh"}

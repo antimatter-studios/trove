@@ -44,6 +44,15 @@ arbitrary = { version = "1", features = ["derive"] }
 # which is already `pub` for integration-test purposes.
 troved = { path = ".." }
 
+# For the targets in harness/: kdbx_open and keyfile_parse drive keepass-rs
+# directly (same version and patch as trove-core, so the same code), the rest go
+# through trove-core and troved.
+keepass = { version = "0.15", features = ["save_kdbx4", "totp", "_merge"] }
+trove-core = { path = "../../trove-core" }
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+serde_json = "1"
+tempfile = "3"
+
 # Prevent these binaries from being compiled when the fuzz crate is built
 # without cargo-fuzz (e.g. plain `cargo check` from inside this directory),
 # which would fail because libfuzzer-sys's `fuzz_target!` macro only works
@@ -65,6 +74,41 @@ bench = false
 [[bin]]
 name = "assuan_line_parse"
 path = "fuzz_targets/assuan_line_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kdbx_open"
+path = "fuzz_targets/kdbx_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "keyfile_parse"
+path = "fuzz_targets/keyfile_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_request"
+path = "fuzz_targets/ipc_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otpauth_uri"
+path = "fuzz_targets/otpauth_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trove_ref_resolve"
+path = "fuzz_targets/trove_ref_resolve.rs"
 test = false
 doc = false
 bench = false

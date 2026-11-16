@@ -1,0 +1,1 @@
+{"cmd": "search", "term": "post", "fields": ["UserName=fuzz"], "tags": ["a"], "attachments": ["note.txt"]}

@@ -54,7 +54,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [assuan_line_parse, ssh_wire_parse, ssh_wire_round_trip]
+        target:
+          - assuan_line_parse
+          - ssh_wire_parse
+          - ssh_wire_round_trip
+          - kdbx_open
+          - keyfile_parse
+          - ipc_request
+          - otpauth_uri
+          - trove_ref_resolve
     defaults:
       run:
         working-directory: crates/troved/fuzz
