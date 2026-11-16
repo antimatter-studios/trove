@@ -2320,8 +2320,42 @@ dependencies = [
 
 [[package]]
 name = "keepass"
-version = "0.15.0"
-source = "git+https://github.com/antimatter-studios/keepass-rs?rev=0bfc807e99add516c5693e587e4176ef8404aa58#0bfc807e99add516c5693e587e4176ef8404aa58"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "806049805d04e8b5793c7bf65b4126ede348194135ebd938a4fe3d37d6833a31"
+dependencies = [
+ "aes 0.9.4",
+ "base64 0.23.1",
+ "block-modes",
+ "byteorder",
+ "cbc",
+ "chacha20",
+ "chrono",
+ "cipher 0.5.2",
+ "flate2",
+ "getrandom 0.4.3",
+ "hex",
+ "hex-literal",
+ "hmac 0.13.0",
+ "hybrid-array",
+ "indexmap 2.14.2",
+ "js-sys",
+ "quick-xml",
+ "rust-argon2",
+ "salsa20",
+ "secrecy",
+ "serde",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "twofish",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "keepass"
+version = "0.17.0"
+source = "git+https://github.com/antimatter-studios/keepass-rs?rev=886a4ab9fc6783172c42bf53fe4ee4f2470684cc#886a4ab9fc6783172c42bf53fe4ee4f2470684cc"
 dependencies = [
  "aes 0.9.4",
  "base32",
@@ -5077,7 +5111,7 @@ dependencies = [
  "base32",
  "chrono",
  "hmac 0.13.0",
- "keepass",
+ "keepass 0.17.0",
  "quick-xml",
  "sha1 0.11.0",
  "sha2 0.11.1",
@@ -5092,7 +5126,7 @@ version = "0.27.1"
 dependencies = [
  "base64 0.22.1",
  "block2",
- "keepass",
+ "keepass 0.15.5",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
