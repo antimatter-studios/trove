@@ -55,7 +55,7 @@ hmac = "0.12"
 # (RFC 3394) is used to unwrap the OpenPGP session key.
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
 aes-kw = { version = "0.2", features = ["alloc"] }
-aes = { version = "0.8", default-features = false }
+aes = { version = "0.9", default-features = false }
 # v0.0.5.0: random bytes for the materialize secure-wipe pass. We don't need a
 # cryptographic CSPRNG strictly speaking — we're overwriting bytes that the
 # storage device may or may not actually rewrite in place — but using OsRng
