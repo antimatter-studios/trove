@@ -31,6 +31,11 @@ mod error;
 pub use error::Error;
 pub mod revisions;
 pub mod settings;
+mod transfer;
+pub use transfer::{
+    send_entry, EntrySnapshot, PreparedSend, SendOptions, SendOutcome, SnapshotField,
+    SEND_SOURCE_DATABASE_KEY, SEND_SOURCE_ENTRY_KEY,
+};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -2999,8 +3004,8 @@ impl Database {
         if other.root().id() != self.inner.db.root().id() {
             return Err(Error::Kdbx(
                 "source is not a copy of this database (different root UUID); merge \
-                 reconciles diverged copies — to combine unrelated databases, import \
-                 entries explicitly"
+                 reconciles diverged copies — to copy entries between unrelated \
+                 databases, use `trove send <ENTRY> --to <PATH>`"
                     .to_string(),
             ));
         }

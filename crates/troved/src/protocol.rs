@@ -336,15 +336,37 @@ pub enum Request {
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
-    /// Code-gated write: duplicate an entry, whole, at another path.
+    /// Code-gated write: duplicate an entry, whole, at another path in the
+    /// same database.
     ///
     /// Same destination rules as [`Request::MoveEntry`]. The copy is
     /// independent — nothing records that two entries share key material,
     /// because a recorded link invites tooling that rotates one and takes the
-    /// other with it.
+    /// other with it. [`Request::SendEntry`] is the other way round: it copies
+    /// into another database and records where the copy came from.
     CopyEntry {
         path: String,
         dest: String,
+        // NOTE: sensitive — the session capability. Never Debug-print verbatim.
+        code: String,
+    },
+    /// Code-gated write: `trove send`. Copy (or with `move_source`, move) an
+    /// entry into another database, recording the source entry and database
+    /// in the copy's CustomData. `to` is the target file: an unlocked
+    /// database is written in place; any other file is opened with
+    /// `target_password` for this request only.
+    SendEntry {
+        path: String,
+        to: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_group: Option<String>,
+        #[serde(default)]
+        move_source: bool,
+        #[serde(default)]
+        with_history: bool,
+        // NOTE: sensitive — the target's password. Never Debug-print verbatim.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_password: Option<String>,
         // NOTE: sensitive — the session capability. Never Debug-print verbatim.
         code: String,
     },
@@ -621,6 +643,27 @@ impl std::fmt::Debug for Request {
                 .debug_struct("RemoveEntry")
                 .field("path", path)
                 .field("permanent", permanent)
+                .field("code", &"<redacted>")
+                .finish(),
+            Request::SendEntry {
+                path,
+                to,
+                to_group,
+                move_source,
+                with_history,
+                target_password,
+                ..
+            } => f
+                .debug_struct("SendEntry")
+                .field("path", path)
+                .field("to", to)
+                .field("to_group", to_group)
+                .field("move_source", move_source)
+                .field("with_history", with_history)
+                .field(
+                    "target_password",
+                    &target_password.as_ref().map(|_| "<redacted>"),
+                )
                 .field("code", &"<redacted>")
                 .finish(),
             Request::CopyEntry { path, dest, .. } => f
@@ -1133,6 +1176,13 @@ pub enum OkBody {
     Recycled {
         recycled: bool,
     },
+    /// Response to `SendEntry`: where the copy landed and what happened.
+    Sent {
+        sent_path: String,
+        target: PathBuf,
+        updated: bool,
+        moved: bool,
+    },
     /// Paths and materialization field count from a recursive group transfer.
     GroupTransfer {
         entries: Vec<(String, String)>,
@@ -1355,6 +1405,14 @@ impl Response {
     }
     pub fn ok_recycled(recycled: bool) -> Self {
         Response::Ok(OkBody::Recycled { recycled })
+    }
+    pub fn ok_sent(outcome: &trove_core::SendOutcome, target: PathBuf) -> Self {
+        Response::Ok(OkBody::Sent {
+            sent_path: outcome.path.clone(),
+            target,
+            updated: outcome.updated,
+            moved: outcome.moved,
+        })
     }
     pub fn ok_group_transfer(plan: trove_core::GroupTransferPlan) -> Self {
         Response::Ok(OkBody::GroupTransfer {

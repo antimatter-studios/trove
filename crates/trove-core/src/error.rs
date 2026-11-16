@@ -47,6 +47,15 @@ pub enum Error {
     #[error("entry already exists: {0}")]
     EntryExists(String),
 
+    #[error(
+        "entry already exists in the target and was not sent from this entry: {0} \
+         (pass --to-group to send it to another group)"
+    )]
+    SendConflict(String),
+
+    #[error("field {field}: cannot resolve {reference} (only {{REF:T|U|P|A|N@I:<uuid>}} references are supported)")]
+    UnresolvedReference { field: String, reference: String },
+
     #[error("group not empty: {0} (pass --recursive to delete it and its contents)")]
     GroupNotEmpty(String),
 
