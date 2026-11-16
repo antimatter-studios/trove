@@ -1266,10 +1266,12 @@ fn apply_attributes(
 
 /// Whether a custom field is one the user owns and the UI shows.
 ///
-/// `_Trove*` is our own bookkeeping. `Materialize.*` is not an attribute of the
-/// entry at all — it describes an attachment, and the Attachments section
-/// presents it as such; listed as an attribute it would be duplicate noise, and
-/// editable there a typo would silently stop a file being written.
+/// `_Trove*` is our own bookkeeping. `KPEX_PASSKEY_*` is a passkey, private key
+/// included, which the form has no business showing or editing. `Materialize.*`
+/// is not an attribute of the entry at all — it describes an attachment, and
+/// the Attachments section presents it as such; listed as an attribute it would
+/// be duplicate noise, and editable there a typo would silently stop a file
+/// being written.
 ///
 /// Read and write MUST agree on this, which is why it is one function rather
 /// than two matching conditions. Saving reconciles the entry's attributes
@@ -1288,7 +1290,15 @@ fn is_standard_field(key: &str) -> bool {
 }
 
 fn is_user_attribute(key: &str) -> bool {
-    !key.starts_with("_Trove") && !key.starts_with("Materialize.")
+    !key.starts_with("_Trove") && !key.starts_with("Materialize.") && !is_passkey_attribute(key)
+}
+
+/// A passkey attribute as KeePassXC's browser integration writes it
+/// (`KPEX_PASSKEY_USERNAME`, `KPEX_PASSKEY_PRIVATE_KEY_PEM`, ...). These are the
+/// passkey itself, private key included: the form must neither show nor
+/// rewrite them, so a save that never saw them leaves them as they were.
+fn is_passkey_attribute(key: &str) -> bool {
+    key.starts_with("KPEX_PASSKEY_")
 }
 
 fn apply_custom_attribute(
@@ -3370,6 +3380,104 @@ mod tests {
         let names = database.custom_field_names(&eid).unwrap();
         assert!(names.iter().any(|k| k == " spaced "), "got {names:?}");
         assert!(!names.iter().any(|k| k == "spaced"), "got {names:?}");
+    }
+
+    /// The `KPEX_PASSKEY_*` attributes KeePassXC 2.8.0 writes for a passkey,
+    /// with its Protected flags (`BrowserService::addPasskeyToEntry`).
+    const PASSKEY_ATTRIBUTES: [(&str, &str, bool); 7] = [
+        ("KPEX_PASSKEY_USERNAME", "alice", false),
+        ("KPEX_PASSKEY_CREDENTIAL_ID", "q7UwRd2kTcGg9w", true),
+        (
+            "KPEX_PASSKEY_PRIVATE_KEY_PEM",
+            "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg\n-----END PRIVATE KEY-----",
+            true,
+        ),
+        ("KPEX_PASSKEY_RELYING_PARTY", "webauthn.io", false),
+        ("KPEX_PASSKEY_USER_HANDLE", "dXNlci1oYW5kbGU", true),
+        ("KPEX_PASSKEY_FLAG_BE", "1", false),
+        ("KPEX_PASSKEY_FLAG_BS", "1", false),
+    ];
+
+    fn open_raw(path: &std::path::Path) -> keepass::Database {
+        let mut file = std::fs::File::open(path).unwrap();
+        keepass::Database::open(
+            &mut file,
+            keepass::DatabaseKey::new().with_password("correct horse"),
+        )
+        .unwrap()
+    }
+
+    fn raw_passkey_attributes(path: &std::path::Path) -> Vec<(String, String, bool)> {
+        let db = open_raw(path);
+        let entry = db
+            .iter_all_entries()
+            .find(|e| e.get_title() == Some("site"))
+            .unwrap();
+        let mut found: Vec<(String, String, bool)> = entry
+            .fields
+            .iter()
+            .filter(|(k, _)| k.starts_with("KPEX_PASSKEY_"))
+            .map(|(k, v)| (k.clone(), v.get().clone(), v.is_protected()))
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn passkey_fields_hidden_and_preserved_on_save() {
+        let (mut database, path) = temp_database();
+        let eid = apply_save_entry(&mut database, &input(None, "Web/site")).unwrap();
+        database.save().unwrap();
+        drop(database);
+
+        // Give the entry a passkey as KeePassXC writes one.
+        let mut db = open_raw(&path);
+        let entry_id = db
+            .iter_all_entries()
+            .find(|e| e.get_title() == Some("site"))
+            .unwrap()
+            .id();
+        {
+            let mut entry = db.entry_mut(entry_id).unwrap();
+            for (key, value, protected) in PASSKEY_ATTRIBUTES {
+                if protected {
+                    entry.set_protected(key, value);
+                } else {
+                    entry.set_unprotected(key, value);
+                }
+            }
+        }
+        let mut file = std::fs::File::create(&path).unwrap();
+        db.save(
+            &mut file,
+            keepass::DatabaseKey::new().with_password("correct horse"),
+        )
+        .unwrap();
+        drop(file);
+        let before = raw_passkey_attributes(&path);
+        assert_eq!(before.len(), PASSKEY_ATTRIBUTES.len());
+
+        let mut database = Database::open(&path, "correct horse").unwrap();
+        let detail = entry_detail(&database, &eid).unwrap();
+        assert!(
+            !detail
+                .fields
+                .iter()
+                .any(|kv| kv.k.starts_with("KPEX_PASSKEY_") || kv.v.contains("PRIVATE KEY")),
+            "passkey attributes must not reach the form: {:?}",
+            detail.fields.iter().map(|kv| &kv.k).collect::<Vec<_>>()
+        );
+
+        // The form sends back what it was shown, with the notes edited.
+        let save = EntryInput {
+            notes: "edited".to_string(),
+            fields: Some(detail.fields),
+            ..input(Some(eid.as_str().to_string()), "Web/site")
+        };
+        apply_save_entry(&mut database, &save).unwrap();
+        database.save().unwrap();
+
+        assert_eq!(raw_passkey_attributes(&path), before);
     }
 
     #[test]
