@@ -40,7 +40,7 @@ serde_json.workspace = true
 serde_yaml = "0.9"
 # v0.0.10.0: code-gated `get` routes extraction through the daemon, which
 # returns attachment bytes base64-encoded on the JSON wire. We decode here.
-base64 = "0.22"
+base64 = "0.23"
 # `add password --generate` / `generate password|diceware` mint secrets with
 # the OS CSPRNG. Same pinning as troved's.
 rand = { version = "0.10", default-features = false, features = ["std", "sys_rng"] }
