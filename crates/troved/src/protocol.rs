@@ -7,6 +7,36 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// The challenge-response factor of an `Unlock`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChallengeResponseSpec {
+    /// A YubiKey HMAC-SHA1 slot (1 or 2), on the key with this serial or on
+    /// the only one plugged in.
+    Yubikey {
+        slot: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        serial: Option<u32>,
+    },
+    /// The HMAC-SHA1 secret a slot was programmed with, as hex. Tests use it
+    /// in place of a device (`trove --cr-secret-hex`).
+    Software { secret_hex: String },
+}
+
+/// Names the factor, never the software secret.
+impl std::fmt::Debug for ChallengeResponseSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Yubikey { slot, serial } => f
+                .debug_struct("Yubikey")
+                .field("slot", slot)
+                .field("serial", serial)
+                .finish(),
+            Self::Software { .. } => f.write_str("Software(<redacted>)"),
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Request {
@@ -45,6 +75,13 @@ pub enum Request {
         /// Wire-optional for back-compat.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<bool>,
+        /// Optional challenge-response factor (a YubiKey slot, or the
+        /// software secret tests use). The daemon keeps the provider, so each
+        /// save it makes answers the fresh challenge. Wire-optional for
+        /// back-compat.
+        // NOTE: sensitive when `Software` — key material. Never Debug-print.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        challenge_response: Option<ChallengeResponseSpec>,
     },
     List,
     /// Lock one unlocked database, or all of them.
@@ -435,6 +472,7 @@ impl std::fmt::Debug for Request {
                 .field("timeout", timeout)
                 .field("filter", filter)
                 .field("keyfile", &"<redacted>")
+                .field("challenge_response", &"<redacted>")
                 .finish(),
             Request::List => f.write_str("List"),
             Request::Lock { database } => {

@@ -11,7 +11,8 @@ categories = ["cryptography", "parser-implementations"]
 
 [features]
 # Challenge-response unlock (YubiKey HMAC-SHA1, KeePassXC's scheme). Off by
-# default: the hardware path pulls USB/HID system dependencies. The software
+# default: the hardware path pulls in a USB stack (nusb on Linux, a statically
+# linked libusb on macOS and Windows), but no runtime library. The software
 # `LocalChallenge` provider (same derivation) rides along for tests.
 yubikey = ["keepass/challenge_response"]
 

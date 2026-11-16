@@ -78,6 +78,7 @@ fn unlock_req(path: &std::path::Path, keyfile_bytes: Option<&[u8]>) -> Request {
         keyfile: keyfile_bytes.map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
         filter: None,
         session: None,
+        challenge_response: None,
     }
 }
 
@@ -104,6 +105,7 @@ async fn unlock_with_keyfile_and_daemon_resave_keeps_composite_key() {
                 keyfile: Some("!!not-base64!!".to_string()),
                 filter: None,
                 session: None,
+                challenge_response: None,
             },
             OWNER,
         )

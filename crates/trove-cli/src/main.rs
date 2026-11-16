@@ -145,8 +145,10 @@ struct Cli {
 
     /// Unlock with a YubiKey HMAC-SHA1 challenge-response (KeePassXC's
     /// scheme): `--yubikey <SLOT>[:SERIAL]`, e.g. `--yubikey 2`. Applies to
-    /// offline `--database` commands and `init`. The device must stay connected
-    /// while writing — every save answers a fresh challenge.
+    /// `unlock` (troved then talks to the key for every save, and later
+    /// commands need no flag), `init` and offline `--database` commands. The
+    /// device must stay connected while writing — every save answers a fresh
+    /// challenge.
     #[cfg(feature = "yubikey")]
     #[arg(long = "yubikey", global = true, value_name = "SLOT[:SERIAL]")]
     yubikey: Option<String>,
@@ -1681,7 +1683,8 @@ fn challenge_response_uses_offline_database(command: &Command, database: Option<
         Command::Generate {
             resource: GenerateResource::Ssh { .. },
         } => database.is_some(),
-        // Includes unlock: its positional database is always opened by troved.
+        // troved opens unlock's positional database and keeps the provider.
+        Command::Unlock { .. } => true,
         _ => false,
     }
 }
@@ -1731,7 +1734,7 @@ mod challenge_response_routing_tests {
             },
             Some(database)
         ));
-        assert!(!challenge_response_uses_offline_database(
+        assert!(challenge_response_uses_offline_database(
             &Command::Unlock {
                 database: PathBuf::from("database.kdbx"),
                 timeout: None,
@@ -1762,14 +1765,43 @@ fn global_keyfile() -> Option<&'static [u8]> {
 static CHALLENGE_RESPONSE: std::sync::OnceLock<Option<trove_core::ChallengeResponse>> =
     std::sync::OnceLock::new();
 
+/// What `trove unlock` forwards to troved, derived from the same flags.
+#[cfg(feature = "yubikey")]
+static UNLOCK_CHALLENGE_RESPONSE: std::sync::OnceLock<Option<daemon::ChallengeResponseSpec>> =
+    std::sync::OnceLock::new();
+
 #[cfg(feature = "yubikey")]
 fn global_challenge_response() -> Option<&'static trove_core::ChallengeResponse> {
     CHALLENGE_RESPONSE.get().and_then(|o| o.as_ref())
 }
 
-/// Resolve `--yubikey SLOT[:SERIAL]` to a device-backed provider.
+/// The challenge-response factor `trove unlock` sends to troved: the YubiKey
+/// found in `run()`, pinned to its serial, or the software secret. troved
+/// talks to the device itself, since it is the process that saves.
 #[cfg(feature = "yubikey")]
-fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponse> {
+fn unlock_challenge_response(
+    cli_yubikey: Option<&str>,
+    provider: Option<&trove_core::ChallengeResponse>,
+    secret_hex: Option<&str>,
+) -> Result<Option<daemon::ChallengeResponseSpec>> {
+    if let Some(hex) = secret_hex {
+        return Ok(Some(daemon::ChallengeResponseSpec::Software {
+            secret_hex: hex.to_string(),
+        }));
+    }
+    let (Some(spec), Some(provider)) = (cli_yubikey, provider) else {
+        return Ok(None);
+    };
+    let (slot, _) = parse_yubikey_spec(spec)?;
+    Ok(Some(daemon::ChallengeResponseSpec::Yubikey {
+        slot,
+        serial: provider.yubikey_serial(),
+    }))
+}
+
+/// Parse `SLOT[:SERIAL]`.
+#[cfg(feature = "yubikey")]
+fn parse_yubikey_spec(spec: &str) -> Result<(u8, Option<u32>)> {
     let (slot, serial) = match spec.split_once(':') {
         Some((s, ser)) => (
             s,
@@ -1782,6 +1814,13 @@ fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponse> {
         "2" => 2,
         _ => return Err(anyhow!("--yubikey slot must be 1 or 2, got '{slot}'")),
     };
+    Ok((slot, serial))
+}
+
+/// Resolve `--yubikey SLOT[:SERIAL]` to a device-backed provider.
+#[cfg(feature = "yubikey")]
+fn resolve_yubikey(spec: &str) -> Result<trove_core::ChallengeResponse> {
+    let (slot, serial) = parse_yubikey_spec(spec)?;
     Ok(trove_core::ChallengeResponse::yubikey(slot, serial)?)
 }
 
@@ -1874,7 +1913,7 @@ fn run(cli: Cli) -> Result<()> {
             && !challenge_response_uses_offline_database(&cli.command, database)
         {
             return Err(anyhow!(
-                "YubiKey challenge-response is supported only when trove opens a database offline; daemon-backed commands, including `unlock`, do not support it"
+                "YubiKey challenge-response applies to `unlock`, `init` and offline `--database` commands; once `trove unlock --yubikey` has opened a database, daemon-backed commands need no flag"
             ));
         }
         // Fail fast: a missing/ambiguous device or bad hex should surface
@@ -1884,6 +1923,14 @@ fn run(cli: Cli) -> Result<()> {
             (None, Some(hex)) => Some(trove_core::ChallengeResponse::software(hex.clone())),
             (None, None) => None,
         };
+        let unlock_cr = unlock_challenge_response(
+            cli.yubikey.as_deref(),
+            cr.as_ref(),
+            cli.cr_secret_hex.as_deref(),
+        )?;
+        UNLOCK_CHALLENGE_RESPONSE
+            .set(unlock_cr)
+            .expect("run() is called once");
         CHALLENGE_RESPONSE.set(cr).expect("run() is called once");
     }
     match cli.command {
@@ -7597,6 +7644,10 @@ fn cmd_unlock(
         )?
     };
 
+    #[cfg(feature = "yubikey")]
+    let challenge_response = UNLOCK_CHALLENGE_RESPONSE.get().cloned().flatten();
+    #[cfg(not(feature = "yubikey"))]
+    let challenge_response = None;
     let req = daemon::Request::Unlock {
         path: database_str,
         password,
@@ -7609,6 +7660,7 @@ fn cmd_unlock(
         // Only speak up to decline. Sending `None` otherwise keeps the request
         // byte-identical to what every previous release sent.
         session: detach.then_some(false),
+        challenge_response,
     };
     let (resp, autospawned) = match daemon::send_autospawn_reporting(&req) {
         Ok(v) => v,

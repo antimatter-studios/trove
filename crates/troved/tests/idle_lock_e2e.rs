@@ -171,6 +171,7 @@ async fn idle_expiry_clears_all_secret_material() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -249,6 +250,7 @@ async fn explicit_lock_cancels_timer() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(target.exists());
@@ -289,6 +291,7 @@ async fn control_rpc_activity_keeps_database_unlocked() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(target.exists());
@@ -355,6 +358,7 @@ async fn ssh_agent_traffic_resets_idle_timer() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(target.exists());
@@ -432,6 +436,7 @@ async fn unlock_timeout_overrides_configured_value() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)), "unlock failed: {resp:?}");
@@ -480,6 +485,7 @@ async fn unlock_without_timeout_preserves_configured_value() {
             keyfile: None,
             filter: None,
             session: None,
+            challenge_response: None,
         })
         .await;
     assert!(matches!(resp, Response::Ok(_)));
