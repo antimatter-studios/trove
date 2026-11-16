@@ -5124,7 +5124,7 @@ dependencies = [
 name = "trove-desktop"
 version = "0.27.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "block2",
  "keepass 0.15.5",
  "objc2",
