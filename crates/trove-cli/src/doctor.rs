@@ -71,8 +71,8 @@ impl Check {
 }
 
 /// Run every check. `database` is the database the command line or `TROVE_DATABASE`
-/// names, if any.
-pub fn run_checks(database: Option<&Path>) -> Vec<Check> {
+/// names, if any; `key_file` is the global `--key-file`, if given.
+pub fn run_checks(database: Option<&Path>, key_file: Option<&Path>) -> Vec<Check> {
     let mut checks = Vec::new();
     let status = daemon::send(&daemon::Request::Status);
     let running = status.is_ok();
@@ -86,14 +86,150 @@ pub fn run_checks(database: Option<&Path>) -> Vec<Check> {
         if let Some(c) = materialized_check() {
             checks.push(c);
         }
+        let session_set = std::env::var_os("TROVE_SESSION").is_some_and(|v| !v.is_empty());
+        if let Some(c) = classify_session(&unlocked_paths(resp), session_set) {
+            checks.push(c);
+        }
     }
     #[cfg(unix)]
     checks.push(daemons_check());
     checks.push(ssh_check(running));
     checks.push(gpg_check());
     checks.push(database_check(database));
+    #[cfg(target_os = "macos")]
+    if let Some(path) = database {
+        checks.push(classify_keychain(path, crate::keychain::exists(path)));
+    }
+    if let Some(path) = key_file {
+        checks.push(classify_key_file(path, probe_key_file(path)));
+    }
     checks.extend(env_file_checks(database));
     checks
+}
+
+/// The database paths a `Status` response says are unlocked.
+fn unlocked_paths(status: &Value) -> Vec<String> {
+    status
+        .get("database_paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::to_string))
+        .collect()
+}
+
+/// With a database unlocked, reads (`get`, `materialize`) need the session
+/// code from `TROVE_SESSION`. `None` when nothing is unlocked.
+fn classify_session(unlocked: &[String], session_set: bool) -> Option<Check> {
+    let first = unlocked.first()?;
+    if session_set {
+        return Some(Check::new(
+            "session",
+            Level::Ok,
+            "TROVE_SESSION is set in this shell",
+        ));
+    }
+    Some(
+        Check::new(
+            "session",
+            Level::Info,
+            format!(
+                "{} database(s) unlocked, but TROVE_SESSION is unset: \
+                 `get` and `materialize` will be refused in this shell",
+                unlocked.len()
+            ),
+        )
+        .hint(format!("eval \"$(trove unlock --export {first})\"")),
+    )
+}
+
+/// What reading the key file found.
+#[derive(Debug)]
+enum KeyFileProbe {
+    Missing,
+    Unreadable(String),
+    /// Readable; `mode` is the permission bits where the platform has them.
+    Readable {
+        mode: Option<u32>,
+    },
+}
+
+fn probe_key_file(path: &Path) -> KeyFileProbe {
+    use std::io::Read as _;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return KeyFileProbe::Missing,
+        Err(e) => return KeyFileProbe::Unreadable(e.to_string()),
+    };
+    if let Err(e) = file.read(&mut [0u8; 1]) {
+        return KeyFileProbe::Unreadable(e.to_string());
+    }
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        file.metadata().ok().map(|m| m.permissions().mode() & 0o777)
+    };
+    #[cfg(not(unix))]
+    let mode = None;
+    KeyFileProbe::Readable { mode }
+}
+
+/// The `--key-file`: present and readable, and on Unix not readable by the
+/// group or others.
+fn classify_key_file(path: &Path, probe: KeyFileProbe) -> Check {
+    match probe {
+        KeyFileProbe::Missing => Check::new(
+            "key-file",
+            Level::Fail,
+            format!("{} does not exist", path.display()),
+        ),
+        KeyFileProbe::Unreadable(e) => Check::new(
+            "key-file",
+            Level::Fail,
+            format!("can't read {}: {e}", path.display()),
+        ),
+        KeyFileProbe::Readable { mode: Some(mode) } if mode & 0o044 != 0 => Check::new(
+            "key-file",
+            Level::Warn,
+            format!(
+                "{} is mode {mode:04o}, readable by more than its owner",
+                path.display()
+            ),
+        )
+        .hint(format!("chmod 600 {}", path.display())),
+        KeyFileProbe::Readable { mode } => Check::new(
+            "key-file",
+            Level::Ok,
+            match mode {
+                Some(mode) => format!("{} is readable, mode {mode:04o}", path.display()),
+                None => format!("{} is readable", path.display()),
+            },
+        ),
+    }
+}
+
+/// Whether the macOS keychain holds a password for the named database. The
+/// lookup asks for attributes only, so it raises no dialog.
+#[cfg(target_os = "macos")]
+fn classify_keychain(database: &Path, found: anyhow::Result<bool>) -> Check {
+    match found {
+        Ok(true) => Check::new(
+            "keychain",
+            Level::Ok,
+            format!("a keychain entry is stored for {}", database.display()),
+        ),
+        Ok(false) => Check::new(
+            "keychain",
+            Level::Info,
+            format!("no keychain entry for {}", database.display()),
+        )
+        .hint(format!("trove keychain save {}", database.display())),
+        Err(e) => Check::new(
+            "keychain",
+            Level::Warn,
+            format!("can't query the keychain: {e:#}"),
+        ),
+    }
 }
 
 fn daemon_check(status: &anyhow::Result<Value>) -> Check {
@@ -693,6 +829,61 @@ pub fn print(checks: &[Check]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_file_missing_fails() {
+        let c = classify_key_file(Path::new("/nope/key"), KeyFileProbe::Missing);
+        assert_eq!(c.name, "key-file");
+        assert_eq!(c.status, Level::Fail);
+        let c = classify_key_file(
+            Path::new("/nope/key"),
+            KeyFileProbe::Unreadable("Permission denied".into()),
+        );
+        assert_eq!(c.status, Level::Fail);
+    }
+
+    #[test]
+    fn key_file_world_readable_warns() {
+        let p = Path::new("/k");
+        for mode in [0o644, 0o640, 0o604] {
+            let c = classify_key_file(p, KeyFileProbe::Readable { mode: Some(mode) });
+            assert_eq!(c.status, Level::Warn, "{mode:o}");
+            assert_eq!(c.hint.as_deref(), Some("chmod 600 /k"));
+        }
+        for mode in [Some(0o600), Some(0o400), None] {
+            let c = classify_key_file(p, KeyFileProbe::Readable { mode });
+            assert_eq!(c.status, Level::Ok, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn session_unset_with_unlocked_database_is_info() {
+        let unlocked = vec!["/d/a.kdbx".to_string()];
+        let c = classify_session(&unlocked, false).expect("a session check");
+        assert_eq!(c.name, "session");
+        assert_eq!(c.status, Level::Info);
+        assert_eq!(
+            c.hint.as_deref(),
+            Some("eval \"$(trove unlock --export /d/a.kdbx)\"")
+        );
+        assert_eq!(classify_session(&unlocked, true).unwrap().status, Level::Ok);
+        assert!(classify_session(&[], false).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_classifier_cases() {
+        let db = Path::new("/d/a.kdbx");
+        assert_eq!(classify_keychain(db, Ok(true)).status, Level::Ok);
+        let absent = classify_keychain(db, Ok(false));
+        assert_eq!(absent.status, Level::Info);
+        assert_eq!(
+            absent.hint.as_deref(),
+            Some("trove keychain save /d/a.kdbx")
+        );
+        let broken = classify_keychain(db, Err(anyhow::anyhow!("boom")));
+        assert_eq!(broken.status, Level::Warn);
+    }
 
     fn never(_: &Path) -> bool {
         false
