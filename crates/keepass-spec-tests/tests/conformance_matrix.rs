@@ -5,7 +5,7 @@
 
 mod matrix;
 
-use matrix::{crate_party, fixtures, keepassxc_party, run_matrix, Participant};
+use matrix::{crate_party, fixtures, keepassxc_party, pykeepass_party, run_matrix, Participant};
 
 #[test]
 fn conformance_matrix() {
@@ -19,11 +19,25 @@ fn conformance_matrix() {
          TROVE_KEEPASSXC_CLIS (colon-separated paths)."
     );
 
-    let mut producers = vec![Participant::Crate012, Participant::Crate013];
-    let mut consumers = vec![Participant::Crate012, Participant::Crate013];
+    let mut producers = vec![
+        Participant::Crate012,
+        Participant::Crate013,
+        Participant::Crate017,
+    ];
+    let mut consumers = producers.clone();
     for o in &oracles {
         producers.push(Participant::Keepassxc(o.clone()));
         consumers.push(Participant::Keepassxc(o.clone()));
+    }
+    // Optional locally; CI sets TROVE_REQUIRE_PYKEEPASS=1 so it can't skip.
+    match pykeepass_party::discover() {
+        Some(p) => {
+            producers.push(Participant::Pykeepass(p.clone()));
+            consumers.push(Participant::Pykeepass(p));
+        }
+        None => {
+            eprintln!("pykeepass not found: skipping it (set TROVE_REQUIRE_PYKEEPASS=1 to fail)")
+        }
     }
 
     let specs = fixtures::all();
@@ -45,8 +59,8 @@ fn conformance_matrix() {
 /// hand-author expected values; we assert that what the keepass crate reads is
 /// *byte-for-byte identical* before and after keepassxc's rewrite.
 ///
-/// Uses keepass 0.13.13 as producer/introspector (the version trove targets, and
-/// the one keepassxc can read — 0.12.5 output trips the <Meta> bug).
+/// Uses keepass 0.17.0 as producer/introspector (the version trove ships;
+/// 0.12.5 output trips keepassxc on the <Meta> bug).
 #[test]
 fn keepassxc_preserves_extensions_across_open_and_save() {
     let oracles = keepassxc_party::discover();
@@ -69,14 +83,14 @@ fn keepassxc_preserves_extensions_across_open_and_save() {
 
     let mut failures = Vec::new();
     for spec in &specs {
-        let bytes = match crate_party::kp013::produce(spec) {
+        let bytes = match crate_party::kp017::produce(spec) {
             Ok(b) => b,
             Err(e) => {
                 failures.push(format!("{}: produce failed: {e}", spec.name));
                 continue;
             }
         };
-        let before = match crate_party::kp013::consume(&bytes, spec) {
+        let before = match crate_party::kp017::consume(&bytes, spec) {
             Ok(r) => r,
             Err(e) => {
                 failures.push(format!("{}: consume(before) failed: {e}", spec.name));
@@ -95,7 +109,7 @@ fn keepassxc_preserves_extensions_across_open_and_save() {
                     continue;
                 }
             };
-            let after = match crate_party::kp013::consume(&resaved, spec) {
+            let after = match crate_party::kp017::consume(&resaved, spec) {
                 Ok(r) => r,
                 Err(e) => {
                     failures.push(format!(
@@ -119,4 +133,25 @@ fn keepassxc_preserves_extensions_across_open_and_save() {
         "keepassxc did not preserve trove-style extensions across open+save:\n{}",
         failures.join("\n\n")
     );
+}
+
+/// Bug D in docs/keepass-bugs.md: KeePass accepts `,` as well as `;` between
+/// `<Tags>`. A single tag holding commas is written verbatim, so the file's
+/// `<Tags>` is `work,ssh,prod`. keepass 0.17.0 (what trove ships) splits it;
+/// so does 0.12.5, whose reader only misses `;`.
+#[test]
+fn comma_separated_tags_are_split_by_the_shipped_crate() {
+    let mut spec = fixtures::all()
+        .into_iter()
+        .find(|s| s.name == "tags-basic")
+        .expect("tags-basic fixture");
+    spec.entries[0].tags = vec!["work,ssh,prod"];
+    let bytes = crate_party::kp017::produce(&spec).expect("produce");
+
+    let tags = |repr: matrix::DatabaseRepr| repr.into_values().next().unwrap().tags;
+    let read_017 = tags(crate_party::kp017::consume(&bytes, &spec).expect("0.17.0 reads it"));
+    assert_eq!(read_017, ["prod", "ssh", "work"]);
+
+    let read_012 = tags(crate_party::kp012::consume(&bytes, &spec).expect("0.12.5 reads it"));
+    assert_eq!(read_012, ["prod", "ssh", "work"]);
 }

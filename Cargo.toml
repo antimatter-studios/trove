@@ -40,16 +40,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# keepass-rs comes from antimatter-studios/keepass-rs, branch `trove`: upstream
-# plus fixes trove needs, pinned to one commit so fork changes only reach trove
-# when this line is bumped. Sync the fork from upstream releases periodically
+# keepass-rs comes from antimatter-studios/keepass-rs at an immutable tag. The
+# package version stays aligned with upstream; the tag names each Trove snapshot.
+# Sync the fork from upstream releases periodically
 # and send fixes upstream. Currently: upstream v0.17.0 plus the attachment and
-# merge fixes sent upstream as sseemayer/keepass-rs#377 and #378, and
-# EntryMut::edit_history.
+# merge fixes sent upstream as sseemayer/keepass-rs#377 and #378,
+# EntryMut::edit_history, the empty-timestamp fix, and reading entry fields
+# that follow <Times> (antimatter-studios/keepass-rs#1, written by pykeepass).
 # crates.io ignores [patch], so the published trove-core still resolves keepass
 # from crates.io.
 [patch.crates-io]
-keepass = { git = "https://github.com/antimatter-studios/keepass-rs", rev = "886a4ab9fc6783172c42bf53fe4ee4f2470684cc" }
+keepass = { git = "https://github.com/antimatter-studios/keepass-rs", tag = "trove-v0.17.0-fix-entry-fields-after-other-elements.1" }
 
 [profile.release]
 lto = "thin"

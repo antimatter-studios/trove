@@ -23,7 +23,19 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::matrix::{EntryRepr, DatabaseRepr};
+use crate::matrix::{DatabaseRepr, EntryRepr};
+
+/// A throwaway, passphrase-less ed25519 private key used only so `trove add
+/// ssh`'s validate-on-add accepts the fixture. NOT a real credential.
+pub const TEST_ED25519_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACBoqrjUPTHgj7L0kKQHDQCV/ct5QA85zPE9oj2wJik4xgAAAKgw4IFwMOCB
+cAAAAAtzc2gtZWQyNTUxOQAAACBoqrjUPTHgj7L0kKQHDQCV/ct5QA85zPE9oj2wJik4xg
+AAAEAsyZCyYmG3xaKTupOv0zRUu34nnomcphEX1RYpWrG19miquNQ9MeCPsvSQpAcNAJX9
+y3lADznM8T2iPbAmKTjGAAAAHnRyb3ZlLWNvbmZvcm1hbmNlLXRlc3RAZXhhbXBsZQECAw
+QFBgc=
+-----END OPENSSH PRIVATE KEY-----
+";
 
 /// A located `trove` binary.
 pub struct Trove {
