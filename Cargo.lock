@@ -1448,7 +1448,7 @@ dependencies = [
 [[package]]
 name = "keepass"
 version = "0.17.0"
-source = "git+https://github.com/antimatter-studios/keepass-rs?rev=3bfc93dcd8f61ea2f4e5de25a55d3343113dd46a#3bfc93dcd8f61ea2f4e5de25a55d3343113dd46a"
+source = "git+https://github.com/antimatter-studios/keepass-rs?tag=trove-v0.17.0-fix-entry-fields-after-other-elements.1#3bfc93dcd8f61ea2f4e5de25a55d3343113dd46a"
 dependencies = [
  "aes 0.9.4",
  "base32",
