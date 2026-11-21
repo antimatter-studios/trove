@@ -31,9 +31,9 @@ dependencies = [
 
 [[package]]
 name = "aes"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35f0f96ce78e38c3dc6d8948aa8163d06385be74000f3c7a95bf1eef35d3ea32"
+checksum = "fc0fc36d7440d015b45468ba08a21e80e056ebbd014c611c6298bb7503e04bd1"
 dependencies = [
  "cipher 0.5.2",
  "cpubits",
@@ -48,7 +48,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f2b8006a0c83f52b62ba44a97b58bf76fe2f70a329e588f67f89691d93d498f"
 dependencies = [
  "aead",
- "aes 0.9.3",
+ "aes 0.9.4",
  "cipher 0.5.2",
  "ctr",
  "ctutils",
@@ -1031,7 +1031,7 @@ name = "keepass"
 version = "0.17.0"
 source = "git+https://github.com/antimatter-studios/keepass-rs?tag=trove-v0.17.0-fix-entry-fields-after-other-elements.1#3bfc93dcd8f61ea2f4e5de25a55d3343113dd46a"
 dependencies = [
- "aes 0.9.3",
+ "aes 0.9.4",
  "base32",
  "base64 0.23.1",
  "block-modes",
@@ -1842,7 +1842,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d801accda99469cde6d73da741422610fdf6508a72d9a69d1b55cb241c720597"
 dependencies = [
  "aead",
- "aes 0.9.3",
+ "aes 0.9.4",
  "aes-gcm",
  "chacha20",
  "cipher 0.5.2",
@@ -2023,7 +2023,7 @@ dependencies = [
 name = "troved"
 version = "0.27.1"
 dependencies = [
- "aes 0.8.4",
+ "aes 0.9.4",
  "aes-kw",
  "anyhow",
  "base64 0.23.1",
