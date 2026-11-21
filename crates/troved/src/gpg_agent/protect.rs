@@ -11,7 +11,7 @@
 //! AES-128/192/256. That is what GnuPG writes by default. AEAD (OCB)
 //! protection, older ciphers and GnuPG's stub keys are refused by name.
 
-use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
+use aes::cipher::{Block, BlockCipherEncrypt, KeyInit};
 use sha2::Digest as _;
 use zeroize::Zeroizing;
 
@@ -205,9 +205,9 @@ fn derive<D: sha2::Digest>(input: &[u8], count: usize, key_len: usize) -> Zeroiz
 
 /// OpenPGP's CFB mode for secret keys: plain CFB with a full-block IV.
 fn cfb_decrypt(key: &[u8], iv: &[u8], data: &mut [u8]) {
-    fn run<C: BlockEncrypt + KeyInit>(key: &[u8], iv: &[u8], data: &mut [u8]) {
+    fn run<C: BlockCipherEncrypt + KeyInit>(key: &[u8], iv: &[u8], data: &mut [u8]) {
         let cipher = C::new_from_slice(key).expect("key length checked");
-        let mut feedback = GenericArray::clone_from_slice(iv);
+        let mut feedback = Block::<C>::try_from(iv).expect("IV length checked");
         for chunk in data.chunks_mut(16) {
             let mut ks = feedback.clone();
             cipher.encrypt_block(&mut ks);
@@ -231,4 +231,74 @@ fn checksum(bytes: &[u8]) -> u16 {
     bytes
         .iter()
         .fold(0u16, |acc, &b| acc.wrapping_add(u16::from(b)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cfb_decrypt;
+
+    fn check_cfb_vector(key: &str, ciphertext: &str) {
+        let decode = |value: &str| {
+            value
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let key = decode(key);
+        let ciphertext = decode(ciphertext);
+        let iv = decode("000102030405060708090a0b0c0d0e0f");
+        let plaintext = decode(concat!(
+            "6bc1bee22e409f96e93d7e117393172a",
+            "ae2d8a571e03ac9c9eb76fac45af8e51",
+            "30c81c46a35ce411e5fbc1191a0a52ef",
+            "f69f2445df4f9b17ad2b417be66c3710",
+        ));
+        for length in 0..=plaintext.len() {
+            let mut data = ciphertext[..length].to_vec();
+            cfb_decrypt(&key, &iv, &mut data);
+            assert_eq!(data, plaintext[..length], "ciphertext length {length}");
+        }
+    }
+
+    #[test]
+    fn aes128_cfb_nist_vector_and_partial_blocks() {
+        check_cfb_vector(
+            "2b7e151628aed2a6abf7158809cf4f3c",
+            concat!(
+                "3b3fd92eb72dad20333449f8e83cfb4a",
+                "c8a64537a0b3a93fcde3cdad9f1ce58b",
+                "26751f67a3cbb140b1808cf187a4f4df",
+                "c04b05357c5d1c0eeac4c66f9ff7f2e6",
+            ),
+        );
+    }
+
+    #[test]
+    fn aes192_cfb_nist_vector_and_partial_blocks() {
+        check_cfb_vector(
+            "8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b",
+            concat!(
+                "cdc80d6fddf18cab34c25909c99a4174",
+                "67ce7f7f81173621961a2b70171d3d7a",
+                "2e1e8a1dd59b88b1c8e60fed1efac4c9",
+                "c05f9f9ca9834fa042ae8fba584b09ff",
+            ),
+        );
+    }
+
+    #[test]
+    fn aes256_cfb_nist_vector_and_partial_blocks() {
+        check_cfb_vector(
+            "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+            concat!(
+                "dc7e84bfda79164b7ecd8486985d3860",
+                "39ffed143b28b1c832113c6331e5407b",
+                "df10132415e54b92a13ed0a8267ae2f9",
+                "75a385741ab9cef82031623d55b1e471",
+            ),
+        );
+    }
 }
