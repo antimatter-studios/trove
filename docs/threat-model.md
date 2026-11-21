@@ -75,21 +75,23 @@ Where could secrets leak from each delivery surface? One section per surface.
 
 ## Mitigations and gaps
 
-Tabulated form.
+Tabulated form. The Tests column names the tests in [crates/troved/tests/security_claims.rs](../crates/troved/tests/security_claims.rs) that back each row; `threat_model_rows_have_tests` fails if a row with a mitigation names none, or names one that doesn't exist.
 
-| Threat | Mitigation in trove | Gap |
-| --- | --- | --- |
-| Lost / stolen cold laptop | Encrypted-at-rest kdbx, Argon2 KDF | Same as KeePassXC; depends on master-password strength |
-| Same-UID process reading agent socket | `0600` perms, owned by user | None — same-UID is part of the threat model we accept |
-| Same-UID process reading materialized file | `0600` mode, tmpfs-by-default | Group perms not yet exposed; per-process MAC (e.g. AppArmor) is the user's job |
-| `~/.kube/config` lying around for 18 months | TTL + wipe-on-lock + idle-lock | If `AllowDiskBacked=true` and no TTL set, equivalent to status quo |
-| Backup tool capturing materialized path | Default targets in `/tmp` (not backed up); refusal of system dirs | If the user picks `~/Documents/secret`, no protection |
-| Swap / hibernation capture | tmpfs-only defaults on Linux | macOS APFS has no tmpfs — soft-allowlist only |
-| Unattended unlocked laptop | Idle-lock (default 900s, configurable) | Doesn't help if you set the timeout to 0 (`TROVE_IDLE_TIMEOUT=0`) |
-| Crash-dumped daemon memory | Best-effort `Zeroize` on drop; non-dumpable on Linux (`PR_SET_DUMPABLE` 0) | macOS and Windows crash reporters can still capture memory |
-| Kernel-level attacker / cold-boot | None | Out of scope |
-| Forwarded SSH agent abuse | Standard SSH agent protocol — user opts in | Same as any agent; not specific to trove |
-| Password manager UI phishing | N/A — no GUI yet | Future GUI must address this |
+| Threat | Mitigation in trove | Gap | Tests |
+| --- | --- | --- | --- |
+| Lost / stolen cold laptop | Encrypted-at-rest kdbx, Argon2 KDF | Same as KeePassXC; depends on master-password strength | `vault_at_rest_is_encrypted_with_argon2` |
+| Same-UID process reading agent socket | `0600` perms, owned by user; owner-only pipe DACL on Windows | None — same-UID is part of the threat model we accept | `sockets_are_owner_only`, `ipc::windows_imp::security::tests::pipe_owner_can_connect_to_owner_only_pipe` |
+| Same-UID process extracting secrets over the control socket | Per-unlock session code + `SO_PEERCRED` uid check on code-gated requests | A process that can read the unlocking shell's environment gets the code | `code_gated_requests_refuse_another_uid`, `control_socket_reports_peer_uid` |
+| Same-UID process reading materialized file | `0600` mode, tmpfs-by-default | Group perms not yet exposed; per-process MAC (e.g. AppArmor) is the user's job | `materialized_file_is_owner_only`, `materialize_default_target_is_memory_backed` |
+| `~/.kube/config` lying around for 18 months | TTL + wipe-on-lock + idle-lock | If `AllowDiskBacked=true` and no TTL set, equivalent to status quo | `materialized_file_is_wiped_on_lock`, `materialized_file_is_wiped_when_ttl_expires`, `idle_lock_locks_after_timeout` |
+| Backup tool capturing materialized path | Default targets in `/tmp` (not backed up); refusal of system dirs | If the user picks `~/Documents/secret`, no protection | `materialize_refuses_system_directories`, `materialize_default_target_is_memory_backed` |
+| Swap / hibernation capture | tmpfs-only defaults on Linux | macOS APFS has no tmpfs — soft-allowlist only | `materialize_default_target_is_memory_backed` |
+| Unattended unlocked laptop | Idle-lock (default 900s, configurable) | Doesn't help if you set the timeout to 0 (`TROVE_IDLE_TIMEOUT=0`) | `idle_lock_defaults_to_900_seconds`, `idle_lock_locks_after_timeout` |
+| Crash-dumped daemon memory | Best-effort `Zeroize` on drop; non-dumpable on Linux (`PR_SET_DUMPABLE` 0) | macOS and Windows crash reporters can still capture memory; request buffers (e.g. the unlock password on the wire) are not zeroized | `secret_holders_zeroize_on_drop`, `troved_is_not_dumpable` |
+| Hostile database file (shared or synced) | A file keepass-rs can't parse fails with an error, not a crash; parsers fuzzed nightly | KDF parameters come from the file's header and are not bounded: a hostile file can make an unlock hang or exhaust memory | `malformed_database_is_an_error_not_a_crash` |
+| Kernel-level attacker / cold-boot | None | Out of scope | none |
+| Forwarded SSH agent abuse | None — standard SSH agent protocol; the user opts in | Same as any agent; not specific to trove | none |
+| Password manager UI phishing | N/A — no GUI yet | Future GUI must address this | none |
 
 The same-UID **extraction** gap for the `get` surface (adversary #4) is now
 mitigated: per-unlock **session codes** + `SO_PEERCRED` move that adversary

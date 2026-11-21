@@ -1,0 +1,1 @@
+{"cmd": "add-totp", "path": "loose", "uri": "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP", "code": "guess"}

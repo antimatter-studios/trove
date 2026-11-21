@@ -1,0 +1,1 @@
+{"cmd": "add-file", "title": "Files/f", "src": "AAAA", "name": "f", "target": "/nonexistent/x", "mode": "600", "ttl": 60, "allow_disk_backed": false, "code": "guess"}
