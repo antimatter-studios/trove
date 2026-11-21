@@ -258,6 +258,207 @@ fn sync_flows_and_errors() {
     assert_eq!(std::fs::read(b).unwrap(), before);
 }
 
+fn add_password(trove: &std::path::Path, database: &str, entry: &str, secret: &str) {
+    ok(
+        &run_trove(
+            trove,
+            &[
+                "--database",
+                database,
+                "--password-stdin",
+                "add",
+                "password",
+                entry,
+                "--secret-stdin",
+            ],
+            &format!("{PW}\n{secret}\n"),
+        ),
+        "add",
+    );
+}
+
+fn entry_events(report: &serde_json::Value) -> Vec<(String, String)> {
+    let mut events: Vec<(String, String)> = report["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter(|e| e["target"] == "entry")
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap().to_string(),
+                e["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    events.sort();
+    events
+}
+
+#[test]
+fn merge_json_lists_events() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.kdbx");
+    let a = a.to_str().unwrap();
+    let b = dir.path().join("b.kdbx");
+    let b = b.to_str().unwrap();
+    seed(&trove, a, "shared", "merge-json-old-canary");
+    std::fs::copy(a, b).unwrap();
+    // A later second, so b's edit is newer than a's copy of the entry.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    add_password(&trove, b, "in-b", "merge-json-new-canary");
+    ok(
+        &run_trove(
+            &trove,
+            &[
+                "--database",
+                b,
+                "--password-stdin",
+                "edit",
+                "shared",
+                "--set",
+                "Token=merge-json-edit-canary",
+            ],
+            &format!("{PW}\n"),
+        ),
+        "edit b",
+    );
+
+    let out = run_trove(
+        &trove,
+        &["--database", a, "--password-stdin", "merge", b, "--json"],
+        &format!("{PW}\n{PW}\n"),
+    );
+    let stdout = ok(&out, "merge --json");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(report["source"], b);
+    assert_eq!(report["created"], 1);
+    assert_eq!(
+        entry_events(&report),
+        [
+            ("created".to_string(), "in-b".to_string()),
+            ("updated".to_string(), "shared".to_string()),
+        ]
+    );
+    let updated = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "updated" && e["target"] == "entry")
+        .unwrap();
+    assert_eq!(updated["winner"], "source");
+    assert!(updated["modified"].is_string(), "{updated}");
+    assert!(updated["id"].as_str().is_some_and(|id| id.len() == 36));
+    assert!(report["warnings"].is_array());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for canary in [
+        "merge-json-old-canary",
+        "merge-json-new-canary",
+        "merge-json-edit-canary",
+    ] {
+        assert!(
+            !stdout.contains(canary) && !stderr.contains(canary),
+            "{canary} leaked"
+        );
+    }
+}
+
+#[test]
+fn merge_prints_one_line_per_event() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.kdbx");
+    let a = a.to_str().unwrap();
+    let b = dir.path().join("b.kdbx");
+    let b = b.to_str().unwrap();
+    seed(&trove, a, "shared", "orig");
+    std::fs::copy(a, b).unwrap();
+    add_password(&trove, b, "in-b", "secret");
+    let out = ok(
+        &run_trove(
+            &trove,
+            &["--database", a, "--password-stdin", "merge", b],
+            &format!("{PW}\n{PW}\n"),
+        ),
+        "merge",
+    );
+    let mut lines = out.lines();
+    assert!(lines.next().unwrap().starts_with("merged "), "{out}");
+    assert!(
+        out.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["created", "in-b"]),
+        "{out}"
+    );
+}
+
+#[test]
+fn sync_json_lists_events_both_ways() {
+    let Some(trove) = find_trove() else {
+        eprintln!("skipping: trove binary not built");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.kdbx");
+    let a = a.to_str().unwrap();
+    let b = dir.path().join("b.kdbx");
+    let b = b.to_str().unwrap();
+    seed(&trove, a, "shared", "orig");
+    std::fs::copy(a, b).unwrap();
+    add_password(&trove, a, "in-a", "sync-json-a-canary");
+    add_password(&trove, b, "in-b", "sync-json-b-canary");
+
+    let out = run_trove(
+        &trove,
+        &["--database", a, "--password-stdin", "sync", b, "--json"],
+        &format!("{PW}\n{PW}\n"),
+    );
+    let stdout = ok(&out, "sync --json");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(report["other"], b);
+    assert_eq!(report["created"], false);
+    assert_eq!(report["other_written"], true);
+    assert_eq!(
+        entry_events(&report["pulled"]),
+        [("created".to_string(), "in-b".to_string())]
+    );
+    assert_eq!(
+        entry_events(&report["pushed"]),
+        [("created".to_string(), "in-a".to_string())]
+    );
+    assert_eq!(report["pulled"]["created"], 1);
+    assert_eq!(report["pushed"]["created"], 1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for canary in ["sync-json-a-canary", "sync-json-b-canary"] {
+        assert!(
+            !stdout.contains(canary) && !stderr.contains(canary),
+            "{canary} leaked"
+        );
+    }
+
+    // The human form names each event with its direction.
+    add_password(&trove, b, "later-in-b", "secret");
+    let out = ok(
+        &run_trove(
+            &trove,
+            &["--database", a, "--password-stdin", "sync", b],
+            &format!("{PW}\n{PW}\n"),
+        ),
+        "sync",
+    );
+    assert!(
+        out.lines().any(
+            |l| l.split_whitespace().collect::<Vec<_>>() == ["pulled", "created", "later-in-b"]
+        ),
+        "{out}"
+    );
+}
+
 #[test]
 fn export_xml_and_csv_shapes() {
     let Some(trove) = find_trove() else {

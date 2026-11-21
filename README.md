@@ -309,7 +309,7 @@ bigger ideas, grouped:
   cross-entry analytics (#285).
 - **Mobile:** materialization metadata that KeePassDX and Strongbox can adopt
   (#290). There will be no first-party mobile app ([docs/scope.md](docs/scope.md)).
-- **Quality of life:** history UI with global undo (#287), large attachments
+- **Quality of life:** entry history, restore and global undo (#438), large attachments
   stored out of band (#247), lossless 1Password and Bitwarden import/export
   (#291), Secret Service on Linux (#293).
 
