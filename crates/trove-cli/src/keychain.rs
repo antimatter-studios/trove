@@ -94,6 +94,28 @@ mod imp {
         }
     }
 
+    /// Whether an item exists, from an attributes-only query. The password
+    /// data is never requested, so the item's ACL is not consulted and no
+    /// dialog can appear: safe without a terminal.
+    pub fn exists(database: &Path) -> Result<bool> {
+        use security_framework::item::{ItemClass, ItemSearchOptions};
+        let account = account(database)?;
+        let found = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(SERVICE)
+            .account(&account)
+            .load_attributes(true)
+            .limit(1)
+            .search();
+        match found {
+            Ok(items) => Ok(!items.is_empty()),
+            Err(e) if e.code() == -25300 => Ok(false),
+            Err(e) => {
+                Err(e).with_context(|| format!("looking up the keychain entry for {account}"))
+            }
+        }
+    }
+
     pub fn forget(database: &Path) -> Result<bool> {
         let account = account(database)?;
         match delete_generic_password(SERVICE, &account) {
@@ -141,6 +163,13 @@ pub fn save(database: &Path, password: &str) -> Result<()> {
 /// Refuses without an interactive terminal — see the module note.
 pub fn load(database: &Path) -> Result<Option<String>> {
     imp::load(database)
+}
+
+/// Whether a keychain entry exists for `database`, without reading the
+/// password: no dialog, no terminal needed.
+#[cfg(target_os = "macos")]
+pub fn exists(database: &Path) -> Result<bool> {
+    imp::exists(database)
 }
 
 /// Remove the entry for `database`. `false` when there was nothing to remove.
