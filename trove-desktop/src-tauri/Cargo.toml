@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # An image attachment reaches the webview as a data URL, which means base64.
 # Same version the CLI and the daemon already use.
-base64 = "0.22"
+base64 = "0.23"
 # Server-side password-strength scoring for the entry list (the DTO carries a
 # 0..=100 score, never the password itself).
 zxcvbn = "3"
