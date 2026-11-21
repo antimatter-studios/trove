@@ -460,7 +460,7 @@ async fn handle_request(
             let guard = state.lock().await;
             if guard.is_empty() {
                 return Handled {
-                    response: Response::err("no database unlocked"),
+                    response: Response::err(crate::protocol::NO_DATABASE_UNLOCKED),
                     shutdown: false,
                 };
             }
@@ -523,7 +523,10 @@ async fn handle_request(
                             idle.start_or_reset(Duration::from_secs(idle.current_timeout_secs()));
                         }
                         return Handled {
-                            response: Response::err(format!("no database unlocked at {path}")),
+                            response: Response::err(format!(
+                                "{} at {path}",
+                                crate::protocol::NO_DATABASE_UNLOCKED
+                            )),
                             shutdown: false,
                         };
                     }
@@ -1654,9 +1657,7 @@ async fn add_file(
         let ok = session_matches(&sess, peer_uid, code);
         if !ok {
             return Handled {
-                response: Response::err(
-                    "refused: database locked, or session code missing/invalid for this uid",
-                ),
+                response: Response::err(crate::protocol::SESSION_REFUSED),
                 shutdown: false,
             };
         }
@@ -1811,9 +1812,7 @@ fn session_matches(sess: &Option<Session>, peer_uid: u32, code: &str) -> bool {
 
 fn session_refused() -> Handled {
     Handled {
-        response: Response::err(
-            "refused: database locked, or session code missing/invalid for this uid",
-        ),
+        response: Response::err(crate::protocol::SESSION_REFUSED),
         shutdown: false,
     }
 }
@@ -2083,7 +2082,7 @@ async fn search(
     }
     let guard = state.lock().await;
     if guard.is_empty() {
-        return err_handled("no database unlocked");
+        return err_handled(crate::protocol::NO_DATABASE_UNLOCKED);
     }
     // Searches the union — a hit in any unlocked database counts. Unlike a
     // title-addressed read there is nothing to disambiguate: search returns
@@ -2173,9 +2172,7 @@ async fn git_credential(
     let authorized = session_matches(&sess, peer_uid, code);
     if !authorized {
         return Handled {
-            response: Response::err(
-                "refused: database locked, or session code missing/invalid for this uid",
-            ),
+            response: Response::err(crate::protocol::SESSION_REFUSED),
             shutdown: false,
         };
     }
@@ -2386,7 +2383,7 @@ fn gpg_gates_for_database(
 /// last-unlock-wins exactly as the main keyring does (docs/multi-database.md).
 fn find_ssh_key(set: &DatabaseSet, entry: &str) -> Result<LoadedKey, String> {
     if set.is_empty() {
-        return Err("no database is unlocked".to_string());
+        return Err(crate::protocol::NO_DATABASE_UNLOCKED.to_string());
     }
     let prefix = format!("{entry}:");
     let mut exact: Vec<LoadedKey> = Vec::new();
@@ -2445,7 +2442,7 @@ fn find_ssh_keys_matching(
         return Err("name a pattern or a tag to add keys by".to_string());
     }
     if set.is_empty() {
-        return Err("no database is unlocked".to_string());
+        return Err(crate::protocol::NO_DATABASE_UNLOCKED.to_string());
     }
     let mut found: Vec<LoadedKey> = Vec::new();
     for (database, filter) in set.iter_with_filters() {

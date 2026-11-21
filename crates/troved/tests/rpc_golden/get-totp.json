@@ -1,0 +1,13 @@
+{
+  "request": {
+    "cmd": "get-totp",
+    "path": "web",
+    "code": "$CODE"
+  },
+  "response": {
+    "status": "string",
+    "totp_code": "string",
+    "valid_for_secs": "integer",
+    "period_secs": "integer"
+  }
+}

@@ -2,10 +2,131 @@
 //!
 //! Newline-delimited JSON. One request per line, one response per line.
 //! Requests are tagged on `cmd`; responses on `status` (`"ok"` / `"err"`).
+//! The public contract is docs/rpc.md: which requests are stable, their
+//! shapes, the error kinds and the versioning rules.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// The control-socket protocol version, reported by `get-version`.
+///
+/// Adding a request, an optional request field or a response field leaves it
+/// alone. Removing or renaming a stable request or field, changing a field's
+/// type, or changing what an existing field means bumps it (docs/rpc.md).
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Every `cmd` the daemon understands, in declaration order. A test checks it
+/// against the variants serde derives, and docs/rpc.md classifies each one as
+/// stable or internal.
+pub const COMMANDS: &[&str] = &[
+    "ping",
+    "unlock",
+    "list",
+    "lock",
+    "shutdown",
+    "materialize-status",
+    "set-idle-timeout",
+    "get-idle-timeout",
+    "get-version",
+    "status",
+    "ssh-agent-list",
+    "gpg-agent-list",
+    "gpg-public-keys",
+    "ssh-agent-empty",
+    "ssh-agent-add",
+    "ssh-agent-add-matching",
+    "ssh-agent-close",
+    "ssh-agent-sockets",
+    "ssh-agent-which",
+    "get",
+    "add-ssh",
+    "add-gpg",
+    "add-file",
+    "show-entry",
+    "settings",
+    "set-settings",
+    "describe",
+    "search",
+    "get-field",
+    "git-credential",
+    "add-password",
+    "edit-entry",
+    "remove-entry",
+    "move-entry",
+    "copy-entry",
+    "move-group",
+    "copy-group",
+    "mkdir",
+    "rmdir",
+    "get-totp",
+    "add-totp",
+    "set-expiry",
+    "set-icon",
+];
+
+/// The machine-readable `kind` on every error response. Scripts branch on
+/// these; the `error` text is for people and may change in any release. New
+/// kinds may be added, so treat one you don't know as [`kind::FAILED`].
+pub mod kind {
+    /// The `cmd` names no request this daemon knows.
+    pub const UNKNOWN_COMMAND: &str = "unknown-command";
+    /// The line is not JSON, has no `cmd`, or a field is missing or mistyped.
+    pub const INVALID_REQUEST: &str = "invalid-request";
+    /// No database is unlocked, or not the one the request named.
+    pub const LOCKED: &str = "locked";
+    /// A code-gated request was refused: the session code is missing or
+    /// wrong, it came from another uid, or nothing is unlocked. Deliberately
+    /// one kind, so it can't be used to tell those apart.
+    pub const SESSION_REFUSED: &str = "session-refused";
+    /// Anything else.
+    pub const FAILED: &str = "failed";
+}
+
+/// Error text for "nothing is unlocked". [`Response::err`] gives it
+/// [`kind::LOCKED`], so every path that reports it agrees.
+pub const NO_DATABASE_UNLOCKED: &str = "no database unlocked";
+
+/// Error text for a refused code-gated request ([`kind::SESSION_REFUSED`]).
+pub const SESSION_REFUSED: &str =
+    "refused: database locked, or session code missing/invalid for this uid";
+
+/// Why a request line could not be decoded; [`Response::from`] turns it into
+/// the error response.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BadRequest {
+    pub kind: &'static str,
+    pub error: String,
+}
+
+impl From<BadRequest> for Response {
+    fn from(bad: BadRequest) -> Self {
+        Response::err_kind(bad.kind, bad.error)
+    }
+}
+
+/// Decode one request line: `unknown-command` naming the `cmd` when it is one
+/// this daemon doesn't know, otherwise `invalid-request`. Either way the
+/// connection stays open.
+pub fn parse_request(line: &str) -> Result<Request, BadRequest> {
+    serde_json::from_str::<Request>(line).map_err(|e| {
+        let value = serde_json::from_str::<serde_json::Value>(line).ok();
+        match value
+            .as_ref()
+            .and_then(|v| v.get("cmd"))
+            .and_then(|c| c.as_str())
+        {
+            Some(cmd) if !COMMANDS.contains(&cmd) => BadRequest {
+                kind: kind::UNKNOWN_COMMAND,
+                error: format!("unknown command: {cmd}"),
+            },
+            _ => BadRequest {
+                kind: kind::INVALID_REQUEST,
+                error: format!("invalid request: {e}"),
+            },
+        }
+    })
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
@@ -1008,7 +1129,12 @@ pub struct GpgPublicKeyDto {
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum Response {
     Ok(OkBody),
-    Err { error: String },
+    Err {
+        /// One of [`kind`]; stable, for scripts to branch on.
+        kind: &'static str,
+        /// For people; not covered by the stability promise.
+        error: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -1039,6 +1165,9 @@ pub enum OkBody {
     /// `build.rs`. Lets a connecting CLI warn on CLI↔daemon drift.
     Version {
         daemon_version: String,
+        /// [`PROTOCOL_VERSION`]. Added at protocol version 1; a daemon that
+        /// leaves it out predates the versioned protocol.
+        protocol_version: u32,
     },
     /// v0.0.9.0: response body for `Status`. `database_path` is `Some` only when
     /// a database is unlocked. `idle_timeout_secs` is the configured timeout
@@ -1225,8 +1354,26 @@ impl Response {
             materialized: items,
         })
     }
+    /// An error, its [`kind`] read from the message: the shared texts for
+    /// "nothing unlocked" and "session refused" get theirs, the rest `failed`.
     pub fn err(msg: impl Into<String>) -> Self {
-        Response::Err { error: msg.into() }
+        let error = msg.into();
+        let kind = if error == SESSION_REFUSED {
+            kind::SESSION_REFUSED
+        } else if error == NO_DATABASE_UNLOCKED
+            || error.starts_with(&format!("{NO_DATABASE_UNLOCKED} at "))
+        {
+            kind::LOCKED
+        } else {
+            kind::FAILED
+        };
+        Response::Err { kind, error }
+    }
+    pub fn err_kind(kind: &'static str, msg: impl Into<String>) -> Self {
+        Response::Err {
+            kind,
+            error: msg.into(),
+        }
     }
     pub fn ok_idle_timeout(seconds: u64, remaining: Option<u64>) -> Self {
         Response::Ok(OkBody::IdleTimeout { seconds, remaining })
@@ -1234,6 +1381,7 @@ impl Response {
     pub fn ok_version() -> Self {
         Response::Ok(OkBody::Version {
             daemon_version: env!("TROVE_BUILD_VERSION").to_string(),
+            protocol_version: PROTOCOL_VERSION,
         })
     }
     pub fn ok_status(
@@ -1369,5 +1517,97 @@ impl Response {
             valid_for_secs: code.valid_for_secs,
             period_secs: code.period_secs,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn wire(resp: &Response) -> Value {
+        serde_json::to_value(resp).unwrap()
+    }
+
+    /// The `cmd` names serde derives from [`Request`], read from the error it
+    /// gives for a name it doesn't know ("expected one of `a`, `b`, ...").
+    fn serde_commands() -> Vec<String> {
+        let err = serde_json::from_str::<Request>(r#"{"cmd":"no-such-command"}"#)
+            .expect_err("an unknown cmd must not decode")
+            .to_string();
+        let list = err
+            .split("expected one of ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("unexpected serde error: {err}"));
+        list.split(',')
+            .map(|s| s.trim().trim_matches(|c| c == '`' || c == ' '))
+            .map(|s| s.split('`').next().unwrap().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn commands_matches_every_request_variant() {
+        let derived = serde_commands();
+        let listed: Vec<String> = COMMANDS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            derived, listed,
+            "COMMANDS must list every Request variant; a new one also needs \
+             classifying as stable or internal in docs/rpc.md"
+        );
+    }
+
+    #[test]
+    fn unknown_command_names_it() {
+        let resp = Response::from(parse_request(r#"{"cmd":"foo"}"#).unwrap_err());
+        assert_eq!(
+            wire(&resp),
+            json!({"status":"err","kind":"unknown-command","error":"unknown command: foo"})
+        );
+    }
+
+    #[test]
+    fn malformed_lines_are_invalid_requests() {
+        for line in [
+            "not json",
+            r#"{"nocmd":1}"#,
+            r#"{"cmd":42}"#,
+            r#"{"cmd":"set-idle-timeout","seconds":"x"}"#,
+            r#"{"cmd":"unlock"}"#,
+        ] {
+            let v = wire(&Response::from(parse_request(line).unwrap_err()));
+            assert_eq!(v["kind"], "invalid-request", "{line}: {v}");
+            assert!(
+                v["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("invalid request: "),
+                "{line}: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_error_texts_carry_their_kind() {
+        let cases = [
+            (NO_DATABASE_UNLOCKED.to_string(), "locked"),
+            (format!("{NO_DATABASE_UNLOCKED} at /x.kdbx"), "locked"),
+            (
+                crate::databases::ResolveError::NoDatabase.to_string(),
+                "locked",
+            ),
+            (SESSION_REFUSED.to_string(), "session-refused"),
+            ("entry not found: x".to_string(), "failed"),
+        ];
+        for (msg, want) in cases {
+            assert_eq!(wire(&Response::err(msg.clone()))["kind"], want, "{msg}");
+        }
+    }
+
+    #[test]
+    fn version_reports_the_protocol() {
+        let v = wire(&Response::ok_version());
+        assert_eq!(v["protocol_version"], PROTOCOL_VERSION);
+        assert!(v["daemon_version"].is_string());
     }
 }

@@ -1,0 +1,33 @@
+{
+  "request": {
+    "cmd": "show-entry",
+    "path": "web"
+  },
+  "response": {
+    "status": "string",
+    "entry": {
+      "id": "string",
+      "title": "string",
+      "username": "string|null",
+      "url": "string|null",
+      "notes": "string|null",
+      "custom_fields": [
+        "string"
+      ],
+      "attachments": [
+        "string"
+      ],
+      "group_path": [
+        "string"
+      ],
+      "tags": [
+        "string"
+      ],
+      "inherited_tags": [
+        "string"
+      ],
+      "expires": "string|null",
+      "icon": "integer|null"
+    }
+  }
+}

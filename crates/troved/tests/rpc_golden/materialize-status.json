@@ -1,0 +1,21 @@
+{
+  "request": {
+    "cmd": "materialize-status"
+  },
+  "response": {
+    "status": "string",
+    "materialized": [
+      {
+        "title": "string",
+        "target_path": "string",
+        "database?": "string",
+        "ttl_remaining_seconds": "integer|null",
+        "exists": "bool",
+        "memory_backed": "bool"
+      }
+    ]
+  },
+  "nonempty": [
+    "materialized"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "request": {
+    "cmd": "list"
+  },
+  "response": {
+    "status": "string",
+    "entries": [
+      {
+        "id": "string",
+        "title": "string",
+        "username": "string|null",
+        "url": "string|null",
+        "attachments": [
+          "string"
+        ],
+        "group_path": [
+          "string"
+        ],
+        "tags": [
+          "string"
+        ],
+        "inherited_tags": [
+          "string"
+        ]
+      }
+    ]
+  },
+  "nonempty": [
+    "entries"
+  ]
+}

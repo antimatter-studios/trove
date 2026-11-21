@@ -1,0 +1,50 @@
+{
+  "request": {
+    "cmd": "search",
+    "term": "web",
+    "fields": [
+      "UserName"
+    ],
+    "tags": [
+      "work"
+    ],
+    "attachments": [
+      "note"
+    ]
+  },
+  "response": {
+    "status": "string",
+    "entries": [
+      {
+        "id": "string",
+        "title": "string",
+        "username": "string|null",
+        "url": "string|null",
+        "attachments": [
+          "string"
+        ],
+        "group_path": [
+          "string"
+        ],
+        "tags": [
+          "string"
+        ],
+        "inherited_tags": [
+          "string"
+        ],
+        "matched": [
+          "string"
+        ]
+      }
+    ]
+  },
+  "nonempty": [
+    "entries"
+  ],
+  "older_requests": [
+    {
+      "cmd": "search",
+      "term": "web"
+    }
+  ]
+}
