@@ -382,3 +382,47 @@ async fn scd_returns_no_smartcard_daemon() {
     assert!(lines[0].starts_with("ERR "));
     assert!(lines[0].contains("No_SmartCard_Daemon"));
 }
+
+/// `TROVE_TEST_APPROVER` is process-wide; the confirmation tests below hold
+/// this while they set it.
+async fn approver(answer: &str) -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let guard = LOCK.lock().await;
+    std::env::set_var("TROVE_TEST_APPROVER", answer);
+    guard
+}
+
+async fn get_confirmation_reply(answer: &str) -> String {
+    let _g = approver(answer).await;
+    let tmp = TempDir::new().expect("tempdir");
+    let sock = tmp.path().join("gpg.sock");
+    let _agent = spawn_agent_with_keys(&sock, vec![]).await;
+
+    let stream = connect_retry(&sock).await;
+    let (rh, mut wh) = stream.into_split();
+    let mut reader = BufReader::new(rh).lines();
+    expect_greeting(&mut reader).await;
+
+    wh.write_all(b"GET_CONFIRMATION Delete%20the%20key%3F\n")
+        .await
+        .unwrap();
+    read_until_terminator(&mut reader).await.remove(0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_confirmation_refused_without_approval() {
+    // "none" stands for a machine where no approver can be asked.
+    let line = get_confirmation_reply("none").await;
+    assert!(
+        line.starts_with("ERR 67108978"),
+        "GET_CONFIRMATION must refuse with GPG_ERR_NOT_CONFIRMED, got: {line}"
+    );
+    let line = get_confirmation_reply("deny").await;
+    assert!(line.starts_with("ERR 67108978"), "got: {line}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_confirmation_ok_when_approved() {
+    let line = get_confirmation_reply("allow").await;
+    assert!(line.starts_with("OK"), "got: {line}");
+}

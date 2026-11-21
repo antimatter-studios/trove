@@ -82,8 +82,9 @@ pub struct LoadedKey {
     pub comment: String,
     /// What the owning entry's `KeeAgent.settings` asked for regarding the copy
     /// pushed into the user's own ssh-agent — see
-    /// [`super::keeagent::ForwardPolicy`]. trove's own agent honours only its
-    /// lifetime, through [`Self::expires_at`].
+    /// [`super::keeagent::ForwardPolicy`]. trove's own agents honour its
+    /// lifetime, through [`Self::expires_at`], and its confirm flag, by asking
+    /// the approver before each signature.
     pub forward: ForwardPolicy,
     /// When this key stops being offered and signing with it is refused, if
     /// the entry set a lifetime. `None` until the key enters an agent's store
